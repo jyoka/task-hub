@@ -50,11 +50,12 @@ DEFAULT_AGENTS = {
 }
 
 BIN = Path(__file__).resolve()
-HUB = Path(os.environ.get("TASK_HUB_DIR") or BIN.parent.parent)
-TASKS = HUB / "tasks"
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
+# the board is private data, kept apart from this (shareable) tool repo, with its own local git history
+HUB = Path(os.environ.get("TASK_HUB_DIR") or DATA / "board")
+TASKS = HUB / "tasks"
 LOGS = Path.home() / ".local" / "state" / "task-hub" / "logs"
 GH = os.environ.get("TASK_GH", "gh")
 
@@ -134,14 +135,16 @@ def write(t, msg):
     t["updated"] = today()
     head = "\n".join(f"{k}: {t.get(k, '')}".rstrip() for k in FIELDS)
     t["_path"].write_text(f"---\n{head}\n---\n{t['_body']}")
-    # local history only; several runs may finish at once, so retry while git's index is locked
-    if run("git", "-C", HUB, "rev-parse").returncode == 0:
-        for _ in range(20):
-            run("git", "-C", HUB, "add", t["_path"])
-            r = run("git", "-C", HUB, "commit", "-q", "-m", f"task {t['id']}: {msg}", "--", t["_path"])
-            if "index.lock" not in r.stderr:
-                break
-            time.sleep(0.2)
+    # the board's own local git history (never pushed); several runs may finish at once,
+    # so retry while git's index is locked
+    if not (HUB / ".git").exists():
+        run("git", "init", "-q", HUB)
+    for _ in range(20):
+        run("git", "-C", HUB, "add", t["_path"])
+        r = run("git", "-C", HUB, "commit", "-q", "-m", f"task {t['id']}: {msg}", "--", t["_path"])
+        if "index.lock" not in r.stderr:
+            break
+        time.sleep(0.2)
 
 
 def load_all():
@@ -549,7 +552,7 @@ def cmd_new(a):
         fail("goal is empty", "pass --goal \"...\" or --goal-file path", 2)
     # keep Goal's own headings below the task's "## " sections
     goal = re.sub(r"(?m)^#{1,2} ", "### ", goal)
-    TASKS.mkdir(exist_ok=True)
+    TASKS.mkdir(parents=True, exist_ok=True)
     tid = max((int(t["id"]) for t in load_all()), default=0) + 1
     path = TASKS / f"{tid:04d}-{slug(a['title'])}.md"
     t = {"id": str(tid), "title": a["title"], "repo": a["repo"], "theme": a["theme"] or "",

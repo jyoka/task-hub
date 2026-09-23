@@ -53,12 +53,14 @@ A normal chat never becomes a task. Only `/task` or `task new` creates one, and 
 
 ```
 bin/task              the CLI (Python 3 standard library; uses git, gh, and herdr if running)
-tasks/NNNN-slug.md    one file per task (this repo's git history records every change)
 worker/PROMPT.md      the instructions every agent gets at the start of a run
 skills/task/SKILL.md  the /task skill (linked into Claude, Codex/Pi, and Kiro skill folders)
 tests/test_task.py    tests: python3 -m unittest -v
-docs/                 setup, agents, design, task format, operations
+docs/                 setup, agents, design, task format, operations, lessons
 ```
+
+Your tasks are not in this repo. They live in `~/.local/share/task-hub/board/tasks/`, a private
+folder with its own local git history that is never pushed, so this repo can be shared safely.
 
 ## Docs
 

@@ -2,7 +2,9 @@
 
 ## Task file
 
-Each task is one markdown file: `tasks/NNNN-slug.md`, for example `tasks/0012-fix-login.md`.
+Each task is one markdown file in the board folder, `~/.local/share/task-hub/board/tasks/`
+(or `$TASK_HUB_DIR/tasks/`), for example `tasks/0012-fix-login.md`. The board is private: it has
+its own local git history, separate from the task-hub repo, and is never pushed.
 Only the `task` CLI writes these files. You can edit the Goal text by hand, for example
 before starting a task or before re-running a blocked one. Change status only through the CLI.
 

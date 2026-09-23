@@ -373,8 +373,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("0 tasks with status ready", self.task("list", "--status", "ready"))
         self.assertIn("has not run yet", self.task("log", self.new()))
 
-    def test_changes_are_committed_to_the_hub_history(self):
-        subprocess.run(["git", "init", "-q", str(self.hub)], check=True)
+    def test_changes_are_committed_to_the_board_history(self):
         tid = self.new()
         self.task("start", tid)
         self.wait(tid)
@@ -382,6 +381,16 @@ class TaskTest(unittest.TestCase):
                              capture_output=True, text=True).stdout
         self.assertIn("task 1: new draft", log)
         self.assertIn("task 1: review", log)
+
+    def test_board_defaults_to_a_private_folder_outside_the_tool_repo(self):
+        env = {k: v for k, v in self.env.items() if k != "TASK_HUB_DIR"}
+        r = subprocess.run([str(BIN), "new", "--title", "x", "--repo", "a/b", "--goal", "g"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        board = self.root / ".local/share/task-hub/board"
+        self.assertEqual(len(list((board / "tasks").glob("*.md"))), 1)
+        self.assertTrue((board / ".git").is_dir())
+        self.assertFalse((BIN.parent.parent / "tasks").exists())
 
     def test_version(self):
         self.assertRegex(self.task("--version").strip(), r"^\d+\.\d+\.\d+$")

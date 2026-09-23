@@ -35,7 +35,8 @@ Constraints from the user:
 ## Decisions
 
 1. **The board is local markdown, and only `task` writes it.** No agent reads or writes the board.
-   Every change is committed to the hub's git history. (0.1 let agents write the board
+   The board lives in a private folder (`~/.local/share/task-hub/board`) with its own local git
+   history, never pushed, so the tool repo can be public. (0.1 let agents write the board
    through a shared branch, which needed locking and race handling. That was removed in 0.2.)
 2. **Agents run locally, started by `task`.** `task start` approves a task. `task` and `task start`
    launch approved tasks while fewer than 3 are running. A queued task starts the

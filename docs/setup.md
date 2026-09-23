@@ -16,13 +16,13 @@ the personal Mac. Setup is the same on both.
 ## Install
 
 ```
-git clone <this repo, or copy the folder> "$HOME/AIprogramming PJ/task-hub"
+git clone https://github.com/jyoka/task-hub.git "$HOME/AIprogramming PJ/task-hub"
 ln -s "$HOME/AIprogramming PJ/task-hub/bin/task" ~/.local/bin/task       # ~/.local/bin must be on PATH
 task --version
 ```
 
-The board starts empty. Each machine's `tasks/` folder is its own. If you copy this repo to
-another machine, delete that copy's `tasks/*.md` first.
+The board (your tasks) is created on first use at `~/.local/share/task-hub/board`, outside this
+repo, so every machine has its own private board. To keep it somewhere else, set `TASK_HUB_DIR`.
 
 ## Install the /task skill
 

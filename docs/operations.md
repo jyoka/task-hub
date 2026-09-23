@@ -15,7 +15,7 @@ free, and shows every open task and how many need you.
 
 | What | Where |
 |---|---|
-| Task files | `<hub>/tasks/` (committed to the hub's git history on every change) |
+| Task files (the board) | `~/.local/share/task-hub/board/tasks/` (private; every change is committed to the board's own local git history) |
 | Config | `~/.config/task-hub/config.ini` |
 | Repo clones | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | Worktrees | `~/.local/share/task-hub/worktrees/<id>` |
