@@ -1,104 +1,104 @@
-# Lessons from building task-hub (2026-09-23)
+# task-hub の開発から得た教訓 (2026-09-23)
 
-What one day of building and testing task-hub taught us: about AI agent work efficiency,
-about building tools like this, and what is still unproven.
+task-hub を 1 日かけて作り、テストして分かったことをまとめます。AI エージェントの作業効率について、
+こうしたツールの作り方について、そしてまだ検証できていないことについてです。
 
-## Timeline in one table
+## 経緯を 1 つの表で
 
-| Version | Idea | Why it changed |
+| バージョン | 考え方 | 変更した理由 |
 |---|---|---|
-| 0.1 | Cloud agents (Claude routines) claim tasks and push status to the board's `main` | Several writers on one branch needed locking and race handling. The user called it chaos and dangerous |
-| 0.2 | Only the Mac writes the board. The brief goes in the trigger, results come back in the PR | Still Claude-only. The user also uses Codex and Pi, and the work Mac only allows Kiro |
-| 0.3 | Any agent CLI, run locally in a worktree, one herdr workspace per task. The agent only edits files | Current design. Proven with all four agents on a real repo |
+| 0.1 | クラウドのエージェント (Claude routines) がタスクを取得し、ボードの `main` にステータスを push する | 1 つのブランチに複数の書き手がいるため、ロックと競合への対処が必要でした。ユーザーはこれを混沌としていて危険だと評しました |
+| 0.2 | ボードに書き込むのは Mac だけ。指示はトリガーに入れ、結果は PR で返ってくる | まだ Claude 専用でした。ユーザーは Codex と Pi も使い、仕事用の Mac では Kiro しか使えません |
+| 0.3 | 任意のエージェント CLI を worktree 内でローカル実行し、タスクごとに herdr のワークスペースを 1 つ使う。エージェントはファイルを編集するだけ | 現在の設計です。実際のリポジトリで 4 つのエージェントすべてで動作を確認しました |
 
-Two rewrites in one day were cheap, because the board format and the PR contract survived
-each rewrite. But both rewrites came from constraints that one early question would have surfaced.
+1 日に 2 回の作り直しは低コストで済みました。ボードの形式と PR の約束事がどちらの作り直しでも
+そのまま残ったからです。ただし、どちらの作り直しも、最初に 1 つ質問していれば見えていたはずの制約が原因でした。
 
-## AI agent work efficiency
+## AI エージェントの作業効率
 
-### What worked
+### うまくいったこと
 
-- **Give the agent the smallest possible contract.** "Edit files, run tests, write
-  `.task-report.md`" was the one change that made four vendors behave the same. All git and
-  GitHub work moved into task-hub, and that also got around Codex's sandbox (no network, no writes
-  outside the folder). The less the agent has to do besides the task, the less varies between agents.
-- **Let code guarantee the output format, not the prompt.** The PR description is built
-  by task-hub from the report file, so every PR looks the same no matter which agent wrote it.
-- **Ask for "Please review" explicitly.** Every agent produced a specific list (files,
-  decisions, risks) instead of "review the PR". This is the part that saves human time.
-- **A blocked path makes agents honest.** Given an impossible task (commit a password it
-  cannot know), Claude refused to fabricate, explained why, and proposed safer options. It did this
-  because the instructions said stuck is a valid outcome. Without that exit, agents tend to invent something.
-- **Re-runs with memory.** A re-run gets the earlier report and the reason it stopped, so it
-  continues instead of starting over.
-- **Cap parallel work at what a human can review (3).** The bottleneck is human review,
-  not agent speed. Trivial tasks took 15 to 55 seconds, and reviewing them takes longer than that.
+- **エージェントとの約束事はできるだけ小さくします。** 「ファイルを編集し、テストを実行し、
+  `.task-report.md` を書く」という変更 1 つで、4 つのベンダーの挙動がそろいました。git と
+  GitHub の作業はすべて task-hub に移し、これで Codex のサンドボックス (ネットワークなし、フォルダ外への
+  書き込み不可) も回避できました。タスク以外にエージェントがやることが少ないほど、エージェント間の差は小さくなります。
+- **出力形式はプロンプトではなくコードで保証します。** PR の説明は task-hub がレポートファイルから
+  組み立てるので、どのエージェントが書いても PR は同じ見た目になります。
+- **"Please review" を明示的に求めます。** どのエージェントも「PR をレビューしてください」ではなく、
+  具体的な一覧 (ファイル、判断、リスク) を出しました。ここが人間の時間を節約する部分です。
+- **ブロックという逃げ道があると、エージェントは正直になります。** 不可能なタスク (知りようのないパスワードを
+  コミットする) を与えたところ、Claude は捏造を拒み、理由を説明し、より安全な選択肢を提案しました。これは
+  指示の中で、行き詰まることも正当な結果だと書いていたからです。この逃げ道がないと、エージェントは何かをでっち上げがちです。
+- **記憶を引き継ぐ再実行。** 再実行には前回のレポートと止まった理由が渡されるので、
+  最初からやり直すのではなく続きから進めます。
+- **並行作業は人間がレビューできる量 (3) に抑えます。** ボトルネックは人間のレビューであり、
+  エージェントの速度ではありません。簡単なタスクは 15 から 55 秒で終わり、それをレビューする方が時間がかかります。
 
-### What wasted effort
+### 無駄になった労力
 
-- **Constraints discovered late.** Which agents? Which machines? Which terminal tool (herdr,
-  not tmux)? Which git host? Each late answer caused a redesign. Ask these before designing.
-- **Ambiguous instructions produce noise.** Two agents listed the report file itself under
-  "Please review", because nothing said it is never committed. One added sentence fixed it.
-  Anything the agent might wonder about should be answered in the instructions.
-- **Assuming CLI flags from help text.** `codex exec --full-auto` looked right from a help
-  description but does not exist in Codex 0.155. Flags change between versions: run the command
-  once before relying on it. Prefer long-standing flags (`-s workspace-write`).
+- **制約に気づくのが遅れたこと。** どのエージェントか。どのマシンか。どの端末ツールか (tmux ではなく
+  herdr)。どの git ホストか。答えが遅れるたびに設計をやり直しました。これらは設計の前に確認してください。
+- **あいまいな指示はノイズを生みます。** 2 つのエージェントが "Please review" にレポートファイル自体を
+  挙げました。そのファイルは決してコミットされないとどこにも書いていなかったからです。1 文を足すだけで直りました。
+  エージェントが疑問に思いそうなことは、すべて指示の中で答えておくべきです。
+- **ヘルプの文面から CLI のフラグを推測したこと。** `codex exec --full-auto` はヘルプの説明からは
+  正しそうに見えましたが、Codex 0.155 には存在しません。フラグはバージョンによって変わるので、頼る前に
+  一度コマンドを実行してください。昔からあるフラグ (`-s workspace-write`) を優先しましょう。
 
-### Speed observed (trivial one-file task, approval to finished PR)
+### 観測した速度 (1 ファイルの簡単なタスク、承認から PR 完成まで)
 
-| Agent | Time | Log lines |
+| エージェント | 時間 | ログ行数 |
 |---|---|---|
 | Claude Code | 15s | 9 |
 | Kiro | 15s | 11 |
 | Pi | 40s | 12 |
-| Codex | 54s | 274 (very verbose output) |
+| Codex | 54s | 274 (出力が非常に冗長) |
 
-These numbers are from one trivial task each. They say nothing about quality on real work.
+これらの数値はそれぞれ簡単なタスク 1 つの結果です。実際の作業での品質については何も示していません。
 
-## Building tools like this
+## こうしたツールの作り方
 
-- **Unit tests with fakes only prove your own assumptions.** 27 tests passed, and the first real
-  run still found 4 bugs: SSH clone refused, a wrong Codex flag, an empty PR rejected by GitHub,
-  and noisy review lists. The herdr trial found 3 more: the Enter key swallowed while the shell was
-  starting, the pane having a different environment, and the run starting before its task file was saved.
-- **Fakes are often more forgiving than the real thing.** The fake GitHub accepted a PR with
-  no commits. The real one refused it. When a real run fails, reproduce the failure in a test first,
-  then fix it (done for the blocked-without-changes case).
-- **Check test isolation before changing anything.** `HERDR_SESSION` did not isolate herdr
-  commands, so the first experiment created two workspaces in the user's live session. They were
-  removed right away. The fix: a read-only check of which session a command reaches, then the change.
-- **Break the code on purpose.** Changing the limit, the blocked detection, or the report handling
-  had to make tests fail. One mutation survived because two guards protected the same thing. That
-  is fine, but it is worth knowing.
-- **Don't depend on the user's personal setup.** SSH keys, git protocol, and shell startup differ
-  per machine. HTTPS through `gh`'s own login, set on task-hub's clones only, works everywhere
-  `gh` is logged in.
-- **One writer per file.** Every race we hit came from two processes writing the same file.
-  The fix was always to decide who owns the file, not to add locking.
+- **フェイクを使った単体テストは、自分の思い込みを確かめるだけです。** 27 個のテストが通っても、最初の実際の
+  実行で 4 つのバグが見つかりました。SSH での clone の拒否、Codex のフラグの誤り、GitHub に拒否された空の PR、
+  そしてノイズの多いレビュー一覧です。herdr での試行ではさらに 3 つ見つかりました。シェルの起動中に Enter キーが
+  吸い込まれたこと、ペインの環境が異なっていたこと、タスクファイルの保存前に実行が始まったことです。
+- **フェイクは本物より寛容なことが多いです。** フェイクの GitHub はコミットのない PR を受け付けましたが、
+  本物は拒否しました。実際の実行が失敗したら、まずその失敗をテストで再現し、
+  それから修正してください (変更なしでブロックになるケースではそうしました)。
+- **何かを変える前にテストの分離を確認します。** `HERDR_SESSION` では herdr のコマンドが分離されず、
+  最初の実験でユーザーが使用中のセッションにワークスペースが 2 つ作られてしまいました。すぐに
+  削除しました。対策は、コマンドがどのセッションに届くかを読み取り専用で確認してから変更することです。
+- **わざと壊すテスト (ミューテーション) を行います。** 上限、ブロックの検出、レポートの処理を変えたら、
+  テストが失敗しなければなりません。1 つのミューテーションは、2 つのガードが同じものを守っていたため生き残りました。
+  それで問題はありませんが、知っておく価値はあります。
+- **ユーザー個人の環境に依存しないこと。** SSH キー、git のプロトコル、シェルの起動処理は
+  マシンごとに異なります。`gh` 自身のログインを使った HTTPS を task-hub の clone にだけ設定すれば、
+  `gh` にログインしている環境ならどこでも動きます。
+- **1 つのファイルに書き込むのは 1 者だけにします。** 遭遇した競合はすべて、2 つのプロセスが同じファイルに書き込んだことが原因でした。
+  対策は常に、ロックを追加することではなく、そのファイルの持ち主を決めることでした。
 
-## Simplicity rules for task-hub
+## task-hub のシンプルさのルール
 
-1. No feature without a user need stated in this project. "Might be useful" is not enough.
-2. Plain files and existing tools (git, gh, herdr, the agents' own CLIs) before anything new.
-3. One way to do each thing.
-4. When a real run shows a problem, fix it at the smallest point and add the test that would
-   have caught it.
+1. このプロジェクトで示されたユーザーのニーズがない機能は作りません。「役に立つかもしれない」では不十分です。
+2. 新しいものより、プレーンなファイルと既存のツール (git、gh、herdr、各エージェント自身の CLI) を優先します。
+3. 1 つのことをする方法は 1 つだけにします。
+4. 実際の実行で問題が見つかったら、最小の箇所で修正し、それを検出できたはずのテストを
+   追加します。
 
-## What we could still prove
+## まだ検証できること
 
-Ordered by value. Each is one small experiment, not a feature.
+価値の高い順に並べています。それぞれ機能ではなく、1 つの小さな実験です。
 
-1. **A real task in a real repo.** A multi-file change with real tests. Do the reports and review
-   lists still save review time when the work is not trivial?
-2. **The work Mac.** Kiro only, company GitHub (possibly SSO), company network rules. Does
-   `gh`-based HTTPS cloning work there? Does `kiro-cli` stay logged in for unattended runs?
-3. **`/task` in Codex, Pi, and Kiro.** Only tested in Claude Code. Does each agent register a task
-   when asked, and never on its own?
-4. **Blocked, then unblocked.** Edit the Goal with the missing decision, re-run, and check that the
-   agent finishes on the same branch and PR with a real agent (tested only with the fake agent).
-5. **Two tasks touching the same files.** Their PRs will conflict. Is "merge one, re-run the other"
-   good enough?
-6. **Long runs and a sleeping Mac.** Close the lid during a run: does the run resume or show up
-   correctly as stopped?
-7. **Codex with tests that need the network**, under the default sandbox.
+1. **実際のリポジトリでの実際のタスク。** 本物のテストがある、複数ファイルにまたがる変更です。作業が簡単でない場合でも、
+   レポートとレビュー一覧はレビューの時間を節約できるでしょうか。
+2. **仕事用の Mac。** Kiro のみ、会社の GitHub (SSO の可能性あり)、会社のネットワークルールという環境です。そこで
+   `gh` ベースの HTTPS clone は動くでしょうか。無人で実行する間、`kiro-cli` はログインしたままでいられるでしょうか。
+3. **Codex、Pi、Kiro での `/task`。** Claude Code でしかテストしていません。各エージェントは、依頼されたときに
+   タスクを登録し、自分からは決して登録しないでしょうか。
+4. **ブロックされてから、解除されるまで。** 不足していた判断を Goal に書き足して再実行し、実際のエージェントで、
+   エージェントが同じブランチと PR で作業を終えることを確認します (フェイクのエージェントでしかテストしていません)。
+5. **同じファイルに触れる 2 つのタスク。** それぞれの PR は競合します。「一方をマージし、もう一方を再実行する」
+   で十分でしょうか。
+6. **長時間の実行とスリープする Mac。** 実行中にふたを閉じたとき、実行は再開するでしょうか。あるいは停止として
+   正しく表示されるでしょうか。
+7. **ネットワークが必要なテストを持つ Codex。** デフォルトのサンドボックスのままで、テストは通るでしょうか。

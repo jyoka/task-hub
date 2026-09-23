@@ -1,68 +1,68 @@
-# Operations and troubleshooting
+# 運用とトラブルシューティング
 
-Start with `task`. It checks running tasks and PRs, starts approved tasks when a slot is
-free, and shows every open task and how many need you.
+まず `task` を実行します。実行中のタスクと PR を確認し、空きがあれば承認済みのタスクを開始し、
+未完了のタスクすべてと、あなたの対応が必要なタスクの数を表示します。
 
-## Watching a run
+## 実行の様子を見る
 
-- **herdr**: each run has a workspace in the sidebar named "task <id>: <title>". Open it to
-  watch the agent's output live. When the run ends, the pane stays open with the final status
-  line. `task done <id>` (or merging the PR) closes it.
-- **Without herdr**: `task log <id>` shows the last 40 lines, and `task log <id> --full` shows everything.
-- What the agent was told: `~/.local/share/task-hub/prompts/<id>.md`.
+- **herdr**: 各実行には、サイドバーに "task <id>: <title>" という名前のワークスペースがあります。開くと
+  エージェントの出力をリアルタイムで確認できます。実行が終わっても、ペインは最終ステータス行を表示したまま
+  開いています。`task done <id>`(または PR のマージ)で閉じます。
+- **herdr なしの場合**: `task log <id>` で最後の 40 行を、`task log <id> --full` ですべてを表示します。
+- エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<id>.md`。
 
-## Where things live
+## 保存場所
 
-| What | Where |
+| 内容 | 場所 |
 |---|---|
-| Task files (the board) | `~/.local/share/task-hub/board/tasks/` (private; every change is committed to the board's own local git history) |
-| Config | `~/.config/task-hub/config.ini` |
-| Repo clones | `~/.local/share/task-hub/repos/<owner>/<name>` |
-| Worktrees | `~/.local/share/task-hub/worktrees/<id>` |
-| Prompts | `~/.local/share/task-hub/prompts/<id>.md` |
-| Logs | `~/.local/state/task-hub/logs/<id>.log` |
+| タスクファイル(ボード) | `~/.local/share/task-hub/board/tasks/`(非公開。すべての変更はボード独自のローカル git 履歴にコミットされます) |
+| 設定 | `~/.config/task-hub/config.ini` |
+| リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
+| worktree | `~/.local/share/task-hub/worktrees/<id>` |
+| プロンプト | `~/.local/share/task-hub/prompts/<id>.md` |
+| ログ | `~/.local/state/task-hub/logs/<id>.log` |
 
-## A task is `blocked`
+## タスクが `blocked` になった
 
-`task show <id>` shows `reason`, and the report says more. Common reasons:
+`task show <id>` で `reason` を確認できます。詳しくはレポートに書かれています。よくある理由:
 
-| Reason | What to do |
+| 理由 | 対処 |
 |---|---|
-| the agent's own line (from `## Blocked`) | give it what it asks for: edit the Goal in the task file, or fix the environment |
-| `agent exited without a report (exit N)` | read `task log <id>`. Usually the agent crashed, is not logged in, or ran out of budget |
-| `agent wrote a report but changed no files` | the agent thought there was nothing to do. Clarify the Goal |
-| `run stopped unexpectedly` | the `task _run` process died (for example you closed its herdr pane, or the Mac restarted) |
-| `could not start: ...` | cloning or worktree setup failed: check `gh auth status` and the `repo` name |
-| `PR was closed without merging` | re-run it, or close the task with `task done <id>` |
+| エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。タスクファイルの Goal を編集するか、環境を修正します |
+| `agent exited without a report (exit N)` | `task log <id>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
+| `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
+| `run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
+| `could not start: ...` | クローンまたは worktree の準備に失敗しました。`gh auth status` と `repo` の名前を確認します |
+| `PR was closed without merging` | 再実行するか、`task done <id>` でタスクを閉じます |
 
-Then `task start <id>`. The re-run continues on the same branch and PR, and the agent is told why
-the last run stopped.
+その後 `task start <id>` を実行します。再実行は同じブランチと PR で作業を続け、エージェントには前回の実行が
+止まった理由が伝えられます。
 
 ## `queue: N approved task(s) waiting, all 3 slots busy`
 
-Normal. They start on the next `task` after a running task finishes.
+正常な状態です。実行中のタスクが終わった後、次の `task` 実行時に開始されます。
 
 ## `github_errors[...]`
 
-`gh` could not read a repo's PRs (not logged in, no access, repo renamed). Those tasks keep
-their status. Run `gh auth status`.
+`gh` がリポジトリの PR を読み取れませんでした(ログインしていない、アクセス権がない、リポジトリ名が変わった)。
+該当するタスクの status はそのまま保たれます。`gh auth status` を実行してください。
 
-## Stop a running task
+## 実行中のタスクを止める
 
-Stop the agent in its herdr workspace (Ctrl-C). The runner still finishes: it pushes whatever
-was changed and marks the task blocked. Or close the pane. The next `task` then marks it
-`run stopped unexpectedly`.
+herdr のワークスペースでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
+push してタスクをブロック状態にします。または、ペインを閉じます。その場合、次の `task` 実行時に
+`run stopped unexpectedly` として記録されます。
 
-## Cancel a task
+## タスクを取り消す
 
-`task done <id>`. This closes its herdr workspace and removes its worktree. The branch and any PR
-stay on GitHub. Close the PR there if you want.
+`task done <id>` を実行します。そのタスクの herdr のワークスペースを閉じ、worktree を削除します。ブランチと PR は
+GitHub に残ります。必要であれば、GitHub 上で PR をクローズしてください。
 
-## Change the parallel limit
+## 同時実行数の上限を変更する
 
-`MAX_PARALLEL` at the top of `bin/task`.
+`bin/task` の先頭にある `MAX_PARALLEL` を変更します。
 
-## Disk cleanup
+## ディスクの整理
 
-Worktrees are removed when tasks are done. Clones in `~/.local/share/task-hub/repos/` are kept
-to make the next run faster, and can be deleted at any time.
+worktree はタスクが完了すると削除されます。`~/.local/share/task-hub/repos/` 内のクローンは次の実行を速くするために
+残されており、いつでも削除できます。

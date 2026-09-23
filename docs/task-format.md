@@ -1,12 +1,12 @@
-# Task file, report file, and PR format
+# タスクファイル、レポートファイル、PR の形式
 
-## Task file
+## タスクファイル
 
-Each task is one markdown file in the board folder, `~/.local/share/task-hub/board/tasks/`
-(or `$TASK_HUB_DIR/tasks/`), for example `tasks/0012-fix-login.md`. The board is private: it has
-its own local git history, separate from the task-hub repo, and is never pushed.
-Only the `task` CLI writes these files. You can edit the Goal text by hand, for example
-before starting a task or before re-running a blocked one. Change status only through the CLI.
+各タスクはボードフォルダ `~/.local/share/task-hub/board/tasks/`(または `$TASK_HUB_DIR/tasks/`)内の
+1 つの markdown ファイルです。例: `tasks/0012-fix-login.md`。ボードは非公開です。task-hub リポジトリとは別の
+独自のローカル git 履歴を持ち、push されることはありません。
+これらのファイルを書き込むのは `task` CLI だけです。Goal のテキストは手で編集できます。たとえばタスクを
+開始する前や、ブロックされたタスクを再実行する前です。status の変更は必ず CLI で行ってください。
 
 ```markdown
 ---
@@ -47,32 +47,32 @@ Added 3 tests; `pytest` passes.
 - I kept the old `/home` fallback when `next` is missing. Confirm that is wanted.
 ```
 
-| Field | Set by | Meaning |
+| フィールド | 設定者 | 意味 |
 |---|---|---|
-| `id` | CLI | Number, unique on this board, never reused |
-| `title` | you | Short imperative summary. Also the PR title |
-| `repo` | you | GitHub `owner/name` where the work happens |
-| `theme` | you | Optional grouping |
-| `agent` | you | Agent for this task. Empty = the machine's default ([agents.md](agents.md)) |
-| `status` | CLI | See the README |
-| `created` / `updated` | CLI | Dates |
-| `branch` | CLI | `task/<id>`, reused by re-runs |
-| `started` | CLI | UTC time the latest run was launched |
-| `pid` | CLI | Process of the running `task _run`, used to notice runs that died |
-| `workspace` | CLI | The herdr workspace task-hub created for the run (empty without herdr) |
-| `worktree` | CLI | Where the agent works. Removed when the task is done |
-| `log` | CLI | The run's full output (`task log <id>`) |
-| `pr` | CLI | The PR task-hub opened |
-| `reason` | CLI | Why the task is blocked |
+| `id` | CLI | 番号。このボード内で一意で、再利用されません |
+| `title` | あなた | 命令形の短い要約。PR のタイトルにもなります |
+| `repo` | あなた | 作業を行う GitHub の `owner/name` |
+| `theme` | あなた | 任意のグループ分け |
+| `agent` | あなた | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) |
+| `status` | CLI | README を参照 |
+| `created` / `updated` | CLI | 日付 |
+| `branch` | CLI | `task/<id>`。再実行でも使い回されます |
+| `started` | CLI | 最新の実行を起動した UTC 時刻 |
+| `pid` | CLI | 実行中の `task _run` のプロセス。停止した実行の検出に使います |
+| `workspace` | CLI | task-hub がその実行用に作成した herdr のワークスペース(herdr がない場合は空) |
+| `worktree` | CLI | エージェントが作業する場所。タスクが完了すると削除されます |
+| `log` | CLI | 実行の全出力(`task log <id>`) |
+| `pr` | CLI | task-hub が作成した PR |
+| `reason` | CLI | タスクがブロックされた理由 |
 
-Sections: **Goal** is written by you or by `/task` and is the agent's whole brief.
-**Report** and **Please review** are copied from the agent's report file when a run ends.
+セクション: **Goal** はあなたまたは `/task` が書くもので、エージェントへの指示のすべてです。
+**Report** と **Please review** は、実行終了時にエージェントのレポートファイルからコピーされます。
 
-## The agent's report file
+## エージェントのレポートファイル
 
-At the end of every run, the agent writes `.task-report.md` in the worktree root
-([worker/PROMPT.md](../worker/PROMPT.md) tells it how). task-hub reads it, deletes it,
-and never commits it.
+毎回の実行の最後に、エージェントは worktree のルートに `.task-report.md` を書き込みます
+(書き方は [worker/PROMPT.md](../worker/PROMPT.md) で指示しています)。task-hub はこれを読み取ってから削除し、
+コミットすることはありません。
 
 ```markdown
 ## Blocked                 <- only when stuck; everything else still gets written
@@ -88,23 +88,23 @@ What changed, how it was verified, what was not done.
 Exact files, decisions, and risks to check.
 ```
 
-## What happens when the run ends
+## 実行終了時の処理
 
-| Agent result | task-hub does | Task becomes |
+| エージェントの結果 | task-hub の処理 | タスクの状態 |
 |---|---|---|
-| report, files changed | commit, push `task/<id>`, PR ready for review | `review` |
-| report with `## Blocked` | commit and push what exists, **draft** PR with the reason | `blocked` |
-| no report, files changed | push, draft PR ("agent exited without a report") | `blocked` |
-| no report, nothing changed (crash) | nothing pushed, no PR | `blocked` |
-| report, nothing changed | nothing pushed, no PR | `blocked` |
+| レポートあり、ファイル変更あり | コミットし、`task/<id>` を push し、レビュー可能な PR を作成 | `review` |
+| `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成 | `blocked` |
+| レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | `blocked` |
+| レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない | `blocked` |
+| レポートあり、変更なし | push せず、PR も作成しない | `blocked` |
 
-A re-run (`task start` on a blocked task) continues on the same branch and updates the same
-PR. The agent is told the earlier report and why it was blocked. The exact prompt of the latest
-run is kept at `~/.local/share/task-hub/prompts/<id>.md`.
+再実行(ブロックされたタスクに対する `task start`)は同じブランチで作業を続け、同じ PR を更新します。
+エージェントには前回のレポートとブロックされた理由が伝えられます。最新の実行で使われたプロンプトそのものは
+`~/.local/share/task-hub/prompts/<id>.md` に保存されます。
 
-## The PR
+## PR
 
-- branch `task/<id>`, base = the repo's default branch, title = task title
-- description: `## Blocked` (if any), `## Report`, `## Please review`, and a footer with the task id and agent
-- merged on GitHub: the next `task` marks the task `done` and removes its worktree and herdr workspace
-- closed without merging while in review: the task becomes `blocked`
+- ブランチは `task/<id>`、ベースはリポジトリのデフォルトブランチ、タイトルはタスクのタイトル
+- 説明: `## Blocked`(ある場合)、`## Report`、`## Please review`、およびタスク ID とエージェントを記したフッター
+- GitHub でマージされた場合: 次の `task` 実行時にタスクを `done` にし、その worktree と herdr のワークスペースを削除します
+- レビュー中にマージされずにクローズされた場合: タスクは `blocked` になります

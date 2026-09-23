@@ -1,77 +1,77 @@
-# Design
+# 設計
 
-## Problem
+## 課題
 
-Agent coding sessions are chat-shaped. The goal is to make them task-shaped, like Jira:
+エージェントによるコーディングのセッションはチャット形式です。これを Jira のようなタスク形式にすることが目的です。
 
-1. Register a task when you decide to (a plain question to an agent must not create one).
-2. See all tasks with their status.
-3. A free agent picks up the next approved task by itself.
-4. When done, the agent reports the result and says exactly which parts need your review.
+1. タスクは自分で決めたときに登録します (エージェントへの単なる質問でタスクが作られてはいけません)。
+2. すべてのタスクとそのステータスを一覧できます。
+3. 空いているエージェントが、承認済みの次のタスクを自分で取りにいきます。
+4. 完了したら、エージェントは結果を報告し、どこをレビューしてほしいかを具体的に伝えます。
 
-Constraints from the user:
+ユーザーからの制約は次のとおりです。
 
-- Tasks are local files.
-- Agents only take tasks the user approved. Agents never create or split tasks.
-- Tasks can target several repositories.
-- At most 3 tasks run in parallel, enforced by code.
-- **Not tied to one vendor**: the user works with Claude Code, Codex, and Pi, and the work Mac
-  only allows Kiro. The same tool must work on both machines.
-- Simple branch handling. No agent pushes to a shared branch.
-- The user works in herdr, so runs should show up there.
-- Separate boards per machine. Stopping when the machine sleeps is acceptable.
+- タスクはローカルファイルです。
+- エージェントはユーザーが承認したタスクだけを扱います。エージェントがタスクを作成・分割することはありません。
+- タスクは複数のリポジトリを対象にできます。
+- 同時に実行できるタスクは最大 3 つで、コードで強制します。
+- **特定のベンダーに縛られない**: ユーザーは Claude Code、Codex、Pi を使っており、仕事用の Mac
+  では Kiro しか使えません。同じツールが両方のマシンで動く必要があります。
+- ブランチの扱いはシンプルにします。共有ブランチに push するエージェントはいません。
+- ユーザーは herdr で作業しているので、実行は herdr 上に表示されるべきです。
+- ボードはマシンごとに分けます。マシンがスリープしたときに止まるのは許容します。
 
-## What we looked at (2026-09) and why not
+## 検討したもの (2026-09) と採用しなかった理由
 
-| Option | What it is | Why not on its own |
+| 選択肢 | 概要 | 単体で採用しなかった理由 |
 |---|---|---|
-| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | Kanban board, a worktree per card, review column | You assign cards by hand. The company shut down in April 2026 (now community maintained) |
-| [Beads](https://github.com/steveyegge/beads) | Git-backed issue tracker for agents, `bd ready` | Task store only: no runner, no parallel limit |
-| Backlog.md, Task Master | Markdown task files / PRD-to-task breakdown | Planning only, nothing runs the tasks |
-| [OpenAI Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/) | Polls Linear, runs a Codex agent per issue | Codex + Linear only |
-| [Claude Code Projects](https://code.claude.com/docs/en/claude-projects) / [routines](https://code.claude.com/docs/en/routines) | Cloud sessions on claude.ai | Claude only, state on claude.ai. task-hub 0.1 and 0.2 used routines. Dropped in 0.3 for vendor neutrality |
-| GitHub Actions + an agent CLI | Agents in CI | Needs API keys as repo secrets, and may not be allowed at work |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | カンバンボード、カードごとの worktree、レビュー列 | カードの割り当ては手動です。開発元は 2026 年 4 月に閉鎖しました (現在はコミュニティがメンテナンス) |
+| [Beads](https://github.com/steveyegge/beads) | git ベースのエージェント向け課題トラッカー、`bd ready` | タスクの保存だけで、実行する仕組みも同時実行数の上限もありません |
+| Backlog.md, Task Master | Markdown のタスクファイル / PRD からタスクへの分解 | 計画のみで、タスクを実行するものがありません |
+| [OpenAI Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/) | Linear をポーリングし、課題ごとに Codex エージェントを実行 | Codex と Linear 専用です |
+| [Claude Code Projects](https://code.claude.com/docs/en/claude-projects) / [routines](https://code.claude.com/docs/en/routines) | claude.ai 上のクラウドセッション | Claude 専用で、状態は claude.ai にあります。task-hub 0.1 と 0.2 は routines を使っていましたが、ベンダー中立のため 0.3 でやめました |
+| GitHub Actions + エージェント CLI | CI 上のエージェント | API キーをリポジトリのシークレットに置く必要があり、職場では許可されない可能性があります |
 
-## Decisions
+## 決定事項
 
-1. **The board is local markdown, and only `task` writes it.** No agent reads or writes the board.
-   The board lives in a private folder (`~/.local/share/task-hub/board`) with its own local git
-   history, never pushed, so the tool repo can be public. (0.1 let agents write the board
-   through a shared branch, which needed locking and race handling. That was removed in 0.2.)
-2. **Agents run locally, started by `task`.** `task start` approves a task. `task` and `task start`
-   launch approved tasks while fewer than 3 are running. A queued task starts the
-   next time you run `task`, so new work starts when you are around to keep track of it.
-3. **The agent only edits files. task-hub does all git and GitHub work.** Agents differ in
-   sandboxing (Codex's sandbox cannot use the network or write outside the folder, so it could
-   not even commit in a worktree). So the agent's contract is the same for every agent: edit
-   files, run tests, write `.task-report.md`. task-hub then commits, pushes, and opens or updates
-   the PR. The PR format is therefore guaranteed by code, not by prompt.
-4. **An agent is just a command template.** `{prompt}` is passed as one argument. Built-ins cover
-   claude, codex, pi, and kiro, and the config can override them or add more. Nothing
-   vendor-specific lives in the code path.
-5. **One task = one branch (`task/<id>`) = one worktree = one PR.** A re-run of a blocked task
-   continues on the same branch and updates the same PR. It gets the earlier report and the reason
-   in its prompt.
-6. **herdr is the viewer, not a dependency.** When herdr is running, a run gets its own workspace
-   (created with `herdr workspace create` on a worktree task-hub made itself. `herdr worktree create`
-   was not used because it also opens a second workspace for the parent repo). Without herdr, the
-   run is a background process with a log. task-hub only closes workspaces it created.
-7. **Dead runs are detected.** `task _run` records its pid. If that process is gone while the
-   task is still `in_progress`, the next `task` marks it blocked with a pointer to the log.
-8. **Registering is explicit.** The `/task` skill tells every agent to run only on an explicit
-   request. Claude Code additionally enforces it with `disable-model-invocation: true`.
+1. **ボードはローカルの markdown で、書き込むのは `task` だけです。** エージェントはボードを読み書きしません。
+   ボードは専用のフォルダ (`~/.local/share/task-hub/board`) に置き、独自のローカル git
+   履歴を持ち、push はしません。そのためツールのリポジトリは公開できます。(0.1 ではエージェントが共有ブランチ
+   経由でボードに書き込んでいましたが、ロックと競合への対処が必要でした。これは 0.2 で削除しました。)
+2. **エージェントはローカルで動き、`task` が起動します。** `task start` はタスクを承認します。`task` と `task start`
+   は、実行中のタスクが 3 つ未満の間、承認済みのタスクを起動します。キューに入ったタスクは
+   次に `task` を実行したときに始まるので、新しい作業はあなたが状況を追える時に始まります。
+3. **エージェントはファイルを編集するだけです。git と GitHub の作業はすべて task-hub が行います。** エージェントごとに
+   サンドボックスの仕組みが違います (Codex のサンドボックスはネットワークを使えず、フォルダ外に書き込めないため、
+   worktree 内でコミットすることさえできませんでした)。そこでエージェントとの約束事はどのエージェントでも同じにしました。
+   ファイルを編集し、テストを実行し、`.task-report.md` を書くことです。そのあと task-hub がコミットと push を行い、
+   PR を作成または更新します。そのため PR の形式はプロンプトではなくコードで保証されます。
+4. **エージェントは単なるコマンドテンプレートです。** `{prompt}` は 1 つの引数として渡されます。組み込みで
+   claude、codex、pi、kiro に対応しており、設定で上書きしたり追加したりできます。コードの処理経路には
+   ベンダー固有のものは一切ありません。
+5. **1 タスク = 1 ブランチ (`task/<id>`) = 1 worktree = 1 PR です。** ブロックされたタスクの再実行は
+   同じブランチで続きを行い、同じ PR を更新します。プロンプトには前回のレポートとブロックの理由が
+   含まれます。
+6. **herdr は表示役であって、依存先ではありません。** herdr が動いているときは、実行ごとに専用のワークスペースを持ちます
+   (task-hub が自分で作った worktree 上に `herdr workspace create` で作成します。`herdr worktree create`
+   は親リポジトリ用に 2 つ目のワークスペースも開いてしまうため使っていません)。herdr がない場合、
+   実行はログ付きのバックグラウンドプロセスになります。task-hub は自分が作成したワークスペースだけを閉じます。
+7. **停止した実行を検出します。** `task _run` は自分の pid を記録します。そのプロセスが消えているのに
+   タスクがまだ `in_progress` の場合、次の `task` がログへの案内付きでタスクをブロックにします。
+8. **登録は明示的に行います。** `/task` スキルは、明示的な依頼があったときだけ実行するようすべてのエージェントに指示します。
+   Claude Code ではさらに `disable-model-invocation: true` でこれを強制しています。
 
-## CLI shape
+## CLI の形
 
-`bin/task` follows the AXI conventions for agent-facing CLIs: compact TOON output, a home view
-(`task` with no arguments) with live state, explicit empty states, errors on stdout with a
-`help:` line, unknown flags rejected, repeated state changes treated as no-ops, and no prompts
-when stdin is not a terminal (`task start` without an id then lists candidates and asks for an id).
-It uses only the Python 3 standard library, plus git, gh, and optionally herdr and fzf.
+`bin/task` はエージェント向け CLI の AXI の規約に従います。コンパクトな TOON 出力、現在の状態を表示する
+ホーム画面 (引数なしの `task`)、空の状態の明示、`help:` 行付きで stdout に出すエラー、
+未知のフラグの拒否、同じ状態変更の繰り返しは何もしない、stdin が端末でないときはプロンプトを出さない
+(その場合、id なしの `task start` は候補を一覧して id を求めます)、といった点です。
+Python 3 の標準ライブラリだけを使い、あとは git、gh、そして必要に応じて herdr と fzf を使います。
 
-## Known limits
+## 既知の制限
 
-- Runs pause when the machine sleeps, and a queued task starts only on the next `task`.
-- The built-in agent commands (except Codex) skip approval prompts. See [agents.md](agents.md#safety).
-- Test commands that need the network can fail under Codex's default sandbox. Adjust its command.
-- One board per machine. Moving a task between machines means copying its file by hand.
+- マシンがスリープすると実行は一時停止し、キューに入ったタスクは次の `task` まで始まりません。
+- 組み込みのエージェントコマンド (Codex を除く) は承認のプロンプトをスキップします。[agents.md](agents.md#safety) を参照してください。
+- ネットワークが必要なテストコマンドは、Codex のデフォルトのサンドボックスでは失敗することがあります。そのコマンドを調整してください。
+- ボードはマシンごとに 1 つです。マシン間でタスクを移すには、そのファイルを手でコピーします。

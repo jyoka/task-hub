@@ -1,35 +1,35 @@
-# Agents
+# エージェント
 
-task-hub runs any agent CLI that can take a prompt and work without anyone typing.
-It starts the agent in the task's worktree with one argument, the prompt (the instructions
-in [worker/PROMPT.md](../worker/PROMPT.md) followed by the task), and waits for it to exit.
+task-hub は、プロンプトを受け取り、誰も入力しなくても作業できるエージェント CLI なら何でも実行できます。
+タスクの worktree でエージェントを 1 つの引数(プロンプト)付きで起動し、終了するまで待ちます。プロンプトは
+[worker/PROMPT.md](../worker/PROMPT.md) の指示の後にタスクを続けたものです。
 
-The agent's only job is to edit files, run tests, and write `.task-report.md`. task-hub
-does all git and GitHub work afterwards. This is what makes every agent behave the same way,
-including agents whose sandbox cannot use the network or write outside the folder.
+エージェントの仕事は、ファイルを編集し、テストを実行し、`.task-report.md` を書くことだけです。git と GitHub の
+作業はすべて、その後で task-hub が行います。これにより、サンドボックスがネットワークを使えない、またはフォルダの外に
+書き込めないエージェントも含め、すべてのエージェントが同じように振る舞います。
 
-## Built-in agents
+## 組み込みのエージェント
 
-| Name | Command task-hub runs | Notes |
+| 名前 | task-hub が実行するコマンド | 補足 |
 |---|---|---|
-| `claude` | `claude -p --dangerously-skip-permissions {prompt}` | Claude Code print mode, no permission prompts |
-| `codex` | `codex exec -s workspace-write {prompt}` | Codex runs in its workspace-write sandbox: it can edit the worktree and run commands, with no network by default |
-| `pi` | `pi -p {prompt}` | Pi print mode |
-| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI, all tools trusted. Log in first (`kiro-cli whoami`) |
+| `claude` | `claude -p --dangerously-skip-permissions {prompt}` | Claude Code の print モード、権限の確認なし |
+| `codex` | `codex exec -s workspace-write {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません |
+| `pi` | `pi -p {prompt}` | Pi の print モード |
+| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`) |
 
-`{prompt}` is replaced by the prompt as a single argument, so no shell quoting is involved.
+`{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。
 
-## Choosing the agent
+## エージェントの選び方
 
-1. `task start --agent <name>` for this task (it is saved on the task)
-2. otherwise `task new --agent <name>`, if given when the task was registered
-3. otherwise `[runner] agent` in `~/.config/task-hub/config.ini`
-4. otherwise `claude`
+1. `task start --agent <name>` でこのタスク用に指定(タスクに保存されます)
+2. それがなければ、タスクの登録時に指定した `task new --agent <name>`
+3. それもなければ、`~/.config/task-hub/config.ini` の `[runner] agent`
+4. それもなければ `claude`
 
-## Changing or adding an agent
+## エージェントの変更と追加
 
-Put the command under `[agents]` in `~/.config/task-hub/config.ini`. It overrides the built-in
-command with the same name, or adds a new one:
+`~/.config/task-hub/config.ini` の `[agents]` にコマンドを書きます。同じ名前の組み込みコマンドを上書きするか、
+新しいエージェントを追加します:
 
 ```ini
 [agents]
@@ -39,23 +39,22 @@ claude = claude -p --allowedTools Edit,Write,Bash(npm test:*) {prompt}
 aider = aider --yes-always --message {prompt}
 ```
 
-Rules for a command to work:
+コマンドが動くための条件:
 
-- it must run to completion without asking questions (stdin is closed)
-- it must work in the current directory, which is the task's worktree
-- it must be able to write `.task-report.md` there. This is the only way task-hub learns the
-  result: no report means the task is marked blocked
+- 質問せずに最後まで実行されること(stdin は閉じられています)
+- カレントディレクトリ、つまりタスクの worktree で動作すること
+- そこに `.task-report.md` を書けること。task-hub が結果を知る方法はこれだけです。
+  レポートがなければ、タスクはブロックとして扱われます
 
-## Safety
+## 安全性
 
-Except for Codex, the built-in commands run **without approval prompts**. The agent can run
-any command as you, in the worktree and beyond. What limits it:
+Codex を除き、組み込みコマンドは**承認の確認なしで**実行されます。エージェントはあなたの権限で、worktree の中でも外でも
+どんなコマンドでも実行できます。それを制限しているのは次の点です:
 
-- it works in a separate worktree (`~/.local/share/task-hub/worktrees/<id>`), never your own checkout
-- only you approve tasks (`task start`), and at most 3 run at once
-- it never pushes: task-hub pushes only the task's own branch, and changes reach your default
-  branch only when you merge the PR
+- 別の worktree(`~/.local/share/task-hub/worktrees/<id>`)で作業し、あなた自身のチェックアウトには触れません
+- タスクを承認できるのはあなただけで(`task start`)、同時に実行されるのは最大 3 つです
+- エージェントは push しません。task-hub が push するのはそのタスク自身のブランチだけで、変更がデフォルトブランチに
+  入るのは、あなたが PR をマージしたときだけです
 
-If that is too much trust for a machine (for example a work Mac), tighten the command in
-the config: an allowlist of tools for Claude, `--trust-tools=...` for Kiro, or a stricter
-sandbox for Codex.
+マシンによって(たとえば仕事用 Mac で)これでは信頼しすぎだと感じる場合は、config でコマンドを厳しくしてください。
+Claude ならツールの許可リスト、Kiro なら `--trust-tools=...`、Codex ならより厳しいサンドボックスを使います。
