@@ -44,7 +44,7 @@ BODY_TEMPLATE = f"""## Goal
 """
 DEFAULT_AGENTS = {
     "claude": "claude -p --dangerously-skip-permissions {prompt}",
-    "codex": "codex exec --full-auto {prompt}",
+    "codex": "codex exec -s workspace-write {prompt}",
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
 }
@@ -211,7 +211,10 @@ def ensure_clone(repo):
         if url:
             run("git", "clone", "-q", url.format(repo=repo), d, check=True)
         else:
-            run(GH, "repo", "clone", repo, d, "--", "-q", check=True)
+            # HTTPS authenticated by gh, set on this clone only: works without SSH keys and
+            # leaves the user's global git config alone
+            run("git", "clone", "-q", "-c", "credential.helper=", "-c", f"credential.helper=!{GH} auth git-credential",
+                f"https://github.com/{repo}.git", d, check=True)
     run("git", "-C", d, "fetch", "-q", "--prune", "origin", check=True)
     run("git", "-C", d, "remote", "set-head", "origin", "--auto")
     return d
@@ -363,9 +366,11 @@ def finish(t, report, code, say):
         t["status"], t["reason"] = "blocked", f"agent exited without a report (exit {code}), see log"
     elif not blocked and ahead in ("", "0"):
         t["status"], t["reason"] = "blocked", "agent wrote a report but changed no files"
-    if t.get("status") == "blocked" and ahead in ("", "0"):
+    if ahead in ("", "0"):  # nothing to push, so no PR (GitHub refuses one without commits)
+        if blocked:
+            t["status"], t["reason"] = "blocked", blocked[0]
         write(t, "blocked")
-        return  # nothing to push, no PR to open
+        return
 
     run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
     why = blocked[0] if blocked else (t["reason"] if t.get("status") == "blocked" else "")

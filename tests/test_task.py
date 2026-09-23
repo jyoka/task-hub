@@ -59,11 +59,11 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
-if mode != "nochange":
+if mode not in ("nochange", "stuck"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "commit":  # an agent that ignores the "do not commit" rule
     subprocess.run(["git", "add", "-A"]); subprocess.run(["git", "commit", "-qm", "agent commit"])
-if mode == "blocked":
+if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
 if mode != "noreport":
     Path(".task-report.md").write_text(report)
@@ -259,6 +259,14 @@ class TaskTest(unittest.TestCase):
         pr = self.pr(tid)
         self.assertTrue(pr["isDraft"])
         self.assertTrue(pr["body"].startswith("## Blocked\n\nNeed the Stripe test key."))
+
+    def test_blocked_without_changes_keeps_the_agents_reason_and_opens_no_pr(self):
+        tid = self.new("stuck")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "blocked")
+        self.assertEqual(self.field(tid, "reason"), "Need the Stripe test key.")
+        self.assertIsNone(self.pr(tid))
+        self.assertIn("Ran the tests", self.task("show", tid))  # the report still reaches the board
 
     def test_rerun_continues_on_same_branch_and_pr(self):
         tid = self.new("blocked")

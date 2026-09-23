@@ -13,7 +13,7 @@ including agents whose sandbox cannot use the network or write outside the folde
 | Name | Command task-hub runs | Notes |
 |---|---|---|
 | `claude` | `claude -p --dangerously-skip-permissions {prompt}` | Claude Code print mode, no permission prompts |
-| `codex` | `codex exec --full-auto {prompt}` | Codex runs in its workspace-write sandbox: it can edit the worktree and run commands, with no network by default |
+| `codex` | `codex exec -s workspace-write {prompt}` | Codex runs in its workspace-write sandbox: it can edit the worktree and run commands, with no network by default |
 | `pi` | `pi -p {prompt}` | Pi print mode |
 | `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI, all tools trusted. Log in first (`kiro-cli whoami`) |
 

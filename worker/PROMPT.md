@@ -19,7 +19,8 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
 4. Do **not** commit, push, create branches, or open pull requests. task-hub does all of that
    after you finish, from whatever files you changed.
 5. Before you finish, write the file `.task-report.md` in the current directory (the worktree
-   root). It is required: without it the task counts as failed.
+   root). It is required: without it the task counts as failed. task-hub reads it and never
+   commits it, so it does not count as a changed file and needs no mention in the report.
 
 ## `.task-report.md`
 
