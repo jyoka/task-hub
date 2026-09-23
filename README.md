@@ -1,77 +1,69 @@
 # task-hub
 
-A file-based task board for Claude Code agents running in the cloud.
+A file-based task board that runs your coding agents for you, whichever agent you use:
+Claude Code, Codex, Pi, Kiro, or anything else with a non-interactive mode.
 
-You register tasks when you choose to. Cloud agents work only on the tasks you approved,
-at most 3 at a time. Each agent works on its own branch in the project repo and opens a PR
-whose description holds its report and the exact things you need to review.
-
-**Only your Mac writes the task board.** Cloud agents never touch it. They receive the
-task brief when their run starts, and they answer with a PR. `task` reads those PRs from
-GitHub and updates the board.
+You register tasks when you choose to. You approve them with `task start`. At most 3 run at
+the same time, each in its own herdr workspace on its own branch. When an agent finishes,
+task-hub pushes the branch and opens a PR with the agent's report and a list of exactly what
+you need to review.
 
 ```
-you:    /task in a chat      ->  tasks/0012-fix-login.md            status: draft
-you:    task ready 12        ->  cloud run starts with the brief    status: in_progress
-cloud:  works on branch claude/task-12 in the project repo, opens a PR with Report + Please review
-you:    task                 ->  PR found, report copied in         status: review
-you:    review + merge PR    ->  task notices the merge             status: done
+you:    /task in a chat          ->  tasks/0012-fix-login.md           draft
+you:    task start               ->  pick the task, an agent starts    in_progress
+        (herdr sidebar shows a new workspace "task 12: Fix login" with the agent working)
+agent:  edits files, runs tests, writes its report
+task:   commits, pushes task/12, opens the PR                          review
+you:    review + merge the PR    ->  next `task` marks it              done
 ```
+
+Nothing runs in the cloud and nothing depends on one vendor. The board is plain markdown on
+your machine, the agents run on your machine, and GitHub only sees the branch and the PR.
 
 ## Daily use
 
 | You want to | Run |
 |---|---|
-| See what needs you (also syncs with GitHub and starts waiting tasks) | `task` |
-| Turn the current chat into a task | `/task` in Claude Code (optionally `/task repo is jyoka/app`) |
-| Create a task from the terminal | `task new --title "..." --repo owner/name --goal "..."` |
-| Read a task, its report, and what to review | `task show <id>` |
-| Let an agent work on it | `task ready <id>` |
+| See what needs you (also starts waiting tasks) | `task` |
+| Turn the current chat into a task | `/task` in your agent (optionally `/task repo is jyoka/app, use codex`) |
+| Create a task from the terminal | `task new --title "..." --repo owner/name --goal "..." [--agent codex]` |
+| Approve a task so an agent works on it | `task start` (pick from a list) or `task start 12` |
+| Use a different agent for this task | `task start --agent kiro` |
+| Watch a run | its workspace in the herdr sidebar, or `task log 12` |
+| Read the report and what to review | `task show 12` |
 | Accept finished work | merge the PR; the next `task` marks it done |
-| Re-run a blocked or stuck task | `task ready <id>` (continues on the same branch and PR) |
-| Close or cancel a task by hand | `task done <id>` |
-| List by status, without GitHub calls | `task list --status review` |
+| Re-run a blocked task | `task start` (continues on the same branch and PR) |
+| Close or cancel a task | `task done 12` |
 
-A normal chat never becomes a task. Only `/task` or `task new` creates one.
+A normal chat never becomes a task. Only `/task` or `task new` creates one, and only
+`task start` lets an agent work on it.
 
 ## Status lifecycle
 
-| From -> To | Triggered by |
-|---|---|
-| (new) -> draft | you: `/task` or `task new` |
-| draft -> ready | you only: `task ready <id>` |
-| ready -> in_progress | `task` / `task ready` starts a cloud run while fewer than 3 are running |
-| in_progress -> review | the agent opened a PR that is ready for review |
-| in_progress -> blocked | the agent opened a **draft** PR with a `## Blocked` reason, or the PR was closed |
-| blocked / stuck -> in_progress | you: `task ready <id>` |
-| review -> done | the PR was merged (or you: `task done <id>`) |
+| Status | Meaning | Needs you? |
+|---|---|---|
+| `draft` | registered, not approved | yes: `task start` when you want it done |
+| `ready` | approved, waiting because 3 are already running | no: starts on a later `task` |
+| `in_progress` | an agent is working on it | no |
+| `review` | PR open and ready | yes: review, then merge |
+| `blocked` | the agent needs something (reason shown), or the run failed | yes: fix it, then `task start` |
+| `done` | PR merged, or closed by hand | no |
 
 ## Layout
 
 ```
-bin/task              the CLI (Python 3, standard library only; uses `gh` to read PRs)
-tasks/NNNN-slug.md    one file per task (local only, committed to this repo's git history)
-skills/task/SKILL.md  the /task skill (linked into ~/.claude/skills/task)
-routine/PROMPT.md     the instructions the cloud routine runs
+bin/task              the CLI (Python 3 standard library; uses git, gh, and herdr if running)
+tasks/NNNN-slug.md    one file per task (this repo's git history records every change)
+worker/PROMPT.md      the instructions every agent gets at the start of a run
+skills/task/SKILL.md  the /task skill (linked into Claude, Codex/Pi, and Kiro skill folders)
 tests/test_task.py    tests: python3 -m unittest -v
-docs/                 design, task format, routine setup, operations
+docs/                 setup, agents, design, task format, operations
 ```
-
-## Setup
-
-1. Put the CLI and the skill on this Mac:
-   ```
-   ln -s "$HOME/AIprogramming PJ/task-hub/bin/task" ~/.local/bin/task
-   ln -s "$HOME/AIprogramming PJ/task-hub/skills/task" ~/.claude/skills/task
-   ```
-2. `gh` must be logged in (`gh auth status`): `task` uses it to read PRs.
-3. Cloud agents: follow [docs/routine-setup.md](docs/routine-setup.md).
-
-Until the routine is set up, everything works locally, and `task ready` says the routine is not configured.
 
 ## Docs
 
-- [docs/design.md](docs/design.md): why it is built this way, what else we looked at, known limits
-- [docs/task-format.md](docs/task-format.md): the task file format, the PR format, status meanings
-- [docs/routine-setup.md](docs/routine-setup.md): cloud routine setup, step by step
-- [docs/operations.md](docs/operations.md): troubleshooting and recovery
+- [docs/setup.md](docs/setup.md): install on a Mac (including a work Mac that only has Kiro)
+- [docs/agents.md](docs/agents.md): how each agent is run, safety, adding another agent
+- [docs/task-format.md](docs/task-format.md): the task file, the agent's report file, the PR
+- [docs/operations.md](docs/operations.md): watching runs, troubleshooting, cleanup
+- [docs/design.md](docs/design.md): why it is built this way, what else we looked at

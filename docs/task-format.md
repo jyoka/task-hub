@@ -1,10 +1,10 @@
-# Task file format
+# Task file, report file, and PR format
+
+## Task file
 
 Each task is one markdown file: `tasks/NNNN-slug.md`, for example `tasks/0012-fix-login.md`.
-Only the `task` CLI on your Mac writes these files. You can edit the Goal text by hand
-before approving the task. Change status only through the CLI.
-
-## Example
+Only the `task` CLI writes these files. You can edit the Goal text by hand, for example
+before starting a task or before re-running a blocked one. Change status only through the CLI.
 
 ```markdown
 ---
@@ -12,12 +12,16 @@ id: 12
 title: Fix login redirect
 repo: jyoka/app
 theme: auth
+agent: codex
 status: review
 created: 2026-09-23
 updated: 2026-09-23
-branch: claude/task-12
+branch: task/12
 started: 2026-09-23T02:14:05Z
-session: https://claude.ai/code/session_01H...
+pid:
+workspace: w6
+worktree: /Users/jyoka/.local/share/task-hub/worktrees/12
+log: /Users/jyoka/.local/state/task-hub/logs/12.log
 pr: https://github.com/jyoka/app/pull/41
 reason:
 ---
@@ -41,58 +45,64 @@ Added 3 tests; `pytest` passes.
 - I kept the old `/home` fallback when `next` is missing. Confirm that is wanted.
 ```
 
-## Frontmatter fields
-
 | Field | Set by | Meaning |
 |---|---|---|
-| `id` | CLI | Number, unique in the hub, never reused |
-| `title` | you | Short imperative summary |
-| `repo` | you | GitHub `owner/name` where the work happens. It must be added to the routine |
-| `theme` | you | Optional grouping, for example `auth` or `docs` |
-| `status` | CLI | See below |
+| `id` | CLI | Number, unique on this board, never reused |
+| `title` | you | Short imperative summary. Also the PR title |
+| `repo` | you | GitHub `owner/name` where the work happens |
+| `theme` | you | Optional grouping |
+| `agent` | you | Agent for this task. Empty = the machine's default ([agents.md](agents.md)) |
+| `status` | CLI | See the README |
 | `created` / `updated` | CLI | Dates |
-| `branch` | CLI | `claude/task-<id>`, fixed at the first run and reused by re-runs |
-| `started` | CLI | UTC time of the latest run start. PR activity older than this is ignored |
-| `session` | CLI | URL of the latest cloud session, for watching or taking over the run |
-| `pr` | CLI (from GitHub) | The agent's pull request |
-| `reason` | CLI (from GitHub) | Why the task is blocked: the first line of the PR's `## Blocked` section |
+| `branch` | CLI | `task/<id>`, reused by re-runs |
+| `started` | CLI | UTC time the latest run was launched |
+| `pid` | CLI | Process of the running `task _run`, used to notice runs that died |
+| `workspace` | CLI | The herdr workspace task-hub created for the run (empty without herdr) |
+| `worktree` | CLI | Where the agent works. Removed when the task is done |
+| `log` | CLI | The run's full output (`task log <id>`) |
+| `pr` | CLI | The PR task-hub opened |
+| `reason` | CLI | Why the task is blocked |
 
-## Sections
+Sections: **Goal** is written by you or by `/task` and is the agent's whole brief.
+**Report** and **Please review** are copied from the agent's report file when a run ends.
 
-- **Goal**: written by you, or by `/task` from the chat. It is sent to the agent as its whole
-  brief, because the agent never sees your chat. Headings inside it are kept at `###` level.
-- **Report** and **Please review**: copied from the agent's PR description by `task` / `task sync`.
+## The agent's report file
 
-## What the agent's PR must look like
+At the end of every run, the agent writes `.task-report.md` in the worktree root
+([worker/PROMPT.md](../worker/PROMPT.md) tells it how). task-hub reads it, deletes it,
+and never commits it.
 
-The routine prompt ([routine/PROMPT.md](../routine/PROMPT.md)) tells the agent to use these headings:
+```markdown
+## Blocked                 <- only when stuck; everything else still gets written
 
-```
-## Blocked            <- only when stuck; the PR is then a draft
-<one line: what the agent needs from you>
+Need the Stripe test key.
 
 ## Report
-<what changed, how it was verified, what was not done>
+
+What changed, how it was verified, what was not done.
 
 ## Please review
-<exact files, decisions, risks to check>
+
+Exact files, decisions, and risks to check.
 ```
 
-| PR state | Task becomes |
-|---|---|
-| no PR yet | stays `in_progress` |
-| open, ready for review | `review` |
-| open, draft | `blocked` (reason from `## Blocked`) |
-| closed without merge | `blocked` ("PR was closed without merging") |
-| merged | `done` |
+## What happens when the run ends
 
-## Statuses
-
-| Status | Meaning | Needs you? |
+| Agent result | task-hub does | Task becomes |
 |---|---|---|
-| `draft` | Registered, not approved | Yes: approve with `task ready` or edit the Goal |
-| `ready` | Approved, waiting for a free slot | No |
-| `in_progress` | A cloud run is working on it (max 3 at once) | No |
-| `review` | PR is open and ready | Yes: review, then merge |
-| `blocked` | The agent needs something (see `reason` and the PR) | Yes: fix it, then `task ready` |
-| `done` | PR merged, or closed by hand | No |
+| report, files changed | commit, push `task/<id>`, PR ready for review | `review` |
+| report with `## Blocked` | commit and push what exists, **draft** PR with the reason | `blocked` |
+| no report, files changed | push, draft PR ("agent exited without a report") | `blocked` |
+| no report, nothing changed (crash) | nothing pushed, no PR | `blocked` |
+| report, nothing changed | nothing pushed, no PR | `blocked` |
+
+A re-run (`task start` on a blocked task) continues on the same branch and updates the same
+PR. The agent is told the earlier report and why it was blocked. The exact prompt of the latest
+run is kept at `~/.local/share/task-hub/prompts/<id>.md`.
+
+## The PR
+
+- branch `task/<id>`, base = the repo's default branch, title = task title
+- description: `## Blocked` (if any), `## Report`, `## Please review`, and a footer with the task id and agent
+- merged on GitHub: the next `task` marks the task `done` and removes its worktree and herdr workspace
+- closed without merging while in review: the task becomes `blocked`

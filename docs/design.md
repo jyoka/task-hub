@@ -4,77 +4,73 @@
 
 Agent coding sessions are chat-shaped. The goal is to make them task-shaped, like Jira:
 
-1. Register a task when you decide to (a plain question to the AI must not create one).
+1. Register a task when you decide to (a plain question to an agent must not create one).
 2. See all tasks with their status.
 3. A free agent picks up the next approved task by itself.
 4. When done, the agent reports the result and says exactly which parts need your review.
 
-Constraints chosen by the user:
+Constraints from the user:
 
 - Tasks are local files.
-- Agents run in the cloud, so work continues with the laptop closed.
-- Agents only take tasks the user marked `ready`. Agents never create or split tasks.
+- Agents only take tasks the user approved. Agents never create or split tasks.
 - Tasks can target several repositories.
-- At most 3 tasks run in parallel, enforced by code, so the user can keep track.
-- Cloud agents must not push to a shared branch. Branch handling must stay simple.
+- At most 3 tasks run in parallel, enforced by code.
+- **Not tied to one vendor**: the user works with Claude Code, Codex, and Pi, and the work Mac
+  only allows Kiro. The same tool must work on both machines.
+- Simple branch handling. No agent pushes to a shared branch.
+- The user works in herdr, so runs should show up there.
+- Separate boards per machine. Stopping when the machine sleeps is acceptable.
 
 ## What we looked at (2026-09) and why not
 
 | Option | What it is | Why not on its own |
 |---|---|---|
-| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | Kanban board, a worktree per card, review column | You assign cards by hand. The company shut down in April 2026 (now community maintained, local only) |
-| [Beads](https://github.com/steveyegge/beads) | Git-backed issue tracker for agents, `bd ready` | Task store only: no cloud runner, no parallel limit, Dolt database instead of plain files |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | Kanban board, a worktree per card, review column | You assign cards by hand. The company shut down in April 2026 (now community maintained) |
+| [Beads](https://github.com/steveyegge/beads) | Git-backed issue tracker for agents, `bd ready` | Task store only: no runner, no parallel limit |
 | Backlog.md, Task Master | Markdown task files / PRD-to-task breakdown | Planning only, nothing runs the tasks |
-| [OpenAI Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/) | Polls Linear, runs a Codex agent per issue | Built for Codex + Linear, not local files + Claude Code |
-| [Claude Code Projects](https://code.claude.com/docs/en/claude-projects) | One conversation starts parallel cloud threads, Overview pane | Task state lives on claude.ai, not in files. Starts work right away instead of waiting for `ready`. A thread limit is only an instruction, not enforced |
-| GitHub Actions + claude-code-action | Claude Code on a cron in CI | Works, but routines do the same with no CI setup |
+| [OpenAI Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/) | Polls Linear, runs a Codex agent per issue | Codex + Linear only |
+| [Claude Code Projects](https://code.claude.com/docs/en/claude-projects) / [routines](https://code.claude.com/docs/en/routines) | Cloud sessions on claude.ai | Claude only, state on claude.ai. task-hub 0.1 and 0.2 used routines. Dropped in 0.3 for vendor neutrality |
+| GitHub Actions + an agent CLI | Agents in CI | Needs API keys as repo secrets, and may not be allowed at work |
 
 ## Decisions
 
-1. **Only the Mac writes the board.** Task files live only in this local repo, and only
-   the `task` CLI changes them. Cloud agents never read or write the board. This removed
-   all shared-branch writes, race handling, and locking from an earlier version (0.1),
-   where agents claimed tasks and pushed status changes to the hub's `main`.
-2. **One task = one branch = one PR.** The CLI names the branch `claude/task-<id>`
-   (routines push to `claude/*` branches by default). A re-run of a blocked task continues
-   on the same branch and PR, so there is never more than one branch per task.
-3. **The brief travels in the trigger.** `task ready` calls the routine's API trigger with the
-   task id, repo, branch, and Goal as the `text` payload. The routine prompt explicitly accepts
-   this payload as its assignment (routines treat fire text as untrusted unless the prompt opts in).
-   Only the token holder (your Mac) can send it.
-4. **Results travel in the PR.** The agent writes `## Report` and `## Please review` in the PR
-   description, and uses a draft PR with a `## Blocked` line when it needs you. `task` reads
-   the PRs with `gh` and copies those sections into the task file.
-5. **`task` is the scheduler.** Every `task` / `task sync` / `task ready` first reads PRs, then
-   starts runs for ready tasks while fewer than 3 are `in_progress`. The limit is enforced
-   in code before a run starts. There is no hourly backup run: when a slot frees up while you
-   are away, the next waiting task starts the next time you run `task`. This is deliberate:
-   new work starts when you are around to keep track of it.
-6. **Stale PR activity is ignored.** Each run records its start time. PR changes older than that
-   (the old draft PR of a re-queued task) do not move the task.
-7. **Registering is explicit.** The `/task` skill has `disable-model-invocation: true`,
-   so Claude cannot start it by itself during a normal chat.
-
-Verified in the [routines docs](https://code.claude.com/docs/en/routines): one routine can have
-several repositories (fixed in its settings, cloned every run); it pushes to `claude/*` branches and
-opens PRs as you; the API trigger starts a run immediately and returns the session URL; there is a
-daily cap on runs per account.
+1. **The board is local markdown, and only `task` writes it.** No agent reads or writes the board.
+   Every change is committed to the hub's git history. (0.1 let agents write the board
+   through a shared branch, which needed locking and race handling. That was removed in 0.2.)
+2. **Agents run locally, started by `task`.** `task start` approves a task. `task`, `task start`,
+   and `task sync` launch approved tasks while fewer than 3 are running. A queued task starts the
+   next time you run `task`, so new work starts when you are around to keep track of it.
+3. **The agent only edits files. task-hub does all git and GitHub work.** Agents differ in
+   sandboxing (Codex's sandbox cannot use the network or write outside the folder, so it could
+   not even commit in a worktree). So the agent's contract is the same for every agent: edit
+   files, run tests, write `.task-report.md`. task-hub then commits, pushes, and opens or updates
+   the PR. The PR format is therefore guaranteed by code, not by prompt.
+4. **An agent is just a command template.** `{prompt}` is passed as one argument. Built-ins cover
+   claude, codex, pi, and kiro, and the config can override them or add more. Nothing
+   vendor-specific lives in the code path.
+5. **One task = one branch (`task/<id>`) = one worktree = one PR.** A re-run of a blocked task
+   continues on the same branch and updates the same PR. It gets the earlier report and the reason
+   in its prompt.
+6. **herdr is the viewer, not a dependency.** When herdr is running, a run gets its own workspace
+   (created with `herdr workspace create` on a worktree task-hub made itself. `herdr worktree create`
+   was not used because it also opens a second workspace for the parent repo). Without herdr, the
+   run is a background process with a log. task-hub only closes workspaces it created.
+7. **Dead runs are detected.** `task _run` records its pid. If that process is gone while the
+   task is still `in_progress`, the next `task` marks it blocked with a pointer to the log.
+8. **Registering is explicit.** The `/task` skill tells every agent to run only on an explicit
+   request. Claude Code additionally enforces it with `disable-model-invocation: true`.
 
 ## CLI shape
 
-`bin/task` follows the AXI conventions for agent-facing CLIs: compact TOON output,
-a home view (`task` with no arguments) that shows live state, explicit empty states,
-errors on stdout with a `help:` line, unknown flags rejected, and repeated
-state changes treated as no-ops. It uses only the Python 3 standard library plus `gh`.
+`bin/task` follows the AXI conventions for agent-facing CLIs: compact TOON output, a home view
+(`task` with no arguments) with live state, explicit empty states, errors on stdout with a
+`help:` line, unknown flags rejected, repeated state changes treated as no-ops, and no prompts
+when stdin is not a terminal (`task start` without an id then lists candidates and asks for an id).
+It uses only the Python 3 standard library, plus git, gh, and optionally herdr and fzf.
 
 ## Known limits
 
-- **Repos are fixed in the routine.** A task for a repo not added to the routine produces no PR.
-  The run's session shows why. Add the repo, then `task ready <id>`.
-- **Waiting tasks start only when you run `task`.** See decision 5. A cron job on the Mac could
-  run `task sync` if this ever matters.
-- **A run that dies stays `in_progress`.** `task` shows it, the session link shows what happened,
-  and `task ready <id>` re-runs it on the same branch.
-- **Daily run cap.** Each start (including re-runs) costs one routine run.
-- **Unverified until the first real run:** that the cloud session can open a PR and switch it
-  between draft and ready. [routine-setup.md](routine-setup.md) step 5 checks this.
+- Runs pause when the machine sleeps, and a queued task starts only on the next `task`.
+- The built-in agent commands (except Codex) skip approval prompts. See [agents.md](agents.md#safety).
+- Test commands that need the network can fail under Codex's default sandbox. Adjust its command.
+- One board per machine. Moving a task between machines means copying its file by hand.

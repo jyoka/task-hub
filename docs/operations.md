@@ -1,55 +1,68 @@
 # Operations and troubleshooting
 
-Start with `task`. It syncs with GitHub, starts waiting tasks if slots are free, and shows
-every open task and how many need you.
+Start with `task`. It checks running tasks and PRs, starts approved tasks when a slot is
+free, and shows every open task and how many need you.
 
-## A task is stuck in `in_progress`
+## Watching a run
 
-No PR has appeared yet. Open the `session` link from `task show <id>`.
+- **herdr**: each run has a workspace in the sidebar named "task <id>: <title>". Open it to
+  watch the agent's output live. When the run ends, the pane stays open with the final status
+  line. `task done <id>` (or merging the PR) closes it.
+- **Without herdr**: `task log <id>` shows the last 40 lines, and `task log <id> --full` shows everything.
+- What the agent was told: `~/.local/share/task-hub/prompts/<id>.md`.
 
-- Still running: wait.
-- Finished or failed without a PR (for example the repo is not added to the routine):
-  fix the cause, then `task ready <id>`. The re-run uses the same branch.
+## Where things live
 
-## `dispatch: skipped, routine not configured`
-
-The routine URL or token is missing. See step 3 of [routine-setup.md](routine-setup.md).
-The task stays `ready` and starts on the next `task` once configured.
-
-## `error: could not start the routine for task N`
-
-The API call failed. The task stays `ready`, so no slot is lost. Common causes:
-
-- `401`: the token is wrong or was revoked. Generate a new one and update `~/.config/task-hub/routine.env`
-- daily routine cap reached: check <https://claude.ai/code/routines>. Try again later,
-  or turn on usage credits
-
-Retry with `task sync`.
-
-## `github_errors[...]` in the output
-
-`gh` could not read a repo's PRs (not logged in, no access, repo renamed). Those tasks keep
-their status. Run `gh auth status`, and check that the task's `repo` is correct.
+| What | Where |
+|---|---|
+| Task files | `<hub>/tasks/` (committed to the hub's git history on every change) |
+| Config | `~/.config/task-hub/config.ini` |
+| Repo clones | `~/.local/share/task-hub/repos/<owner>/<name>` |
+| Worktrees | `~/.local/share/task-hub/worktrees/<id>` |
+| Prompts | `~/.local/share/task-hub/prompts/<id>.md` |
+| Logs | `~/.local/state/task-hub/logs/<id>.log` |
 
 ## A task is `blocked`
 
-`task show <id>` shows `reason`, and the PR (a draft) has the details. Give the agent what
-it needs: edit the Goal in the task file, add the repo to the routine, or add credentials to
-the routine's environment. Then `task ready <id>`. The re-run continues on the same branch and PR.
+`task show <id>` shows `reason`, and the report says more. Common reasons:
 
-If the PR was closed without merging, the task is blocked with that reason. Re-run it
-with `task ready <id>`, or close it with `task done <id>`.
+| Reason | What to do |
+|---|---|
+| the agent's own line (from `## Blocked`) | give it what it asks for: edit the Goal in the task file, or fix the environment |
+| `agent exited without a report (exit N)` | read `task log <id>`. Usually the agent crashed, is not logged in, or ran out of budget |
+| `agent wrote a report but changed no files` | the agent thought there was nothing to do. Clarify the Goal |
+| `run stopped unexpectedly` | the `task _run` process died (for example you closed its herdr pane, or the Mac restarted) |
+| `could not start: ...` | cloning or worktree setup failed: check `gh auth status` and the `repo` name |
+| `PR was closed without merging` | re-run it, or close the task with `task done <id>` |
+
+Then `task start <id>`. The re-run continues on the same branch and PR, and the agent is told why
+the last run stopped.
+
+## `queue: N approved task(s) waiting, all 3 slots busy`
+
+Normal. They start on the next `task` after a running task finishes.
+
+## `github_errors[...]`
+
+`gh` could not read a repo's PRs (not logged in, no access, repo renamed). Those tasks keep
+their status. Run `gh auth status`.
+
+## Stop a running task
+
+Stop the agent in its herdr workspace (Ctrl-C). The runner still finishes: it pushes whatever
+was changed and marks the task blocked. Or close the pane. The next `task` then marks it
+`run stopped unexpectedly`.
 
 ## Cancel a task
 
-- Not started (`draft` / `ready`): `task done <id>`.
-- Running: stop the session on claude.ai, close the PR if one exists, then `task done <id>`.
+`task done <id>`. This closes its herdr workspace and removes its worktree. The branch and any PR
+stay on GitHub. Close the PR there if you want.
 
 ## Change the parallel limit
 
 `MAX_PARALLEL` at the top of `bin/task`.
 
-## Back up the board
+## Disk cleanup
 
-The board is a local git repo and every change is committed. To keep an off-machine copy,
-push it to a private repo yourself. Cloud agents never need it.
+Worktrees are removed when tasks are done. Clones in `~/.local/share/task-hub/repos/` are kept
+to make the next run faster, and can be deleted at any time.
