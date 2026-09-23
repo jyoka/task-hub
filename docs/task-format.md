@@ -1,72 +1,24 @@
-# タスクファイル、レポートファイル、PR の形式
+# Issue、レポートファイル、コメント、PR の形式
 
-## タスクファイル
+## タスク = Issue + Project のカード
 
-各タスクはボードフォルダ `~/.local/share/task-hub/board/tasks/`(または `$TASK_HUB_DIR/tasks/`)内の
-1 つの markdown ファイルです。例: `tasks/0012-fix-login.md`。ボードは非公開です。task-hub リポジトリとは別の
-独自のローカル git 履歴を持ち、push されることはありません。
-これらのファイルを書き込むのは `task` CLI だけです。Goal のテキストは手で編集できます。たとえばタスクを
-開始する前や、ブロックされたタスクを再実行する前です。status の変更は必ず CLI で行ってください。
+各タスクは、非公開の Issue リポジトリ(設定の `[board] issues`、例: `jyoka/tasks`)の Issue 1 件です。
+タスクの番号は Issue の番号です。Issue は GitHub Project にカードとして載っています。
 
-```markdown
----
-id: 12
-title: Fix login redirect
-repo: jyoka/app
-theme: auth
-agent: codex
-status: review
-created: 2026-09-23
-updated: 2026-09-23
-branch: task/12
-started: 2026-09-23T02:14:05Z
-pid:
-workspace: w6
-worktree: /Users/jyoka/.local/share/task-hub/worktrees/12
-log: /Users/jyoka/.local/state/task-hub/logs/12.log
-pr: https://github.com/jyoka/app/pull/41
-reason:
----
-## Goal
-
-After login, users land on / instead of the page they came from.
-Keep the `next` query parameter through the OAuth round trip.
-
-- [ ] Redirects to `next` after login
-- [ ] Rejects external `next` URLs
-- [ ] Tests cover both
-
-## Report
-
-Stored `next` in the session before the OAuth redirect and read it back in the callback.
-Added 3 tests; `pytest` passes.
-
-## Please review
-
-- `src/auth/callback.py:40`: the allowlist check for `next` (only same-origin paths)
-- I kept the old `/home` fallback when `next` is missing. Confirm that is wanted.
-```
-
-| フィールド | 設定者 | 意味 |
+| どこに | 何を | 書くのは |
 |---|---|---|
-| `id` | CLI | 番号。このボード内で一意で、再利用されません |
-| `title` | あなた | 命令形の短い要約。PR のタイトルにもなります |
-| `repo` | あなた | 作業を行う GitHub の `owner/name` |
-| `theme` | あなた | 任意のグループ分け |
-| `agent` | あなた | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) |
-| `status` | CLI | README を参照 |
-| `created` / `updated` | CLI | 日付 |
-| `branch` | CLI | `task/<id>`。再実行でも使い回されます |
-| `started` | CLI | 最新の実行を起動した UTC 時刻 |
-| `pid` | CLI | 実行中の `task _run` のプロセス。停止した実行の検出に使います |
-| `workspace` | CLI | task-hub がその実行用に作成した herdr のワークスペース(herdr がない場合は空) |
-| `worktree` | CLI | エージェントが作業する場所。タスクが完了すると削除されます |
-| `log` | CLI | 実行の全出力(`task log <id>`) |
-| `pr` | CLI | task-hub が作成した PR |
-| `reason` | CLI | タスクがブロックされた理由 |
+| Issue のタイトル | 命令形の短い要約。PR のタイトルにもなります | あなた(`/task` / `task new`) |
+| Issue の本文 | Goal: やること、理由、チャットで決まった文脈、確認項目のチェックリスト。エージェントへの指示のすべてです | あなた |
+| カードの Status | Backlog / Ready / In progress / In review / Blocked / Done | あなた(Backlog と Ready) / task-hub(それ以外) |
+| カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
+| カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
+| Issue のコメント | task-hub のレポート(下記) | task-hub |
 
-セクション: **Goal** はあなたまたは `/task` が書くもので、エージェントへの指示のすべてです。
-**Report** と **Please review** は、実行終了時にエージェントのレポートファイルからコピーされます。
+Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
+カードを Ready に戻します。
+
+実行中の情報(ブランチ、プロセス、herdr のワークスペース、worktree、ログ)は手元のマシンの
+`~/.local/state/task-hub/runs/<番号>.json` にだけ保存され、GitHub には載りません。
 
 ## エージェントのレポートファイル
 
@@ -88,23 +40,49 @@ What changed, how it was verified, what was not done.
 Exact files, decisions, and risks to check.
 ```
 
+## task-hub のレポートコメント
+
+実行が終わるたびに、task-hub は Issue に 1 件コメントします。先頭の `<!-- task-hub report -->` が目印で、
+いちばん新しいものがそのタスクの現在のレポートです。再実行のときはこれがエージェントに伝えられます。
+
+```markdown
+<!-- task-hub report -->
+
+## Blocked
+
+Need the Stripe test key.
+
+## Report
+
+...
+
+## Please review
+
+...
+
+PR: https://github.com/jyoka/app/pull/41
+```
+
+task-hub 自身が止めたとき(実行が止まった、開始できなかった)も、
+同じ形式で `## Blocked` だけのコメントを書きます。
+
 ## 実行終了時の処理
 
-| エージェントの結果 | task-hub の処理 | タスクの状態 |
+| エージェントの結果 | task-hub の処理 | カードの列 |
 |---|---|---|
-| レポートあり、ファイル変更あり | コミットし、`task/<id>` を push し、レビュー可能な PR を作成 | `review` |
-| `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成 | `blocked` |
-| レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | `blocked` |
-| レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない | `blocked` |
-| レポートあり、変更なし | push せず、PR も作成しない | `blocked` |
+| レポートあり、ファイル変更あり | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
+| `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
+| レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
+| レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |
+| レポートあり、変更なし | push せず、PR も作成しない。レポートをコメント | Blocked |
 
-再実行(ブロックされたタスクに対する `task start`)は同じブランチで作業を続け、同じ PR を更新します。
-エージェントには前回のレポートとブロックされた理由が伝えられます。最新の実行で使われたプロンプトそのものは
-`~/.local/share/task-hub/prompts/<id>.md` に保存されます。
+再実行(Blocked のカードを Ready に戻す、または `task start`)は同じブランチで作業を続け、同じ PR を更新します。
+最新の実行で使われたプロンプトそのものは `~/.local/share/task-hub/prompts/<番号>.md` に保存されます。
 
 ## PR
 
-- ブランチは `task/<id>`、ベースはリポジトリのデフォルトブランチ、タイトルはタスクのタイトル
-- 説明: `## Blocked`(ある場合)、`## Report`、`## Please review`、およびタスク ID とエージェントを記したフッター
-- GitHub でマージされた場合: 次の `task` 実行時にタスクを `done` にし、その worktree と herdr のワークスペースを削除します
-- レビュー中にマージされずにクローズされた場合: タスクは `blocked` になります
+- ブランチは `task/<番号>`、ベースはリポジトリのデフォルトブランチ、タイトルは Issue のタイトル
+- 説明: `## Blocked`(ある場合)、`## Report`、`## Please review`、`Closes <issues repo>#<番号>`、エージェント名のフッター
+- マージされると `Closes` によって Issue が閉じ、Project のワークフロー(Item closed)でカードが Done に移ります。
+  次の確認で task-hub はカードが開いた列から消えたことに気づき、worktree と herdr のワークスペースを削除します
+- マージせずに PR を閉じた場合、task-hub はカードを動かしません。Ready に戻すか、Issue を閉じてください

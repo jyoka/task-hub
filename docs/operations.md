@@ -1,62 +1,82 @@
 # 運用とトラブルシューティング
 
-まず `task` を実行します。実行中のタスクと PR を確認し、空きがあれば承認済みのタスクを開始し、
-未完了のタスクすべてと、あなたの対応が必要なタスクの数を表示します。
+全体は GitHub Project のボードで見ます。手元では `task` を実行します。ボードと実行中のタスクと PR を確認し、
+空きがあれば Ready のカードを開始し、あなたの対応が必要なタスクの数を表示します。herdr のペインで `task watch` を
+動かしておけば、これを 1 分ごとに自動で行います。
 
 ## 実行の様子を見る
 
-- **herdr**: 各実行には、サイドバーに "task <id>: <title>" という名前のワークスペースがあります。開くと
+- **herdr**: 各実行には、サイドバーに "task <番号>: <title>" という名前のワークスペースがあります。開くと
   エージェントの出力をリアルタイムで確認できます。実行が終わっても、ペインは最終ステータス行を表示したまま
-  開いています。`task done <id>`(または PR のマージ)で閉じます。
-- **herdr なしの場合**: `task log <id>` で最後の 40 行を、`task log <id> --full` ですべてを表示します。
-- エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<id>.md`。
+  開いています。PR のマージ(または `task done <番号>`)で閉じます。
+- **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
+- エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
 
 ## 保存場所
 
 | 内容 | 場所 |
 |---|---|
-| タスクファイル(ボード) | `~/.local/share/task-hub/board/tasks/`(非公開。すべての変更はボード独自のローカル git 履歴にコミットされます) |
+| タスク(ボード) | GitHub: Issue リポジトリと Project(非公開) |
 | 設定 | `~/.config/task-hub/config.ini` |
+| 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
+| ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
-| worktree | `~/.local/share/task-hub/worktrees/<id>` |
-| プロンプト | `~/.local/share/task-hub/prompts/<id>.md` |
-| ログ | `~/.local/state/task-hub/logs/<id>.log` |
+| worktree | `~/.local/share/task-hub/worktrees/<番号>` |
+| プロンプト | `~/.local/share/task-hub/prompts/<番号>.md` |
 
-## タスクが `blocked` になった
+## カードが Blocked になった
 
-`task show <id>` で `reason` を確認できます。詳しくはレポートに書かれています。よくある理由:
+理由は Issue の最新の task-hub コメント(`task show <番号>` でも見られます)に書かれています。よくある理由:
 
 | 理由 | 対処 |
 |---|---|
-| エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。タスクファイルの Goal を編集するか、環境を修正します |
-| `agent exited without a report (exit N)` | `task log <id>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
+| エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。Issue の本文に答えを書き足すか、環境を修正します |
+| `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
-| `run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
-| `could not start: ...` | クローンまたは worktree の準備に失敗しました。`gh auth status` と `repo` の名前を確認します |
-| `PR was closed without merging` | 再実行するか、`task done <id>` でタスクを閉じます |
+| `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
+| `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
+| `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
 
-その後 `task start <id>` を実行します。再実行は同じブランチと PR で作業を続け、エージェントには前回の実行が
-止まった理由が伝えられます。
+その後、カードを Ready に戻します(または `task start <番号>`)。再実行は同じブランチと PR で作業を続け、
+エージェントには前回の実行が止まった理由が伝えられます。
 
-## `queue: N approved task(s) waiting, all 3 slots busy`
+## `queue: N Ready task(s) waiting, all 3 slots busy`
 
-正常な状態です。実行中のタスクが終わった後、次の `task` 実行時に開始されます。
+正常な状態です。実行中のタスクが終わると、次の確認(`task watch` なら 1 分以内)で開始されます。
 
-## `github_errors[...]`
+## `error: GraphQL: API rate limit exceeded`
 
-`gh` がリポジトリの PR を読み取れませんでした(ログインしていない、アクセス権がない、リポジトリ名が変わった)。
-該当するタスクの status はそのまま保たれます。`gh auth status` を実行してください。
+GitHub Projects は GraphQL API だけで操作でき、GraphQL には 1 時間あたりの利用上限があります(アカウント全体で共有)。
+`task watch` は 1 分に 1 回、開いているカードの一覧を 1 回取得するだけなので、それだけで上限に届くことはありません。
+ほかのツールやエージェントも `gh` を多く使っていると届くことがあります。上限に届いても `task watch` は止まらず、
+エラーを表示して次の確認を続けます。上限はおおむね 1 時間で回復します。`gh api rate_limit` は上限中でも
+「残り 5000」と表示することがあるため、回復したかは `task` を実行して確かめてください。
+
+## その他の GitHub のエラー
+
+`gh` が GitHub を読み取れませんでした(ログインしていない、アクセス権がない、リポジトリ名が変わった)。
+カードはそのまま保たれます。`gh auth status` を実行してください。
+
+## `the Project is missing: ...` / `the board is not configured`
+
+Project の欄や選択肢、または設定ファイルが足りていません。[setup.md](setup.md) の「GitHub 側の準備」を見て、
+表示された名前のものを追加してください。
+
+## PR をマージせずに閉じた
+
+task-hub はカードを動かしません(PR の状態を毎回確認すると GitHub の利用上限を早く消費するため)。
+やり直すならカードを Ready に戻し、やめるなら Issue を閉じてください。
 
 ## 実行中のタスクを止める
 
 herdr のワークスペースでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
-push してタスクをブロック状態にします。または、ペインを閉じます。その場合、次の `task` 実行時に
-`run stopped unexpectedly` として記録されます。
+push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
+として Blocked になります。
 
 ## タスクを取り消す
 
-`task done <id>` を実行します。そのタスクの herdr のワークスペースを閉じ、worktree を削除します。ブランチと PR は
-GitHub に残ります。必要であれば、GitHub 上で PR をクローズしてください。
+Issue を閉じるか、`task done <番号>` を実行します。そのタスクの herdr のワークスペースを閉じ、worktree を削除し、
+カードを Done にします。ブランチと PR は GitHub に残ります。必要であれば、GitHub 上で PR をクローズしてください。
 
 ## 同時実行数の上限を変更する
 

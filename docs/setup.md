@@ -1,13 +1,18 @@
 # セットアップ
 
-ボードはマシンごとに 1 つです。仕事のタスクは仕事用 Mac に、個人のタスクは個人用 Mac に置いたままになります。
-セットアップ手順はどちらも同じです。
+ボードはマシン(アカウント)ごとに 1 つです。個人用 Mac は個人の GitHub Project、仕事用 Mac は仕事用の
+GitHub Project を使います。手順はどちらも同じです。
 
 ## 必要なもの
 
 - Python 3.10 以上(`python3 --version`)と git が入った macOS
-- GitHub にログイン済みの `gh`: `gh auth status`。task-hub はリポジトリの clone、PR の作成、
-  PR がマージされたかの確認にこれを使います
+- GitHub にログイン済みの `gh` で、Projects の権限があること:
+
+  ```
+  gh auth refresh -s project
+  gh auth status          # Token scopes に project が含まれていること
+  ```
+
 - ログイン済みのエージェント CLI が 1 つ以上: `claude`、`codex`、`pi`、`kiro-cli`。[agents.md](agents.md) を参照してください
 - 任意: 起動中の herdr。あると、各実行が herdr サイドバーに専用のワークスペースを持ちます。
   herdr がない場合、実行はバックグラウンドで行われ、`task log <id>` で進行を追います
@@ -21,8 +26,40 @@ ln -s "$HOME/AIprogramming PJ/task-hub/bin/task" ~/.local/bin/task       # ~/.lo
 task --version
 ```
 
-ボード(あなたのタスク)は初回利用時に、このリポジトリの外の `~/.local/share/task-hub/board` に作成されます。
-そのため、マシンごとに専用の非公開ボードを持つことになります。別の場所に置きたい場合は `TASK_HUB_DIR` を設定してください。
+## GitHub 側の準備(1 回だけ)
+
+1. **タスク用の非公開リポジトリを作ります。** タスクの Issue はすべてここに作られます。
+
+   ```
+   gh repo create <you>/tasks --private
+   ```
+
+2. **GitHub Project を用意します**(既存のものでも構いません)。Project の設定で次を追加してください。
+   - **Status** 欄: GitHub のかんばん(Kanban)テンプレートで作った Project には `Backlog`、`Ready`、`In progress`、
+     `In review`、`Done` が最初からあります。そこに **`Blocked`** を 1 つ追加します(大文字小文字は区別しません)
+   - テキスト欄 **Target repo** と **Agent** を追加します(Target repo は作業先リポジトリ `owner/name`、Agent は使う
+     エージェント名で、空でも構いません。`Repo` という名前は GitHub の予約語なので使えません)
+   - Board 表示にして、列を Status でグループ化します
+   - Workflows は **「Item closed」(Status を Done にする)だけを有効**にします。無効のままのことがあるので必ず確認します。
+     ほかの Status を変えるワークフロー(「Item added to project」「Pull request linked to issue」「Pull request merged」)は
+     **無効**にします。task-hub が付けた Status を上書きしてしまいます(実際に、PR を出した直後に Backlog に、マージ後に
+     In progress に戻されました)。「Auto-close issue」(カードを Done にすると Issue を閉じる)は有効でも構いません
+
+   足りないものがあると、`task` がそれを名前で教えてくれます。
+
+3. **設定ファイル** `~/.config/task-hub/config.ini` を作ります:
+
+   ```ini
+   [board]
+   project = <you>/2          ; Project の URL の users/<you>/projects/<番号>
+   issues = <you>/tasks
+
+   [runner]
+   agent = claude             ; このマシンのデフォルトエージェント
+   ```
+
+   たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
+   (実行中にエージェントが自分でログインすることはできません)。
 
 ## /task スキルのインストール
 
@@ -34,24 +71,17 @@ ln -s "$HOME/AIprogramming PJ/task-hub/skills/task" ~/.agents/skills/task    # C
 ln -s ../../.agents/skills/task ~/.kiro/skills/task                          # Kiro
 ```
 
-## このマシンのデフォルトエージェントを選ぶ
+## Ready のカードを自動で始める
 
-`~/.config/task-hub/config.ini` を作成します(任意です。ない場合のデフォルトエージェントは `claude` です):
-
-```ini
-[runner]
-agent = kiro
-```
-
-たとえば、Kiro しかない仕事用 Mac では次のようにします:
+herdr のペインを 1 つ用意して、次を動かしたままにします:
 
 ```
-mkdir -p ~/.config/task-hub
-printf '[runner]\nagent = kiro\n' > ~/.config/task-hub/config.ini
-kiro-cli whoami          # must be logged in; runs cannot log in by themselves
+task watch
 ```
 
-エージェントのコマンドを変更したり、別のエージェントを追加したりする方法は [agents.md](agents.md) にあります。
+1 分ごとにボードを確認し、Ready のカードを(同時 3 つまで)始めます。外出先でスマホからカードを Ready に
+移すだけで、Mac が起きていれば作業が始まります。`task watch` を動かしていないときは、`task` を実行した
+タイミングで始まります。
 
 ## 初回の実行
 
@@ -61,9 +91,8 @@ kiro-cli whoami          # must be logged in; runs cannot log in by themselves
 gh repo create <you>/task-sandbox --private --add-readme
 task new --title "Add hello.txt" --repo <you>/task-sandbox \
   --goal "Add hello.txt at the repo root containing 'hello'. Acceptance: the file exists."
-task start
 ```
 
-"task 1: Add hello.txt" という名前の herdr ワークスペースが現れ、その中でエージェントが作業します。終わったら
-`task` を実行してください。タスクは `review` になっているはずで、ブランチ `task/1` の PR があり、その説明文には
-Report と Please review が含まれています。それをマージしてもう一度 `task` を実行すると、タスクは `done` になります。
+Project に Backlog のカードができます。それを Ready に移すと、`task watch`(または `task`)が拾って
+"task 1: Add hello.txt" という herdr ワークスペースで実行します。終わるとカードは In review に移り、Issue に
+レポートのコメントが付き、ブランチ `task/1` の PR ができています。PR をマージすると Issue が閉じ、カードは Done になります。

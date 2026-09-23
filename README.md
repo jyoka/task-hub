@@ -1,52 +1,53 @@
 # task-hub
 
-コーディングエージェントを代わりに実行してくれる、ファイルベースのタスクボードです。どのエージェントでも使えます:
-Claude Code、Codex、Pi、Kiro、そのほか非対話モードを持つものなら何でも構いません。
+GitHub Project をかんばんボードとして使い、そのタスクをコーディングエージェントに実行させるツールです。
+エージェントは何でも使えます: Claude Code、Codex、Pi、Kiro、そのほか非対話モードを持つものなら何でも構いません。
 
-タスクは、あなたが登録したいときに登録します。`task start` で承認します。同時に実行されるのは最大 3 つで、
-それぞれ専用の herdr ワークスペースと専用のブランチで動きます。エージェントが終わると、
-task-hub がブランチを push し、エージェントのレポートと、あなたがレビューすべき点を正確にまとめた一覧を載せた PR を作成します。
+ボードは GitHub Project そのものなので、ブラウザでもスマホアプリでも見られ、`gh` を使えるエージェントなら
+どれでも読み書きできます。タスクは非公開リポジトリの Issue です。カードを **Ready** に移すと、あなたの Mac で
+エージェントが動き始めます。同時に実行されるのは最大 3 つで、それぞれ専用の herdr ワークスペースと専用のブランチで
+動きます。エージェントが終わると、task-hub がブランチを push して PR を作り、エージェントのレポートと、
+あなたがレビューすべき点をまとめた一覧を Issue にコメントし、カードを **In review** に移します。
 
 ```
-you:    /task in a chat          ->  tasks/0012-fix-login.md           draft
-you:    task start               ->  pick the task, an agent starts    in_progress
+you:    /task in a chat      ->  Issue jyoka/tasks#12, card in Backlog
+you:    drag card to Ready   ->  `task watch` starts it on your Mac         In progress
         (herdr sidebar shows a new workspace "task 12: Fix login" with the agent working)
 agent:  edits files, runs tests, writes its report
-task:   commits, pushes task/12, opens the PR                          review
-you:    review + merge the PR    ->  next `task` marks it              done
+task:   commits, pushes task/12, opens the PR, comments the report         In review
+you:    review + merge the PR -> the Issue closes                           Done
 ```
-
-クラウドでは何も動かず、特定のベンダーにも依存しません。ボードは手元のマシン上のただの markdown で、
-エージェントも手元のマシンで動き、GitHub が見るのはブランチと PR だけです。
 
 ## 日々の使い方
 
-| やりたいこと | 実行するもの |
+| やりたいこと | 方法 |
 |---|---|
-| 自分の対応が必要なものを見る(待機中のタスクの開始も行います) | `task` |
+| ボード全体を見る | GitHub Project(ブラウザ、スマホアプリ) |
+| Ready のカードを自動で始める | herdr のペインで `task watch` を動かしておく |
+| 自分の対応が必要なものを見る | `task`(Ready のカードの開始も行います) |
 | 今のチャットをタスクにする | エージェント内で `/task`(必要なら `/task repo is jyoka/app, use codex`) |
 | ターミナルからタスクを作る | `task new --title "..." --repo owner/name --goal "..." [--agent codex]` |
-| タスクを承認してエージェントに作業させる | `task start`(一覧から選択)または `task start 12` |
-| このタスクだけ別のエージェントを使う | `task start --agent kiro` |
+| タスクを承認してエージェントに作業させる | カードを Ready に移す、または `task start`(一覧から選択)/ `task start 12` |
+| このタスクだけ別のエージェントを使う | カードの Agent 欄を書き換える、または `task start --agent kiro` |
 | 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |
-| レポートとレビューすべき点を読む | `task show 12` |
-| 完了した作業を受け入れる | PR をマージします。次の `task` で done になります |
-| ブロックされたタスクを再実行する | `task start`(同じブランチと PR で続行します) |
-| タスクをクローズまたはキャンセルする | `task done 12` |
+| レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12` |
+| 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |
+| ブロックされたタスクを再実行する | Issue に答えを書き足してカードを Ready に戻す(同じブランチと PR で続行します) |
+| タスクをクローズまたはキャンセルする | Issue を閉じる、または `task done 12` |
 
 普通のチャットがタスクになることはありません。タスクを作るのは `/task` か `task new` だけで、
-エージェントに作業させるのは `task start` だけです。
+エージェントに作業させるのはカードを Ready に移したとき(または `task start`)だけです。
 
-## ステータスのライフサイクル
+## ボードの列
 
-| ステータス | 意味 | 対応が必要? |
+| 列 (Status) | 意味 | 対応が必要? |
 |---|---|---|
-| `draft` | 登録済み、未承認 | はい: やってほしいときに `task start` |
-| `ready` | 承認済み、すでに 3 つ実行中のため待機中 | いいえ: 後の `task` で開始します |
-| `in_progress` | エージェントが作業中 | いいえ |
-| `review` | PR がオープンされ準備完了 | はい: レビューしてからマージ |
-| `blocked` | エージェントが何かを必要としている(理由を表示)、または実行が失敗した | はい: 対処してから `task start` |
-| `done` | PR がマージされた、または手動でクローズされた | いいえ |
+| Backlog | 登録済み、未承認 | はい: やってほしいときに Ready へ |
+| Ready | 承認済み。空きがあればすぐ、3 つ実行中なら空きが出たら開始 | いいえ |
+| In progress | エージェントが作業中 | いいえ |
+| In review | PR がオープンされ準備完了 | はい: レビューしてからマージ |
+| Blocked | エージェントが何かを必要としている(理由は Issue のコメント)、または実行が失敗した | はい: 対処してから Ready へ |
+| Done | PR がマージされた、または Issue が閉じられた | いいえ |
 
 ## 構成
 
@@ -58,14 +59,14 @@ tests/test_task.py    tests: python3 -m unittest -v
 docs/                 setup, agents, design, task format, operations, lessons
 ```
 
-あなたのタスクはこのリポジトリには含まれません。タスクは `~/.local/share/task-hub/board/tasks/` にあります。これは
-独自のローカル git 履歴を持つ非公開フォルダで、push されることはないため、このリポジトリは安全に共有できます。
+あなたのタスクはこのリポジトリには含まれません。タスクは非公開の Issue リポジトリ(例: `jyoka/tasks`)と
+GitHub Project にあり、実行中の情報(ログ、worktree など)は手元のマシンにだけ残ります。
 
 ## ドキュメント
 
-- [docs/setup.md](docs/setup.md): Mac へのインストール(Kiro しかない仕事用 Mac も含む)
+- [docs/setup.md](docs/setup.md): セットアップ(GitHub Project の準備、仕事用 Mac も含む)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、安全性、エージェントの追加
-- [docs/task-format.md](docs/task-format.md): タスクファイル、エージェントのレポートファイル、PR
+- [docs/task-format.md](docs/task-format.md): Issue、レポートファイル、コメント、PR の形式
 - [docs/operations.md](docs/operations.md): 実行の見守り、トラブルシューティング、後片付け
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
 - [docs/lessons.md](docs/lessons.md): 作ってテストしてわかったこと、まだ実証されていないこと
