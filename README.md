@@ -26,7 +26,8 @@ you:    review + merge the PR -> the Issue closes                           Done
 | Ready のカードを自動で始める | herdr のペインで `task watch` を動かしておく |
 | 自分の対応が必要なものを見る | `task`(Ready のカードの開始も行います) |
 | 今のチャットをタスクにする | エージェント内で `/task`(必要なら `/task repo is jyoka/app, use codex`) |
-| ターミナルからタスクを作る | `task new --title "..." --repo owner/name --goal "..." [--agent codex]` |
+| ターミナルからタスクを作る | `task new --title "..." --repo owner/name --goal "..." [--base feat/x] [--agent codex]` |
+| main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出ます |
 | タスクを承認してエージェントに作業させる | カードを Ready に移す、または `task start`(一覧から選択)/ `task start 12` |
 | このタスクだけ別のエージェントを使う | カードの Agent 欄を書き換える、または `task start --agent kiro` |
 | 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |

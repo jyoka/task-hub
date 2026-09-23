@@ -2,7 +2,8 @@
 """task - run coding agents on the tasks of a GitHub Project board.
 
 The board is a GitHub Project. Each task is an Issue in a (private) issues repo; the Project's
-Status column says where it is, and its Target repo / Agent fields say where and by whom it is worked on.
+Status column says where it is, and its Target repo / Agent / Base branch fields say where, by whom, and
+from which branch it is worked on.
 Move a card to Ready (or run `task start`) and task-hub runs it on this machine: a git worktree on
 branch `task/<number>`, a herdr workspace (or a background process without herdr), and the agent
 CLI of your choice (claude, codex, pi, kiro, ...). The agent only edits files and writes
@@ -23,12 +24,12 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 MAX_PARALLEL = 3
 # the column names of GitHub's Kanban template, plus Blocked; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, BLOCKED, DONE = STATUSES = \
     ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]
-TEXT_FIELDS = ["Target repo", "Agent"]  # "Repo" is a reserved field name on GitHub
+TEXT_FIELDS = ["Target repo", "Agent", "Base branch"]  # "Repo" is a reserved field name on GitHub
 REPORT_FILE = ".task-report.md"
 REPORT_MARK = "<!-- task-hub report -->"
 WATCH_SECONDS = 60
@@ -46,7 +47,7 @@ DATA = Path.home() / ".local" / "share" / "task-hub"
 STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
-RUN_KEYS = ["repo", "title", "agent", "branch", "started", "pid", "workspace", "worktree", "log", "pr"]
+RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "worktree", "log", "pr"]
 GH = os.environ.get("TASK_GH", "gh")
 
 
@@ -140,51 +141,80 @@ def gh_json(*args):
     return json.loads(gh(*args) or "null")
 
 
+FIELDS_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { fields(first: 50) { nodes {
+  ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } }"""
+# "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
+ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
+  items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id
+    content { ... on Issue { number title url repository { nameWithOwner } } }
+    status: fieldValueByName(name: "@Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+    repo: fieldValueByName(name: "@Target repo") { ... on ProjectV2ItemFieldTextValue { text } }
+    agent: fieldValueByName(name: "@Agent") { ... on ProjectV2ItemFieldTextValue { text } }
+    base: fieldValueByName(name: "@Base branch") { ... on ProjectV2ItemFieldTextValue { text } } } } } } }"""
+
+
+def graphql(query, **variables):
+    return gh_json("api", "graphql", "-f", f"query={query}", *(a for k, v in variables.items() for a in ("-f", f"{k}={v}")))["data"]
+
+
 _board = {}
 
 
 def board():
-    """Project id and the ids of the Status options and Target repo / Agent fields (checked once per command)."""
+    """Project id and the ids of the Status options and the text fields (checked once per command)."""
     if _board:
         return _board
     owner, number, issues = board_config()
     try:
         project = gh_json("project", "view", number, "--owner", owner, "--format", "json")
-        fields = gh_json("project", "field-list", number, "--owner", owner, "--format", "json", "--limit", "100")
+        fields = graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"]
     except RuntimeError as e:  # raised, not fail(): a finishing run must still keep its report and block the card
         raise RuntimeError(f"cannot read GitHub Project {owner}/{number}: {e}")
-    by_name = {f["name"].lower(): f for f in fields["fields"]}
+    by_name = {f["name"].lower(): f for f in fields if f}
     status = by_name.get("status", {})
     options = {o["name"].lower(): o["id"] for o in status.get("options", [])}
     missing = [f'Status option "{s}"' for s in STATUSES if s.lower() not in options]
-    missing += [f'text field "{n}"' for n in TEXT_FIELDS if n.lower() not in by_name]
+    missing += [f'text field "{n}"' + (f" (it is {by_name[n.lower()]['dataType']}, make it TEXT)"
+                                        if n.lower() in by_name else "")
+                for n in TEXT_FIELDS if by_name.get(n.lower(), {}).get("dataType") != "TEXT"]
     if missing:
         fail(f"the Project is missing: {', '.join(missing)}",
              f"add them in the Project's settings ({project.get('url', '')}); see docs/setup.md")
     _board.update(owner=owner, number=number, issues=issues, id=project["id"], url=project.get("url", ""),
                   status_field=status["id"], status_options=options,
-                  text_fields={n: by_name[n.lower()]["id"] for n in TEXT_FIELDS})
+                  text_fields={n: by_name[n.lower()]["id"] for n in TEXT_FIELDS},
+                  names={n: by_name[n.lower()]["name"] for n in ["Status", *TEXT_FIELDS]})
     return _board
 
 
 def tasks(include_done=False):
     """The Issues from the issues repo that are on the Project, as task dicts sorted by number.
 
-    Projects are GraphQL-only and GitHub limits GraphQL per hour, so the frequent path (sync, every
-    minute under `task watch`) asks for the open cards only, in a single call.
+    Projects are GraphQL-only and GitHub limits GraphQL to 5000 points per hour. `gh project item-list`
+    costs 101 points a call (it asks for 100 field values of every card), which a watch asking every
+    minute exceeds; ITEMS_QUERY asks for just our fields and costs 1 point per 100 cards.
     """
     b = board()
-    data = gh_json("project", "item-list", b["number"], "--owner", b["owner"], "--format", "json", "--limit", "200",
-                   *([] if include_done else ["--query", "-status:Done"]))
+    query = ITEMS_QUERY
+    for n, spelled in b["names"].items():
+        query = query.replace(f'"@{n}"', json.dumps(spelled))
+    items, after = [], None
+    while True:
+        page = graphql(query, id=b["id"], q="" if include_done else "-status:Done",
+                       **({"after": after} if after else {}))["node"]["items"]
+        items += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
     result = []
-    for item in data["items"]:
+    for item in items:
         content = item.get("content") or {}
-        if content.get("type") != "Issue" or content.get("repository", "").lower() != b["issues"].lower():
-            continue
-        values = {k.lower(): v for k, v in item.items()}
+        if "number" not in content or content["repository"]["nameWithOwner"].lower() != b["issues"].lower():
+            continue  # a draft card or a PR, or an Issue from another repo
+        value = lambda k: ((item.get(k) or {}).get("name") or (item.get(k) or {}).get("text") or "").strip()
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
-             "status": canonical(values.get("status")), "repo": values.get("target repo") or "",
-             "agent": values.get("agent") or "", "url": content.get("url", "")}
+             "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
+             "base": value("base"), "url": content.get("url", "")}
         result.append({**load_run(t["id"]), **t})
     return sorted(result, key=lambda t: int(t["id"]))
 
@@ -306,10 +336,41 @@ def ensure_clone(repo):
     return d
 
 
+def check_base(base):
+    """Why a Base branch value is unusable, or "" when it is fine."""
+    if base.startswith("origin/"):
+        return f"Base branch is a branch name without origin/, e.g. {base[len('origin/'):]}"
+    if base == "HEAD" or run("git", "check-ref-format", f"refs/heads/{base}").returncode != 0:
+        return f"Base branch {base!r} is not a valid branch name"
+    return ""
+
+
+def base_ref(t, git_dir):
+    """What the task branches from and its PR goes into: the card's Base branch, else the default branch."""
+    if t.get("base"):
+        return f"origin/{t['base']}"
+    return run("git", "-C", git_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip() \
+        or "origin/main"
+
+
 def ensure_worktree(t):
     """The task's worktree on branch task/<number>; a re-run continues where the last run pushed."""
     repo_dir = ensure_clone(t["repo"])
     wt = DATA / "worktrees" / t["id"]
+    first = load_run(t["id"])
+    if first.get("branch") and first.get("base", "") != t.get("base", ""):
+        if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/task/{t['id']}").returncode == 0:
+            # the pushed task branch and its PR were made from the first base: continuing on another would mix them up
+            raise RuntimeError(f"Base branch was changed after the first run (was {first.get('base') or 'empty'}); "
+                               f"set it back, or close the PR and delete branch task/{t['id']} to start over")
+        if (wt / ".git").exists():  # nothing on GitHub yet: start over from the new base
+            run("git", "-C", repo_dir, "worktree", "remove", "--force", wt, check=True)
+    if t.get("base"):
+        if check_base(t["base"]):
+            raise RuntimeError(check_base(t["base"]))
+        if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/{t['base']}").returncode != 0:
+            raise RuntimeError(f"branch {t['base']} is not on GitHub in {t['repo']}; "
+                               "push it, then move the card to Ready again")
     if (wt / ".git").exists():
         return wt
     run("git", "-C", repo_dir, "worktree", "prune")
@@ -321,8 +382,7 @@ def ensure_worktree(t):
                                "delete or rename it, then move the card to Ready again")
         base = f"origin/{branch}"
     else:
-        base = run("git", "-C", repo_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip() \
-            or "origin/main"
+        base = base_ref(t, repo_dir)
     run("git", "-C", repo_dir, "worktree", "add", "-q", "-B", branch, wt, base, check=True)
     exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
     exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
@@ -389,7 +449,9 @@ def build_prompt(t):
     instructions = WORKER_PROMPT.read_text().split("\n---\n", 1)[-1].strip()
     i = issue(t)
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
-             f"Branch: {t['branch']} (already checked out in the current directory)", "", i["body"].strip()]
+             f"Branch: {t['branch']} (already checked out in the current directory)",
+             *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
+             "", i["body"].strip()]
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",
                   i["report"].replace(REPORT_MARK, "").strip()]
@@ -454,7 +516,7 @@ def finish(t, report, code, say):
     run("git", "-C", wt, "add", "-A", check=True)
     if run("git", "-C", wt, "diff", "--cached", "--quiet").returncode != 0:
         run("git", "-C", wt, "commit", "-q", "-m", f"task {t['id']}: {t['title']}", check=True)
-    base = run("git", "-C", wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip() or "origin/main"
+    base = base_ref(t, wt)
     ahead = run("git", "-C", wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
 
     if not report.strip():
@@ -490,6 +552,18 @@ def upsert_pr(t, body, draft, base):
             gh("pr", "ready", url, *(["--undo"] if draft else []))
     body_file.unlink(missing_ok=True)
     return url
+
+
+def pr_merged(t):
+    """Whether the task's PR was merged. REST, not GraphQL: the watch asks every minute, and GraphQL
+    has the tighter hourly limit. Without this machine's run file (the task ran elsewhere), the PR is
+    found by its branch."""
+    m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
+    if m:
+        return gh_json("api", f"repos/{m[1]}/pulls/{m[2]}").get("merged") is True
+    owner = t["repo"].split("/")[0]
+    prs = gh_json("api", f"repos/{t['repo']}/pulls?head={owner}:task/{t['id']}&state=closed&per_page=1")
+    return bool(prs and prs[0].get("merged_at"))
 
 
 def find_pr(t):
@@ -531,6 +605,12 @@ def sync():
                                report=report.strip())
                 kept.unlink(missing_ok=True)
                 set_status(t, BLOCKED)
+            elif before == IN_REVIEW and (t.get("base") or load_run(t["id"]).get("base")) \
+                    and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or "") and pr_merged(t):
+                # GitHub documents "Closes ..." as working only for PRs into the default branch
+                gh("issue", "close", t["id"], "--repo", board()["issues"])
+                set_status(t, DONE)
+                cleanup(t)
         except RuntimeError as e:
             errors.append({"id": t["id"], "error": str(e)})
             continue
@@ -602,7 +682,7 @@ def cmd_watch(_):
 def cmd_show(a):
     t = get(a["id"])
     i = issue(t)
-    lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "agent", "url", "pr")
+    lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr")
                          if t.get(k)]
     body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "")
     if len(body) > 1500 and not a["full"]:
@@ -628,9 +708,11 @@ def cmd_log(a):
 def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
-             'task new --title "..." --repo owner/name [--agent name] (--goal "..." | --goal-file path)', 2)
+             'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)', 2)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a["repo"]):
         fail(f"--repo must look like owner/name, got {a['repo']!r}", code=2)
+    if a["base"] and check_base(a["base"]):
+        fail(check_base(a["base"]), code=2)
     check_agent(a["agent"])
     goal = Path(a["goal_file"]).read_text() if a["goal_file"] else (a["goal"] or "")
     if not goal.strip():
@@ -645,6 +727,8 @@ def cmd_new(a):
     t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"]}
     set_status(t, BACKLOG)
     set_text(t, "Target repo", a["repo"])
+    if a["base"]:
+        set_text(t, "Base branch", a["base"])
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
     out("task:", f"  id: {t['id']}", f"  status: {BACKLOG}", f"  url: {url}",
@@ -717,8 +801,8 @@ COMMANDS = {
     "watch": (cmd_watch, [], {}, f"task watch  # start Ready cards automatically (checks every {WATCH_SECONDS}s)"),
     "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]  # the Issue and its latest report"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
-    "new": (cmd_new, [], {"title": True, "repo": True, "agent": True, "goal": True, "goal-file": True},
-            'task new --title "..." --repo owner/name [--agent name] (--goal "..." | --goal-file path)'),
+    "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True},
+            'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),

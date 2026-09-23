@@ -18,7 +18,7 @@ from pathlib import Path
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
 
 FAKE_GH = r'''#!/usr/bin/env python3
-import fcntl, json, os, sys
+import fcntl, json, os, re, sys
 path = os.environ["TASK_TEST_GH_DB"]
 lock = open(path + ".lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)  # runs call gh concurrently
 db = json.load(open(path))
@@ -29,23 +29,34 @@ def fail(msg):
     print(msg, file=sys.stderr); sys.exit(1)
 out = None
 cmd = a[:2]
-if db.get("down") and cmd[0] == "project" and (db["down"] is True or cmd[1] == db["down"]):
+fields = dict(x.split("=", 1) for x in a[3::2]) if cmd == ["api", "graphql"] else {}  # -f name=value pairs
+kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get("query", "") else "field-list") \
+    if cmd == ["api", "graphql"] else None
+if db.get("down") and kind and (db["down"] is True or kind == db["down"]):
     fail("GraphQL: API rate limit exceeded for user ID 1.")
 if cmd == ["project", "view"]:
     out = {"id": "PVT_1", "url": "https://github.com/users/jyoka/projects/2"}
-elif cmd == ["project", "field-list"]:
-    out = {"fields": db["fields"]}
-elif cmd == ["project", "item-list"]:
+elif kind == "field-list":
+    assert fields["id"] == "PVT_1"
+    out = {"data": {"node": {"fields": {"nodes": db["fields"]}}}}
+elif kind == "item-list":
     db["item_list_calls"] = db.get("item_list_calls", 0) + 1
-    items = []
+    # each "alias: fieldValueByName(name: ...)" gets the value only if the name is spelled as on the board
+    aliases = re.findall(r'(\w+): fieldValueByName\(name: "([^"]+)"\)', fields["query"])
+    names = {f["name"] for f in db["fields"]}
+    nodes = []
     for iid, it in db["items"].items():
-        if opt("--query") == "-status:Done" and it["values"].get("status") == "Done":
+        if fields["q"] == "-status:Done" and it["values"].get("status") == "Done":
             continue
         issue = db["issues"][str(it["number"])]
-        items.append({"id": iid, "title": issue["title"], **it["values"],
-                      "content": {"type": "Issue", "number": it["number"], "title": issue["title"],
-                                  "repository": db["issues_repo"], "url": f"https://github.com/{db['issues_repo']}/issues/{it['number']}"}})
-    out = {"items": items, "totalCount": len(items)}
+        node = {"id": iid, "content": {"number": it["number"], "title": issue["title"],
+                                       "repository": {"nameWithOwner": db["issues_repo"]},
+                                       "url": f"https://github.com/{db['issues_repo']}/issues/{it['number']}"}}
+        for alias, name in aliases:
+            v = it["values"].get(name.lower()) if name in names else None
+            node[alias] = None if v is None else {"name" if name == "Status" else "text": v}
+        nodes.append(node)
+    out = {"data": {"node": {"items": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
 elif cmd == ["project", "item-add"]:
     number = int(opt("--url").rstrip("/").rsplit("/", 1)[-1])
     iid = f"PVTI_{number}"
@@ -87,6 +98,15 @@ elif cmd == ["pr", "create"]:
     print(url)
 elif cmd == ["pr", "edit"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["body"] = open(opt("--body-file")).read()
+elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<number>
+    repo, number = a[1].split("/", 1)[1].rsplit("/pulls/", 1)
+    pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
+    out = {"merged": pr.get("merged", False)}
+elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=closed
+    repo = a[1].split("/", 1)[1].split("/pulls?")[0]
+    head = a[1].split("head=")[1].split("&")[0].split(":", 1)[1]
+    pr = db["prs"].get(f"{repo} {head}")
+    out = [{"merged_at": "2026-09-23T00:00:00Z" if pr.get("merged") else None}] if pr and pr["state"] != "OPEN" else []
 elif cmd == ["pr", "ready"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["isDraft"] = "--undo" in a
 else:
@@ -136,11 +156,12 @@ class TaskTest(unittest.TestCase):
         root = self.root = Path(self.tmp.name)
         self.db = root / "gh.json"
         self.save_db({"issues_repo": "jyoka/tasks", "issues": {}, "items": {}, "prs": {},
-                      "fields": [{"id": "F_status", "name": "Status", "type": "ProjectV2SingleSelectField",
+                      "fields": [{"id": "F_status", "name": "Status", "type": "ProjectV2SingleSelectField", "dataType": "SINGLE_SELECT",
                                   "options": [{"id": f"O_{i}", "name": n} for i, n in enumerate(STATUS_OPTIONS)]},
-                                 {"id": "F_title", "name": "Title", "type": "ProjectV2Field"},
-                                 {"id": "F_repo", "name": "Target repo", "type": "ProjectV2Field"},
-                                 {"id": "F_agent", "name": "Agent", "type": "ProjectV2Field"}]})
+                                 {"id": "F_title", "name": "Title", "type": "ProjectV2Field", "dataType": "TITLE"},
+                                 {"id": "F_repo", "name": "Target repo", "type": "ProjectV2Field", "dataType": "TEXT"},
+                                 {"id": "F_agent", "name": "Agent", "type": "ProjectV2Field", "dataType": "TEXT"},
+                                 {"id": "F_base", "name": "Base branch", "type": "ProjectV2Field", "dataType": "TEXT"}]})
         self.calls = root / "agent-calls.txt"
         for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT)):
             (root / name).write_text(src)
@@ -219,6 +240,17 @@ class TaskTest(unittest.TestCase):
         bare = self.root / "origins" / "jyoka/app.git"
         return subprocess.run(["git", "-C", str(bare), "ls-tree", "--name-only", branch],
                               capture_output=True, text=True).stdout.split()
+
+    def push_branch(self, branch, filename):
+        """A branch someone pushed to the project repo, with one extra file."""
+        bare = self.root / "origins" / "jyoka/app.git"
+        seed = self.root / f"clone-{branch.replace('/', '-')}"
+        subprocess.run(["git", "clone", "-q", str(bare), str(seed)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed), "checkout", "-qb", branch], check=True)
+        (seed / filename).write_text("work on the branch\n")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", filename], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", branch], check=True, capture_output=True)
 
     def agent_calls(self):
         return [eval(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
@@ -460,6 +492,117 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
         self.assertEqual(self.origin_files("task/1"), ["README.md", "old.txt"])  # untouched
 
+    # --- starting from another branch (Base branch) ---
+
+    def test_base_branch_card_starts_from_it_and_its_pr_goes_into_it(self):
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.assertEqual(self.gh()["items"][f"PVTI_{tid}"]["values"]["base branch"], "feat/x")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.pr(tid)["base"], "feat/x")
+        self.assertEqual(self.origin_files(f"task/{tid}"), ["README.md", "feat.txt", "hello.txt"])
+        self.assertEqual(self.origin_files("feat/x"), ["README.md", "feat.txt"])  # untouched until merged
+        self.assertIn("feat/x", self.agent_calls()[0]["prompt"])
+
+    def test_base_branch_not_on_github_blocks_with_reason(self):
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/only-local")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("feat/only-local", self.comments(tid)[-1])
+        self.assertIn("push", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_pr_merged_into_base_branch_moves_the_card_to_done(self):
+        # GitHub closes an Issue from "Closes ..." only when the PR is merged into the default branch
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("start", tid)
+        self.wait(tid)
+        self.task()
+        self.assertEqual(self.status(tid), "In review")  # not merged yet
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
+        self.save_db(db)
+        self.assertIn("Done", self.task())
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        self.assertFalse(self.run_file(tid).exists())
+
+    def test_rerun_after_base_branch_changed_or_deleted_is_blocked_with_reason(self):
+        self.push_branch("feat/x", "feat.txt")
+        self.push_branch("feat/y", "y.txt")
+        tid = self.new("blocked", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        for value, reason in (("feat/y", "Base branch was changed"), ("", "Base branch was changed"),
+                              ("feat/x", "feat/x is not on GitHub")):
+            if value == "feat/x":  # merged and deleted on GitHub, then the card is re-run
+                subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "branch", "-D", "feat/x"],
+                               check=True, capture_output=True)
+            db = self.gh()
+            db["items"][f"PVTI_{tid}"]["values"]["base branch"] = value
+            self.save_db(db)
+            self.task("start", tid)
+            self.assertEqual(self.status(tid), "Blocked")
+            self.assertIn(reason, self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)  # never re-ran on the wrong base
+        self.assertEqual(self.pr(tid)["base"], "feat/x")
+
+    def test_base_branch_can_be_set_after_a_run_that_pushed_nothing_or_was_reset(self):
+        self.push_branch("feat/y", "y.txt")
+        tid = self.new("stuck")  # no base; the agent blocks without changing anything: no branch, no PR
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["base branch"] = "feat/y"
+        db["issues"][tid]["body"] = "Say hello on feat/y. MODE:blocked"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")  # ran on feat/y, pushed, draft PR into feat/y
+        self.assertEqual(self.pr(tid)["base"], "feat/y")
+        self.assertEqual(self.origin_files(f"task/{tid}"), ["README.md", "hello.txt", "y.txt"])
+        # the documented way to start over on another base: close the PR, delete the task branch
+        self.push_branch("feat/z", "z.txt")
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"]["state"] = "CLOSED"
+        db["items"][f"PVTI_{tid}"]["values"]["base branch"] = "feat/z"
+        db["issues"][tid]["body"] = "Say hello on feat/z. MODE:ok"
+        self.save_db(db)
+        subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "branch", "-D", f"task/{tid}"],
+                       check=True, capture_output=True)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.pr(tid)["base"], "feat/z")
+        self.assertEqual(self.origin_files(f"task/{tid}"), ["README.md", "hello.txt", "z.txt"])
+
+    def test_base_branch_value_is_checked(self):
+        self.assertIn("without origin/", self.task("new", "--title", "x", "--repo", "jyoka/app", "--base",
+                                                   "origin/feat/x", "--goal", "g", code=2))
+        self.task("new", "--title", "x", "--repo", "jyoka/app", "--base", "a..b", "--goal", "g", code=2)
+        self.task("new", "--title", "x", "--repo", "jyoka/app", "--base", "HEAD", "--goal", "g", code=2)
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new()
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["base branch"] = " feat/x "  # typed on the card with spaces
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.pr(tid)["base"], "feat/x")
+
+    def test_merge_into_base_branch_is_seen_without_this_machines_run_file(self):
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("start", tid)
+        self.wait(tid)
+        self.run_file(tid).unlink()  # the task ran on another machine
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+
     def test_missing_repo_on_card_blocks_with_reason(self):
         tid = self.new()
         db = self.gh()
@@ -481,11 +624,24 @@ class TaskTest(unittest.TestCase):
     def test_missing_project_fields_are_listed(self):
         db = self.gh()
         db["fields"] = [f for f in db["fields"] if f["name"] != "Agent"]
+        next(f for f in db["fields"] if f["name"] == "Base branch")["dataType"] = "SINGLE_SELECT"
         db["fields"][0]["options"] = [o for o in db["fields"][0]["options"] if o["name"] != "Blocked"]
         self.save_db(db)
         out = self.task(code=1)
         self.assertIn('Status option "Blocked"', out)
         self.assertIn('text field "Agent"', out)
+        self.assertIn('text field "Base branch" (it is SINGLE_SELECT, make it TEXT)', out)
+
+    def test_field_names_are_matched_without_regard_to_case(self):
+        db = self.gh()
+        for f in db["fields"]:
+            f["name"] = {"Target repo": "Target Repo", "Base branch": "base branch"}.get(f["name"], f["name"])
+        self.save_db(db)
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.pr(tid)["base"], "feat/x")
 
     def test_github_outage_is_reported_and_watch_keeps_going(self):
         tid = self.new()

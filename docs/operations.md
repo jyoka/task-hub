@@ -36,9 +36,17 @@
 | `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
+| `could not start: branch X is not on GitHub ...` | Base branch が GitHub にありません(push していない、マージ後に削除された)。push してから Ready に戻します。別のブランチに変えたいときは、欄を書き換えます(すでに `task/<番号>` を push していたら次の行のとおり) |
+| `could not start: Base branch was changed after the first run ...` | 前の実行が `task/<番号>` を GitHub に push した後で Base branch を書き換えました。そのブランチと PR は前のベースから作られているので続けられません。欄を元に戻すか、PR を閉じてブランチ `task/<番号>` を GitHub で削除してから Ready に戻します(新しいベースから作り直します) |
 
 その後、カードを Ready に戻します(または `task start <番号>`)。再実行は同じブランチと PR で作業を続け、
 エージェントには前回の実行が止まった理由が伝えられます。
+
+## 作ったばかりのタスクが `task N not found on the board` になる
+
+GitHub の Project の一覧への反映が遅れています。カードそのものは Project に載っています。まれに 20 分以上
+遅れたことがありました。ブラウザで Project を開き、そのカードを別の列に動かす(Ready に移すなど)と、すぐに
+一覧に出ました。
 
 ## `queue: N Ready task(s) waiting, all 3 slots busy`
 
@@ -46,11 +54,16 @@
 
 ## `error: GraphQL: API rate limit exceeded`
 
-GitHub Projects は GraphQL API だけで操作でき、GraphQL には 1 時間あたりの利用上限があります(アカウント全体で共有)。
-`task watch` は 1 分に 1 回、開いているカードの一覧を 1 回取得するだけなので、それだけで上限に届くことはありません。
-ほかのツールやエージェントも `gh` を多く使っていると届くことがあります。上限に届いても `task watch` は止まらず、
-エラーを表示して次の確認を続けます。上限はおおむね 1 時間で回復します。`gh api rate_limit` は上限中でも
-「残り 5000」と表示することがあるため、回復したかは `task` を実行して確かめてください。
+GitHub Projects は GraphQL API だけで操作でき、GraphQL には 1 時間あたり 5000 ポイントの利用上限があります
+(アカウント全体で共有)。task-hub は必要な欄だけを取るので、`task` 1 回は約 4 ポイント、`task watch` は 1 時間で
+約 60 ポイントです。上限に届くのは、ほかのツールやエージェントが重い呼び出しを繰り返しているときです。たとえば
+`gh project item-list` と `gh project field-list` は 1 回で 101 ポイント使います。上限に届いても `task watch` は止まらず、
+エラーを表示して次の確認を続けます。上限は区切りの時刻に回復します。残りと回復の時刻は次で分かります
+(`gh api rate_limit` は上限中でも「残り 5000」と表示することがあり、当てになりません):
+
+```
+gh api graphql -f query='{rateLimit{used remaining resetAt}}'
+```
 
 ## その他の GitHub のエラー
 
@@ -64,7 +77,8 @@ Project の欄や選択肢、または設定ファイルが足りていません
 
 ## PR をマージせずに閉じた
 
-task-hub はカードを動かしません(PR の状態を毎回確認すると GitHub の利用上限を早く消費するため)。
+task-hub はカードを動かしません(Base branch のないカードの PR は確認していないため。Base branch のあるカードも、
+確認するのはマージされたかどうかだけです)。
 やり直すならカードを Ready に戻し、やめるなら Issue を閉じてください。
 
 ## 実行中のタスクを止める

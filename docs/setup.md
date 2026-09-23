@@ -18,6 +18,15 @@ GitHub Project を使います。手順はどちらも同じです。
   herdr がない場合、実行はバックグラウンドで行われ、`task log <id>` で進行を追います
 - 任意: `fzf`。`task start` で矢印キーの選択リストを使うためのものです(ない場合は番号付きメニュー)
 
+## 0.4 から 0.5 に上げるとき
+
+Project にテキスト欄 **Base branch** を追加してください(下の「GitHub 側の準備」の 2)。追加するまで、`task` は
+`the Project is missing: text field "Base branch"` と表示して止まります。ターミナルからも追加できます:
+
+```
+gh project field-create <Project の番号> --owner <you> --name "Base branch" --data-type TEXT
+```
+
 ## インストール
 
 ```
@@ -37,8 +46,9 @@ task --version
 2. **GitHub Project を用意します**(既存のものでも構いません)。Project の設定で次を追加してください。
    - **Status** 欄: GitHub のかんばん(Kanban)テンプレートで作った Project には `Backlog`、`Ready`、`In progress`、
      `In review`、`Done` が最初からあります。そこに **`Blocked`** を 1 つ追加します(大文字小文字は区別しません)
-   - テキスト欄 **Target repo** と **Agent** を追加します(Target repo は作業先リポジトリ `owner/name`、Agent は使う
-     エージェント名で、空でも構いません。`Repo` という名前は GitHub の予約語なので使えません)
+   - テキスト欄 **Target repo**、**Agent**、**Base branch** を追加します(Target repo は作業先リポジトリ `owner/name`、
+     Agent は使うエージェント名、Base branch は作業を始めるブランチで、Agent と Base branch は空でも構いません。
+     `Repo` という名前は GitHub の予約語なので使えません)
    - Board 表示にして、列を Status でグループ化します
    - Workflows は **「Item closed」(Status を Done にする)だけを有効**にします。無効のままのことがあるので必ず確認します。
      ほかの Status を変えるワークフロー(「Item added to project」「Pull request linked to issue」「Pull request merged」)は

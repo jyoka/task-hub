@@ -12,6 +12,10 @@ Only register what the user asked for. Never start or approve the task: that is 
    - **title**: short imperative, under 60 characters
    - **repo**: the GitHub `owner/name` the work happens in. Infer it from the current directory
      (`git remote get-url origin`) or the conversation. If it is still unclear, ask the user; do not guess.
+   - **base** (optional): the branch the work builds on, when it is not the default branch. If the
+     conversation happened on a feature branch (`git branch --show-current`) and the task continues it,
+     use that branch. It must be on GitHub (`git ls-remote --heads origin <branch>` prints a line);
+     if it is not, tell the user to push it first.
    - **agent** (optional): only if the user named one (for example claude, codex, pi, kiro).
      Otherwise leave it out and the machine's default agent is used.
    - **goal**: what the agent that runs the task needs, without this chat. Write it as markdown
@@ -26,7 +30,7 @@ Only register what the user asked for. Never start or approve the task: that is 
 2. Write the goal to a temporary file and run:
 
    ```
-   task new --title "<title>" --repo <owner/name> [--agent <agent>] --goal-file <tmpfile>
+   task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] --goal-file <tmpfile>
    ```
 
    If `task` is not on PATH, use `"$HOME/AIprogramming PJ/task-hub/bin/task"`.
