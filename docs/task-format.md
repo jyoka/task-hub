@@ -1,8 +1,8 @@
 # Task file format
 
 Each task is one markdown file: `tasks/NNNN-slug.md`, for example `tasks/0012-fix-login.md`.
-The CLI writes these files. You can edit the Goal text by hand. Change status only through
-the CLI, because the CLI also syncs with GitHub and enforces the rules.
+Only the `task` CLI on your Mac writes these files. You can edit the Goal text by hand
+before approving the task. Change status only through the CLI.
 
 ## Example
 
@@ -15,9 +15,11 @@ theme: auth
 status: review
 created: 2026-09-23
 updated: 2026-09-23
+branch: claude/task-12
+started: 2026-09-23T02:14:05Z
+session: https://claude.ai/code/session_01H...
 pr: https://github.com/jyoka/app/pull/41
 reason:
-claim: 9f3a1c2e
 ---
 ## Goal
 
@@ -49,18 +51,40 @@ Added 3 tests; `pytest` passes.
 | `theme` | you | Optional grouping, for example `auth` or `docs` |
 | `status` | CLI | See below |
 | `created` / `updated` | CLI | Dates |
-| `pr` | agent | Pull request URL, set by `task review` |
-| `reason` | agent | Why the task is blocked, set by `task block`. Cleared on `task ready` |
-| `claim` | CLI | Random id of the current claim. Stops two runners from both owning the task |
+| `branch` | CLI | `claude/task-<id>`, fixed at the first run and reused by re-runs |
+| `started` | CLI | UTC time of the latest run start. PR activity older than this is ignored |
+| `session` | CLI | URL of the latest cloud session, for watching or taking over the run |
+| `pr` | CLI (from GitHub) | The agent's pull request |
+| `reason` | CLI (from GitHub) | Why the task is blocked: the first line of the PR's `## Blocked` section |
 
 ## Sections
 
-- **Goal**: written by you, or by `/task` from the chat. It is the agent's whole brief,
-  because the agent never sees your chat.
-- **Report**: written by the agent. What changed, how it was verified, what was not done.
-- **Please review**: written by the agent. The exact files, decisions, and risks you must check.
+- **Goal**: written by you, or by `/task` from the chat. It is sent to the agent as its whole
+  brief, because the agent never sees your chat. Headings inside it are kept at `###` level.
+- **Report** and **Please review**: copied from the agent's PR description by `task` / `task sync`.
 
-`task review` refuses to move a task to review while either agent section still has placeholder text.
+## What the agent's PR must look like
+
+The routine prompt ([routine/PROMPT.md](../routine/PROMPT.md)) tells the agent to use these headings:
+
+```
+## Blocked            <- only when stuck; the PR is then a draft
+<one line: what the agent needs from you>
+
+## Report
+<what changed, how it was verified, what was not done>
+
+## Please review
+<exact files, decisions, risks to check>
+```
+
+| PR state | Task becomes |
+|---|---|
+| no PR yet | stays `in_progress` |
+| open, ready for review | `review` |
+| open, draft | `blocked` (reason from `## Blocked`) |
+| closed without merge | `blocked` ("PR was closed without merging") |
+| merged | `done` |
 
 ## Statuses
 
@@ -68,7 +92,7 @@ Added 3 tests; `pytest` passes.
 |---|---|---|
 | `draft` | Registered, not approved | Yes: approve with `task ready` or edit the Goal |
 | `ready` | Approved, waiting for a free slot | No |
-| `in_progress` | A cloud agent owns it (max 3 at once) | No |
-| `review` | Agent finished, PR open | Yes: review, then `task done` |
-| `blocked` | Agent needs something from you (see `reason`) | Yes: fix it, then `task ready` |
-| `done` | Accepted | No |
+| `in_progress` | A cloud run is working on it (max 3 at once) | No |
+| `review` | PR is open and ready | Yes: review, then merge |
+| `blocked` | The agent needs something (see `reason` and the PR) | Yes: fix it, then `task ready` |
+| `done` | PR merged, or closed by hand | No |

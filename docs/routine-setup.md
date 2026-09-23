@@ -1,23 +1,20 @@
 # Routine setup (cloud agents)
 
-Do this once. Steps marked **(you)** happen in a browser. Steps marked **(terminal)** can be
-run by you or by Claude Code after you confirm.
+A **routine** is a saved job on your claude.ai account: "when triggered, start a Claude Code
+session in the cloud with these repos and follow these instructions". `task ready` triggers it
+through an API URL and token. You set it up once, in the browser, because it belongs to your
+claude.ai account and its token is shown only once.
 
-## 1. Put the hub on GitHub (terminal)
+The task board itself does **not** go to GitHub. Only the project repos need GitHub access.
 
-```
-cd "$HOME/AIprogramming PJ/task-hub"
-gh repo create jyoka/task-hub --private --source . --push
-```
-
-Keep `main` unprotected: the cloud agents push status changes to it.
-
-## 2. Give Claude access to the repos (you)
+## 1. Give Claude access to your project repos
 
 1. Open <https://github.com/apps/claude> and install the Claude GitHub App.
-2. Grant it `jyoka/task-hub` and every project repo you want tasks for.
+2. Grant it every project repo you want tasks for.
+3. For the first test, also create an empty private sandbox repo, for example
+   `gh repo create jyoka/task-sandbox --private --add-readme`, and grant it too.
 
-## 3. Create the routine (you)
+## 2. Create the routine
 
 At <https://claude.ai/code/routines>, click **New routine**:
 
@@ -26,19 +23,18 @@ At <https://claude.ai/code/routines>, click **New routine**:
 | Name | `task-hub worker` |
 | Instructions | everything below the line in [routine/PROMPT.md](../routine/PROMPT.md) |
 | Model | the strongest coding model available |
-| Repositories | `jyoka/task-hub` **plus** every project repo tasks may target |
+| Repositories | every project repo tasks may target (and the sandbox) |
 | Environment | Default (Trusted network) is enough, unless a project needs more |
 | Connectors | remove all. The worker does not need any |
-| Trigger 1 | Schedule: hourly (the backup run) |
-| Trigger 2 | API (added after saving, see step 4) |
+| Trigger | API only. No schedule: `task` decides when runs start |
 
-Click **Create**.
+Save the routine.
 
-## 4. Add the API trigger (you)
+## 3. Add the API trigger and store the token
 
 1. Open the routine, choose **Edit**, then **Add another trigger**, then **API**.
 2. Copy the URL. Click **Generate token** and copy the token. It is shown only once.
-3. Save both on the Mac (never in the repo):
+3. Save both on the Mac (never in a repo):
 
    ```
    mkdir -p ~/.config/task-hub
@@ -49,30 +45,32 @@ Click **Create**.
    chmod 600 ~/.config/task-hub/routine.env
    ```
 
+## 4. Check `gh`
+
+`gh auth status` must show you logged in. `task` uses it to read the agents' PRs.
+
 ## 5. First end-to-end test
 
-Use a throwaway repo that is added to the routine.
-
 ```
-task new --title "Add a hello.txt" --repo <owner/sandbox> --goal "Create hello.txt containing 'hello'. Acceptance: file exists on a PR."
-task ready <id>        # should print: started[1]{id,session}: ...
+task new --title "Add hello.txt" --repo jyoka/task-sandbox \
+  --goal "Add hello.txt at the repo root containing 'hello'. Acceptance: the file is in a PR."
+task ready <id>          # prints started[1] with the session URL
 ```
 
-Then check:
+Then:
 
-- the session URL shows the run working
-- `task show <id>` becomes `review`, with the Report, Please review, and `pr` filled in
-  (run `git -C "$HOME/AIprogramming PJ/task-hub" pull` first, or any `task` write pulls for you)
-- the PR exists in the sandbox repo
+- open the session URL and watch the run
+- when it ends, run `task`: the task should become `review`, with Report, Please review, and `pr`
+- check the PR in `jyoka/task-sandbox`: branch `claude/task-<id>`, ready for review
+- merge it, run `task` again: the task becomes `done`
 
-If the status never changes but the PR exists, the routine could not push to the hub's `main`.
-See [operations.md](operations.md).
+Also try the blocked path once: a task whose Goal cannot be done without asking
+(for example "use the API key I will give you") should end as a draft PR and a `blocked` task.
 
 ## Adding a project repo later
 
 1. Grant the Claude GitHub App access to it.
 2. Add it to the routine's **Repositories**.
-3. Tasks for it now work. Re-queue any that were blocked with `task ready <id>`.
 
 ## Updating the prompt
 

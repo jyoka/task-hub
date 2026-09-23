@@ -11,11 +11,12 @@ Agent coding sessions are chat-shaped. The goal is to make them task-shaped, lik
 
 Constraints chosen by the user:
 
-- Tasks are local files in a git repo (this one).
+- Tasks are local files.
 - Agents run in the cloud, so work continues with the laptop closed.
 - Agents only take tasks the user marked `ready`. Agents never create or split tasks.
 - Tasks can target several repositories.
 - At most 3 tasks run in parallel, enforced by code, so the user can keep track.
+- Cloud agents must not push to a shared branch. Branch handling must stay simple.
 
 ## What we looked at (2026-09) and why not
 
@@ -26,55 +27,54 @@ Constraints chosen by the user:
 | Backlog.md, Task Master | Markdown task files / PRD-to-task breakdown | Planning only, nothing runs the tasks |
 | [OpenAI Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/) | Polls Linear, runs a Codex agent per issue | Built for Codex + Linear, not local files + Claude Code |
 | [Claude Code Projects](https://code.claude.com/docs/en/claude-projects) | One conversation starts parallel cloud threads, Overview pane | Task state lives on claude.ai, not in files. Starts work right away instead of waiting for `ready`. A thread limit is only an instruction, not enforced |
-| GitHub Actions + claude-code-action | Claude Code on a cron in CI | Works, but routines do the same with no CI setup. Kept as the fallback |
+| GitHub Actions + claude-code-action | Claude Code on a cron in CI | Works, but routines do the same with no CI setup |
 
 ## Decisions
 
-1. **Tasks are markdown files in git.** They are readable, editable, and diffable, and there is
-   no database. GitHub is the sync point, because cloud agents can only read what is pushed.
-2. **Claude Code routines are the runner.** A routine is a saved cloud Claude Code job.
-   Verified in the [routines docs](https://code.claude.com/docs/en/routines):
-   - one routine can have several repositories (cloned at the start of every run)
-   - it pushes to `claude/*` branches and opens PRs as you
-   - an API trigger (`POST .../fire`) starts a run immediately, and each run is its own session
-   - schedules can be no more frequent than every hour
-   - there is a daily cap on runs per account
-3. **Dispatch, then fire.** `task ready` claims the task locally (status `in_progress`),
-   pushes, and only then calls the routine API with `task <id>`. The limit of 3 is checked
-   before any run starts, so it is enforced by code, not by asking the agent nicely.
-4. **Hourly backup run.** When a slot frees up, nothing fires by itself. The hourly
-   scheduled run calls `task claim` and takes the next ready task. So a waiting task starts
-   within about an hour of a slot freeing up. Run `task dispatch` to start it right away.
-5. **Git is the lock.** Every write does `pull --rebase`, then commit, then push.
-   - Same task claimed twice: each claim writes a unique `claim` id, so the two changes
-     conflict and only one push wins. The loser is reset and stops.
-   - Different tasks claimed at the same moment (no conflict): after pushing, the claimer
-     re-counts, and if there are more than 3 `in_progress` it gives its claim back. In the
-     rare case both give back, the task waits for the next dispatch or hourly run
-     (safe, only slower).
-   - A rejected write never loses text: the file is saved to `.rejected/` first.
-6. **The agent must say what to review.** `task review` refuses until the Report and Please
-   review sections are filled in. The routine prompt asks for specific files, decisions,
-   and risks.
+1. **Only the Mac writes the board.** Task files live only in this local repo, and only
+   the `task` CLI changes them. Cloud agents never read or write the board. This removed
+   all shared-branch writes, race handling, and locking from an earlier version (0.1),
+   where agents claimed tasks and pushed status changes to the hub's `main`.
+2. **One task = one branch = one PR.** The CLI names the branch `claude/task-<id>`
+   (routines push to `claude/*` branches by default). A re-run of a blocked task continues
+   on the same branch and PR, so there is never more than one branch per task.
+3. **The brief travels in the trigger.** `task ready` calls the routine's API trigger with the
+   task id, repo, branch, and Goal as the `text` payload. The routine prompt explicitly accepts
+   this payload as its assignment (routines treat fire text as untrusted unless the prompt opts in).
+   Only the token holder (your Mac) can send it.
+4. **Results travel in the PR.** The agent writes `## Report` and `## Please review` in the PR
+   description, and uses a draft PR with a `## Blocked` line when it needs you. `task` reads
+   the PRs with `gh` and copies those sections into the task file.
+5. **`task` is the scheduler.** Every `task` / `task sync` / `task ready` first reads PRs, then
+   starts runs for ready tasks while fewer than 3 are `in_progress`. The limit is enforced
+   in code before a run starts. There is no hourly backup run: when a slot frees up while you
+   are away, the next waiting task starts the next time you run `task`. This is deliberate:
+   new work starts when you are around to keep track of it.
+6. **Stale PR activity is ignored.** Each run records its start time. PR changes older than that
+   (the old draft PR of a re-queued task) do not move the task.
 7. **Registering is explicit.** The `/task` skill has `disable-model-invocation: true`,
    so Claude cannot start it by itself during a normal chat.
-8. **Fire payload is untrusted.** Routines wrap API `text` as untrusted data. The prompt
-   accepts only the exact form `task <number>` and checks that the task is `in_progress`.
+
+Verified in the [routines docs](https://code.claude.com/docs/en/routines): one routine can have
+several repositories (fixed in its settings, cloned every run); it pushes to `claude/*` branches and
+opens PRs as you; the API trigger starts a run immediately and returns the session URL; there is a
+daily cap on runs per account.
 
 ## CLI shape
 
 `bin/task` follows the AXI conventions for agent-facing CLIs: compact TOON output,
 a home view (`task` with no arguments) that shows live state, explicit empty states,
 errors on stdout with a `help:` line, unknown flags rejected, and repeated
-state changes treated as no-ops. It uses only the Python 3 standard library, so it runs
-unchanged on the Mac and in the cloud.
+state changes treated as no-ops. It uses only the Python 3 standard library plus `gh`.
 
 ## Known limits
 
-- **Repos are fixed in the routine.** A task for a repo not added to the routine gets
-  blocked with a clear reason. Add the repo in the routine settings, then `task ready <id>`.
-- **Daily run cap.** Each task costs one run, and the hourly backup costs up to 24 a day.
-  If the cap is tight, schedule the backup every few hours.
-- **Pushing to the hub's `main` from the cloud** is allowed by the docs when the branch is not
-  protected and the commits are yours. This is the main assumption the first end-to-end run must confirm.
-- **A run that dies stays `in_progress`.** You see it with `task`, and re-queue it with `task ready <id>`.
+- **Repos are fixed in the routine.** A task for a repo not added to the routine produces no PR.
+  The run's session shows why. Add the repo, then `task ready <id>`.
+- **Waiting tasks start only when you run `task`.** See decision 5. A cron job on the Mac could
+  run `task sync` if this ever matters.
+- **A run that dies stays `in_progress`.** `task` shows it, the session link shows what happened,
+  and `task ready <id>` re-runs it on the same branch.
+- **Daily run cap.** Each start (including re-runs) costs one routine run.
+- **Unverified until the first real run:** that the cloud session can open a PR and switch it
+  between draft and ready. [routine-setup.md](routine-setup.md) step 5 checks this.

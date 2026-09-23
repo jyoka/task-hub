@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """task - file-based task board for cloud coding agents.
 
-Tasks are markdown files in <hub>/tasks/ with a small frontmatter block.
+Tasks are markdown files in <hub>/tasks/. Only this CLI, on your Mac, writes them.
+Cloud agents never touch the board: each one gets the task brief when its run starts,
+works on its own branch `claude/task-<id>` in the project repo, and opens a PR.
+`task` (or `task sync`) reads those PRs from GitHub to update statuses, then starts
+runs for ready tasks while fewer than MAX_PARALLEL are running.
+
 Lifecycle: draft -> ready -> in_progress -> review -> done  (or blocked).
-Only the human moves draft -> ready. At most MAX_PARALLEL tasks run at once.
 """
 import datetime
 import json
@@ -14,26 +18,29 @@ import sys
 import urllib.request
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 MAX_PARALLEL = 3
 STATUSES = ["draft", "ready", "in_progress", "review", "blocked", "done"]
-FIELDS = ["id", "title", "repo", "theme", "status", "created", "updated", "pr", "reason", "claim"]
+FIELDS = ["id", "title", "repo", "theme", "status", "created", "updated",
+          "branch", "started", "session", "pr", "reason"]
+REPORT_SECTIONS = ["Report", "Please review"]
 BODY_TEMPLATE = """## Goal
 
 {goal}
 
 ## Report
 
-(agent fills this in)
+(filled in from the agent's pull request)
 
 ## Please review
 
-(agent lists the exact files, decisions, or risks the human must check)
+(filled in from the agent's pull request)
 """
 
 HUB = Path(os.environ.get("TASK_HUB_DIR") or Path(__file__).resolve().parent.parent)
 TASKS = HUB / "tasks"
 ROUTINE_ENV = Path.home() / ".config" / "task-hub" / "routine.env"
+GH = os.environ.get("TASK_GH", "gh")
 
 
 # ---------- output (TOON) ----------
@@ -61,11 +68,14 @@ def fail(msg, help_=None, code=1):
     sys.exit(code)
 
 
+def home(p):
+    return str(p).replace(str(Path.home()), "~")
+
+
 # ---------- task files ----------
 
 def parse(path):
-    text = path.read_text()
-    m = re.match(r"---\n(.*?)\n---\n?(.*)", text, re.S)
+    m = re.match(r"---\n(.*?)\n---\n?(.*)", path.read_text(), re.S)
     if not m:
         fail(f"{path.name} has no frontmatter")
     meta = {}
@@ -76,10 +86,15 @@ def parse(path):
     return meta
 
 
-def write(t):
+def write(t, msg):
     t["updated"] = today()
     head = "\n".join(f"{k}: {t.get(k, '')}".rstrip() for k in FIELDS)
     t["_path"].write_text(f"---\n{head}\n---\n{t['_body']}")
+    # local history only; the hub is never pushed by this CLI
+    if subprocess.run(["git", "-C", str(HUB), "rev-parse"], capture_output=True).returncode == 0:
+        subprocess.run(["git", "-C", str(HUB), "add", str(t["_path"])], capture_output=True)
+        subprocess.run(["git", "-C", str(HUB), "commit", "-q", "-m", f"task {t['id']}: {msg}"],
+                       capture_output=True)
 
 
 def load_all():
@@ -94,52 +109,68 @@ def get(tid):
     fail(f"task {tid} not found", "task list")
 
 
+def section(body, name):
+    """Text under '## name' up to the next '## ' heading, or ''."""
+    m = re.search(rf"(?m)^## {re.escape(name)}[ \t]*\n(.*?)(?=^## |\Z)", body, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def set_section(body, name, text):
+    return re.sub(rf"(?m)^(## {re.escape(name)}[ \t]*\n)(.*?)(?=^## |\Z)",
+                  lambda m: f"{m.group(1)}\n{text}\n\n", body, count=1, flags=re.S)
+
+
 def today():
     return datetime.date.today().isoformat()
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def slug(title):
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "task"
 
 
-# ---------- git sync (no-op when the hub has no remote) ----------
+# ---------- GitHub (read-only) ----------
 
-def git(*args):
-    return subprocess.run(["git", "-C", str(HUB), *args], capture_output=True, text=True)
-
-
-def has_remote():
-    return git("remote").stdout.strip() != ""
-
-
-def pull():
-    if has_remote() and git("pull", "--rebase", "--autostash", "--quiet").returncode != 0:
-        git("rebase", "--abort")
-        fail("could not sync the hub with its remote", "resolve git state in the hub, then retry")
+def find_pr(t):
+    """The PR for this task's branch, as a dict, or None. Raises RuntimeError if gh fails."""
+    r = subprocess.run([GH, "pr", "list", "--repo", t["repo"], "--head", t["branch"], "--state", "all",
+                        "--limit", "1", "--json", "url,state,isDraft,updatedAt,body"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1:] or ["gh failed"])
+    prs = json.loads(r.stdout or "[]")
+    return prs[0] if prs else None
 
 
-def commit(msg, paths):
-    if git("rev-parse", "--git-dir").returncode != 0:
-        return "local-only"
-    git("add", *map(str, paths))
-    git("commit", "--quiet", "-m", msg)
-    if not has_remote():
-        return "committed"
-    if git("push", "--quiet").returncode == 0:
-        return "pushed"
-    # someone else pushed in between: replay our commit on top of theirs and try once more
-    if git("pull", "--rebase", "--quiet").returncode == 0 and git("push", "--quiet").returncode == 0:
-        return "pushed"
-    # same task file changed on both sides (e.g. two runners claimed the same task): theirs wins.
-    # keep our version of the files so nothing written (like a report) is lost, then reset.
-    git("rebase", "--abort")
-    keep = HUB / ".rejected"
-    keep.mkdir(exist_ok=True)
-    for p in paths:
-        (keep / Path(p).name).write_text(Path(p).read_text())
-    git("reset", "--hard", "--quiet", "@{u}")
-    fail("the task was changed by someone else at the same time; your change was not applied",
-         f"your version is saved in .rejected/; run `task show <id>` to see the current state")
+def apply_pr(t, pr):
+    """Move a task according to its PR. Returns a short description of the change, or None."""
+    if pr is None:
+        return None
+    if pr["state"] == "MERGED":
+        t["status"], t["pr"], t["reason"] = "done", pr["url"], ""
+        write(t, "done (PR merged)")
+        return "done (PR merged)"
+    # only a running task moves on its PR, and only on PR activity after this run started
+    # (a re-queued task still has its old draft PR until the new run updates it)
+    if t["status"] != "in_progress" or pr["updatedAt"] < t.get("started", ""):
+        return None
+    for name in REPORT_SECTIONS:
+        text = section(pr["body"] or "", name)
+        if text:
+            t["_body"] = set_section(t["_body"], name, text)
+    t["pr"] = pr["url"]
+    if pr["state"] == "CLOSED":
+        t["status"], t["reason"] = "blocked", "PR was closed without merging"
+    elif pr["isDraft"]:
+        t["status"] = "blocked"
+        t["reason"] = (section(pr["body"] or "", "Blocked").splitlines() or ["agent needs you, see the PR"])[0]
+    else:
+        t["status"], t["reason"] = "review", ""
+    write(t, f"{t['status']} (from PR)")
+    return t["status"]
 
 
 # ---------- routine trigger ----------
@@ -154,10 +185,15 @@ def routine_config():
     return cfg if all(cfg.values()) else None
 
 
-def fire(cfg, tid):
+def brief(t):
+    return (f"task-hub task {t['id']}\nrepo: {t['repo']}\nbranch: {t['branch']}\n"
+            f"title: {t['title']}\n\n{section(t['_body'], 'Goal')}\n")
+
+
+def fire(cfg, t):
     req = urllib.request.Request(
         cfg["TASK_ROUTINE_URL"], method="POST",
-        data=json.dumps({"text": f"task {tid}"}).encode(),
+        data=json.dumps({"text": brief(t)}).encode(),
         headers={"Authorization": f"Bearer {cfg['TASK_ROUTINE_TOKEN']}",
                  "anthropic-beta": "experimental-cc-routine-2026-04-01",
                  "anthropic-version": "2023-06-01", "Content-Type": "application/json"})
@@ -165,26 +201,75 @@ def fire(cfg, tid):
         return json.load(r).get("claude_code_session_url", "")
 
 
+# ---------- sync: PRs in, runs out ----------
+
+def sync():
+    """Update statuses from PRs, then start runs for ready tasks. Returns output lines."""
+    lines, changed, errors = [], [], []
+    for t in load_all():
+        if t["status"] in ("in_progress", "blocked", "review") and t.get("branch"):
+            try:
+                what = apply_pr(t, find_pr(t))
+            except RuntimeError as e:
+                errors.append({"id": t["id"], "error": str(e)})
+                continue
+            if what:
+                changed.append({"id": t["id"], "title": t["title"], "now": what})
+    if changed:
+        lines += table("updated", changed, ["id", "title", "now"])
+    if errors:
+        lines += table("github_errors", errors, ["id", "error"])
+
+    tasks = load_all()
+    free = MAX_PARALLEL - sum(t["status"] == "in_progress" for t in tasks)
+    ready = [t for t in tasks if t["status"] == "ready"]
+    if not ready:
+        return lines
+    if free <= 0:
+        return lines + [f"dispatch: {len(ready)} ready task(s) waiting, all {MAX_PARALLEL} slots busy"]
+    cfg = routine_config()
+    if not cfg:
+        return lines + [f"dispatch: skipped, routine not configured ({len(ready)} ready task(s) waiting)",
+                        f"help: put TASK_ROUTINE_URL and TASK_ROUTINE_TOKEN in {home(ROUTINE_ENV)}"]
+    started = []
+    for t in ready[:free]:
+        t["branch"] = t.get("branch") or f"claude/task-{t['id']}"
+        t["started"] = now()
+        try:
+            t["session"] = fire(cfg, t)
+        except Exception as e:
+            write(t, "dispatch failed")
+            return lines + (table("started", started, ["id", "session"]) if started else []) + [
+                f"error: could not start the routine for task {t['id']}: {e}",
+                "help: check the routine URL/token, then run `task sync`"]
+        t["status"], t["reason"] = "in_progress", ""
+        write(t, "started")
+        started.append({"id": t["id"], "session": t["session"]})
+    return lines + table("started", started, ["id", "session"])
+
+
 # ---------- commands ----------
 
 def cmd_home(_):
+    lines = sync()
     tasks = load_all()
     counts = {s: sum(t["status"] == s for t in tasks) for s in STATUSES}
     active = [t for t in tasks if t["status"] != "done"]
-    out(f"bin: {str(Path(__file__).resolve()).replace(str(Path.home()), '~')}",
-        "description: File-based task board; cloud agents work ready tasks, max "
-        f"{MAX_PARALLEL} at once",
-        f"hub: {str(HUB).replace(str(Path.home()), '~')}",
-        "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()))
-    if active:
-        out(*table("tasks", active, ["id", "title", "status", "repo"]))
-    else:
-        out("tasks: 0 open tasks")
+    out(f"bin: {home(Path(__file__).resolve())}",
+        f"description: File-based task board; cloud agents work ready tasks, max {MAX_PARALLEL} at once",
+        f"hub: {home(HUB)}",
+        "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()), *lines)
+    out(*table("tasks", active, ["id", "title", "status", "repo"]) if active else ["tasks: 0 open tasks"])
     needs_you = counts["draft"] + counts["review"] + counts["blocked"]
     out("help[3]:",
         f"  {needs_you} task(s) need you (draft to approve, review, blocked)",
         "  Run `task show <id>` for details",
         "  Run `task ready <id>` to approve a draft for the agents")
+
+
+def cmd_sync(_):
+    lines = sync()
+    out(*(lines or ["sync: nothing changed, nothing to start"]))
 
 
 def cmd_list(a):
@@ -214,7 +299,7 @@ def cmd_show(a):
 def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
-             'task new --title "..." --repo owner/name [--theme x] [--goal-file f | --goal "..."]', 2)
+             'task new --title "..." --repo owner/name [--theme x] (--goal "..." | --goal-file path)', 2)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a["repo"]):
         fail(f"--repo must look like owner/name, got {a['repo']!r}", code=2)
     goal = Path(a["goal_file"]).read_text() if a["goal_file"] else (a["goal"] or "")
@@ -222,21 +307,18 @@ def cmd_new(a):
         fail("goal is empty", "pass --goal \"...\" or --goal-file path", 2)
     # keep Goal's own headings below the task's "## " sections
     goal = re.sub(r"(?m)^#{1,2} ", "### ", goal)
-    pull()
     TASKS.mkdir(exist_ok=True)
     tid = max((int(t["id"]) for t in load_all()), default=0) + 1
     path = TASKS / f"{tid:04d}-{slug(a['title'])}.md"
     t = {"id": str(tid), "title": a["title"], "repo": a["repo"], "theme": a["theme"] or "",
          "status": "draft", "created": today(), "_path": path,
          "_body": BODY_TEMPLATE.format(goal=goal.strip())}
-    write(t)
-    sync = commit(f"task {tid}: new draft", [path])
-    out("task:", f"  id: {tid}", f"  status: draft", f"  file: {path.relative_to(HUB)}", f"  sync: {sync}",
+    write(t, "new draft")
+    out("task:", f"  id: {tid}", "  status: draft", f"  file: {path.relative_to(HUB)}",
         "help[1]:", f"  Run `task ready {tid}` when you want an agent to pick it up")
 
 
 def set_status(a, new, allowed_from, msg, extra=None):
-    pull()
     t = get(a["id"])
     if t["status"] == new:
         out(f"task: #{t['id']} already {new} (no-op)")
@@ -245,116 +327,32 @@ def set_status(a, new, allowed_from, msg, extra=None):
         fail(f"task {t['id']} is {t['status']}; {new} only allowed from {', '.join(allowed_from)}")
     t["status"] = new
     t.update(extra or {})
-    write(t)
-    out("task:", f"  id: {t['id']}", f"  status: {new}", f"  sync: {commit(msg.format(id=t['id']), [t['_path']])}")
+    write(t, msg)
+    out("task:", f"  id: {t['id']}", f"  status: {new}")
     return t
 
 
 def cmd_ready(a):
-    # also used to re-queue a blocked or stuck task
-    t = set_status(a, "ready", ["draft", "blocked", "in_progress", "review"], "task {id}: ready", {"reason": "", "claim": ""})
+    # approve a draft, or re-queue a blocked/stuck task (a re-run continues on the same branch)
+    t = set_status(a, "ready", ["draft", "blocked", "in_progress"], "ready", {"reason": ""})
     if t and not a["no_dispatch"]:
-        dispatch()
-
-
-def claim_next():
-    """Mark the oldest ready task in_progress if a slot is free. Returns the task or a reason string."""
-    tasks = load_all()
-    running = sum(t["status"] == "in_progress" for t in tasks)
-    if running >= MAX_PARALLEL:
-        return f"all {MAX_PARALLEL} slots busy"
-    ready = [t for t in tasks if t["status"] == "ready"]
-    if not ready:
-        return "no ready tasks"
-    t = ready[0]
-    t["status"] = "in_progress"
-    # unique per claim, so two runners claiming the same task never produce identical changes
-    t["claim"] = os.urandom(4).hex()
-    write(t)
-    commit(f"task {t['id']}: claimed", [t["_path"]])
-    # another runner may have claimed a different task at the same moment (no git conflict),
-    # so re-count after syncing and give our claim back if the limit is now exceeded
-    if sum(x["status"] == "in_progress" for x in load_all()) > MAX_PARALLEL:
-        t = get(t["id"])
-        t["status"], t["claim"] = "ready", ""
-        write(t)
-        commit(f"task {t['id']}: claim returned, limit reached", [t["_path"]])
-        return f"all {MAX_PARALLEL} slots busy"
-    return t
-
-
-def cmd_claim(_):
-    pull()
-    t = claim_next()
-    if isinstance(t, str):
-        out(f"claim: nothing claimed ({t})")
-        return
-    out("claimed:", f"  id: {t['id']}", f"  title: {q(t['title'])}", f"  repo: {t['repo']}",
-        f"  file: {t['_path'].relative_to(HUB)}")
-
-
-def dispatch():
-    cfg = routine_config()
-    if not cfg:
-        out("dispatch: skipped (routine not configured; the hourly run will pick it up)",
-            f"help: put TASK_ROUTINE_URL and TASK_ROUTINE_TOKEN in {str(ROUTINE_ENV).replace(str(Path.home()), '~')}")
-        return
-    started = []
-    while True:
-        pull()
-        t = claim_next()
-        if isinstance(t, str):
-            reason = t
-            break
-        try:
-            started.append((t["id"], fire(cfg, t["id"])))
-        except Exception as e:  # put it back so the slot is not leaked
-            t["status"], t["claim"] = "ready", ""
-            write(t)
-            commit(f"task {t['id']}: dispatch failed, back to ready", [t["_path"]])
-            fail(f"could not start the routine for task {t['id']}: {e}", "check the routine URL/token, then `task dispatch`")
-    if started:
-        out(*table("started", [{"id": i, "session": u} for i, u in started], ["id", "session"]))
-    else:
-        out(f"dispatch: nothing started ({reason})")
-
-
-def cmd_dispatch(_):
-    dispatch()
-
-
-def cmd_review(a):
-    t = get(a["id"])
-    for section in ("## Report", "## Please review"):
-        chunk = t["_body"].split(section, 1)[-1].split("\n## ", 1)[0].strip()
-        if section not in t["_body"] or not chunk or chunk.startswith("(agent "):
-            fail(f"fill in the '{section[3:]}' section of {t['_path'].relative_to(HUB)} first", code=2)
-    set_status(a, "review", ["in_progress"], "task {id}: ready for review", {"pr": a["pr"] or ""})
-
-
-def cmd_block(a):
-    if not a["reason"]:
-        fail("--reason is required", 'task block <id> --reason "what you need from the human"', 2)
-    set_status(a, "blocked", ["in_progress"], "task {id}: blocked", {"reason": a["reason"]})
+        out(*(sync() or ["dispatch: nothing to start"]))
 
 
 def cmd_done(a):
-    set_status(a, "done", ["review"], "task {id}: done")
+    set_status(a, "done", ["draft", "ready", "in_progress", "review", "blocked"], "done")
 
 
 COMMANDS = {
     # name: (handler, positional args, flags(name -> takes_value), help)
-    "list": (cmd_list, [], {"status": True}, "task list [--status draft|ready|in_progress|review|blocked|done]"),
+    "sync": (cmd_sync, [], {}, "task sync  # read PRs from GitHub, then start runs for ready tasks (also done by `task`)"),
+    "list": (cmd_list, [], {"status": True}, "task list [--status draft|ready|in_progress|review|blocked|done]  # no GitHub calls"),
     "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]"),
     "new": (cmd_new, [], {"title": True, "repo": True, "theme": True, "goal": True, "goal-file": True},
             'task new --title "..." --repo owner/name [--theme x] (--goal "..." | --goal-file path)  # creates a draft'),
     "ready": (cmd_ready, ["id"], {"no-dispatch": False},
-              "task ready <id> [--no-dispatch]  # human approval; also re-queues blocked/stuck tasks"),
-    "claim": (cmd_claim, [], {}, "task claim  # agent: take the oldest ready task if a slot is free"),
-    "dispatch": (cmd_dispatch, [], {}, "task dispatch  # start cloud runs for ready tasks, up to the limit"),
-    "review": (cmd_review, ["id"], {"pr": True}, "task review <id> [--pr url]  # agent: work finished, Report filled"),
-    "block": (cmd_block, ["id"], {"reason": True}, 'task block <id> --reason "..."  # agent: needs the human'),
-    "done": (cmd_done, ["id"], {}, "task done <id>  # human: reviewed and accepted"),
+              "task ready <id> [--no-dispatch]  # approve a draft, or re-queue a blocked/stuck task"),
+    "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
 }
 
 
@@ -365,9 +363,12 @@ def main(argv):
     if not argv:
         return cmd_home(None)
     if argv[0] in ("-h", "--help", "help"):
-        out("commands:", *("  " + c[3] for c in COMMANDS.values()))
+        out("commands:", "  task  # sync, then show the board", *("  " + c[3] for c in COMMANDS.values()))
         return
     name, rest = argv[0], argv[1:]
+    if name in ("claim", "review", "block", "dispatch"):
+        fail(f"`{name}` was removed in 0.2: agents no longer write to the board",
+             "statuses now come from the agent's PR; run `task sync`", 2)
     if name not in COMMANDS:
         fail(f"unknown command {name!r}", "commands: " + ", ".join(COMMANDS), 2)
     handler, positional, flags, usage = COMMANDS[name]
