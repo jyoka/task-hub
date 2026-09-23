@@ -37,8 +37,8 @@ Constraints from the user:
 1. **The board is local markdown, and only `task` writes it.** No agent reads or writes the board.
    Every change is committed to the hub's git history. (0.1 let agents write the board
    through a shared branch, which needed locking and race handling. That was removed in 0.2.)
-2. **Agents run locally, started by `task`.** `task start` approves a task. `task`, `task start`,
-   and `task sync` launch approved tasks while fewer than 3 are running. A queued task starts the
+2. **Agents run locally, started by `task`.** `task start` approves a task. `task` and `task start`
+   launch approved tasks while fewer than 3 are running. A queued task starts the
    next time you run `task`, so new work starts when you are around to keep track of it.
 3. **The agent only edits files. task-hub does all git and GitHub work.** Agents differ in
    sandboxing (Codex's sandbox cannot use the network or write outside the folder, so it could

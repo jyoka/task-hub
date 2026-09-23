@@ -182,8 +182,7 @@ def slug(title):
 # ---------- herdr ----------
 
 def herdr(*args):
-    session = os.environ.get("TASK_HERDR_SESSION")
-    return run("herdr", *(["--session", session] if session else []), *args)
+    return run("herdr", *args)
 
 
 def herdr_available():
@@ -503,10 +502,6 @@ def cmd_home(_):
         "  Run `task start` to approve a draft (or re-run a blocked task)")
 
 
-def cmd_sync(_):
-    out(*(sync() or ["sync: nothing changed, nothing to start"]))
-
-
 def cmd_list(a):
     tasks = load_all()
     if a["status"]:
@@ -628,7 +623,6 @@ COMMANDS = {
     # name: (handler, positional args (optional ones end with ?), flags(name -> takes_value), help)
     "start": (cmd_start, ["id?"], {"agent": True},
               "task start [<id>] [--agent name]  # approve a draft or re-run a blocked task; no id = pick one"),
-    "sync": (cmd_sync, [], {}, "task sync  # update statuses from runs and PRs, start approved tasks (also done by `task`)"),
     "list": (cmd_list, [], {"status": True}, "task list [--status draft|ready|in_progress|review|blocked|done]"),
     "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output"),
@@ -636,13 +630,6 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--agent name] [--theme x] (--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
-}
-REMOVED = {
-    "ready": "`task ready` was renamed to `task start`",
-    "claim": "`task claim` was removed: agents no longer write to the board",
-    "review": "`task review` was removed: the runner sets review when the agent finishes",
-    "block": "`task block` was removed: agents report Blocked in .task-report.md",
-    "dispatch": "`task dispatch` was removed: `task` and `task start` start runs",
 }
 
 
@@ -657,8 +644,6 @@ def main(argv):
             *("  " + c[3] for n, c in COMMANDS.items() if not n.startswith("_")))
         return
     name, rest = argv[0], argv[1:]
-    if name in REMOVED:
-        fail(REMOVED[name], "run `task --help`", 2)
     if name not in COMMANDS:
         fail(f"unknown command {name!r}", "commands: " + ", ".join(n for n in COMMANDS if not n.startswith("_")), 2)
     handler, positional, flags, usage = COMMANDS[name]

@@ -67,3 +67,4 @@ docs/                 setup, agents, design, task format, operations
 - [docs/task-format.md](docs/task-format.md): the task file, the agent's report file, the PR
 - [docs/operations.md](docs/operations.md): watching runs, troubleshooting, cleanup
 - [docs/design.md](docs/design.md): why it is built this way, what else we looked at
+- [docs/lessons.md](docs/lessons.md): what building and testing it taught us, and what is still unproven

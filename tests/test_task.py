@@ -88,7 +88,6 @@ class TaskTest(unittest.TestCase):
                     "TASK_GH": str(root / "gh"), "TASK_HERDR": "0", "TASK_TEST_GH_DB": str(self.db),
                     "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
-        self.env.pop("TASK_HERDR_SESSION", None)
         cfg = root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True)
         cfg.write_text(f"[runner]\nagent = fake\n\n[agents]\nfake = {root}/agent {{prompt}}\n"
@@ -188,7 +187,6 @@ class TaskTest(unittest.TestCase):
 
     def test_draft_never_runs(self):
         self.new()
-        self.task("sync")
         self.task()
         self.assertEqual(self.agent_calls(), [])
 
@@ -356,10 +354,6 @@ class TaskTest(unittest.TestCase):
         self.assertIn("no-op", self.task("done", tid))
         self.assertIn("error:", self.task("start", tid, code=1))
 
-    def test_renamed_and_removed_commands_explain(self):
-        self.assertIn("renamed to `task start`", self.task("ready", "1", code=2))
-        self.assertIn("agents no longer write", self.task("claim", code=2))
-
     def test_unknown_flag_is_rejected(self):
         self.assertIn("unknown flag --stat", self.task("list", "--stat", "ready", code=2))
 
@@ -377,7 +371,6 @@ class TaskTest(unittest.TestCase):
     def test_empty_states_are_explicit(self):
         self.assertIn("0 open tasks", self.task())
         self.assertIn("0 tasks with status ready", self.task("list", "--status", "ready"))
-        self.assertIn("nothing changed", self.task("sync"))
         self.assertIn("has not run yet", self.task("log", self.new()))
 
     def test_changes_are_committed_to_the_hub_history(self):
