@@ -68,6 +68,7 @@ task --version
    [runner]
    agent = claude             ; このマシンのデフォルトエージェント
    reviewer = agent           ; 任意: 実装後の自動レビュー。agent = タスクと同じエージェント、名前で固定も可
+   replanner = agent          ; 任意: エージェントが Blocked で止まったときの仕分け(コメントだけ)
    ```
 
    `reviewer` を空にするか省略すると、自動レビューは行いません。有効にすると、エージェントの作業後、PR を出す前に
