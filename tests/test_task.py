@@ -688,6 +688,66 @@ class TaskTest(unittest.TestCase):
         time.sleep(1)
         self.assertEqual(self.replans(tid), [])
 
+    def metrics(self, n):
+        """The run records, once there are n of them (each is written as the run's last step)."""
+        path = self.root / ".local/state/task-hub/metrics.jsonl"
+        self.wait_for(lambda: path.exists() and len(path.read_text().splitlines()) >= n)
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_each_run_is_recorded_with_reviews_retries_and_why_it_blocked(self):
+        self.write_config(reviewer=True, replanner="agent")
+        a = self.new("ok")
+        self.task("start", a)
+        self.wait(a)
+        self.metrics(1)
+        b = self.new("reviewfix")
+        self.task("start", b)
+        self.wait(b)
+        self.metrics(2)
+        c = self.new("blocked REPLAN=answered")
+        self.task("start", c)
+        self.wait(c)
+        self.metrics(3)
+        d = self.new("crash")
+        self.task("start", d)
+        self.wait(d)
+        runs = {r["id"]: r for r in self.metrics(4)}
+        self.assertEqual((runs[a]["status"], runs[a]["reviews"], runs[a]["retried"]), ("In review", ["pass"], False))
+        self.assertEqual((runs[b]["status"], runs[b]["reviews"], runs[b]["retried"]),
+                         ("In review", ["needs changes", "pass"], True))
+        self.assertEqual((runs[c]["status"], runs[c]["blocked_by"], runs[c]["replan"]), ("Blocked", "agent", "answered"))
+        self.assertEqual((runs[d]["status"], runs[d]["blocked_by"]), ("Blocked", "no report"))
+        self.assertEqual(runs[a]["agent"], "fake")
+        self.assertEqual(runs[a]["reviewer"], "reviewer")
+        self.assertIsInstance(runs[a]["seconds"], int)
+
+    def test_review_block_and_start_failure_are_recorded(self):
+        self.write_config(reviewer=True)
+        a = self.new("reviewfail")
+        self.task("start", a)
+        self.wait(a)
+        self.metrics(1)
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
+        b = self.new("ok")
+        self.task("start", b)
+        runs = {r["id"]: r for r in self.metrics(2)}
+        self.assertEqual((runs[a]["blocked_by"], runs[a]["retried"]), ("review", True))
+        self.assertEqual((runs[b]["status"], runs[b]["blocked_by"]), ("Blocked", "start"))
+
+    def test_stats_sums_up_the_recorded_runs(self):
+        self.assertIn("0 runs recorded yet", self.task("stats"))
+        self.write_config(reviewer=True)
+        for mode in ("ok", "reviewfix", "stuck"):
+            tid = self.new(mode)
+            self.task("start", tid)
+            self.wait(tid)
+        self.metrics(3)
+        out = self.task("stats")
+        self.assertIn("stats: 3 runs since", out)
+        self.assertIn("outcomes[2]{status,runs}:\n  In review,2\n  Blocked,1", out)
+        self.assertIn("reviews: 2 reviewed runs, 1 sent back once, 1 of those passed after the retry", out)
+        self.assertIn("blocked_by[1]{reason,runs}:\n  agent,1", out)
+
     def test_python_bytecode_is_never_committed(self):
         tid = self.new("pycache")
         self.task("start", tid)

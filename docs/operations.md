@@ -12,6 +12,24 @@
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
 - エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
 
+## 実行の結果を集計する
+
+`task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
+件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定です。
+Blocked の理由は次のどれかです。
+
+| 理由 | 意味 |
+|---|---|
+| `agent` | エージェント自身が `## Blocked` を書いた |
+| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻し後も `needs changes` など) |
+| `no report` | エージェントがレポートを書かずに終わった |
+| `no changes` | レポートはあるが、ファイルを変えなかった |
+| `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
+| `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
+
+1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
+戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。
+
 ## 保存場所
 
 | 内容 | 場所 |
@@ -20,6 +38,7 @@
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
+| 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | worktree | `~/.local/share/task-hub/worktrees/<番号>` |
 | プロンプト | `~/.local/share/task-hub/prompts/<番号>.md` |
