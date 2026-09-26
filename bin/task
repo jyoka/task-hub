@@ -1112,7 +1112,7 @@ def cmd_home(_):
 
 
 def cmd_list(_):
-    """The open cards, read only: unlike `task`, it starts nothing and changes nothing (for the /desk agent)."""
+    """The open cards, read only: unlike `task`, it starts nothing and changes nothing (for the /chief agent)."""
     board_ = tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
     out("counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
@@ -1128,7 +1128,7 @@ def event_line(e):
 def cmd_events(a):
     """What task-hub did lately; with --follow, each new event as one line the moment it is written.
 
-    --follow is for an agent's background monitor (the /desk skill): every line it prints is one thing to react to.
+    --follow is for an agent's background monitor (the /chief skill): every line it prints is one thing to react to.
     """
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
