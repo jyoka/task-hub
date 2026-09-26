@@ -122,6 +122,9 @@ from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+if "adversarial reviewer of one completed task-hub run" in prompt:  # used as its own reviewer
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nreviewed by the agent itself\n")
+    sys.exit(0)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
@@ -165,6 +168,10 @@ if forced == ["boldpass"]:
 if forced == ["edit"]:  # a reviewer that breaks the rule and edits a file the agent already changed
     Path("hello.txt").write_text(text + "reviewer was here\n")
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
+    sys.exit(0)
+if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
+    Path("coverage.out").write_text("tests ran\n")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nran the tests\n")
     sys.exit(0)
 if forced == ["blocked"]:
     Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
@@ -249,7 +256,7 @@ class TaskTest(unittest.TestCase):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
-                       + ("reviewer = reviewer\n" if reviewer else "") + "\n"
+                       + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -531,6 +538,25 @@ class TaskTest(unittest.TestCase):
         pushed = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
                                 capture_output=True, text=True).stdout
         self.assertEqual(pushed, "hello from mode ok\n")
+
+    def test_reviewer_agent_means_the_tasks_own_agent(self):
+        self.write_config(reviewer="agent")
+        tid = self.new("ok")
+        self.task("start", tid, "--agent", "other")
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["argv0"], ["--other"])  # follows the card's agent, not the machine default
+        self.assertIn("adversarial reviewer", calls[1]["prompt"])
+        self.assertEqual(self.reviewer_calls(), [])
+        self.assertIn("reviewed by the agent itself", self.comments(tid)[-1])
+
+    def test_test_leftovers_of_the_reviewer_are_removed_not_blocked(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=leftover")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertNotIn("coverage.out", self.origin_files(f"task/{tid}"))
 
     def test_reviewer_blocked_reason_is_the_blocked_line(self):
         self.write_config(reviewer=True)
