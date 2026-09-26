@@ -69,9 +69,13 @@ task-hub 自身が止めたとき(実行が止まった、開始できなかっ�
 
 ## 実行終了時の処理
 
+`[runner] reviewer` が設定されている場合、task-hub は PR を作る前に reviewer を実行します。reviewer が
+`needs changes` と判定したら、実装エージェントに 1 回だけ自動で差し戻します。2 回目も通らない場合は Blocked になります。
+
 | エージェントの結果 | task-hub の処理 | カードの列 |
 |---|---|---|
-| レポートあり、ファイル変更あり | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
+| レポートあり、ファイル変更あり、レビュー通過または reviewer なし | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
+| reviewer が 2 回目も `needs changes` または `blocked` | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント | Blocked |
 | `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
 | レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
 | レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |
