@@ -131,6 +131,8 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
+if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the retry dies without a report
+    sys.exit(1)
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
     Path("hello.txt").write_text("fixed after review\n")
 elif mode not in ("nochange", "stuck"):
@@ -150,12 +152,26 @@ if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
 '''
 
 FAKE_REVIEWER = r'''#!/usr/bin/env python3
-import os, sys
+import os, re, sys
 from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
 text = Path("hello.txt").read_text() if Path("hello.txt").exists() else ""
+forced = re.findall(r"REVIEW=(\w+)", prompt)  # a goal word that picks the verdict, when present
+if forced == ["boldpass"]:
+    Path(".task-review.md").write_text("## Verdict\n\n**Pass**\n\n## Review\n\nlooks fine\n")
+    sys.exit(0)
+if forced == ["edit"]:  # a reviewer that breaks the rule and edits a file the agent already changed
+    Path("hello.txt").write_text(text + "reviewer was here\n")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
+    sys.exit(0)
+if forced == ["blocked"]:
+    Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
+    sys.exit(0)
+if forced == ["needs"]:
+    Path(".task-review.md").write_text("## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n## Please fix\n\nredo it\n")
+    sys.exit(0)
 if "reviewfail" in text:
     verdict = "needs changes"
     fix = "Keep trying; this fake reviewer never accepts reviewfail."
@@ -474,6 +490,66 @@ class TaskTest(unittest.TestCase):
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
         self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
+
+    def test_reviewer_sees_the_goal_and_new_files(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        prompt = self.reviewer_calls()[0]["prompt"]
+        self.assertIn("Say hello. MODE:ok", prompt)  # the Goal, with its acceptance criteria
+        self.assertIn("+hello from mode ok", prompt)  # hello.txt is a new file
+
+    def test_reviewer_sees_the_whole_branch_on_a_rerun(self):
+        self.write_config(reviewer=True)
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        prompt = self.reviewer_calls()[-1]["prompt"]
+        self.assertIn("new file mode", prompt)  # hello.txt was pushed by the first run, yet is still new to the PR
+        self.assertNotIn("-hello from mode blocked", prompt)
+
+    def test_reviewer_verdict_in_markdown_bold_passes(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=boldpass")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_reviewer_that_edits_files_blocks_and_its_edit_is_not_pushed(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edit")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("changed files", self.comments(tid)[-1])
+        bare = self.root / "origins" / "jyoka/app.git"
+        pushed = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(pushed, "hello from mode ok\n")
+
+    def test_reviewer_blocked_reason_is_the_blocked_line(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 1)  # no retry for blocked
+        blocked = self.comments(tid)[-1].split("## Blocked\n\n", 1)[1].splitlines()[0]
+        self.assertIn("Need access to the staging logs.", blocked)
+        self.assertNotIn("retry", blocked)
+
+    def test_retry_that_crashes_is_not_taken_for_the_old_report(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewcrash REVIEW=needs")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.reviewer_calls()), 1)  # nothing new to review after the crash
+        self.assertIn("agent exited without a report", self.comments(tid)[-1])
 
     def test_blocked_without_changes_comments_and_opens_no_pr(self):
         tid = self.new("stuck")

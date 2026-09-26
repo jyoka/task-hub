@@ -75,7 +75,7 @@ task-hub 自身が止めたとき(実行が止まった、開始できなかっ�
 | エージェントの結果 | task-hub の処理 | カードの列 |
 |---|---|---|
 | レポートあり、ファイル変更あり、レビュー通過または reviewer なし | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
-| reviewer が 2 回目も `needs changes` または `blocked` | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント | Blocked |
+| reviewer が 2 回目も `needs changes`、または `blocked`、判定なし、ファイルを変更した(変更は取り消します) | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント | Blocked |
 | `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
 | レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
 | レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |

@@ -29,7 +29,8 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 ## 自動レビュー
 
 `~/.config/task-hub/config.ini` の `[runner] reviewer` にエージェント名を書くと、実装エージェントが終わったあと、
-PR を作る前に reviewer が同じ worktree で差分を読みます。reviewer の指示は
+PR を作る前に reviewer が同じ worktree で差分を読みます。reviewer には Issue の Goal と、ベースから分かれた時点からの
+PR 全体の差分(新しいファイルを含む)を渡します。reviewer の指示は
 [worker/REVIEW.md](../worker/REVIEW.md) です。
 
 reviewer は `.task-review.md` だけを書きます。判定は `pass` / `needs changes` / `blocked` です。
