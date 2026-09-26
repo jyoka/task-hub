@@ -58,6 +58,7 @@ DATA = Path.home() / ".local" / "share" / "task-hub"
 STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
+METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "worktree", "log", "pr"]
 GH = os.environ.get("TASK_GH", "gh")
 
@@ -65,6 +66,8 @@ GH = os.environ.get("TASK_GH", "gh")
 # ---------- output (TOON) ----------
 
 def q(v):
+    if isinstance(v, int) and not isinstance(v, bool):  # a count is a number; a string that looks like one is quoted
+        return str(v)
     s = "" if v is None else str(v)
     if s == "" or s != s.strip() or re.search(r'[,:"\\\[\]{}\n#]', s) or s in ("true", "false", "null") \
             or re.fullmatch(r"-?\d+(\.\d+)?", s):
@@ -397,6 +400,17 @@ def save_run(t):
     (RUNS / f"{t['id']}.json").write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
 
 
+def record_run(record, say=None):
+    """Append one run's outcome to METRICS. A failure here must never cost the run itself."""
+    try:
+        METRICS.parent.mkdir(parents=True, exist_ok=True)
+        with METRICS.open("a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as e:
+        if say:
+            say(f"== could not record the run in {home(METRICS)}: {e}")
+
+
 def alive(t):
     if not t.get("pid"):
         if not t.get("started"):
@@ -699,8 +713,11 @@ def run_review(t, report, say):
     return ReviewResult((wt / REVIEW_FILE).read_text())
 
 
-def review_loop(t, report, code, say):
-    """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked)."""
+def review_loop(t, report, code, say, record):
+    """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked).
+
+    Each verdict goes into record["reviews"], and record["retried"] says whether the agent was sent back.
+    """
     if not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
         return report, code, "", ""
     wt = Path(t["worktree"])
@@ -709,12 +726,14 @@ def review_loop(t, report, code, say):
         if review is None:
             return report, code, "", ""
         say(f"== reviewer verdict: {review.verdict or 'missing'}")
+        record["reviews"].append(review.verdict or "missing")
         if review.passed:
             return report, code, review.issue_section(), ""
         if attempt == 1 or not review.needs_changes:
             return report, code, review.issue_section(), review.blocked_line(retried=attempt == 1)
         feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
                               review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
+        record["retried"] = True
         (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
         code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review")
         report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
@@ -750,26 +769,27 @@ def run_replan(t, report, say):
     """Triage the agent's own Blocked: answer it from the repository, or sharpen the question for the human.
 
     It only comments; the card stays Blocked and the human decides whether to move it to Ready.
+    Returns the decision, "skipped", "ignored" (no usable result), or "" when it did not run.
     """
     name, blocked = helper_agent(t, "replanner"), AgentReport(report).blocked
     if not name or not blocked:
-        return
+        return ""
     replans = issue(t)["replans"]
     if sum("\nDecision: answered\n" in r for r in replans) >= MAX_REPLAN_ANSWERS:
         say(f"== replanner: skipped, it already answered {MAX_REPLAN_ANSWERS} times")
-        return
+        return "skipped"
     if replans and f"\nBlocked: {blocked}\n" in replans[-1]:
         say("== replanner: skipped, blocked for the same reason as last time")
-        return
+        return "skipped"
     wt = Path(t["worktree"])
     (wt / REPLAN_FILE).unlink(missing_ok=True)
     code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner")
     if undo_unstaged(wt):
         say("== replanner changed files; its edits were undone and its result is ignored")
-        return
+        return "ignored"
     if not (wt / REPLAN_FILE).exists():
         say(f"== replanner exited {code} without writing {REPLAN_FILE}")
-        return
+        return "ignored"
     text = (wt / REPLAN_FILE).read_text()
     decision = (section(text, "Decision").splitlines() or [""])[0].strip(" *`_.").lower()
     note = ""
@@ -791,9 +811,10 @@ def run_replan(t, report, say):
                    "Edit the Goal if you agree, then move the card to Ready."]
     else:
         say(f"== replanner wrote an unknown decision {decision!r}")
-        return
+        return "ignored"
     comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details]))
     say(f"== replanner decision: {decision}")
+    return decision
 
 
 # ---------- one run (called in the herdr pane or background process) ----------
@@ -815,24 +836,33 @@ def cmd_run(a):
     (wt / REVIEW_FILE).unlink(missing_ok=True)
     (wt / REPLAN_FILE).unlink(missing_ok=True)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
+    began = time.time()
+    record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
+              "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
+              "blocked_by": "", "replan": ""}
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent")
     say(f"== agent exited with code {code}")
 
     report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
     review, review_blocked = "", ""
     try:
-        report, code, review, review_blocked = review_loop(t, report, code, say)
+        report, code, review, review_blocked = review_loop(t, report, code, say, record)
         item = next((x for x in tasks() if x["id"] == t["id"]), None)
         t["item"] = item["item"] if item else ""
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
+        if status == BLOCKED:
+            record["blocked_by"] = ("no report" if not report.strip() else "review" if review_blocked
+                                    else "agent" if AgentReport(report).blocked else "no changes")
         if status == BLOCKED and not review_blocked:  # the agent's own Blocked, not one task-hub gave
             try:
-                run_replan(t, report, say)
+                record["replan"] = run_replan(t, report, say)
             except RuntimeError as e:  # the run itself is already on GitHub
+                record["replan"] = "failed"
                 say(f"== replanner failed: {e}")
     except RuntimeError as e:
         status = BLOCKED
+        record["blocked_by"] = "finish error"
         say(f"== could not finish: {e}")
         try:
             report_comment(t, blocked=f"task-hub could not finish the run: {str(e)[:300]}", report=report.strip())
@@ -841,6 +871,7 @@ def cmd_run(a):
         except RuntimeError:  # GitHub unreachable too: the next sync sees the dead run and blocks the card
             say(f"== the agent's report is kept in {home(wt / REPORT_FILE)}")
     save_run(t)  # the pid stays: once this process is gone, `alive` knows the run has ended
+    record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": status}, say)
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
 
 
@@ -964,6 +995,9 @@ def sync():
         try:
             launch(t)
         except RuntimeError as e:
+            record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""), "agent": t.get("agent", ""),
+                        "started": now(), "finished": now(), "seconds": 0, "status": BLOCKED,
+                        "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
             report_comment(t, blocked=f"could not start: {str(e)[:300]}")
             set_status(t, BLOCKED)
             lines.append(f"error: task {t['id']} could not start: {e}")
@@ -1036,6 +1070,42 @@ def cmd_log(a):
     shown = lines if a["full"] else lines[-40:]
     out(f"log: {home(t['log'])} ({len(lines)} lines)", *shown,
         *([f"help: Run `task log {t['id']} --full` for all lines"] if len(lines) > len(shown) else []))
+
+
+def cmd_stats(_):
+    """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions."""
+    runs = []
+    for line in (METRICS.read_text().splitlines() if METRICS.exists() else []):
+        try:
+            runs.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not runs:
+        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)")
+        return
+
+    def counts(name, key, values):
+        seen = {}
+        for v in values:
+            seen[v] = seen.get(v, 0) + 1
+        return table(name, [{key: k, "runs": n} for k, n in sorted(seen.items(), key=lambda kv: -kv[1])], [key, "runs"])
+
+    reviewed = [r for r in runs if r.get("reviews")]
+    retried = [r for r in reviewed if r.get("retried")]
+    by_agent = {}
+    for r in runs:
+        by_agent.setdefault(r.get("agent") or "?", []).append(r)
+    agents = [{"agent": name, "runs": len(rs), "in_review": sum(r["status"] == IN_REVIEW for r in rs),
+               "median_seconds": sorted(r.get("seconds", 0) for r in rs)[len(rs) // 2]}
+              for name, rs in sorted(by_agent.items())]
+    out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
+        *counts("outcomes", "status", [r["status"] for r in runs]),
+        *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
+        f"reviews: {len(reviewed)} reviewed runs, {len(retried)} sent back once, "
+        f"{sum(r['reviews'][-1] == 'pass' for r in retried)} of those passed after the retry",
+        *(counts("first_verdicts", "verdict", [r["reviews"][0] for r in reviewed]) if reviewed else []),
+        *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
+        *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]))
 
 
 def cmd_new(a):
@@ -1137,6 +1207,7 @@ COMMANDS = {
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True},
             'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
+    "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
 }
