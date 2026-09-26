@@ -26,7 +26,8 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 Each line looks like `event: #41 In review | <title> | <owner/repo> | pr <url>`.
 
 - **In review**: run `task show <id> --full`. Tell the user the title, the automated review verdict, the one
-  to three things from "Please review" they must check, and the PR link. No more than five lines.
+  to three things from "Please review" they must check, and the PR link. No more than five lines. A research
+  task has no PR: give the findings in a few lines instead, and say they can close it with `task done <id>`.
 - **Blocked**: run `task show <id> --full`. Say why in one line. If it ends with a `## Replanner`
   section, give its decision and its question or answer. Say what would
   unblock it.
@@ -42,13 +43,14 @@ When several events arrive together, send one message, most urgent first.
 1. Propose the tasks. For each: a title (short imperative), the repository (`owner/name`; take it
    from `git remote get-url origin` in the relevant folder, or ask), and a Goal the agent can work from
    without this chat: what to do and why, the context and decisions from the conversation, and
-   acceptance criteria as a checklist. Leave out secrets and personal data.
+   acceptance criteria as a checklist. Leave out secrets and personal data. Mark a task as research
+   when what the user wants back is an answer, a comparison, or findings rather than a code change.
 2. Say which tasks can run in parallel (at most three run at once) and which depend on another.
    Do not propose starting a task whose work needs another task's unmerged pull request; register
    it after that one is merged, or give it that branch as its Base branch.
 3. Ask once whether to register and start them. Act only on an explicit yes, and only on what you
    proposed. For each task, write its Goal to a temporary file, then run
-   `task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] --goal-file <file>`
+   `task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] [--research] --goal-file <file>`
    and `task start <id>`. If the user wants them registered but not started, skip `task start`.
 
 Tasks registered from this pane open as tabs in this herdr workspace, and each tab closes itself
