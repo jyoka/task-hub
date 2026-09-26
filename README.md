@@ -25,6 +25,8 @@ you:    review + merge the PR -> the Issue closes                           Done
 | ボード全体を見る | GitHub Project(ブラウザ、スマホアプリ) |
 | Ready のカードを自動で始める | herdr のペインで `task watch` を動かしておく |
 | 自分の対応が必要なものを見る | `task`(Ready のカードの開始も行います) |
+| 総指揮のエージェントと話すだけで済ませる | 作業中の herdr の workspace のペインで `/chief`(状況を伝え、起きたことを知らせ、話した作業をタスクにして提案する) |
+| ボードを読むだけ(何も始めない) | `task list`。最近の出来事は `task events` |
 | 今のチャットをタスクにする | エージェント内で `/task`(必要なら `/task repo is jyoka/app, use codex`) |
 | ターミナルからタスクを作る | `task new --title "..." --repo owner/name --goal "..." [--base feat/x] [--agent codex]` |
 | main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出ます |

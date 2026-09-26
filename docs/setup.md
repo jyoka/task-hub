@@ -105,15 +105,24 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
    (実行中にエージェントが自分でログインすることはできません)。
 
-## /task スキルのインストール
+## /task と /chief スキルのインストール
 
 同じスキルフォルダがすべてのエージェントで使えます。各エージェントがスキルを探す場所にリンクしてください:
 
 ```
-ln -sfn ~/.local/lib/task-hub/skills/task ~/.claude/skills/task    # Claude Code
-ln -sfn ~/.local/lib/task-hub/skills/task ~/.agents/skills/task    # Codex, Pi
-ln -s ../../.agents/skills/task ~/.kiro/skills/task                          # Kiro
+for s in task chief; do
+  ln -sfn ~/.local/lib/task-hub/skills/$s ~/.claude/skills/$s    # Claude Code
+  ln -sfn ~/.local/lib/task-hub/skills/$s ~/.agents/skills/$s    # Codex, Pi
+  ln -sfn ../../.agents/skills/$s ~/.kiro/skills/$s              # Kiro
+done
 ```
+
+`/chief` は総指揮のエージェントです。作業している herdr の workspace のペインで、エージェントを起動して `/chief` と
+打つと、ボードの状況を伝え、何かが起きるたびに知らせ(`task events --follow` を裏で見張る)、話した作業を
+タスクに分けて提案します。登録と開始は、あなたが「うん」と答えたときだけです。マージはしません。
+頼んだタスクはその workspace のタブで動き、In review になると自分で閉じます。起きたことを自分から知らせるには、
+裏で監視を続けられるエージェント(Claude Code の Monitor など)が要ります。できないエージェントでは、返答のたびに
+`task events` で新しい出来事を確かめます。
 
 ## Ready のカードを自動で始める
 
