@@ -92,9 +92,12 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
 
    ```ini
    [env]
-   ; 作業先リポジトリ = コピーするファイル(複数ならカンマ区切り)。worktree のルートに同じ名前で置きます
-   jyoka/aica_ra_a2a_poc = ~/AIprogramming PJ/aica_ra_a2a_poc/.env
+   ; 作業先リポジトリ = コピーするファイル(複数ならカンマ区切り)
+   ; そのまま書くと worktree のルートに同じ名前で、「-> 場所」を付けるとその場所に置きます
+   jyoka/aica_ra_a2a_poc = ~/AIprogramming PJ/ai-CA_RA-A2A-PoC/.env, ~/AIprogramming PJ/ai-CA_RA-A2A-PoC/voice-agent/.env -> voice-agent/.env
    ```
+
+   置き場所は worktree の中の相対パスで、外を指すもの(`../`、絶対パス)や、同じ場所を 2 回書いたものは止めます。
 
    コピーしたファイルはコミットしません。ファイルがない、またはリポジトリで追跡されている名前のときは、開始せずに
    Blocked にします。書いたリポジトリのエージェントは、そのキーで実際に API を呼べる(費用が出る)ことに注意してください。
