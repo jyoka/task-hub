@@ -175,6 +175,27 @@ class TaskTest(unittest.TestCase):
         self.origin("jyoka/app")
 
     def tearDown(self):
+        runs = self.root / ".local/state/task-hub/runs"
+        for f in runs.glob("*.json") if runs.exists() else []:
+            try:
+                pid = int(json.loads(f.read_text()).get("pid") or 0)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if not pid:
+                continue
+            try:
+                cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+                if "_run" not in cmd:
+                    continue
+                os.killpg(pid, signal.SIGTERM)
+                for _ in range(20):
+                    if subprocess.run(["ps", "-p", str(pid)], capture_output=True).returncode != 0:
+                        break
+                    time.sleep(0.05)
+                else:
+                    os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         self.tmp.cleanup()
 
     # --- helpers ---
