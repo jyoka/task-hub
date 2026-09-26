@@ -140,21 +140,30 @@ class ReviewResult:
     """Automated review verdict and feedback."""
     def __init__(self, markdown=""):
         self.markdown = markdown or ""
-        self.verdict = (section(self.markdown, "Verdict").splitlines() or [""])[0].strip().lower()
+        # models often decorate the word: **Pass**, `pass`, Pass.
+        self.verdict = (section(self.markdown, "Verdict").splitlines() or [""])[0].strip(" *`_.").lower()
         self.review = section(self.markdown, "Review")
         self.fix = section(self.markdown, "Please fix")
 
     @property
     def passed(self):
-        return self.verdict in ("pass", "mergeable", "ok")
+        return self.verdict == "pass"
 
     @property
     def needs_changes(self):
-        return self.verdict in ("needs changes", "needs change", "fix", "revise")
+        return self.verdict == "needs changes"
+
+    def blocked_line(self, retried=False):
+        """One line for the card's Blocked reason: what happened and the reviewer's own first line."""
+        first = ((self.review or self.fix).splitlines() or ["no details"])[0]
+        head = "automated review did not pass after one retry" if retried \
+            else f"automated review: {self.verdict or 'no verdict'}"
+        return f"{head}: {first}"
 
     def issue_section(self):
         verdict = self.verdict or "missing verdict"
-        body = self.review or self.fix or self.markdown.strip() or "reviewer produced no details"
+        body = self.review or self.markdown.strip() or "reviewer produced no details"
+        body += f"\n\n### Please fix\n\n{self.fix}" * bool(self.fix)
         return f"## Automated review\n\nVerdict: {verdict}\n\n{body}"
 
 
@@ -553,8 +562,25 @@ def build_prompt(t):
     return "\n".join(lines) + "\n"
 
 
-def worktree_changes(wt):
-    return run("git", "-C", wt, "status", "--porcelain").stdout.strip()
+def staged_diff(t):
+    """The whole PR as it will be pushed: all files, new ones included, from where the branch left its base.
+
+    Staging everything also gives the reviewer a baseline: any edit it makes shows up as unstaged.
+    """
+    wt = t["worktree"]
+    run("git", "-C", wt, "add", "-A", check=True)
+    fork = run("git", "-C", wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
+    return run("git", "-C", wt, "diff", "--cached", fork, "--").stdout
+
+
+def undo_unstaged(wt):
+    """Throw away edits made after staged_diff; True if there were any. Ignored files (the report files) stay."""
+    edited = run("git", "-C", wt, "diff", "--quiet").returncode != 0 or \
+        bool(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.strip())
+    if edited:
+        run("git", "-C", wt, "checkout", "-q", "--", ".", check=True)
+        run("git", "-C", wt, "clean", "-fdq", check=True)
+    return edited
 
 
 def run_agent_process(agent, prompt, wt, say, label):
@@ -579,58 +605,58 @@ def run_agent_process(agent, prompt, wt, say, label):
         return 127
 
 
-def build_review_prompt(t, report):
+def build_review_prompt(t, report, diff):
     instructions = WORKER_REVIEW.read_text().split("\n---\n", 1)[-1].strip()
-    wt = t["worktree"]
-    diff = run("git", "-C", wt, "diff", "HEAD", "--").stdout
     if len(diff) > 20000:
         diff = diff[:20000] + "\n... (diff truncated)\n"
     return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
-                      f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "# Agent report", "",
+                      f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
+                      issue(t)["body"].strip(), "", "# Agent report", "",
                       report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
 
 
 def run_review(t, report, say):
+    """The reviewer's verdict on the whole PR, or None when no reviewer is set or there is nothing to review."""
     reviewer = config()["runner"].get("reviewer", "").strip()
     if not reviewer:
         return None
     if not config().has_option("agents", reviewer):
         raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
     wt = Path(t["worktree"])
+    diff = staged_diff(t)
+    if not diff.strip():
+        return None  # finish() blocks it as "changed no files"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
-    before = worktree_changes(wt)
-    code = run_agent_process(reviewer, build_review_prompt(t, report), wt, say, "reviewer")
-    after = worktree_changes(wt)
-    if after != before:
-        return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; reviewers must only inspect the worktree."), code
+    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer")
+    if undo_unstaged(wt):
+        return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
+                            "Reviewers must only inspect the worktree.")
     if not (wt / REVIEW_FILE).exists():
-        return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\nReviewer exited {code} without writing {REVIEW_FILE}."), code
-    return ReviewResult((wt / REVIEW_FILE).read_text()), code
+        return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\nReviewer exited {code} without writing {REVIEW_FILE}.")
+    return ReviewResult((wt / REVIEW_FILE).read_text())
 
 
 def review_loop(t, report, code, say):
-    if AgentReport(report).blocked or not worktree_changes(t["worktree"]):
+    """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked)."""
+    if not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
         return report, code, "", ""
-    review = None
+    wt = Path(t["worktree"])
     for attempt in range(2):
-        result = run_review(t, report, say)
-        if result is None:
+        review = run_review(t, report, say)
+        if review is None:
             return report, code, "", ""
-        review, review_code = result
         say(f"== reviewer verdict: {review.verdict or 'missing'}")
         if review.passed:
             return report, code, review.issue_section(), ""
-        if attempt == 0 and review.needs_changes:
-            feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
-                                  review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
-            code = run_agent_process(t["agent"], feedback, Path(t["worktree"]), say, "agent retry after review")
-            report = (Path(t["worktree"]) / REPORT_FILE).read_text() \
-                if (Path(t["worktree"]) / REPORT_FILE).exists() else ""
-            if AgentReport(report).blocked:
-                return report, code, review.issue_section(), ""
-            continue
-        return report, code, review.issue_section(), "automated review did not pass after one retry"
-    return report, code, review.issue_section() if review else "", "automated review did not pass"
+        if attempt == 1 or not review.needs_changes:
+            return report, code, review.issue_section(), review.blocked_line(retried=attempt == 1)
+        feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
+                              review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
+        (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
+        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review")
+        report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
+        if not report.strip() or AgentReport(report).blocked:
+            return report, code, review.issue_section(), ""
 
 
 # ---------- one run (called in the herdr pane or background process) ----------
