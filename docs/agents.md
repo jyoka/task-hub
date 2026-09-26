@@ -45,6 +45,27 @@ PR のファイルを書き換えた場合は元に戻して Blocked にしま�
 `needs changes` の場合、task-hub は 1 回だけ実装エージェントに自動で差し戻します。2 回目も通らなければ
 ドラフト PR を作り、カードを Blocked にします。マージの判断は今までどおり人が行います。
 
+## Blocked の仕分け(replanner)
+
+`[runner] replanner` に `agent` かエージェント名を書くと、エージェント自身が `## Blocked` を書いて止まったとき、
+replanner がその理由を仕分けて Issue にコメントします(指示は [worker/REPLAN.md](../worker/REPLAN.md))。
+task-hub 自身が付けた Blocked(開始の失敗、レポートなし、自動レビューの不合格)は対象外です。
+
+| 判定 | コメント | カード |
+|---|---|---|
+| `answered` | リポジトリにある答えと、根拠(`path:行番号` と、その行からの引用) | Blocked のまま。正しければ Ready に移すと、次の実行に「Replanner notes」として渡ります |
+| `human` | あなたへの質問を 1 行に | Blocked のまま |
+| `goal-conflict` | Goal の修正案 | Blocked のまま。適用はあなたが Goal を書き換えて行います |
+
+でっち上げを防ぐため、次をコードで保証しています:
+
+- `answered` の根拠は task-hub が 1 行ずつ確かめます。ファイルがない、行がない、引用がその行にない、のどれかなら
+  答えを捨てて `human` として質問だけを載せます
+- Goal の本文は書き換えません。答えは `<!-- task-hub replan -->` 付きのコメントに残します
+- `answered` は 1 タスク 2 回まで。前回の仕分けと同じ理由でまた Blocked になったら、仕分けをせずにあなたに回します
+- replanner がファイルを書き換えたら、元に戻して結果を捨てます
+- カードを Ready に戻すのは常にあなたです。タスクの作成や分割もしません
+
 ## エージェントの変更と追加
 
 `~/.config/task-hub/config.ini` の `[agents]` にコマンドを書きます。同じ名前の組み込みコマンドを上書きするか、
