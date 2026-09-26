@@ -92,7 +92,7 @@ Decision: answered
 ## 実行終了時の処理
 
 task-hub は worktree の中で git が無視しないファイルをすべてコミットします。`.task-report.md`、`.task-review.md`、
-Python の `__pycache__/` と `*.pyc` は、リポジトリに `.gitignore` がなくてもコミットしません(clone の `.git/info/exclude` に
+Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたファイルは、リポジトリに `.gitignore` がなくてもコミットしません(clone の `.git/info/exclude` に
 書きます。すでに追跡されているファイルには影響しません)。
 
 `[runner] reviewer` が設定されている場合、task-hub は PR を作る前に reviewer を実行します。reviewer が
