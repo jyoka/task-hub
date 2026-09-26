@@ -21,7 +21,8 @@
 ## 起きたことを受け取る(events.jsonl)
 
 task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
-このファイルを見張れば、何かが起きた瞬間に分かります。窓口のエージェントや通知は、これを読む想定です。
+このファイルを見張れば、何かが起きた瞬間に分かります。`task events` は最近の 20 件を、`task events --follow` は
+新しい出来事を起きるたびに 1 行ずつ出します。窓口のエージェント(`/desk`)は、後者を裏で見張っています。
 
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}
