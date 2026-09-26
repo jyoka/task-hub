@@ -144,9 +144,11 @@ if "You triage one blocked task-hub run" in prompt:  # used as the replanner; RE
                         "## Evidence\n\n- README.md:1: `STRIPE=sk_test_123`\n",
            "human": "## Decision\n\nhuman\n\n## For the human\n\nCould you add the Stripe test key to [env]?\n",
            "conflict": "## Decision\n\ngoal-conflict\n\n## Proposed goal change\n\nDrop the hello requirement.\n",
-           "edits": None}[kind]
+           "edits": None, "stagededits": None}[kind]
     if out is None:
         Path("README.md").write_text("changed by the replanner\n")
+        if kind == "stagededits":
+            subprocess.run(["git", "add", "README.md"], check=True)
         out = "## Decision\n\nhuman\n\n## For the human\n\nx\n"
     Path(".task-replan.md").write_text(out)
     sys.exit(0)
@@ -209,6 +211,18 @@ if forced == ["boldpass"]:
     sys.exit(0)
 if forced == ["edit"]:  # a reviewer that breaks the rule and edits a file the agent already changed
     Path("hello.txt").write_text(text + "reviewer was here\n")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
+    sys.exit(0)
+if forced in (["stageedit"], ["stagenew"], ["commit"]):  # breaks the rule with git, so a plain diff misses it
+    import subprocess
+    if forced == ["stagenew"]:
+        Path("sneaky.txt").write_text("added by the reviewer\n")
+        subprocess.run(["git", "add", "sneaky.txt"], check=True)
+    else:
+        Path("hello.txt").write_text(text + "reviewer was here\n")
+        subprocess.run(["git", "add", "hello.txt"], check=True)
+        if forced == ["commit"]:
+            subprocess.run(["git", "commit", "-qm", "reviewer's own commit"], check=True)
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
     sys.exit(0)
 if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
@@ -763,6 +777,17 @@ class TaskTest(unittest.TestCase):
         wt = self.root / ".local/share/task-hub/worktrees" / tid
         self.assertEqual((wt / "README.md").read_text(), "app\n")
 
+    def test_replanner_that_stages_its_edit_is_ignored_too(self):
+        self.write_config(replanner="agent")
+        tid = self.new("blocked REPLAN=stagededits")
+        self.task("start", tid)
+        self.wait(tid)
+        self.wait_for(lambda: "replanner changed files" in self.task("log", tid, "--full"))
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        self.assertEqual((wt / "README.md").read_text(), "app\n")
+        status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("README.md", status)
+
     def test_no_replanner_for_blocks_task_hub_gave(self):
         self.write_config(replanner="agent")
         tid = self.new("noreport REPLAN=answered")
@@ -1044,6 +1069,25 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn(f"task/{tid}", self.local_branches())
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))  # the PR's branch stays
 
+    def test_cleanup_that_fails_keeps_the_record_and_is_retried(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        run_file = self.root / ".local/state/task-hub/runs" / f"{tid}.json"
+        wt.chmod(0o555)  # the worktree cannot be removed right now
+        try:
+            self.task("done", tid)
+            self.assertTrue(run_file.exists())  # not forgotten
+            self.assertIn(f"task/{tid}", self.local_branches())
+        finally:
+            wt.chmod(0o755)
+        out = self.task()  # the next check tries again
+        self.assertFalse(run_file.exists())
+        self.assertFalse(wt.exists())
+        self.assertNotIn(f"task/{tid}", self.local_branches())
+        self.assertIn("cleaned up", out)
+
     def test_blocked_task_keeps_its_local_branch_for_the_rerun(self):
         tid = self.new("stuck")
         self.task("start", tid)
@@ -1112,6 +1156,22 @@ class TaskTest(unittest.TestCase):
         self.assertIn("adversarial reviewer", calls[1]["prompt"])
         self.assertEqual(self.reviewer_calls(), [])
         self.assertIn("reviewed by the agent itself", self.comments(tid)[-1])
+
+    def test_reviewer_cannot_slip_changes_in_with_git(self):
+        self.write_config(reviewer=True)
+        bare = self.root / "origins" / "jyoka/app.git"
+        for kind in ("stageedit", "stagenew", "commit"):
+            tid = self.new(f"ok REVIEW={kind}")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked", kind)
+            self.assertIn("changed files", self.comments(tid)[-1], kind)
+            pushed = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                                    capture_output=True, text=True).stdout
+            self.assertEqual(pushed, "hello from mode ok\n", kind)
+            self.assertNotIn("sneaky.txt", self.origin_files(f"task/{tid}"), kind)
+            log = subprocess.run(["git", "-C", str(bare), "log", "--format=%s", f"task/{tid}"],
+                                 capture_output=True, text=True).stdout
+            self.assertNotIn("reviewer's own commit", log, kind)
 
     def test_test_leftovers_of_the_reviewer_are_removed_not_blocked(self):
         self.write_config(reviewer=True)
