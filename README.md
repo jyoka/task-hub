@@ -30,6 +30,7 @@ you:    review + merge the PR -> the Issue closes                           Done
 | main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出ます |
 | タスクを承認してエージェントに作業させる | カードを Ready に移す、または `task start`(一覧から選択)/ `task start 12` |
 | このタスクだけ別のエージェントを使う | カードの Agent 欄を書き換える、または `task start --agent kiro` |
+| PR 前に自動レビューさせる | 設定の `[runner] reviewer` にレビュー用エージェントを書く |
 | 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |
 | レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12` |
 | 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |

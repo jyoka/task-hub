@@ -131,7 +131,9 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
-if mode not in ("nochange", "stuck"):
+if mode == "reviewfix" and "# Automated review feedback" in prompt:
+    Path("hello.txt").write_text("fixed after review\n")
+elif mode not in ("nochange", "stuck"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
@@ -145,6 +147,31 @@ if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
     import json
     db = json.load(open(os.environ["TASK_TEST_GH_DB"])); db["down"] = True
     json.dump(db, open(os.environ["TASK_TEST_GH_DB"], "w"))
+'''
+
+FAKE_REVIEWER = r'''#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+prompt = sys.argv[-1]
+with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+text = Path("hello.txt").read_text() if Path("hello.txt").exists() else ""
+if "reviewfail" in text:
+    verdict = "needs changes"
+    fix = "Keep trying; this fake reviewer never accepts reviewfail."
+elif "reviewfix" in text:
+    verdict = "needs changes"
+    fix = "Change hello.txt so it says fixed after review."
+elif "fixed after review" in text or "hello from" in text:
+    verdict = "pass"
+    fix = ""
+else:
+    verdict = "blocked"
+    fix = "hello.txt was missing."
+body = f"## Verdict\n\n{verdict}\n\n## Review\n\nchecked hello.txt\n"
+if fix:
+    body += f"\n## Please fix\n\n{fix}\n"
+Path(".task-review.md").write_text(body)
 '''
 
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
@@ -163,13 +190,15 @@ class TaskTest(unittest.TestCase):
                                  {"id": "F_agent", "name": "Agent", "type": "ProjectV2Field", "dataType": "TEXT"},
                                  {"id": "F_base", "name": "Base branch", "type": "ProjectV2Field", "dataType": "TEXT"}]})
         self.calls = root / "agent-calls.txt"
-        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT)):
+        self.review_calls = root / "review-calls.txt"
+        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
                   "GIT_COMMITTER_EMAIL": "t@e"}
         self.env = {**os.environ, **git_id, "HOME": str(root), "TASK_GH": str(root / "gh"), "TASK_HERDR": "0",
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
+                    "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
         self.write_config()
         self.origin("jyoka/app")
@@ -200,11 +229,13 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra=""):
+    def write_config(self, extra="", reviewer=False):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n\n"
-                       f"[agents]\nfake = {self.root}/agent {{prompt}}\nother = {self.root}/agent --other {{prompt}}\n"
+        cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
+                       + ("reviewer = reviewer\n" if reviewer else "") + "\n"
+                       f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
+                       f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
 
     def save_db(self, db):
@@ -275,6 +306,9 @@ class TaskTest(unittest.TestCase):
 
     def agent_calls(self):
         return [eval(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def reviewer_calls(self):
+        return [eval(line) for line in self.review_calls.read_text().splitlines()] if self.review_calls.exists() else []
 
     def run_file(self, tid):
         return self.root / ".local/state/task-hub/runs" / f"{tid}.json"
@@ -416,6 +450,30 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("## Blocked\n\nNeed the Stripe test key.", self.comments(tid)[-1])
+
+    def test_automated_review_can_send_one_retry_before_in_review(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewfix")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertIn("# Automated review feedback", self.agent_calls()[1]["prompt"])
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertFalse(self.pr(tid)["isDraft"])
+        self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
+        self.assertIn("## Automated review", self.comments(tid)[-1])
+        self.assertIn("Verdict: pass", self.comments(tid)[-1])
+
+    def test_automated_review_blocks_after_one_failed_retry(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewfail")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertTrue(self.pr(tid)["isDraft"])
+        self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
+        self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
 
     def test_blocked_without_changes_comments_and_opens_no_pr(self):
         tid = self.new("stuck")
