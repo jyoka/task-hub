@@ -5,6 +5,8 @@
 - The agent is a fake CLI whose behaviour is chosen by a MODE word in the task's goal.
 - herdr is disabled (TASK_HERDR=0): runs use the background-process path.
 """
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -111,7 +113,10 @@ elif cmd == ["pr", "ready"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["isDraft"] = "--undo" in a
 else:
     fail(f"fake gh: unsupported {a}")
-json.dump(db, open(path, "w"))
+tmp = f"{path}.{os.getpid()}.tmp"  # write, then rename: a reader never sees a half-written file
+with open(tmp, "w") as f:
+    json.dump(db, f)
+os.replace(tmp, path)
 if out is not None:
     print(json.dumps(out))
 '''
@@ -170,14 +175,17 @@ if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
 if mode != "noreport":
     Path(".task-report.md").write_text(report)
+def set_gh(key):  # under the fake gh's lock, like every other writer
+    import fcntl, json
+    path = os.environ["TASK_TEST_GH_DB"]
+    with open(path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        db = json.load(open(path)); db[key] = True
+        Path(path).write_text(json.dumps(db))
 if mode == "prfail":  # GitHub is up, but opening the PR is refused
-    import json
-    db = json.load(open(os.environ["TASK_TEST_GH_DB"])); db["pr_create_fails"] = True
-    json.dump(db, open(os.environ["TASK_TEST_GH_DB"], "w"))
+    set_gh("pr_create_fails")
 if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
-    import json
-    db = json.load(open(os.environ["TASK_TEST_GH_DB"])); db["down"] = True
-    json.dump(db, open(os.environ["TASK_TEST_GH_DB"], "w"))
+    set_gh("down")
 '''
 
 FAKE_REVIEWER = r'''#!/usr/bin/env python3
@@ -288,11 +296,20 @@ class TaskTest(unittest.TestCase):
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
 
+    @contextlib.contextmanager
+    def db_lock(self):
+        """The fake gh's lock: background runs write the fake GitHub while a test reads or edits it."""
+        with open(f"{self.db}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
     def save_db(self, db):
-        self.db.write_text(json.dumps(db))
+        with self.db_lock():
+            self.db.write_text(json.dumps(db))
 
     def gh(self):
-        return json.loads(self.db.read_text())
+        with self.db_lock():
+            return json.loads(self.db.read_text())
 
     def origin(self, repo):
         bare = self.root / "origins" / f"{repo}.git"
@@ -318,10 +335,11 @@ class TaskTest(unittest.TestCase):
         return self.gh()["items"][f"PVTI_{tid}"]["values"].get("status")
 
     def move(self, tid, status):
-        """What the human does by dragging the card on GitHub."""
-        db = self.gh()
-        db["items"][f"PVTI_{tid}"]["values"]["status"] = status
-        self.save_db(db)
+        """What the human does by dragging the card on GitHub. One locked edit: a run may still be commenting."""
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["items"][f"PVTI_{tid}"]["values"]["status"] = status
+            self.db.write_text(json.dumps(db))
 
     def comments(self, tid):
         return [c["body"] for c in self.gh()["issues"][tid]["comments"]]
