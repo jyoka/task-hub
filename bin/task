@@ -723,6 +723,18 @@ def staged_diff(t):
     return run("git", "-C", wt, "diff", "--cached", fork, "--").stdout
 
 
+def pr_size(t, wt):
+    """(files, lines added, lines removed) of the whole branch since it left its base: what the PR asks you to review."""
+    fork = run("git", "-C", wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip()
+    files = added = removed = 0
+    for line in run("git", "-C", wt, "diff", "--numstat", fork, "HEAD").stdout.splitlines() if fork else []:
+        plus, minus, _ = line.split("\t", 2)
+        files += 1
+        added += int(plus) if plus.isdigit() else 0  # "-" for a binary file
+        removed += int(minus) if minus.isdigit() else 0
+    return {"files": files, "added": added, "removed": removed}
+
+
 def snapshot(wt):
     """Everything in the worktree, staged, as (tree, HEAD): what a read-only helper must leave as it found it."""
     run("git", "-C", wt, "add", "-A", check=True)
@@ -944,6 +956,7 @@ def cmd_run(a):
         item = next((x for x in tasks() if x["id"] == t["id"]), None)
         t["item"] = item["item"] if item else ""
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
+        record.update(pr_size(t, wt))
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
         if status == BLOCKED:
             record["blocked_by"] = ("no report" if not report.strip() else "review" if review_blocked
@@ -1269,6 +1282,10 @@ def cmd_stats(_):
     agents = [{"agent": name, "runs": len(rs), "in_review": sum(r["status"] == IN_REVIEW for r in rs),
                "median_seconds": sorted(r.get("seconds", 0) for r in rs)[len(rs) // 2]}
               for name, rs in sorted(by_agent.items())]
+    sized = sorted((r for r in runs if r.get("files")), key=lambda r: -(r["added"] + r["removed"]))
+    largest = [{"id": r["id"], "title": r["title"], "lines": r["added"] + r["removed"], "files": r["files"]}
+               for r in sized[:3]]
+    sizes = sorted(r["added"] + r["removed"] for r in sized)
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
@@ -1276,7 +1293,10 @@ def cmd_stats(_):
         f"{sum(r['reviews'][-1] == 'pass' for r in retried)} of those passed after the retry",
         *(counts("first_verdicts", "verdict", [r["reviews"][0] for r in reviewed]) if reviewed else []),
         *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
-        *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]))
+        *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
+        *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
+           f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
+           *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []))
 
 
 def cmd_new(a):
