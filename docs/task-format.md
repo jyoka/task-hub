@@ -105,7 +105,7 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 | `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
 | レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
 | レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |
-| レポートあり、変更なし | push せず、PR も作成しない。レポートをコメント | Blocked |
+| レポートあり、変更なし | push せず、PR も作成しない。レポートをコメント | Blocked(`research` ラベルのタスクは In review) |
 
 再実行(Blocked のカードを Ready に戻す、または `task start`)は同じブランチで作業を続け、同じ PR を更新します。
 最新の実行で使われたプロンプトそのものは `~/.local/share/task-hub/prompts/<番号>.md` に保存されます。
