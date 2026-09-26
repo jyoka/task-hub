@@ -714,7 +714,7 @@ class TaskTest(unittest.TestCase):
         self.wait_for(lambda: self.replans(tid))
         replan = self.replans(tid)[-1]
         self.assertIn("Blocked: Need the Stripe test key.\nDecision: answered", replan)
-        self.assertIn("## Replanner", self.task("show", tid, "--full"))  # what the /desk agent reads
+        self.assertIn("## Replanner", self.task("show", tid, "--full"))  # what the /chief agent reads
         self.assertIn("README.md:1", replan)
         self.assertEqual(self.status(tid), "Blocked")  # the human decides whether to re-run
         self.move(tid, "Ready")
