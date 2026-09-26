@@ -529,6 +529,38 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
         self.assertFalse(self.run_file(tid).exists())
 
+    def test_wait_for_merge_column_is_optional_but_watched_when_present(self):
+        db = self.gh()
+        field = next(f for f in db["fields"] if f["name"] == "Status")
+        field["options"].append({"id": "O_wait", "name": "wait for merge"})
+        self.save_db(db)
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("start", tid)
+        self.wait(tid)
+        self.move(tid, "wait for merge")
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
+        self.save_db(db)
+        self.assertIn("Done", self.task())
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+
+    def test_wait_for_merge_without_base_branch_is_not_rest_polled(self):
+        db = self.gh()
+        field = next(f for f in db["fields"] if f["name"] == "Status")
+        field["options"].append({"id": "O_wait", "name": "wait for merge"})
+        self.save_db(db)
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait(tid)
+        self.move(tid, "wait for merge")
+        db = self.gh()
+        db["broken_repos"] = ["jyoka/app"]  # REST/PR calls would fail if the watcher ran
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "wait for merge")
+
     def test_rerun_after_base_branch_changed_or_deleted_is_blocked_with_reason(self):
         self.push_branch("feat/x", "feat.txt")
         self.push_branch("feat/y", "y.txt")
