@@ -135,7 +135,8 @@ push してカードを Blocked にします。または、ペインを閉じま
 ## タスクを取り消す
 
 Issue を閉じるか、`task done <番号>` を実行します。そのタスクの herdr のタブ(またはタスク専用の workspace)を閉じ、worktree を削除し、
-カードを Done にします。ブランチと PR は GitHub に残ります。必要であれば、GitHub 上で PR をクローズしてください。
+カードを Done にします。task-hub の clone の中のブランチ `task/<番号>` も消しますが、GitHub のブランチと PR は残ります。
+必要であれば、GitHub 上で PR をクローズしてください。
 
 ## 同時実行数の上限を変更する
 
@@ -143,5 +144,7 @@ Issue を閉じるか、`task done <番号>` を実行します。そのタス�
 
 ## ディスクの整理
 
-worktree はタスクが完了すると削除されます。`~/.local/share/task-hub/repos/` 内のクローンは次の実行を速くするために
-残されており、いつでも削除できます。
+worktree と、clone の中のブランチ `task/<番号>` は、タスクが完了すると削除されます(0.6 より前に完了したタスクの
+ブランチは残っていることがあります。`git -C ~/.local/share/task-hub/repos/<owner>/<name> branch --list 'task/*'` で
+確かめ、完了済みのものは `git branch -D` で消せます)。`~/.local/share/task-hub/repos/` 内のクローンは次の実行を
+速くするために残されており、いつでも削除できます。
