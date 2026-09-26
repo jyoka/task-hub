@@ -134,6 +134,10 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
+if mode == "env":  # proves the agent got the env file: writes what it read
+    Path("hello.txt").write_text("key seen: " + Path(".env").read_text().strip() + "\n")
+    Path(".task-report.md").write_text(report)
+    sys.exit(0)
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
     Path("__pycache__").mkdir(exist_ok=True)
     Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
@@ -518,6 +522,28 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(tid), "Blocked")
         self.assertEqual(self.agent_calls(), [])
         self.assertIn('unknown reviewer "nosuch"', self.comments(tid)[-1])
+
+    def test_env_files_are_copied_into_the_worktree_but_never_committed(self):
+        secret = self.root / "my checkout" / ".env"  # a path with a space, like "AIprogramming PJ"
+        secret.parent.mkdir()
+        secret.write_text("API_KEY=test-123\n")
+        self.write_config(f"\n[env]\nJyoka/App = {secret}\n")
+        tid = self.new("env")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertNotIn(".env", self.origin_files(f"task/{tid}"))
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "key seen: API_KEY=test-123\n")
+
+    def test_missing_env_file_stops_the_start(self):
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("is missing", self.comments(tid)[-1])
 
     def test_python_bytecode_is_never_committed(self):
         tid = self.new("pycache")

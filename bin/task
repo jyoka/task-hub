@@ -453,15 +453,35 @@ def base_ref(t, git_dir):
         or "origin/main"
 
 
-def ensure_internal_excludes(wt):
+def ensure_internal_excludes(wt, extra=()):
     exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
     exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
     existing_exclude = exclude.read_text() if exclude.exists() else ""
-    missing_excludes = [name for name in NEVER_COMMIT if name not in existing_exclude.splitlines()]
+    missing_excludes = [name for name in [*NEVER_COMMIT, *extra] if name not in existing_exclude.splitlines()]
     if missing_excludes:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a") as f:
             f.write("\n" + "\n".join(missing_excludes) + "\n")
+
+
+def env_files(repo):
+    """The files that [env] in the config copies into this repo's worktrees (secrets its tests need, like .env)."""
+    c = config()
+    value = c.get("env", repo, fallback="") if c.has_section("env") else ""  # keys are matched without regard to case
+    return [Path(p.strip()).expanduser() for p in value.split(",") if p.strip()]
+
+
+def copy_env_files(t, wt):
+    """Copy, never link: the agent may change its copy, not your checkout's. Never committed."""
+    files = env_files(t["repo"])
+    for src in files:
+        if not src.is_file():
+            raise RuntimeError(f"env file {src} for {t['repo']} is missing; fix [env] in {home(CONFIG)}")
+        if run("git", "-C", wt, "ls-files", "--error-unmatch", src.name).returncode == 0:
+            raise RuntimeError(f"env file {src.name} is tracked in {t['repo']}; copying it would change the PR")
+    for src in files:
+        shutil.copy2(src, wt / src.name)
+    ensure_internal_excludes(wt, [src.name for src in files])
 
 
 def ensure_worktree(t):
@@ -512,6 +532,7 @@ def launch(t):
     if reviewer not in ("", "agent") and not config().has_option("agents", reviewer):  # found now, not after the agent's work
         raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
     wt = ensure_worktree(t)
+    copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
