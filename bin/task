@@ -178,7 +178,7 @@ class AgentReport:
             self.blocked = (section(self.markdown, "Blocked").splitlines() or [""])[0]
             self.report = section(self.markdown, "Report")
             self.review = section(self.markdown, "Please review")
-            self.auto_review = auto_review or section(self.markdown, "Automated review")
+            self.auto_review = auto_review or ""  # only task-hub's reviewer writes this, never the agent's report
         else:
             self.blocked = blocked or ""
             self.report = report or ""
@@ -508,6 +508,9 @@ def launch(t):
     t["agent"] = t.get("agent") or config()["runner"]["agent"]
     if not config().has_option("agents", t["agent"]):  # a typo on one card must not stop the others
         raise RuntimeError(f'unknown agent "{t["agent"]}" on the card')
+    reviewer = config()["runner"].get("reviewer", "").strip()
+    if reviewer not in ("", "agent") and not config().has_option("agents", reviewer):  # found now, not after the agent's work
+        raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
     wt = ensure_worktree(t)
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
