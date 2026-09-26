@@ -144,7 +144,8 @@ Issue を閉じるか、`task done <番号>` を実行します。そのタス�
 
 ## ディスクの整理
 
-worktree と、clone の中のブランチ `task/<番号>` は、タスクが完了すると削除されます(0.6 より前に完了したタスクの
+worktree と、clone の中のブランチ `task/<番号>` は、タスクが完了すると削除されます。消せなかったときは
+`cleanup: task <番号>: ...; trying again at the next check` と表示し、次の確認でやり直します(0.6 より前に完了したタスクの
 ブランチは残っていることがあります。`git -C ~/.local/share/task-hub/repos/<owner>/<name> branch --list 'task/*'` で
 確かめ、完了済みのものは `git branch -D` で消せます)。`~/.local/share/task-hub/repos/` 内のクローンは次の実行を
 速くするために残されており、いつでも削除できます。
