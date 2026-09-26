@@ -31,6 +31,7 @@ you:    review + merge the PR -> the Issue closes                           Done
 | タスクを承認してエージェントに作業させる | カードを Ready に移す、または `task start`(一覧から選択)/ `task start 12` |
 | このタスクだけ別のエージェントを使う | カードの Agent 欄を書き換える、または `task start --agent kiro` |
 | PR 前に自動レビューさせる | 設定の `[runner] reviewer` に `agent`(タスクと同じエージェント)かエージェント名を書く |
+| 自動レビューや Blocked の傾向を見る | `task stats`(このマシンで終わった実行の集計) |
 | 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |
 | レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12` |
 | 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |
