@@ -1130,13 +1130,16 @@ def cmd_events(a):
 
     --follow is for an agent's background monitor (the /chief skill): every line it prints is one thing to react to.
     """
+    only = {e.strip().lower() for e in (a["only"] or "").split(",") if e.strip()}
+    wanted = lambda e: not only or e.get("event", "").lower() in only
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
-        events = [json.loads(line) for line in recent if line.startswith("{")]
+        events = [e for e in (json.loads(line) for line in recent if line.startswith("{")) if wanted(e)]
         out(*([event_line(e) for e in events] or [f"events: none yet in {home(EVENTS)}"]))
         return
     pos = EVENTS.stat().st_size if EVENTS.exists() else 0  # only what happens from now on
-    print(f"events: following {home(EVENTS)} (Ctrl-C to stop)", flush=True)
+    # stderr: a monitor wakes its agent for each stdout line, and this one is not an event
+    print(f"events: following {home(EVENTS)} (Ctrl-C to stop)", file=sys.stderr, flush=True)
     try:
         while True:
             if EVENTS.exists() and EVENTS.stat().st_size > pos:
@@ -1147,7 +1150,9 @@ def cmd_events(a):
                 pos += len(whole)
                 for line in whole.decode(errors="replace").splitlines():
                     try:
-                        print(event_line(json.loads(line)), flush=True)
+                        e = json.loads(line)
+                        if wanted(e):
+                            print(event_line(e), flush=True)
                     except (ValueError, KeyError):
                         continue
             time.sleep(1)
@@ -1337,8 +1342,9 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
-    "events": (cmd_events, [], {"follow": False},
-               "task events [--follow]  # what task-hub did lately; --follow prints each new event as it happens"),
+    "events": (cmd_events, [], {"follow": False, "only": True},
+               "task events [--follow] [--only \"In review,Blocked\"]  # what task-hub did lately; "
+               "--follow prints each new event as it happens"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),

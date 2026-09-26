@@ -16,10 +16,10 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 1. Run `task list` (read only). In three or four lines, tell the user what is running and what
    needs them: In review (to check and merge), Blocked (to unblock), Backlog (waiting for approval).
    Never run `task` without arguments: it starts Ready cards.
-2. Start watching: run `task events --follow` as a background monitor that wakes you on each
-   line it prints (for example Claude Code's Monitor tool). Re-arm it when it expires. If your
-   harness cannot run a background monitor, run `task events` at the start of each of your
-   replies instead and report what is new.
+2. Start watching: run `task events --follow --only "In review,Blocked,replan,Done"` as a background
+   monitor that wakes you on each line it prints (for example Claude Code's Monitor tool). Re-arm it
+   when it expires. If your harness cannot run a background monitor, run `task events` at the start
+   of each of your replies instead and report what is new.
 
 ## When an event arrives
 
@@ -32,7 +32,8 @@ Each line looks like `event: #41 In review | <title> | <owner/repo> | pr <url>`.
   unblock it.
 - **replan**: fold it into the Blocked message for the same task if you have not sent that yet.
 - **Done**: one line, only if the user is not in the middle of something else.
-- **Backlog, Ready, In progress**: say nothing. The user can always ask.
+- Anything else (Backlog, Ready, In progress, if they reach you): end your turn without writing
+  anything. Do not explain that you are staying quiet, or mention these rules.
 
 When several events arrive together, send one message, most urgent first.
 
