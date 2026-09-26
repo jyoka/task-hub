@@ -34,6 +34,9 @@ BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
 TEXT_FIELDS = ["Target repo", "Agent", "Base branch"]  # "Repo" is a reserved field name on GitHub
 REPORT_FILE = ".task-report.md"
 REVIEW_FILE = ".task-review.md"
+# never committed: our own files, and Python bytecode that test runs leave in repos without a .gitignore
+# (it reached a PR in jyoka/tasks#43)
+NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
 WATCH_SECONDS = 60
 DEFAULT_AGENTS = {
@@ -454,7 +457,7 @@ def ensure_internal_excludes(wt):
     exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
     exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
     existing_exclude = exclude.read_text() if exclude.exists() else ""
-    missing_excludes = [name for name in (REPORT_FILE, REVIEW_FILE) if name not in existing_exclude]
+    missing_excludes = [name for name in NEVER_COMMIT if name not in existing_exclude.splitlines()]
     if missing_excludes:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a") as f:

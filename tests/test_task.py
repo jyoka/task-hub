@@ -134,6 +134,10 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
+if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
+    Path("__pycache__").mkdir(exist_ok=True)
+    Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
+    Path("stray.pyc").write_bytes(b"\x00bytecode")
 if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the retry dies without a report
     sys.exit(1)
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
@@ -497,6 +501,15 @@ class TaskTest(unittest.TestCase):
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
         self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
+
+    def test_python_bytecode_is_never_committed(self):
+        tid = self.new("pycache")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        files = self.origin_files(f"task/{tid}")
+        self.assertIn("hello.txt", files)
+        self.assertNotIn("__pycache__", files)
+        self.assertNotIn("stray.pyc", files)
 
     def test_reviewer_sees_the_goal_and_new_files(self):
         self.write_config(reviewer=True)

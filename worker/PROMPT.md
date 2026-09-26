@@ -20,8 +20,9 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    after you finish, from whatever files you changed.
    task-hub commits **every file in the worktree** that git does not ignore; the git index
    (`git add`, `git rm --cached`) makes no difference. So delete anything you do not want in the
-   pull request, such as files your test run generated (`__pycache__/`, coverage output), or,
-   if the Goal allows it, add them to `.gitignore`.
+   pull request, such as files your test run generated (coverage output and the like; Python
+   `__pycache__/` and `*.pyc` are already ignored by task-hub), or, if the Goal allows it, add them
+   to `.gitignore`.
 5. Before you finish, write the file `.task-report.md` in the current directory (the worktree
    root). It is required: without it the task counts as failed. task-hub reads it and never
    commits it, so it does not count as a changed file and needs no mention in the report.
