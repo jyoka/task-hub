@@ -34,6 +34,7 @@ you:    review + merge the PR -> the Issue closes                           Done
 | 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |
 | レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12` |
 | 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |
+| Blocked の理由を自動で仕分けさせる | 設定の `[runner] replanner` に `agent` かエージェント名を書く(コメントだけで、Ready に戻すのはあなた) |
 | ブロックされたタスクを再実行する | Issue に答えを書き足してカードを Ready に戻す(同じブランチと PR で続行します) |
 | タスクをクローズまたはキャンセルする | Issue を閉じる、または `task done 12` |
 

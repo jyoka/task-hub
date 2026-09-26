@@ -122,6 +122,22 @@ from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
+    kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
+    out = {"answered": "## Decision\n\nanswered\n\n## Answer\n\nThe app is called app, see the README.\n\n"
+                       "## Evidence\n\n- README.md:1: `app`\n",
+           "invented": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                       "## Evidence\n\n- config/keys.md:3: `STRIPE=sk_test_123`\n",
+           "misquoted": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                        "## Evidence\n\n- README.md:1: `STRIPE=sk_test_123`\n",
+           "human": "## Decision\n\nhuman\n\n## For the human\n\nCould you add the Stripe test key to [env]?\n",
+           "conflict": "## Decision\n\ngoal-conflict\n\n## Proposed goal change\n\nDrop the hello requirement.\n",
+           "edits": None}[kind]
+    if out is None:
+        Path("README.md").write_text("changed by the replanner\n")
+        out = "## Decision\n\nhuman\n\n## For the human\n\nx\n"
+    Path(".task-replan.md").write_text(out)
+    sys.exit(0)
 if "adversarial reviewer of one completed task-hub run" in prompt:  # used as its own reviewer
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nreviewed by the agent itself\n")
     sys.exit(0)
@@ -262,11 +278,12 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False):
+    def write_config(self, extra="", reviewer=False, replanner=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
-                       + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "") + "\n"
+                       + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
+                       + (f"replanner = {replanner}\n" if replanner else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -317,6 +334,15 @@ class TaskTest(unittest.TestCase):
                 return self.status(tid)
             time.sleep(0.2)
         self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
+
+    def wait_for(self, check, timeout=20):
+        """The replanner runs after the card is already Blocked."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if check():
+                return
+            time.sleep(0.2)
+        self.fail("timed out")
 
     def pr(self, tid):
         return self.gh()["prs"].get(f"jyoka/app task/{tid}")
@@ -544,6 +570,71 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(tid), "Blocked")
         self.assertEqual(self.agent_calls(), [])
         self.assertIn("is missing", self.comments(tid)[-1])
+
+    def replans(self, tid):
+        return [c for c in self.comments(tid) if c.startswith("<!-- task-hub replan -->")]
+
+    def work_prompts(self):
+        return [c["prompt"] for c in self.agent_calls() if "You triage one blocked" not in c["prompt"]]
+
+    def test_replanner_answer_with_evidence_is_commented_and_reaches_the_rerun(self):
+        self.write_config(replanner="agent")
+        tid = self.new("blocked REPLAN=answered")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: self.replans(tid))
+        replan = self.replans(tid)[-1]
+        self.assertIn("Blocked: Need the Stripe test key.\nDecision: answered", replan)
+        self.assertIn("README.md:1", replan)
+        self.assertEqual(self.status(tid), "Blocked")  # the human decides whether to re-run
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "Blocked")  # the fake agent blocks on the same thing again
+        self.assertIn("# Replanner notes", self.work_prompts()[1])
+        self.assertIn("The app is called app", self.work_prompts()[1])
+        time.sleep(1)
+        self.assertEqual(len(self.replans(tid)), 1)  # same reason again: no second replan
+
+    def test_replanner_answer_that_cannot_be_verified_goes_to_the_human(self):
+        self.write_config(replanner="agent")
+        for kind in ("invented", "misquoted"):  # a file that does not exist; a real line that does not say that
+            tid = self.new(f"blocked REPLAN={kind}")
+            self.task("start", tid)
+            self.wait(tid)
+            self.wait_for(lambda: self.replans(tid))
+            replan = self.replans(tid)[-1]
+            self.assertIn("Decision: human", replan)
+            self.assertIn("could not be verified", replan)
+            self.assertNotIn("### Answer", replan)
+
+    def test_replanner_question_and_goal_conflict_are_only_comments(self):
+        self.write_config(replanner="agent")
+        for kind, expect in (("human", "Could you add the Stripe test key to [env]?"),
+                             ("conflict", "Drop the hello requirement.")):
+            tid = self.new(f"blocked REPLAN={kind}")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked")
+            self.wait_for(lambda: self.replans(tid))
+            self.assertIn(expect, self.replans(tid)[-1])
+            self.assertEqual(self.status(tid), "Blocked")
+
+    def test_replanner_that_edits_files_is_ignored(self):
+        self.write_config(replanner="agent")
+        tid = self.new("blocked REPLAN=edits")
+        self.task("start", tid)
+        self.wait(tid)
+        self.wait_for(lambda: "replanner changed files" in self.task("log", tid, "--full"))
+        self.assertEqual(self.replans(tid), [])
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        self.assertEqual((wt / "README.md").read_text(), "app\n")
+
+    def test_no_replanner_for_blocks_task_hub_gave(self):
+        self.write_config(replanner="agent")
+        tid = self.new("noreport REPLAN=answered")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        time.sleep(1)
+        self.assertEqual(self.replans(tid), [])
 
     def test_python_bytecode_is_never_committed(self):
         tid = self.new("pycache")
