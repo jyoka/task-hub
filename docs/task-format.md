@@ -67,6 +67,28 @@ PR: https://github.com/jyoka/app/pull/41
 task-hub 自身が止めたとき(実行が止まった、開始できなかった)も、
 同じ形式で `## Blocked` だけのコメントを書きます。
 
+## replanner のコメント
+
+`[runner] replanner` を設定すると、エージェント自身の Blocked で止まった実行のあとに、task-hub が次の形で
+コメントします([agents.md](agents.md#blocked-の仕分けreplanner))。`Blocked:` と `Decision:` の行は、回数の上限と
+同じ理由の検出に使います。
+
+```markdown
+<!-- task-hub replan -->
+
+## Replanner
+
+Blocked: Need the Stripe test key.
+Decision: answered
+
+### Answer
+...
+### Evidence
+- README.md:12: `STRIPE_KEY is in 1Password "dev"`
+```
+
+最新の `answered` のコメントは、次の実行のプロンプトに「Replanner notes」として入ります。
+
 ## 実行終了時の処理
 
 task-hub は worktree の中で git が無視しないファイルをすべてコミットします。`.task-report.md`、`.task-review.md`、

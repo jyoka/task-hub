@@ -36,8 +36,11 @@ REPORT_FILE = ".task-report.md"
 REVIEW_FILE = ".task-review.md"
 # never committed: our own files, and Python bytecode that test runs leave in repos without a .gitignore
 # (it reached a PR in jyoka/tasks#43)
-NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, "__pycache__/", "*.pyc"]
+REPLAN_FILE = ".task-replan.md"
+NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
+REPLAN_MARK = "<!-- task-hub replan -->"
+MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
 DEFAULT_AGENTS = {
     "claude": "claude -p --dangerously-skip-permissions {prompt}",
@@ -49,6 +52,7 @@ DEFAULT_AGENTS = {
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
+WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
 STATE = Path.home() / ".local" / "state" / "task-hub"
@@ -206,7 +210,7 @@ class AgentReport:
 
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": ""}, "agents": DEFAULT_AGENTS, "board": {}})
+    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {}})
     c.read(CONFIG)
     return c
 
@@ -226,6 +230,12 @@ def agent_command(name, prompt):
     if not c.has_option("agents", name):
         fail(f"unknown agent {name!r}", f"agents: {', '.join(c['agents'])} (add more in {home(CONFIG)})", 2)
     return [prompt if part == "{prompt}" else part for part in shlex.split(c["agents"][name])]
+
+
+def helper_agent(t, key):
+    """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
+    name = config()["runner"].get(key, "").strip()
+    return t["agent"] if name == "agent" else name
 
 
 def check_agent(name):
@@ -370,7 +380,9 @@ def issue(t):
     """Body and task-hub report comments of the task's Issue."""
     data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments")
     reports = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
-    return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else ""}
+    replans = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPLAN_MARK)]
+    return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else "",
+            "replans": replans}
 
 
 # ---------- run state on this machine ----------
@@ -508,9 +520,10 @@ def launch(t):
     t["agent"] = t.get("agent") or config()["runner"]["agent"]
     if not config().has_option("agents", t["agent"]):  # a typo on one card must not stop the others
         raise RuntimeError(f'unknown agent "{t["agent"]}" on the card')
-    reviewer = config()["runner"].get("reviewer", "").strip()
-    if reviewer not in ("", "agent") and not config().has_option("agents", reviewer):  # found now, not after the agent's work
-        raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
+    for key in ("reviewer", "replanner"):  # found now, not after the agent's work
+        name = helper_agent(t, key)
+        if name and not config().has_option("agents", name):
+            raise RuntimeError(f'unknown {key} "{name}" in the config')
     wt = ensure_worktree(t)
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
@@ -565,6 +578,11 @@ def build_prompt(t):
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",
                   i["report"].replace(REPORT_MARK, "").strip()]
+    answered = [r for r in i["replans"] if "\nDecision: answered\n" in r]
+    if answered:
+        lines += ["", "# Replanner notes", "",
+                  "Another agent answered what the earlier run was blocked on, from the repository. "
+                  "Check its evidence before you rely on it:", "", answered[-1].replace(REPLAN_MARK, "").strip()]
     return "\n".join(lines) + "\n"
 
 
@@ -626,11 +644,9 @@ def build_review_prompt(t, report, diff):
 
 def run_review(t, report, say):
     """The reviewer's verdict on the whole PR, or None when no reviewer is set or there is nothing to review."""
-    reviewer = config()["runner"].get("reviewer", "").strip()
+    reviewer = helper_agent(t, "reviewer")  # "agent": the task's own agent, in a fresh context
     if not reviewer:
         return None
-    if reviewer == "agent":  # the task's own agent, in a fresh context that never saw the implementation
-        reviewer = t["agent"]
     if not config().has_option("agents", reviewer):
         raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
     wt = Path(t["worktree"])
@@ -670,6 +686,80 @@ def review_loop(t, report, code, say):
             return report, code, review.issue_section(), ""
 
 
+def unverified_evidence(wt, evidence):
+    """The evidence lines that do not check out. Each must be `path:line` plus a `quote` that is on that line."""
+    items = [line.strip() for line in evidence.splitlines() if line.strip()]
+    bad = []
+    for item in items:
+        m = re.search(r"([^\s`:]+):(\d+)\D.*?`([^`]+)`", item)
+        ok = False
+        if m:
+            path = (wt / m.group(1)).resolve()
+            if path.is_relative_to(wt.resolve()) and path.is_file():
+                lines = path.read_text(errors="replace").splitlines()
+                n = int(m.group(2))
+                ok = 1 <= n <= len(lines) and m.group(3).strip() in lines[n - 1]
+        if not ok:
+            bad.append(item)
+    return bad if items else ["no evidence given"]
+
+
+def build_replan_prompt(t, report):
+    instructions = WORKER_REPLAN.read_text().split("\n---\n", 1)[-1].strip()
+    return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
+                      "", "## Goal", "", issue(t)["body"].strip(), "", "# The agent's report", "", report.strip(), ""])
+
+
+def run_replan(t, report, say):
+    """Triage the agent's own Blocked: answer it from the repository, or sharpen the question for the human.
+
+    It only comments; the card stays Blocked and the human decides whether to move it to Ready.
+    """
+    name, blocked = helper_agent(t, "replanner"), AgentReport(report).blocked
+    if not name or not blocked:
+        return
+    replans = issue(t)["replans"]
+    if sum("\nDecision: answered\n" in r for r in replans) >= MAX_REPLAN_ANSWERS:
+        say(f"== replanner: skipped, it already answered {MAX_REPLAN_ANSWERS} times")
+        return
+    if replans and f"\nBlocked: {blocked}\n" in replans[-1]:
+        say("== replanner: skipped, blocked for the same reason as last time")
+        return
+    wt = Path(t["worktree"])
+    (wt / REPLAN_FILE).unlink(missing_ok=True)
+    code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner")
+    if undo_unstaged(wt):
+        say("== replanner changed files; its edits were undone and its result is ignored")
+        return
+    if not (wt / REPLAN_FILE).exists():
+        say(f"== replanner exited {code} without writing {REPLAN_FILE}")
+        return
+    text = (wt / REPLAN_FILE).read_text()
+    decision = (section(text, "Decision").splitlines() or [""])[0].strip(" *`_.").lower()
+    note = ""
+    if decision == "answered":
+        bad = unverified_evidence(wt, section(text, "Evidence"))
+        if bad:  # an answer we cannot check is exactly the invented kind; the human gets the question instead
+            decision = "human"
+            note = f"The replanner's answer was not used: its evidence could not be verified ({'; '.join(bad)[:300]})."
+    if decision == "answered":
+        details = [f"### Answer\n\n{section(text, 'Answer')}", f"### Evidence\n\n{section(text, 'Evidence')}",
+                   "Move the card to Ready to re-run with this answer (the next run gets it as Replanner notes). "
+                   "If it is wrong, answer in the Goal instead."]
+    elif decision == "human":
+        question = (section(text, "For the human").splitlines() or [""])[0] or blocked
+        details = [note] * bool(note) + [f"### Question for you\n\n{question}",
+                                          "Answer in the Goal, then move the card to Ready."]
+    elif decision == "goal-conflict":
+        details = [f"### Proposed goal change\n\n{section(text, 'Proposed goal change')}",
+                   "Edit the Goal if you agree, then move the card to Ready."]
+    else:
+        say(f"== replanner wrote an unknown decision {decision!r}")
+        return
+    comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details]))
+    say(f"== replanner decision: {decision}")
+
+
 # ---------- one run (called in the herdr pane or background process) ----------
 
 def cmd_run(a):
@@ -687,6 +777,7 @@ def cmd_run(a):
     wt = Path(t["worktree"])
     (wt / REPORT_FILE).unlink(missing_ok=True)
     (wt / REVIEW_FILE).unlink(missing_ok=True)
+    (wt / REPLAN_FILE).unlink(missing_ok=True)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent")
     say(f"== agent exited with code {code}")
@@ -699,6 +790,11 @@ def cmd_run(a):
         t["item"] = item["item"] if item else ""
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
+        if status == BLOCKED and not review_blocked:  # the agent's own Blocked, not one task-hub gave
+            try:
+                run_replan(t, report, say)
+            except RuntimeError as e:  # the run itself is already on GitHub
+                say(f"== replanner failed: {e}")
     except RuntimeError as e:
         status = BLOCKED
         say(f"== could not finish: {e}")
