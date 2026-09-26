@@ -32,6 +32,10 @@ fails, not to confirm that it works. The pull request is opened after you finish
 4. **Regressions.** Does the change break existing behaviour or the repository's own rules
    (AGENTS.md, CLAUDE.md, and so on)?
 
+For a research task (the diff says there are no file changes), the report is the deliverable: check
+that it answers every question in the Goal, that its claims point to evidence (files and lines, commands
+and their output, links), and that it says what it could not find out.
+
 Report only findings you can back with a location and a concrete scenario ("input X gives Y, expected
 Z"). Leave out style preferences that neither the Goal nor the repository's rules ask for. A finding
 you cannot make concrete is not a finding.

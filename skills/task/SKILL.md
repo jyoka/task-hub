@@ -18,6 +18,8 @@ Only register what the user asked for. Never start or approve the task: that is 
      if it is not, tell the user to push it first.
    - **agent** (optional): only if the user named one (for example claude, codex, pi, kiro).
      Otherwise leave it out and the machine's default agent is used.
+   - **research** (optional): when the user wants an investigation, comparison, or answer rather than a
+     change to the code, add `--research`. The agent's report is then the result (no pull request needed).
    - **goal**: what the agent that runs the task needs, without this chat. Write it as markdown
      (use `###` for any headings) with:
      - what to build or fix, and why
@@ -30,7 +32,7 @@ Only register what the user asked for. Never start or approve the task: that is 
 2. Write the goal to a temporary file and run:
 
    ```
-   task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] --goal-file <tmpfile>
+   task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] [--research] --goal-file <tmpfile>
    ```
 
    If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.

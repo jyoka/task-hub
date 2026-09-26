@@ -40,6 +40,7 @@ REPLAN_FILE = ".task-replan.md"
 NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
 REPLAN_MARK = "<!-- task-hub replan -->"
+RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
 DEFAULT_AGENTS = {
@@ -61,7 +62,8 @@ RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
 EVENTS = STATE / "events.jsonl"  # one line per status change task-hub makes, for whatever watches (see docs/operations.md)
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
-RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr"]
+RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
+            "research"]
 GH = os.environ.get("TASK_GH", "gh")
 
 
@@ -389,12 +391,13 @@ def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
 
 
 def issue(t):
-    """Body and task-hub report comments of the task's Issue."""
-    data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments")
+    """Body, labels, and task-hub comments of the task's Issue."""
+    data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments,labels")
     reports = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     replans = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPLAN_MARK)]
     return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else "",
-            "replans": replans}
+            "replans": replans,
+            "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
 
 
 # ---------- run state on this machine ----------
@@ -644,6 +647,7 @@ def launch(t):
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
+    t["research"] = "yes" if issue(t)["research"] else ""
     prompt_file(t).write_text(build_prompt(t))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
@@ -697,6 +701,8 @@ def build_prompt(t):
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
+             *(["Kind: research. Your report is the deliverable: put your findings in its Report section. Change "
+                "files only if the Goal asks for a file."] if t.get("research") else []),
              "", i["body"].strip()]
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",
@@ -775,7 +781,9 @@ def run_review(t, report, say):
     wt = Path(t["worktree"])
     diff = staged_diff(t)
     if not diff.strip():
-        return None  # finish() blocks it as "changed no files"
+        if not t.get("research"):
+            return None  # finish() blocks it as "changed no files"
+        diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
     code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer")
     if undo_unstaged(wt):
@@ -970,7 +978,7 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         parsed.blocked = f"agent exited without a report (exit {code}), see `task log {t['id']}`"
     elif blocked_override:
         parsed.blocked = blocked_override
-    elif not parsed.blocked and not ahead:
+    elif not parsed.blocked and not ahead and not t.get("research"):  # a research task's report is its result
         parsed.blocked = "agent wrote a report but changed no files"
     if ahead:
         run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
@@ -1244,7 +1252,7 @@ def cmd_stats(_):
 def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
-             'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)', 2)
+             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] (--goal "..." | --goal-file path)', 2)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a["repo"]):
         fail(f"--repo must look like owner/name, got {a['repo']!r}", code=2)
     if a["base"] and check_base(a["base"]):
@@ -1257,7 +1265,13 @@ def cmd_new(a):
     f = DATA / "new-issue.md"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(goal.strip() + "\n")
-    url = gh("issue", "create", "--repo", b["issues"], "--title", a["title"], "--body-file", f).strip().splitlines()[-1]
+    labels = []
+    if a["research"]:
+        gh("label", "create", RESEARCH_LABEL, "--repo", b["issues"], "--force",
+           "--description", "task-hub: the deliverable is the agent's report", "--color", "0E8A16")
+        labels = ["--label", RESEARCH_LABEL]
+    url = gh("issue", "create", "--repo", b["issues"], "--title", a["title"], "--body-file", f,
+             *labels).strip().splitlines()[-1]
     f.unlink(missing_ok=True)
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
     t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"]}
@@ -1338,8 +1352,10 @@ COMMANDS = {
     "watch": (cmd_watch, [], {}, f"task watch  # start Ready cards automatically (checks every {WATCH_SECONDS}s)"),
     "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]  # the Issue and its latest report"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
-    "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True},
-            'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)'),
+    "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True,
+                          "research": False},
+            'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] '
+            '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
     "events": (cmd_events, [], {"follow": False, "only": True},
