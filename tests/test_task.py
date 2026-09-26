@@ -155,8 +155,9 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
-if mode == "env":  # proves the agent got the env file: writes what it read
-    Path("hello.txt").write_text("key seen: " + Path(".env").read_text().strip() + "\n")
+if mode == "env":  # proves the agent got the env files: writes what it read
+    seen = [Path(p).read_text().strip() for p in (".env", "voice/.env") if Path(p).exists()]
+    Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
@@ -580,6 +581,39 @@ class TaskTest(unittest.TestCase):
         seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
                               capture_output=True, text=True).stdout
         self.assertEqual(seen, "key seen: API_KEY=test-123\n")
+
+    def test_env_file_can_go_into_a_subfolder(self):
+        root_env, voice_env = self.root / "co" / ".env", self.root / "co" / "voice" / ".env"
+        voice_env.parent.mkdir(parents=True)
+        root_env.write_text("ROOT=1\n")
+        voice_env.write_text("VOICE=2\n")
+        self.write_config(f"\n[env]\njyoka/app = {root_env}, {voice_env} -> voice/.env\n")
+        tid = self.new("env")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "key seen: ROOT=1 | VOICE=2\n")
+        tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", f"task/{tid}"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertNotIn("voice/.env", tree)
+        self.assertNotIn(".env", tree)
+
+    def test_env_destination_must_stay_in_the_worktree_and_be_unique(self):
+        src = self.root / "co" / ".env"
+        src.parent.mkdir()
+        src.write_text("K=1\n")
+        for value, why in ((f"{src} -> ../outside.env", "outside the worktree"),
+                           (f"{src} -> /tmp/abs.env", "outside the worktree"),
+                           (f"{src}, {src}", "twice")):
+            self.write_config(f"\n[env]\njyoka/app = {value}\n")
+            tid = self.new("ok")
+            self.task("start", tid)
+            self.assertEqual(self.status(tid), "Blocked")
+            self.assertIn(why, self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+        self.assertFalse((self.root / ".local/share/task-hub/worktrees/outside.env").exists())
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
