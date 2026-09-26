@@ -756,7 +756,7 @@ def run_replan(t, report, say):
     else:
         say(f"== replanner wrote an unknown decision {decision!r}")
         return
-    comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}\n", *details]))
+    comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details]))
     say(f"== replanner decision: {decision}")
 
 
