@@ -574,12 +574,15 @@ def staged_diff(t):
 
 
 def undo_unstaged(wt):
-    """Throw away edits made after staged_diff; True if there were any. Ignored files (the report files) stay."""
-    edited = run("git", "-C", wt, "diff", "--quiet").returncode != 0 or \
-        bool(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.strip())
+    """Throw away what changed after staged_diff; True if a file of the PR was edited.
+
+    New untracked files are leftovers of test runs the reviewer may do: removed, but not an offence.
+    Ignored files (the report files, build output) stay.
+    """
+    edited = run("git", "-C", wt, "diff", "--quiet").returncode != 0
     if edited:
         run("git", "-C", wt, "checkout", "-q", "--", ".", check=True)
-        run("git", "-C", wt, "clean", "-fdq", check=True)
+    run("git", "-C", wt, "clean", "-fdq", check=True)
     return edited
 
 
@@ -620,6 +623,8 @@ def run_review(t, report, say):
     reviewer = config()["runner"].get("reviewer", "").strip()
     if not reviewer:
         return None
+    if reviewer == "agent":  # the task's own agent, in a fresh context that never saw the implementation
+        reviewer = t["agent"]
     if not config().has_option("agents", reviewer):
         raise RuntimeError(f'unknown reviewer "{reviewer}" in the config')
     wt = Path(t["worktree"])
