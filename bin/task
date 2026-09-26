@@ -1027,12 +1027,17 @@ def find_pr(t):
 
 
 def cleanup(t):
-    """Close this task's herdr tab or workspace and remove its worktree (only ones task-hub created)."""
+    """Close this task's herdr tab or workspace, remove its worktree and its local branch (only ones task-hub made).
+
+    The branch on GitHub stays: it is the PR's. The local one would only pile up in task-hub's clone.
+    """
     close_herdr(t)
     (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
     wt = Path(t.get("worktree") or "")
     if t.get("worktree") and (DATA / "worktrees") in wt.parents and wt.exists():
         run("git", "-C", clone_dir(t["repo"]), "worktree", "remove", "--force", wt)
+    if t.get("repo") and t.get("branch") == f"task/{t['id']}" and (clone_dir(t["repo"]) / ".git").exists():
+        run("git", "-C", clone_dir(t["repo"]), "branch", "-D", t["branch"])
     (RUNS / f"{t['id']}.json").unlink(missing_ok=True)
 
 

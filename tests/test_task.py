@@ -1030,6 +1030,27 @@ class TaskTest(unittest.TestCase):
         self.assertIn("## Report", prompt)  # the agent's report, which is what gets reviewed
         self.assertIn("## Automated review", self.comments(tid)[-1])
 
+    def local_branches(self):
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        return subprocess.run(["git", "-C", str(clone), "branch", "--list", "task/*", "--format=%(refname:short)"],
+                              capture_output=True, text=True).stdout.split()
+
+    def test_cleanup_deletes_the_local_task_branch_but_not_the_one_on_github(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn(f"task/{tid}", self.local_branches())
+        self.task("done", tid)
+        self.assertNotIn(f"task/{tid}", self.local_branches())
+        self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))  # the PR's branch stays
+
+    def test_blocked_task_keeps_its_local_branch_for_the_rerun(self):
+        tid = self.new("stuck")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.task()
+        self.assertIn(f"task/{tid}", self.local_branches())
+
     def test_python_bytecode_is_never_committed(self):
         tid = self.new("pycache")
         self.task("start", tid)
