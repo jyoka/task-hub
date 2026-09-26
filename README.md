@@ -5,14 +5,14 @@ GitHub Project をかんばんボードとして使い、そのタスクをコ�
 
 ボードは GitHub Project そのものなので、ブラウザでもスマホアプリでも見られ、`gh` を使えるエージェントなら
 どれでも読み書きできます。タスクは非公開リポジトリの Issue です。カードを **Ready** に移すと、あなたの Mac で
-エージェントが動き始めます。同時に実行されるのは最大 3 つで、それぞれ専用の herdr ワークスペースと専用のブランチで
+エージェントが動き始めます。同時に実行されるのは最大 3 つで、それぞれ herdr のタブ(`/task` を頼んだ workspace の中)と専用のブランチで
 動きます。エージェントが終わると、task-hub がブランチを push して PR を作り、エージェントのレポートと、
 あなたがレビューすべき点をまとめた一覧を Issue にコメントし、カードを **In review** に移します。
 
 ```
 you:    /task in a chat      ->  Issue jyoka/tasks#12, card in Backlog
 you:    drag card to Ready   ->  `task watch` starts it on your Mac         In progress
-        (herdr sidebar shows a new workspace "task 12: Fix login" with the agent working)
+        (a tab "#12 Fix login" opens in the herdr workspace where you asked, with the agent working)
 agent:  edits files, runs tests, writes its report
 task:   commits, pushes task/12, opens the PR, comments the report         In review
 you:    review + merge the PR -> the Issue closes                           Done
@@ -32,7 +32,7 @@ you:    review + merge the PR -> the Issue closes                           Done
 | このタスクだけ別のエージェントを使う | カードの Agent 欄を書き換える、または `task start --agent kiro` |
 | PR 前に自動レビューさせる | 設定の `[runner] reviewer` に `agent`(タスクと同じエージェント)かエージェント名を書く |
 | 自動レビューや Blocked の傾向を見る | `task stats`(このマシンで終わった実行の集計) |
-| 実行を見守る | herdr サイドバーのそのワークスペース、または `task log 12` |
+| 実行を見守る | herdr のそのタスクのタブ(`/task` を頼んだ workspace の中)、または `task log 12` |
 | レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12` |
 | 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |
 | Blocked の理由を自動で仕分けさせる | 設定の `[runner] replanner` に `agent` かエージェント名を書く(コメントだけで、Ready に戻すのはあなた) |

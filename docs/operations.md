@@ -6,11 +6,32 @@
 
 ## 実行の様子を見る
 
-- **herdr**: 各実行には、サイドバーに "task <番号>: <title>" という名前のワークスペースがあります。開くと
-  エージェントの出力をリアルタイムで確認できます。実行が終わっても、ペインは最終ステータス行を表示したまま
-  開いています。PR のマージ(または `task done <番号>`)で閉じます。
+- **herdr**: 各実行は "#<番号> <title>" という名前のタブで動き、エージェントの出力をリアルタイムで確認できます。
+  タブを置く workspace は、次の順で決まります。
+  1. `/task` を頼んだ workspace(herdr のペインの中で登録したとき)
+  2. そのリポジトリの checkout を開いているペインがある workspace(スマホやボードから作ったカードなど)
+  3. どちらもなければ、タスク専用の workspace "task <番号> · <リポジトリ名>: <title>" を作る
+
+  In review で終わったタブは自動で閉じます(出力は `task log <番号>` で読めます)。Blocked で終わったタブは、
+  何が起きたかを見られるように残し、`task done <番号>` か PR のマージで閉じます。task-hub が閉じるのは、自分が
+  作ったタブだけです(herdr が同じ id を別のタブに使い回していないか、名前で確かめてから閉じます)。
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
 - エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
+
+## 起きたことを受け取る(events.jsonl)
+
+task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
+このファイルを見張れば、何かが起きた瞬間に分かります。窓口のエージェントや通知は、これを読む想定です。
+
+```json
+{"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}
+{"time": "2026-09-26T14:20:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない"}
+{"time": "2026-09-26T14:21:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "replan", "decision": "human"}
+```
+
+`event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
+`replan` です。`reason`(Blocked の 1 行)、`pr`、`decision` は、あるときだけ入ります。マシンごとのファイルで、
+そのマシンの task-hub が動かしたものだけが書かれます。
 
 ## 実行の結果を集計する
 
@@ -106,13 +127,13 @@ task-hub はカードを動かしません(Base branch のないカードの PR 
 
 ## 実行中のタスクを止める
 
-herdr のワークスペースでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
+herdr のそのタスクのタブでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
 push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
 として Blocked になります。
 
 ## タスクを取り消す
 
-Issue を閉じるか、`task done <番号>` を実行します。そのタスクの herdr のワークスペースを閉じ、worktree を削除し、
+Issue を閉じるか、`task done <番号>` を実行します。そのタスクの herdr のタブ(またはタスク専用の workspace)を閉じ、worktree を削除し、
 カードを Done にします。ブランチと PR は GitHub に残ります。必要であれば、GitHub 上で PR をクローズしてください。
 
 ## 同時実行数の上限を変更する
