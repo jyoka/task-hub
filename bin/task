@@ -29,7 +29,7 @@ from pathlib import Path
 VERSION = "0.5.0"
 MAX_PARALLEL = 3
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
-BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = STATUSES = \
+BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
     ["Backlog", "Ready", "In progress", "In review", "wait for merge", "Blocked", "Done"]
 TEXT_FIELDS = ["Target repo", "Agent", "Base branch"]  # "Repo" is a reserved field name on GitHub
 REPORT_FILE = ".task-report.md"
@@ -97,6 +97,87 @@ def section(body, name):
     """Text under '## name' up to the next '## ' heading, or ''."""
     m = re.search(rf"(?m)^## {re.escape(name)}[ \t]*\n(.*?)(?=^## |\Z)", body, re.S)
     return m.group(1).strip() if m else ""
+
+
+class StatusLifecycle:
+    """Status policy for the task board lifecycle."""
+    all = [BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE]
+    optional = {WAIT_FOR_MERGE}
+    open = [s for s in all if s != DONE]
+    startable_by_human = {BACKLOG, BLOCKED}
+    startable_explicitly = {BACKLOG, BLOCKED, READY}
+    starts_automatically = {READY}
+    watched_for_merge = {IN_REVIEW, WAIT_FOR_MERGE}
+    needs_user = {BACKLOG, IN_REVIEW, BLOCKED}
+
+    @classmethod
+    def required(cls):
+        return [s for s in cls.all if s not in cls.optional]
+
+    @classmethod
+    def canonical(cls, status):
+        return next((s for s in cls.all if s.lower() == (status or "").lower()), status or BACKLOG)
+
+    @classmethod
+    def missing_required_options(cls, options):
+        return [f'Status option "{s}"' for s in cls.required() if s.lower() not in options]
+
+    @classmethod
+    def needs_merge_watch(cls, t):
+        return t.get("status") in cls.watched_for_merge and bool(current_base(t) or first_run_base(t)) \
+            and valid_repo(t.get("repo") or "")
+
+    @classmethod
+    def needs_user_count(cls, counts):
+        return sum(counts[s] for s in cls.needs_user)
+
+
+STATUSES = StatusLifecycle.all
+
+
+class TaskState:
+    """Task facts with explicit board and local-run provenance."""
+    @staticmethod
+    def combine(board_task, run_state):
+        t = {**run_state, **board_task}
+        t["_board"] = board_task
+        t["_run"] = run_state
+        return t
+
+
+def current_base(t):
+    return t.get("_board", {}).get("base", t.get("base", ""))
+
+
+def first_run_base(t):
+    return t.get("_run", {}).get("base", load_run(t["id"]).get("base", ""))
+
+
+def valid_repo(repo):
+    return re.fullmatch(r"[\w.-]+/[\w.-]+", repo or "") is not None
+
+
+class AgentReport:
+    """Agent report parsing and rendering."""
+    def __init__(self, markdown=""):
+        self.markdown = markdown or ""
+        self.blocked = (section(self.markdown, "Blocked").splitlines() or [""])[0]
+        self.report = section(self.markdown, "Report")
+        self.review = section(self.markdown, "Please review")
+
+    def issue_comment(self, pr=""):
+        parts = [REPORT_MARK]
+        parts += [f"## Blocked\n\n{self.blocked}"] * bool(self.blocked)
+        parts += [f"## Report\n\n{self.report}"] * bool(self.report)
+        parts += [f"## Please review\n\n{self.review}"] * bool(self.review)
+        parts += [f"PR: {pr}"] * bool(pr)
+        return "\n\n".join(parts)
+
+    def pr_body(self, t):
+        return "\n\n".join([f"## Blocked\n\n{self.blocked}"] * bool(self.blocked) +
+                           [f"## Report\n\n{self.report}", f"## Please review\n\n{self.review}",
+                            f"Closes {board()['issues']}#{t['id']}",
+                            f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
 # ---------- config ----------
@@ -175,8 +256,7 @@ def board():
     by_name = {f["name"].lower(): f for f in fields if f}
     status = by_name.get("status", {})
     options = {o["name"].lower(): o["id"] for o in status.get("options", [])}
-    missing = [f'Status option "{s}"' for s in STATUSES
-               if s.lower() not in options and s != WAIT_FOR_MERGE]  # wait for merge is optional
+    missing = StatusLifecycle.missing_required_options(options)
     missing += [f'text field "{n}"' + (f" (it is {by_name[n.lower()]['dataType']}, make it TEXT)"
                                         if n.lower() in by_name else "")
                 for n in TEXT_FIELDS if by_name.get(n.lower(), {}).get("dataType") != "TEXT"]
@@ -218,13 +298,13 @@ def tasks(include_done=False):
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
              "base": value("base"), "url": content.get("url", "")}
-        result.append({**load_run(t["id"]), **t})
+        result.append(TaskState.combine(t, load_run(t["id"])))
     return sorted(result, key=lambda t: int(t["id"]))
 
 
 def canonical(status):
     """The board's column name in our spelling ("In Progress" on GitHub is IN_PROGRESS here)."""
-    return next((s for s in STATUSES if s.lower() == (status or "").lower()), status or BACKLOG)
+    return StatusLifecycle.canonical(status)
 
 
 def get(tid):
@@ -261,12 +341,9 @@ def comment(t, body):
 
 def report_comment(t, blocked="", report="", review="", pr=""):
     """The one comment format task-hub writes on an Issue; the last one is the task's current report."""
-    parts = [REPORT_MARK]
-    parts += [f"## Blocked\n\n{blocked}"] * bool(blocked)
-    parts += [f"## Report\n\n{report}"] * bool(report)
-    parts += [f"## Please review\n\n{review}"] * bool(review)
-    parts += [f"PR: {pr}"] * bool(pr)
-    comment(t, "\n\n".join(parts))
+    r = AgentReport()
+    r.blocked, r.report, r.review = blocked, report, review
+    comment(t, r.issue_comment(pr))
 
 
 def issue(t):
@@ -274,6 +351,36 @@ def issue(t):
     data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments")
     reports = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else ""}
+
+
+class GitHubTaskBoard:
+    """Task board adapter backed by GitHub Project, Issues, PRs, and gh."""
+    def metadata(self):
+        return board()
+
+    def list_tasks(self, include_done=False):
+        return tasks(include_done)
+
+    def get_task(self, tid):
+        return get(tid)
+
+    def set_status(self, t, status):
+        set_status(t, status)
+
+    def set_text(self, t, field, value):
+        set_text(t, field, value)
+
+    def post_report(self, t, blocked="", report="", review="", pr=""):
+        report_comment(t, blocked=blocked, report=report, review=review, pr=pr)
+
+    def issue(self, t):
+        return issue(t)
+
+    def close_issue(self, t):
+        gh("issue", "close", t["id"], "--repo", board()["issues"])
+
+
+TASK_BOARD = GitHubTaskBoard()
 
 
 # ---------- run state on this machine ----------
@@ -318,87 +425,110 @@ def close_workspace(t):
 
 # ---------- starting a run ----------
 
+class TaskWorkspace:
+    """Git clone, base branch, task branch, worktree, publish, and cleanup rules."""
+    @staticmethod
+    def clone_dir(repo):
+        return DATA / "repos" / repo
+
+    @staticmethod
+    def ensure_clone(repo):
+        d = TaskWorkspace.clone_dir(repo)
+        if not (d / ".git").exists():
+            d.parent.mkdir(parents=True, exist_ok=True)
+            url = os.environ.get("TASK_CLONE_URL")  # tests: a local bare repo, e.g. file:///tmp/{repo}.git
+            if url:
+                run("git", "clone", "-q", url.format(repo=repo), d, check=True)
+            else:
+                # HTTPS authenticated by gh, set on this clone only: works without SSH keys and
+                # leaves the user's global git config alone
+                run("git", "clone", "-q", "-c", "credential.helper=", "-c", f"credential.helper=!{GH} auth git-credential",
+                    f"https://github.com/{repo}.git", d, check=True)
+        run("git", "-C", d, "fetch", "-q", "--prune", "origin", check=True)
+        run("git", "-C", d, "remote", "set-head", "origin", "--auto")
+        return d
+
+    @staticmethod
+    def check_base(base):
+        """Why a Base branch value is unusable, or "" when it is fine."""
+        if base.startswith("origin/"):
+            return f"Base branch is a branch name without origin/, e.g. {base[len('origin/'):]}"
+        if base == "HEAD" or run("git", "check-ref-format", f"refs/heads/{base}").returncode != 0:
+            return f"Base branch {base!r} is not a valid branch name"
+        return ""
+
+    @staticmethod
+    def base_ref(t, git_dir):
+        """What the task branches from and its PR goes into: the card's Base branch, else the default branch."""
+        if t.get("base"):
+            return f"origin/{t['base']}"
+        return run("git", "-C", git_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip() \
+            or "origin/main"
+
+    @staticmethod
+    def ensure_worktree(t):
+        """The task's worktree on branch task/<number>; a re-run continues where the last run pushed."""
+        repo_dir = TaskWorkspace.ensure_clone(t["repo"])
+        wt = DATA / "worktrees" / t["id"]
+        first = load_run(t["id"])
+        if first.get("branch") and first.get("base", "") != t.get("base", ""):
+            if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/task/{t['id']}").returncode == 0:
+                # the pushed task branch and its PR were made from the first base: continuing on another would mix them up
+                raise RuntimeError(f"Base branch was changed after the first run (was {first.get('base') or 'empty'}); "
+                                   f"set it back, or close the PR and delete branch task/{t['id']} to start over")
+            if (wt / ".git").exists():  # nothing on GitHub yet: start over from the new base
+                run("git", "-C", repo_dir, "worktree", "remove", "--force", wt, check=True)
+        if t.get("base"):
+            if TaskWorkspace.check_base(t["base"]):
+                raise RuntimeError(TaskWorkspace.check_base(t["base"]))
+            if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/{t['base']}").returncode != 0:
+                raise RuntimeError(f"branch {t['base']} is not on GitHub in {t['repo']}; "
+                                   "push it, then move the card to Ready again")
+        if (wt / ".git").exists():
+            return wt
+        run("git", "-C", repo_dir, "worktree", "prune")
+        branch = t["branch"]
+        if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/{branch}").returncode == 0:
+            # continue only a branch this task's own earlier run pushed; anything else is not ours to touch
+            if not load_run(t["id"]).get("branch"):
+                raise RuntimeError(f"branch {branch} already exists in {t['repo']} but was not made by this task; "
+                                   "delete or rename it, then move the card to Ready again")
+            base = f"origin/{branch}"
+        else:
+            base = TaskWorkspace.base_ref(t, repo_dir)
+        run("git", "-C", repo_dir, "worktree", "add", "-q", "-B", branch, wt, base, check=True)
+        exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
+        exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
+        if REPORT_FILE not in (exclude.read_text() if exclude.exists() else ""):
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a") as f:
+                f.write(f"\n{REPORT_FILE}\n")
+        return wt
+
+
 def clone_dir(repo):
-    return DATA / "repos" / repo
+    return TaskWorkspace.clone_dir(repo)
 
 
 def ensure_clone(repo):
-    d = clone_dir(repo)
-    if not (d / ".git").exists():
-        d.parent.mkdir(parents=True, exist_ok=True)
-        url = os.environ.get("TASK_CLONE_URL")  # tests: a local bare repo, e.g. file:///tmp/{repo}.git
-        if url:
-            run("git", "clone", "-q", url.format(repo=repo), d, check=True)
-        else:
-            # HTTPS authenticated by gh, set on this clone only: works without SSH keys and
-            # leaves the user's global git config alone
-            run("git", "clone", "-q", "-c", "credential.helper=", "-c", f"credential.helper=!{GH} auth git-credential",
-                f"https://github.com/{repo}.git", d, check=True)
-    run("git", "-C", d, "fetch", "-q", "--prune", "origin", check=True)
-    run("git", "-C", d, "remote", "set-head", "origin", "--auto")
-    return d
+    return TaskWorkspace.ensure_clone(repo)
 
 
 def check_base(base):
-    """Why a Base branch value is unusable, or "" when it is fine."""
-    if base.startswith("origin/"):
-        return f"Base branch is a branch name without origin/, e.g. {base[len('origin/'):]}"
-    if base == "HEAD" or run("git", "check-ref-format", f"refs/heads/{base}").returncode != 0:
-        return f"Base branch {base!r} is not a valid branch name"
-    return ""
+    return TaskWorkspace.check_base(base)
 
 
 def base_ref(t, git_dir):
-    """What the task branches from and its PR goes into: the card's Base branch, else the default branch."""
-    if t.get("base"):
-        return f"origin/{t['base']}"
-    return run("git", "-C", git_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip() \
-        or "origin/main"
+    return TaskWorkspace.base_ref(t, git_dir)
 
 
 def ensure_worktree(t):
-    """The task's worktree on branch task/<number>; a re-run continues where the last run pushed."""
-    repo_dir = ensure_clone(t["repo"])
-    wt = DATA / "worktrees" / t["id"]
-    first = load_run(t["id"])
-    if first.get("branch") and first.get("base", "") != t.get("base", ""):
-        if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/task/{t['id']}").returncode == 0:
-            # the pushed task branch and its PR were made from the first base: continuing on another would mix them up
-            raise RuntimeError(f"Base branch was changed after the first run (was {first.get('base') or 'empty'}); "
-                               f"set it back, or close the PR and delete branch task/{t['id']} to start over")
-        if (wt / ".git").exists():  # nothing on GitHub yet: start over from the new base
-            run("git", "-C", repo_dir, "worktree", "remove", "--force", wt, check=True)
-    if t.get("base"):
-        if check_base(t["base"]):
-            raise RuntimeError(check_base(t["base"]))
-        if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/{t['base']}").returncode != 0:
-            raise RuntimeError(f"branch {t['base']} is not on GitHub in {t['repo']}; "
-                               "push it, then move the card to Ready again")
-    if (wt / ".git").exists():
-        return wt
-    run("git", "-C", repo_dir, "worktree", "prune")
-    branch = t["branch"]
-    if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/{branch}").returncode == 0:
-        # continue only a branch this task's own earlier run pushed; anything else is not ours to touch
-        if not load_run(t["id"]).get("branch"):
-            raise RuntimeError(f"branch {branch} already exists in {t['repo']} but was not made by this task; "
-                               "delete or rename it, then move the card to Ready again")
-        base = f"origin/{branch}"
-    else:
-        base = base_ref(t, repo_dir)
-    run("git", "-C", repo_dir, "worktree", "add", "-q", "-B", branch, wt, base, check=True)
-    exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
-    exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
-    if REPORT_FILE not in (exclude.read_text() if exclude.exists() else ""):
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        with exclude.open("a") as f:
-            f.write(f"\n{REPORT_FILE}\n")
-    return wt
+    return TaskWorkspace.ensure_worktree(t)
 
 
 def launch(t):
     """Start `task _run <number>` in a herdr workspace, or as a background process."""
-    if not re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or ""):
+    if not valid_repo(t.get("repo") or ""):
         raise RuntimeError('the card has no valid "Target repo" (owner/name)')
     t["branch"] = t.get("branch") or f"task/{t['id']}"
     t["agent"] = t.get("agent") or config()["runner"]["agent"]
@@ -494,7 +624,7 @@ def cmd_run(a):
 
     report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
     try:
-        item = next((x for x in tasks() if x["id"] == t["id"]), None)
+        item = next((x for x in TASK_BOARD.list_tasks() if x["id"] == t["id"]), None)
         t["item"] = item["item"] if item else ""
         status = finish(t, report, code, say)
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
@@ -511,33 +641,42 @@ def cmd_run(a):
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
 
 
+class FinishTransaction:
+    """Convert agent output into durable git, PR, Issue comment, and status outcomes."""
+    def __init__(self, t, report_markdown, code, say):
+        self.t = t
+        self.report_markdown = report_markdown
+        self.code = code
+        self.say = say
+        self.report = AgentReport(report_markdown)
+
+    def run(self):
+        t = self.t
+        wt = t["worktree"]
+        run("git", "-C", wt, "add", "-A", check=True)
+        if run("git", "-C", wt, "diff", "--cached", "--quiet").returncode != 0:
+            run("git", "-C", wt, "commit", "-q", "-m", f"task {t['id']}: {t['title']}", check=True)
+        base = base_ref(t, wt)
+        ahead = run("git", "-C", wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
+
+        if not self.report_markdown.strip():
+            self.report.blocked = f"agent exited without a report (exit {self.code}), see `task log {t['id']}`"
+        elif not self.report.blocked and not ahead:
+            self.report.blocked = "agent wrote a report but changed no files"
+        if ahead:
+            run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
+            t["pr"] = upsert_pr(t, self.report.pr_body(t), bool(self.report.blocked), base.split("/", 1)[-1])
+            self.say(f"== PR: {t['pr']}")
+        report_comment(t, blocked=self.report.blocked, report=self.report.report, review=self.report.review,
+                       pr=t.get("pr", "") if ahead else "")
+        status = BLOCKED if self.report.blocked else IN_REVIEW
+        set_status(t, status)
+        return status
+
+
 def finish(t, report, code, say):
     """Commit and push the agent's work, open or update the PR, report on the Issue, move the card."""
-    blocked = (section(report, "Blocked").splitlines() or [""])[0]
-    text, review = section(report, "Report"), section(report, "Please review")
-    wt = t["worktree"]
-    run("git", "-C", wt, "add", "-A", check=True)
-    if run("git", "-C", wt, "diff", "--cached", "--quiet").returncode != 0:
-        run("git", "-C", wt, "commit", "-q", "-m", f"task {t['id']}: {t['title']}", check=True)
-    base = base_ref(t, wt)
-    ahead = run("git", "-C", wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
-
-    if not report.strip():
-        blocked = f"agent exited without a report (exit {code}), see `task log {t['id']}`"
-    elif not blocked and not ahead:
-        blocked = "agent wrote a report but changed no files"
-    if ahead:
-        run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
-        body = "\n\n".join([f"## Blocked\n\n{blocked}"] * bool(blocked) +
-                           [f"## Report\n\n{text}", f"## Please review\n\n{review}",
-                            f"Closes {board()['issues']}#{t['id']}",
-                            f"<sub>task-hub | agent: {t['agent']}</sub>"])
-        t["pr"] = upsert_pr(t, body, bool(blocked), base.split("/", 1)[-1])
-        say(f"== PR: {t['pr']}")
-    report_comment(t, blocked=blocked, report=text, review=review, pr=t.get("pr", "") if ahead else "")
-    status = BLOCKED if blocked else IN_REVIEW
-    set_status(t, status)
-    return status
+    return FinishTransaction(t, report, code, say).run()
 
 
 def upsert_pr(t, body, draft, base):
@@ -584,11 +723,28 @@ def cleanup(t):
     (RUNS / f"{t['id']}.json").unlink(missing_ok=True)
 
 
+class MergeWatcher:
+    """Observe completed PR effects that GitHub workflows do not always apply."""
+    @staticmethod
+    def should_watch(t):
+        return StatusLifecycle.needs_merge_watch(t)
+
+    @staticmethod
+    def observe(t):
+        if not MergeWatcher.should_watch(t) or not pr_merged(t):
+            return False
+        # GitHub documents "Closes ..." as working only for PRs into the default branch.
+        TASK_BOARD.close_issue(t)
+        TASK_BOARD.set_status(t, DONE)
+        cleanup(t)
+        return True
+
+
 # ---------- sync: board and runs in, new runs out ----------
 
 def sync():
     lines, changed, errors = [], [], []
-    open_ = tasks()
+    open_ = TASK_BOARD.list_tasks()
     # a card that left the open columns (GitHub moves it to Done when its Issue closes, e.g. the PR
     # was merged) no longer needs its worktree or herdr workspace: clean up from local state only
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
@@ -608,12 +764,8 @@ def sync():
                                report=report.strip())
                 kept.unlink(missing_ok=True)
                 set_status(t, BLOCKED)
-            elif before in (IN_REVIEW, WAIT_FOR_MERGE) and (t.get("base") or load_run(t["id"]).get("base")) \
-                    and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or "") and pr_merged(t):
-                # GitHub documents "Closes ..." as working only for PRs into the default branch
-                gh("issue", "close", t["id"], "--repo", board()["issues"])
-                set_status(t, DONE)
-                cleanup(t)
+            elif MergeWatcher.observe(t):
+                pass
         except RuntimeError as e:
             errors.append({"id": t["id"], "error": str(e)})
             continue
@@ -624,7 +776,7 @@ def sync():
     if errors:
         lines += table("github_errors", errors, ["id", "error"])
 
-    board_ = tasks() if changed else open_
+    board_ = TASK_BOARD.list_tasks() if changed else open_
     free = MAX_PARALLEL - sum(t["status"] == IN_PROGRESS for t in board_)
     ready = [t for t in board_ if t["status"] == READY]
     if ready and free <= 0:
@@ -649,15 +801,15 @@ def sync():
 
 def cmd_home(_):
     lines = sync()
-    board_ = tasks()
+    board_ = TASK_BOARD.list_tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}  # Done is not fetched
     active = board_
     out(f"bin: {home(BIN)}",
         f"description: runs coding agents on the tasks of a GitHub Project, max {MAX_PARALLEL} at once",
-        f"board: {board()['url']}",
+        f"board: {TASK_BOARD.metadata()['url']}",
         "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()), *lines)
     out(*table("tasks", active, ["id", "title", "status", "agent"]) if active else ["tasks: 0 open tasks"])
-    needs_you = counts[BACKLOG] + counts[IN_REVIEW] + counts[BLOCKED]
+    needs_you = StatusLifecycle.needs_user_count(counts)
     out("help[3]:",
         f"  {needs_you} task(s) need you (Backlog to approve, In review, Blocked)",
         "  Move a card to Ready, or run `task start`, to have an agent work on it",
@@ -665,8 +817,8 @@ def cmd_home(_):
 
 
 def cmd_watch(_):
-    board()  # fail fast on a bad config
-    out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
+    TASK_BOARD.metadata()  # fail fast on a bad config
+    out(f"watch: checking {TASK_BOARD.metadata()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     while True:
         try:
             lines = sync()
@@ -712,7 +864,7 @@ def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
              'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)', 2)
-    if not re.fullmatch(r"[\w.-]+/[\w.-]+", a["repo"]):
+    if not valid_repo(a["repo"]):
         fail(f"--repo must look like owner/name, got {a['repo']!r}", code=2)
     if a["base"] and check_base(a["base"]):
         fail(check_base(a["base"]), code=2)
@@ -755,7 +907,7 @@ def cmd_start(a):
     check_agent(a["agent"])
     tid = a.get("id")
     if tid is None:
-        candidates = [t for t in tasks() if t["status"] in (BACKLOG, BLOCKED)]
+        candidates = [t for t in TASK_BOARD.list_tasks() if t["status"] in StatusLifecycle.startable_by_human]
         if not candidates:
             out("start: 0 Backlog or Blocked tasks to start")
             return
@@ -773,7 +925,7 @@ def cmd_start(a):
     if t["status"] in (READY, IN_PROGRESS) and not a["agent"]:
         out(f"task: #{t['id']} already {t['status']} (no-op)")
         return
-    if t["status"] not in (BACKLOG, BLOCKED, READY):
+    if t["status"] not in StatusLifecycle.startable_explicitly:
         fail(f"task {t['id']} is {t['status']}; only Backlog or Blocked tasks can be started")
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
