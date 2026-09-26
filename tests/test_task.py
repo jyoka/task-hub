@@ -169,6 +169,8 @@ if mode == "env":  # proves the agent got the env files: writes what it read
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
+if mode == "rewrite":  # replaces the README's one line: one line added, one removed
+    Path("README.md").write_text("app, rewritten\n")
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
     Path("__pycache__").mkdir(exist_ok=True)
     Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
@@ -1008,6 +1010,24 @@ class TaskTest(unittest.TestCase):
         runs = {r["id"]: r for r in self.metrics(2)}
         self.assertEqual((runs[a]["blocked_by"], runs[a]["retried"]), ("review", True))
         self.assertEqual((runs[b]["status"], runs[b]["blocked_by"]), ("Blocked", "start"))
+
+    def test_each_run_records_the_size_of_its_pr(self):
+        a = self.new("ok")
+        self.task("start", a)
+        self.wait(a)
+        b = self.new("nochange", "Compare", "jyoka/app", "--research")
+        self.task("start", b)
+        self.wait(b)
+        c = self.new("rewrite")
+        self.task("start", c)
+        self.wait(c)
+        runs = {r["id"]: r for r in self.metrics(3)}
+        self.assertEqual((runs[a]["files"], runs[a]["added"], runs[a]["removed"]), (1, 1, 0))  # hello.txt, one line
+        self.assertEqual((runs[c]["files"], runs[c]["added"], runs[c]["removed"]), (2, 2, 1))  # + README rewritten
+        self.assertEqual((runs[b]["files"], runs[b]["added"]), (0, 0))  # a research report changes no files
+        out = self.task("stats")
+        self.assertIn("size: median 3 changed lines per PR over 2 runs", out)
+        self.assertIn(f'largest[2]{{id,title,lines,files}}:\n  "{c}",Add hello,3,2\n  "{a}",Add hello,1,1', out)
 
     def test_stats_sums_up_the_recorded_runs(self):
         self.assertIn("0 runs recorded yet", self.task("stats"))
