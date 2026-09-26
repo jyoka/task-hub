@@ -26,6 +26,25 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 3. それもなければ、`~/.config/task-hub/config.ini` の `[runner] agent`
 4. それもなければ `claude`
 
+## 自動レビュー
+
+`~/.config/task-hub/config.ini` の `[runner] reviewer` にエージェント名を書くと、実装エージェントが終わったあと、
+PR を作る前に reviewer が同じ worktree で差分を読みます。reviewer には Issue の Goal と、ベースから分かれた時点からの
+PR 全体の差分(新しいファイルを含む)を渡します。reviewer の指示は
+[worker/REVIEW.md](../worker/REVIEW.md) です。受け入れ条件を 1 つずつ照らし合わせ、指摘には場所と具体的な入力と結果を
+付けるよう求めています。
+
+| `[runner] reviewer` | reviewer |
+|---|---|
+| `agent` | そのタスクの実装エージェント(カードの Agent 欄に従う)を、実装を見ていない新しいコンテキストで起動します |
+| エージェント名(例: `codex`) | そのエージェントに固定します。実装とは別のベンダーのモデルにすると、同じモデルに共通する思い込みを避けやすくなります |
+| 空、または省略 | 自動レビューをしません |
+
+reviewer は `.task-review.md` だけを書きます。テストは実行できます。テストが残した新しいファイルは自動で消し、
+PR のファイルを書き換えた場合は元に戻して Blocked にします。判定は `pass` / `needs changes` / `blocked` です。
+`needs changes` の場合、task-hub は 1 回だけ実装エージェントに自動で差し戻します。2 回目も通らなければ
+ドラフト PR を作り、カードを Blocked にします。マージの判断は今までどおり人が行います。
+
 ## エージェントの変更と追加
 
 `~/.config/task-hub/config.ini` の `[agents]` にコマンドを書きます。同じ名前の組み込みコマンドを上書きするか、
@@ -43,8 +62,9 @@ aider = aider --yes-always --message {prompt}
 
 - 質問せずに最後まで実行されること(stdin は閉じられています)
 - カレントディレクトリ、つまりタスクの worktree で動作すること
-- そこに `.task-report.md` を書けること。task-hub が結果を知る方法はこれだけです。
+- 実装エージェントは `.task-report.md` を書けること。task-hub が結果を知る方法はこれだけです。
   レポートがなければ、タスクはブロックとして扱われます
+- reviewer として使う場合は `.task-review.md` を書けること。reviewer はそれ以外のファイルを変更してはいけません
 
 ## 安全性
 

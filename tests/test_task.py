@@ -122,6 +122,9 @@ from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+if "adversarial reviewer of one completed task-hub run" in prompt:  # used as its own reviewer
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nreviewed by the agent itself\n")
+    sys.exit(0)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
@@ -131,7 +134,15 @@ if mode == "slow":  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
     print("waiting", flush=True)
     import time; time.sleep(60)
-if mode not in ("nochange", "stuck"):
+if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
+    Path("__pycache__").mkdir(exist_ok=True)
+    Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
+    Path("stray.pyc").write_bytes(b"\x00bytecode")
+if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the retry dies without a report
+    sys.exit(1)
+if mode == "reviewfix" and "# Automated review feedback" in prompt:
+    Path("hello.txt").write_text("fixed after review\n")
+elif mode not in ("nochange", "stuck"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
@@ -145,6 +156,49 @@ if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
     import json
     db = json.load(open(os.environ["TASK_TEST_GH_DB"])); db["down"] = True
     json.dump(db, open(os.environ["TASK_TEST_GH_DB"], "w"))
+'''
+
+FAKE_REVIEWER = r'''#!/usr/bin/env python3
+import os, re, sys
+from pathlib import Path
+prompt = sys.argv[-1]
+with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+text = Path("hello.txt").read_text() if Path("hello.txt").exists() else ""
+forced = re.findall(r"REVIEW=(\w+)", prompt)  # a goal word that picks the verdict, when present
+if forced == ["boldpass"]:
+    Path(".task-review.md").write_text("## Verdict\n\n**Pass**\n\n## Review\n\nlooks fine\n")
+    sys.exit(0)
+if forced == ["edit"]:  # a reviewer that breaks the rule and edits a file the agent already changed
+    Path("hello.txt").write_text(text + "reviewer was here\n")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
+    sys.exit(0)
+if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
+    Path("coverage.out").write_text("tests ran\n")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nran the tests\n")
+    sys.exit(0)
+if forced == ["blocked"]:
+    Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
+    sys.exit(0)
+if forced == ["needs"]:
+    Path(".task-review.md").write_text("## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n## Please fix\n\nredo it\n")
+    sys.exit(0)
+if "reviewfail" in text:
+    verdict = "needs changes"
+    fix = "Keep trying; this fake reviewer never accepts reviewfail."
+elif "reviewfix" in text:
+    verdict = "needs changes"
+    fix = "Change hello.txt so it says fixed after review."
+elif "fixed after review" in text or "hello from" in text:
+    verdict = "pass"
+    fix = ""
+else:
+    verdict = "blocked"
+    fix = "hello.txt was missing."
+body = f"## Verdict\n\n{verdict}\n\n## Review\n\nchecked hello.txt\n"
+if fix:
+    body += f"\n## Please fix\n\n{fix}\n"
+Path(".task-review.md").write_text(body)
 '''
 
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
@@ -163,13 +217,15 @@ class TaskTest(unittest.TestCase):
                                  {"id": "F_agent", "name": "Agent", "type": "ProjectV2Field", "dataType": "TEXT"},
                                  {"id": "F_base", "name": "Base branch", "type": "ProjectV2Field", "dataType": "TEXT"}]})
         self.calls = root / "agent-calls.txt"
-        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT)):
+        self.review_calls = root / "review-calls.txt"
+        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
                   "GIT_COMMITTER_EMAIL": "t@e"}
         self.env = {**os.environ, **git_id, "HOME": str(root), "TASK_GH": str(root / "gh"), "TASK_HERDR": "0",
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
+                    "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
         self.write_config()
         self.origin("jyoka/app")
@@ -200,11 +256,13 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra=""):
+    def write_config(self, extra="", reviewer=False):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n\n"
-                       f"[agents]\nfake = {self.root}/agent {{prompt}}\nother = {self.root}/agent --other {{prompt}}\n"
+        cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
+                       + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "") + "\n"
+                       f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
+                       f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
 
     def save_db(self, db):
@@ -275,6 +333,9 @@ class TaskTest(unittest.TestCase):
 
     def agent_calls(self):
         return [eval(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def reviewer_calls(self):
+        return [eval(line) for line in self.review_calls.read_text().splitlines()] if self.review_calls.exists() else []
 
     def run_file(self, tid):
         return self.root / ".local/state/task-hub/runs" / f"{tid}.json"
@@ -416,6 +477,118 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("## Blocked\n\nNeed the Stripe test key.", self.comments(tid)[-1])
+
+    def test_automated_review_can_send_one_retry_before_in_review(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewfix")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertIn("# Automated review feedback", self.agent_calls()[1]["prompt"])
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertFalse(self.pr(tid)["isDraft"])
+        self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
+        self.assertIn("## Automated review", self.comments(tid)[-1])
+        self.assertIn("Verdict: pass", self.comments(tid)[-1])
+
+    def test_automated_review_blocks_after_one_failed_retry(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewfail")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertTrue(self.pr(tid)["isDraft"])
+        self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
+        self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
+
+    def test_python_bytecode_is_never_committed(self):
+        tid = self.new("pycache")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        files = self.origin_files(f"task/{tid}")
+        self.assertIn("hello.txt", files)
+        self.assertNotIn("__pycache__", files)
+        self.assertNotIn("stray.pyc", files)
+
+    def test_reviewer_sees_the_goal_and_new_files(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        prompt = self.reviewer_calls()[0]["prompt"]
+        self.assertIn("Say hello. MODE:ok", prompt)  # the Goal, with its acceptance criteria
+        self.assertIn("+hello from mode ok", prompt)  # hello.txt is a new file
+
+    def test_reviewer_sees_the_whole_branch_on_a_rerun(self):
+        self.write_config(reviewer=True)
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        prompt = self.reviewer_calls()[-1]["prompt"]
+        self.assertIn("new file mode", prompt)  # hello.txt was pushed by the first run, yet is still new to the PR
+        self.assertNotIn("-hello from mode blocked", prompt)
+
+    def test_reviewer_verdict_in_markdown_bold_passes(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=boldpass")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_reviewer_that_edits_files_blocks_and_its_edit_is_not_pushed(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edit")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("changed files", self.comments(tid)[-1])
+        bare = self.root / "origins" / "jyoka/app.git"
+        pushed = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(pushed, "hello from mode ok\n")
+
+    def test_reviewer_agent_means_the_tasks_own_agent(self):
+        self.write_config(reviewer="agent")
+        tid = self.new("ok")
+        self.task("start", tid, "--agent", "other")
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["argv0"], ["--other"])  # follows the card's agent, not the machine default
+        self.assertIn("adversarial reviewer", calls[1]["prompt"])
+        self.assertEqual(self.reviewer_calls(), [])
+        self.assertIn("reviewed by the agent itself", self.comments(tid)[-1])
+
+    def test_test_leftovers_of_the_reviewer_are_removed_not_blocked(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=leftover")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertNotIn("coverage.out", self.origin_files(f"task/{tid}"))
+
+    def test_reviewer_blocked_reason_is_the_blocked_line(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 1)  # no retry for blocked
+        blocked = self.comments(tid)[-1].split("## Blocked\n\n", 1)[1].splitlines()[0]
+        self.assertIn("Need access to the staging logs.", blocked)
+        self.assertNotIn("retry", blocked)
+
+    def test_retry_that_crashes_is_not_taken_for_the_old_report(self):
+        self.write_config(reviewer=True)
+        tid = self.new("reviewcrash REVIEW=needs")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.reviewer_calls()), 1)  # nothing new to review after the crash
+        self.assertIn("agent exited without a report", self.comments(tid)[-1])
 
     def test_blocked_without_changes_comments_and_opens_no_pr(self):
         tid = self.new("stuck")
