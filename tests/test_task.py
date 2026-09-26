@@ -78,13 +78,18 @@ elif cmd == ["issue", "create"]:
     if opt("--repo") != db["issues_repo"]:
         fail("could not resolve repository")
     n = len(db["issues"]) + 1
-    db["issues"][str(n)] = {"title": opt("--title"), "body": open(opt("--body-file")).read(), "state": "OPEN", "comments": []}
+    if opt("--label") and opt("--label") not in db.get("labels", []):
+        fail(f"could not add label: '{opt('--label')}' not found")
+    db["issues"][str(n)] = {"title": opt("--title"), "body": open(opt("--body-file")).read(), "state": "OPEN", "comments": [],
+                            "labels": [{"name": opt("--label")}] if opt("--label") else []}
     print(f"https://github.com/{db['issues_repo']}/issues/{n}")
 elif cmd == ["issue", "comment"]:
     db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read()})
 elif cmd == ["issue", "view"]:
     i = db["issues"][a[2]]
-    out = {"body": i["body"], "state": i["state"], "comments": i["comments"]}
+    out = {"body": i["body"], "state": i["state"], "comments": i["comments"], "labels": i.get("labels", [])}
+elif cmd == ["label", "create"]:
+    db.setdefault("labels", []).append(a[2])
 elif cmd == ["issue", "close"]:
     db["issues"][a[2]]["state"] = "CLOSED"
 elif cmd == ["pr", "list"]:
@@ -992,6 +997,38 @@ class TaskTest(unittest.TestCase):
         self.assertIn("outcomes[2]{status,runs}:\n  In review,2\n  Blocked,1", out)
         self.assertIn("reviews: 2 reviewed runs, 1 sent back once, 1 of those passed after the retry", out)
         self.assertIn("blocked_by[1]{reason,runs}:\n  agent,1", out)
+
+    def test_research_task_report_without_changes_goes_to_in_review_without_a_pr(self):
+        tid = self.new("nochange", "Compare search libraries", "jyoka/app", "--research")
+        self.assertEqual(self.gh()["issues"][tid]["labels"], [{"name": "research"}])
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(self.pr(tid))
+        self.assertIn("## Report", self.comments(tid)[-1])
+        self.assertNotIn("## Blocked", self.comments(tid)[-1])
+        self.assertIn("Kind: research", self.agent_calls()[0]["prompt"])
+
+    def test_research_task_that_writes_a_file_still_opens_a_pr(self):
+        tid = self.new("ok", "Write the comparison doc", "jyoka/app", "--research")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNotNone(self.pr(tid))
+
+    def test_task_without_the_label_and_without_changes_is_still_blocked(self):
+        tid = self.new("nochange")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("changed no files", self.comments(tid)[-1])
+
+    def test_reviewer_reviews_a_research_report(self):
+        self.write_config(reviewer=True)
+        tid = self.new("nochange REVIEW=boldpass", "Compare search libraries", "jyoka/app", "--research")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        prompt = self.reviewer_calls()[0]["prompt"]
+        self.assertIn("this is a research task", prompt)
+        self.assertIn("## Report", prompt)  # the agent's report, which is what gets reviewed
+        self.assertIn("## Automated review", self.comments(tid)[-1])
 
     def test_python_bytecode_is_never_committed(self):
         tid = self.new("pycache")
