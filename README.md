@@ -77,7 +77,7 @@ Issue ではないカードを無視するので、エージェントが動く�
 bin/task              the CLI (Python 3 standard library; uses git, gh, and herdr if running)
 worker/PROMPT.md      the instructions every agent gets at the start of a run
 skills/task/SKILL.md  the /task skill (linked into Claude, Codex/Pi, and Kiro skill folders)
-tests/test_task.py    tests: python3 -m unittest -v
+tests/test_task.py    tests: python3 -m unittest discover -s tests -v
 docs/                 setup, agents, design, task format, operations, lessons
 ```
 
