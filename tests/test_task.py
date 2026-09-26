@@ -873,14 +873,21 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(tid), "Ready")  # `task` would have started it
         self.assertEqual(self.agent_calls(), [])
 
+    def follow_events(self, *args):
+        """`task events --follow`, with its stdout and stderr lines collected as they come."""
+        p = subprocess.Popen([str(BIN), "events", "--follow", *args], env=self.env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        out, err = [], []
+        for stream, into in ((p.stdout, out), (p.stderr, err)):
+            threading.Thread(target=lambda s=stream, i=into: [i.append(line.strip()) for line in s], daemon=True).start()
+        self.wait_for(lambda: out or err)  # it has started looking
+        return p, out, err
+
     def test_events_shows_recent_ones_and_follow_prints_each_new_one(self):
         old = self.new("ok")
         self.assertIn(f"event: #{old} Backlog | Add hello | jyoka/app", self.task("events"))
-        follow = subprocess.Popen([str(BIN), "events", "--follow"], env=self.env, stdout=subprocess.PIPE, text=True)
-        lines = []
-        threading.Thread(target=lambda: [lines.append(line.strip()) for line in follow.stdout], daemon=True).start()
+        follow, lines, errs = self.follow_events()
         try:
-            self.wait_for(lambda: lines)  # "events: following ..."
             tid = self.new("stuck")
             self.task("start", tid)
             self.wait_for(lambda: any(f"#{tid} Blocked" in line for line in lines))
@@ -893,6 +900,23 @@ class TaskTest(unittest.TestCase):
                          [f"event: #{tid} Backlog", f"event: #{tid} Ready", f"event: #{tid} In progress",
                           f"event: #{tid} Blocked"])
         self.assertIn("reason Need the Stripe test key.", events[-1])
+        self.assertEqual(lines, events)  # stdout carries events only: a monitor wakes its agent for each line
+        self.assertTrue(errs[0].startswith("events: following"))
+
+    def test_events_only_keeps_the_named_events(self):
+        follow, lines, _ = self.follow_events("--only", "in review, Blocked")
+        try:
+            ok, stuck = self.new("ok"), self.new("stuck")
+            self.task("start", ok)
+            self.wait(ok)
+            self.task("start", stuck)
+            self.wait_for(lambda: len(lines) >= 2)
+            time.sleep(1.5)  # anything else would have arrived by now
+        finally:
+            follow.terminate()
+            follow.wait()
+        self.assertEqual([line.split(" | ")[0] for line in lines], [f"event: #{ok} In review", f"event: #{stuck} Blocked"])
+        self.assertEqual(self.task("events", "--only", "Blocked").strip().split(" | ")[0], f"event: #{stuck} Blocked")
 
     def test_events_note_each_status_change_with_the_reason(self):
         ok, stuck = self.new("ok"), self.new("stuck")
