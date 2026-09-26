@@ -8,6 +8,25 @@ disable-model-invocation: true
 The user asked to turn this conversation into a task on their task-hub board.
 Only register what the user asked for. Never start or approve the task: that is the user's job.
 
+## How big a task is
+
+One task is one concern the user can review, merge, and revert on its own: a pull request they can
+review in 10 to 15 minutes (a few hundred changed lines, not counting generated files).
+
+- Split work of different kinds (a feature, a bug fix, tooling or lint setup, docs), or work on different
+  files that the user might want to merge or revert separately.
+- Keep together work that touches the same file or function (separate tasks would conflict), or whose
+  parts mean nothing alone.
+- Do not split into a chain where one task needs another's unmerged pull request: task-hub cannot make a
+  task wait yet. Register the later one after the first is merged, or give it that branch as its Base branch.
+- Give tasks split from one piece of work a shared title prefix with a count, for example
+  "PR #23 follow-up (1/3): save experience from voice", so they stay together on the board.
+
+If the conversation holds several such concerns, do not fold them into one task. Show the user the split
+(titles and one line each) and ask which to register; register each as its own task.
+
+## Registering
+
 1. From the conversation (and the notes the user passed, if any), work out:
    - **title**: short imperative, under 60 characters
    - **repo**: the GitHub `owner/name` the work happens in. Infer it from the current directory

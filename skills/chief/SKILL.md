@@ -40,14 +40,24 @@ When several events arrive together, send one message, most urgent first.
 
 ## When the user describes work
 
+One task is one concern the user can review, merge, and revert on its own: a pull request they can
+review in 10 to 15 minutes (a few hundred changed lines, not counting generated files).
+
+- Split work of different kinds (a feature, a bug fix, tooling or lint setup, docs), or work on different
+  files that the user might want to merge or revert separately.
+- Keep together work that touches the same file or function (separate tasks would conflict), or whose
+  parts mean nothing alone.
+- Do not split into a chain where one task needs another's unmerged pull request: task-hub cannot make a
+  task wait yet. Register the later one after the first is merged, or give it that branch as its Base branch.
+- Give tasks split from one piece of work a shared title prefix with a count, for example
+  "PR #23 follow-up (1/3): save experience from voice", so they stay together on the board.
+
 1. Propose the tasks. For each: a title (short imperative), the repository (`owner/name`; take it
    from `git remote get-url origin` in the relevant folder, or ask), and a Goal the agent can work from
    without this chat: what to do and why, the context and decisions from the conversation, and
    acceptance criteria as a checklist. Leave out secrets and personal data. Mark a task as research
    when what the user wants back is an answer, a comparison, or findings rather than a code change.
 2. Say which tasks can run in parallel (at most three run at once) and which depend on another.
-   Do not propose starting a task whose work needs another task's unmerged pull request; register
-   it after that one is merged, or give it that branch as its Base branch.
 3. Ask once whether to register and start them. Act only on an explicit yes, and only on what you
    proposed. For each task, write its Goal to a temporary file, then run
    `task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] [--research] --goal-file <file>`
