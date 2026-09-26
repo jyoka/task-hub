@@ -3,7 +3,8 @@
 - The Project board, Issues, and PRs live in a fake `gh` that keeps everything in one JSON file.
 - Project repos are local bare repos (TASK_CLONE_URL), so clone/worktree/push are real git.
 - The agent is a fake CLI whose behaviour is chosen by a MODE word in the task's goal.
-- herdr is disabled (TASK_HERDR=0): runs use the background-process path.
+- herdr is disabled (TASK_HERDR=0): runs use the background-process path, except in tests that call
+  use_herdr(), which put a fake herdr (workspaces, tabs, panes in one JSON file) on PATH.
 """
 import contextlib
 import fcntl
@@ -230,6 +231,81 @@ body = f"## Verdict\n\n{verdict}\n\n## Review\n\nchecked hello.txt\n"
 if fix:
     body += f"\n## Please fix\n\n{fix}\n"
 Path(".task-review.md").write_text(body)
+'''
+
+FAKE_HERDR = r'''#!/usr/bin/env python3
+import fcntl, json, os, subprocess, sys, time
+path = os.environ["TASK_TEST_HERDR_DB"]
+a = sys.argv[1:]
+def opt(name):
+    return a[a.index(name) + 1] if name in a else None
+def locked(fn):
+    with open(path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        db = json.load(open(path))
+        out = fn(db)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(db, f)
+        os.replace(tmp, path)
+    return out
+def res(r):
+    print(json.dumps({"result": r}))
+def fail(msg):
+    print(json.dumps({"error": {"message": msg}})); sys.exit(1)
+def new_tab(db, ws, cwd, label):
+    db["n"] += 1
+    tab, pane = f"{ws}:t{db['n']}", f"{ws}:p{db['n']}"
+    db["tabs"][tab] = {"tab_id": tab, "workspace_id": ws, "label": label}
+    db["panes"][pane] = {"pane_id": pane, "tab_id": tab, "workspace_id": ws, "cwd": cwd}
+    return {"root_pane": db["panes"][pane], "tab": db["tabs"][tab]}
+def out_file(pane):
+    return f"{path}.{pane.replace(':', '_')}.out"
+cmd = a[:2]
+if cmd == ["status", "server"]:
+    print("status: running")
+elif cmd == ["workspace", "list"]:
+    res(locked(lambda db: {"workspaces": list(db["workspaces"].values())}))
+elif cmd == ["workspace", "get"]:
+    w = locked(lambda db: db["workspaces"].get(a[2]))
+    res({"workspace": w}) if w else fail("workspace_not_found")
+elif cmd == ["workspace", "create"]:
+    def create(db):
+        db["n"] += 1
+        ws = f"w{db['n']}"
+        db["workspaces"][ws] = {"workspace_id": ws, "label": opt("--label")}
+        return new_tab(db, ws, opt("--cwd"), "1")
+    res(locked(create))
+elif cmd in (["workspace", "close"], ["tab", "close"]):
+    def close(db):
+        db["workspaces" if cmd[0] == "workspace" else "tabs"].pop(a[2], None)
+        db["closed"].append(a[2])
+    locked(close)
+    res({"type": "ok"})
+elif cmd == ["tab", "create"]:
+    r = locked(lambda db: new_tab(db, opt("--workspace"), opt("--cwd"), opt("--label"))
+               if opt("--workspace") in db["workspaces"] else None)
+    res(r) if r else fail("workspace_not_found")
+elif cmd == ["tab", "get"]:
+    t = locked(lambda db: db["tabs"].get(a[2]))
+    res({"tab": t}) if t else fail("tab_not_found")
+elif cmd == ["pane", "list"]:
+    res(locked(lambda db: {"panes": list(db["panes"].values())}))
+elif cmd == ["pane", "run"]:
+    pane = locked(lambda db: db["panes"][a[2]])
+    subprocess.Popen(["sh", "-c", a[3]], cwd=pane["cwd"], stdin=subprocess.DEVNULL, stdout=open(out_file(a[2]), "ab"),
+                     stderr=subprocess.STDOUT, start_new_session=True)
+elif cmd == ["pane", "wait-output"]:
+    end = time.time() + int(opt("--timeout")) / 1000
+    while time.time() < end:
+        if os.path.exists(out_file(a[2])) and opt("--match") in open(out_file(a[2]), errors="replace").read():
+            sys.exit(0)
+        time.sleep(0.1)
+    sys.exit(1)
+elif cmd == ["pane", "send-keys"]:
+    pass
+else:
+    fail(f"fake herdr: unsupported {a}")
 '''
 
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
@@ -687,6 +763,118 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         time.sleep(1)
         self.assertEqual(self.replans(tid), [])
+
+    def use_herdr(self, workspaces=(), panes=()):
+        """A fake herdr server. workspaces: (id, label) pairs; panes: (workspace id, cwd) pairs."""
+        db = {"n": 100, "workspaces": {w: {"workspace_id": w, "label": label} for w, label in workspaces},
+              "tabs": {}, "panes": {}, "closed": []}
+        for i, (ws, cwd) in enumerate(panes):
+            db["panes"][f"{ws}:p{i}"] = {"pane_id": f"{ws}:p{i}", "tab_id": f"{ws}:t0", "workspace_id": ws, "cwd": str(cwd)}
+        (self.root / "herdr.json").write_text(json.dumps(db))
+        fakebin = self.root / "fakebin"
+        fakebin.mkdir(exist_ok=True)
+        (fakebin / "herdr").write_text(FAKE_HERDR)
+        (fakebin / "herdr").chmod(0o755)
+        self.env.pop("TASK_HERDR", None)
+        self.env.update(PATH=f"{fakebin}:{self.env['PATH']}", TASK_TEST_HERDR_DB=str(self.root / "herdr.json"))
+
+    def herdr_db(self):
+        return json.loads((self.root / "herdr.json").read_text())
+
+    def new_in_herdr(self, workspace, mode="ok"):
+        """/task run by an agent in a pane of that herdr workspace."""
+        self.env.update(HERDR_ENV="1", HERDR_WORKSPACE_ID=workspace)
+        try:
+            return self.new(mode)
+        finally:
+            for k in ("HERDR_ENV", "HERDR_WORKSPACE_ID"):
+                self.env.pop(k)
+
+    def run_state(self, tid):
+        return json.loads((self.root / ".local/state/task-hub/runs" / f"{tid}.json").read_text())
+
+    def checkout(self, name, url):
+        """A checkout of a repo, as you would have it open in a herdr pane."""
+        d = self.root / name
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "remote", "add", "origin", url], check=True)
+        return d
+
+    def test_task_opens_as_a_tab_where_it_was_asked_and_closes_at_in_review(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new_in_herdr("w2")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.wait_for(lambda: self.herdr_db()["closed"])
+        db = self.herdr_db()
+        tab = db["closed"][0]
+        self.assertTrue(tab.startswith("w2:t"))  # a tab in the workspace where it was asked for
+        self.assertEqual(sorted(db["workspaces"]), ["w1", "w2"])  # no workspace of its own
+        self.assertEqual((self.run_state(tid)["tab"], self.run_state(tid)["workspace"]), ("", ""))
+
+    def test_task_not_asked_in_herdr_opens_next_to_a_checkout_of_its_repo(self):
+        other = self.checkout("other", "https://github.com/jyoka/other.git")
+        mine = self.checkout("my app", "git@github.com:jyoka/app.git")
+        self.use_herdr(workspaces=[("w1", "other"), ("w3", "app work")], panes=[("w1", other), ("w3", mine)])
+        tid = self.new("stuck")  # registered outside herdr, e.g. from the board on a phone
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        tab = self.run_state(tid)["tab"]
+        self.assertTrue(tab.startswith("w3:t"))
+        self.assertTrue(self.herdr_db()["tabs"][tab]["label"].startswith(f"#{tid} "))
+
+    def test_task_gets_its_own_workspace_when_none_fits(self):
+        self.use_herdr(workspaces=[("w1", "task-hub")])
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.wait_for(lambda: self.herdr_db()["closed"])
+        closed = self.herdr_db()["closed"][0]
+        self.assertNotIn(closed, ("w1",))
+        self.assertFalse(closed.startswith("w1:"))
+
+    def test_where_asked_is_ignored_once_that_id_belongs_to_another_workspace(self):
+        self.use_herdr(workspaces=[("w2", "バイトルCRM関連")])
+        tid = self.new_in_herdr("w2", "stuck")
+        db = self.herdr_db()
+        db["workspaces"]["w2"]["label"] = "something else"  # herdr restarted and reused the id
+        (self.root / "herdr.json").write_text(json.dumps(db))
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertEqual(self.run_state(tid)["tab"], "")  # its own workspace instead
+        self.assertNotEqual(self.run_state(tid)["workspace"], "w2")
+
+    def test_blocked_task_keeps_its_tab_and_done_never_closes_a_reused_id(self):
+        self.use_herdr(workspaces=[("w2", "バイトルCRM関連")])
+        a, b = self.new_in_herdr("w2", "stuck"), self.new_in_herdr("w2", "stuck")
+        self.task("start", a)
+        self.wait(a)
+        self.task("start", b)
+        self.wait(b)
+        self.assertEqual(self.herdr_db()["closed"], [])  # Blocked: you want to see what happened
+        tab_a, tab_b = self.run_state(a)["tab"], self.run_state(b)["tab"]
+        self.task("done", a)
+        self.assertEqual(self.herdr_db()["closed"], [tab_a])
+        db = self.herdr_db()
+        db["tabs"][tab_b]["label"] = "my notes"  # the id now belongs to one of your own tabs
+        (self.root / "herdr.json").write_text(json.dumps(db))
+        self.task("done", b)
+        self.assertNotIn(tab_b, self.herdr_db()["closed"])
+
+    def test_events_note_each_status_change_with_the_reason(self):
+        ok, stuck = self.new("ok"), self.new("stuck")
+        self.task("start", ok)
+        self.wait(ok)
+        self.task("start", stuck)
+        self.wait(stuck)
+        path = self.root / ".local/state/task-hub/events.jsonl"
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual([e["event"] for e in events if e["id"] == ok], ["Backlog", "Ready", "In progress", "In review"])
+        done = [e for e in events if e["id"] == ok][-1]
+        self.assertEqual((done["title"], done["repo"]), ("Add hello", "jyoka/app"))
+        self.assertTrue(done["pr"].startswith("https://github.com/jyoka/app/pull/"))
+        blocked = [e for e in events if e["id"] == stuck][-1]
+        self.assertEqual((blocked["event"], blocked["reason"]), ("Blocked", "Need the Stripe test key."))
 
     def metrics(self, n):
         """The run records, once there are n of them (each is written as the run's last step)."""

@@ -59,7 +59,9 @@ STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
-RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "worktree", "log", "pr"]
+EVENTS = STATE / "events.jsonl"  # one line per status change task-hub makes, for whatever watches (see docs/operations.md)
+ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
+RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr"]
 GH = os.environ.get("TASK_GH", "gh")
 
 
@@ -350,13 +352,20 @@ def get(tid):
     fail(f"task {tid} not found on the board", "run `task` to see the board")
 
 
-def set_status(t, status):
+def set_status(t, status, reason=""):
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
     b = board()
     gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
        "--single-select-option-id", b["status_options"][status.lower()])
     t["status"] = status
+    emit(t, status, reason=reason, pr=t.get("pr", ""))
+
+
+def emit(t, event, **extra):
+    """Note what just happened in EVENTS, one JSON line, so a watcher learns of it without polling GitHub."""
+    append_jsonl(EVENTS, {"time": now(), "id": t["id"], "title": t.get("title", ""), "repo": t.get("repo", ""),
+                          "event": event, **{k: v for k, v in extra.items() if v}})
 
 
 def set_text(t, field, value):
@@ -401,14 +410,19 @@ def save_run(t):
 
 
 def record_run(record, say=None):
-    """Append one run's outcome to METRICS. A failure here must never cost the run itself."""
+    """Append one run's outcome to METRICS."""
+    append_jsonl(METRICS, record, say)
+
+
+def append_jsonl(path, record, say=None):
+    """A failure to note something must never cost the run or the command itself."""
     try:
-        METRICS.parent.mkdir(parents=True, exist_ok=True)
-        with METRICS.open("a") as f:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError as e:
         if say:
-            say(f"== could not record the run in {home(METRICS)}: {e}")
+            say(f"== could not write {home(path)}: {e}")
 
 
 def alive(t):
@@ -434,9 +448,61 @@ def herdr_available():
     return "status: running" in herdr("status", "server").stdout
 
 
-def close_workspace(t):
-    if t.get("workspace") and herdr_available():
-        herdr("workspace", "close", t["workspace"])
+def herdr_json(*args):
+    r = herdr(*args)
+    try:
+        return json.loads(r.stdout)["result"] if r.returncode == 0 else None
+    except (ValueError, KeyError):
+        return None
+
+
+def remember_where_asked(t):
+    """When a task is registered inside herdr (/task in an agent's pane), note that workspace for its tab.
+
+    Only HERDR_WORKSPACE_ID counts: outside herdr, `herdr pane current` answers with whatever pane has the focus.
+    The label is kept too, because herdr can hand the same id to another workspace after a restart.
+    """
+    ws = os.environ.get("HERDR_WORKSPACE_ID", "") if os.environ.get("HERDR_ENV") == "1" else ""
+    info = herdr_json("workspace", "get", ws) if ws and herdr_available() else None
+    if info:
+        ASKED.mkdir(parents=True, exist_ok=True)
+        (ASKED / f"{t['id']}.json").write_text(json.dumps({"workspace": ws, "label": info["workspace"]["label"]}))
+
+
+def task_workspace(t):
+    """The workspace for this task's tab: where it was asked for, else one with a pane in a checkout of its repo.
+
+    "" when there is none: the task then gets a workspace of its own.
+    """
+    workspaces = {w["workspace_id"]: w for w in (herdr_json("workspace", "list") or {}).get("workspaces", [])}
+    f = ASKED / f"{t['id']}.json"
+    asked = json.loads(f.read_text()) if f.exists() else {}
+    if asked.get("workspace") in workspaces and workspaces[asked["workspace"]]["label"] == asked.get("label"):
+        return asked["workspace"]
+    checked = set()
+    for pane in (herdr_json("pane", "list") or {}).get("panes", []):
+        cwd = pane.get("cwd") or ""
+        if not cwd or cwd in checked or Path(cwd).resolve().is_relative_to(DATA.resolve()):  # not task-hub's own clones
+            continue
+        checked.add(cwd)
+        url = run("git", "-C", cwd, "remote", "get-url", "origin").stdout.strip()
+        if re.search(rf"github\.com[:/]{re.escape(t['repo'])}(\.git)?/?$", url, re.I) and pane["workspace_id"] in workspaces:
+            return pane["workspace_id"]
+    return ""
+
+
+def close_herdr(t):
+    """Close this task's tab (or its own workspace). Only if it still carries this task's label: ids get reused."""
+    if not (t.get("tab") or t.get("workspace")) or not herdr_available():
+        return
+    if t.get("tab"):
+        info = herdr_json("tab", "get", t["tab"])
+        if info and info["tab"]["label"].startswith(f"#{t['id']} "):
+            herdr("tab", "close", t["tab"])
+    else:
+        info = herdr_json("workspace", "get", t["workspace"])
+        if info and info["workspace"]["label"].startswith(f"task {t['id']} "):
+            herdr("workspace", "close", t["workspace"])
 
 
 # ---------- starting a run ----------
@@ -580,14 +646,21 @@ def launch(t):
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     prompt_file(t).write_text(build_prompt(t))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
-    t["workspace"] = ""
+    t["workspace"], t["tab"] = "", ""
     if herdr_available():
-        close_workspace(load_run(t["id"]))  # a re-run replaces this task's old workspace, never anyone else's
-        r = herdr("workspace", "create", "--cwd", wt, "--label", f"task {t['id']}: {t['title']}"[:60], "--no-focus")
+        close_herdr(load_run(t["id"]))  # a re-run replaces this task's old tab or workspace, never anyone else's
+        home_ws = task_workspace(t)
+        if home_ws:  # a tab next to where you work on this repo
+            r = herdr("tab", "create", "--workspace", home_ws, "--cwd", wt, "--label",
+                      f"#{t['id']} {t['title']}"[:40], "--no-focus")
+        else:
+            r = herdr("workspace", "create", "--cwd", wt, "--label",
+                      f"task {t['id']} · {t['repo'].split('/')[-1]}: {t['title']}"[:60], "--no-focus")
         if r.returncode != 0:
-            raise RuntimeError(f"herdr could not create a workspace: {r.stderr.strip()[-200:]}")
+            raise RuntimeError(f"herdr could not open a {'tab' if home_ws else 'workspace'}: {r.stderr.strip()[-200:]}")
         res = json.loads(r.stdout)["result"]
-        t["workspace"] = res["workspace"]["workspace_id"]
+        t["workspace"] = res["root_pane"]["workspace_id"]
+        t["tab"] = res["tab"]["tab_id"] if home_ws else ""
     save_run(t)  # saved before the run starts: the run reads it, then records its pid
     set_status(t, IN_PROGRESS)
     if t["workspace"]:
@@ -607,7 +680,7 @@ def launch(t):
             if herdr("pane", "wait-output", pane, "--match", f"== task {t['id']}:", "--timeout", "8000").returncode == 0:
                 break
         else:
-            raise RuntimeError(f"the run did not start in herdr workspace {t['workspace']}")
+            raise RuntimeError(f"the run did not start in herdr {'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
         with open(t["log"], "ab") as log:
             subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
@@ -814,6 +887,7 @@ def run_replan(t, report, say):
         return "ignored"
     comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details]))
     say(f"== replanner decision: {decision}")
+    emit(t, "replan", decision=decision)
     return decision
 
 
@@ -867,11 +941,18 @@ def cmd_run(a):
         try:
             report_comment(t, blocked=f"task-hub could not finish the run: {str(e)[:300]}", report=report.strip())
             (wt / REPORT_FILE).unlink(missing_ok=True)
-            set_status(t, BLOCKED)
+            set_status(t, BLOCKED, reason=f"task-hub could not finish the run: {str(e)[:300]}")
         except RuntimeError:  # GitHub unreachable too: the next sync sees the dead run and blocks the card
             say(f"== the agent's report is kept in {home(wt / REPORT_FILE)}")
     save_run(t)  # the pid stays: once this process is gone, `alive` knows the run has ended
     record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": status}, say)
+    if status == IN_REVIEW and (t.get("tab") or t.get("workspace")):  # nothing more to see here: `task log` keeps it
+        say(f"== task {t['id']} is now {status}. Closing this tab; `task log {t['id']}` has the output.")
+        closing = dict(t)
+        t["tab"] = t["workspace"] = ""
+        save_run(t)  # forget the ids first: herdr may give them to someone else's tab later
+        close_herdr(closing)  # this process ends with its tab
+        return
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
 
 
@@ -898,7 +979,7 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
     report_comment(t, blocked=parsed.blocked, report=parsed.report, review=parsed.review,
                    pr=t.get("pr", "") if ahead else "", auto_review=parsed.auto_review)
     status = BLOCKED if parsed.blocked else IN_REVIEW
-    set_status(t, status)
+    set_status(t, status, reason=parsed.blocked)
     return status
 
 
@@ -938,8 +1019,9 @@ def find_pr(t):
 
 
 def cleanup(t):
-    """Close this task's herdr workspace and remove its worktree (only ones task-hub created)."""
-    close_workspace(t)
+    """Close this task's herdr tab or workspace and remove its worktree (only ones task-hub created)."""
+    close_herdr(t)
+    (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
     wt = Path(t.get("worktree") or "")
     if t.get("worktree") and (DATA / "worktrees") in wt.parents and wt.exists():
         run("git", "-C", clone_dir(t["repo"]), "worktree", "remove", "--force", wt)
@@ -969,7 +1051,7 @@ def sync():
                                if t.get("started") else "no run of this task on this machine",
                                report=report.strip())
                 kept.unlink(missing_ok=True)
-                set_status(t, BLOCKED)
+                set_status(t, BLOCKED, reason="the run stopped unexpectedly" if t.get("started") else "no run here")
             elif StatusLifecycle.needs_merge_watch(t) and pr_merged(t):
                 # GitHub documents "Closes ..." as working only for PRs into the default branch
                 gh("issue", "close", t["id"], "--repo", board()["issues"])
@@ -999,11 +1081,12 @@ def sync():
                         "started": now(), "finished": now(), "seconds": 0, "status": BLOCKED,
                         "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
             report_comment(t, blocked=f"could not start: {str(e)[:300]}")
-            set_status(t, BLOCKED)
+            set_status(t, BLOCKED, reason=f"could not start: {str(e)[:300]}")
             lines.append(f"error: task {t['id']} could not start: {e}")
             continue
         started.append({"id": t["id"], "agent": t["agent"],
-                        "where": f"herdr workspace {t['workspace']}" if t["workspace"] else home(t["log"])})
+                        "where": f"herdr tab {t['tab']}" if t["tab"] else
+                        f"herdr workspace {t['workspace']}" if t["workspace"] else home(t["log"])})
     if started:
         lines += table("started", started, ["id", "agent", "where"])
     return lines
@@ -1127,7 +1210,8 @@ def cmd_new(a):
     url = gh("issue", "create", "--repo", b["issues"], "--title", a["title"], "--body-file", f).strip().splitlines()[-1]
     f.unlink(missing_ok=True)
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
-    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"]}
+    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"]}
+    remember_where_asked(t)
     set_status(t, BACKLOG)
     set_text(t, "Target repo", a["repo"])
     if a["base"]:
