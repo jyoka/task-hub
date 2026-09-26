@@ -716,26 +716,36 @@ def build_prompt(t):
 
 
 def staged_diff(t):
-    """The whole PR as it will be pushed: all files, new ones included, from where the branch left its base.
-
-    Staging everything also gives the reviewer a baseline: any edit it makes shows up as unstaged.
-    """
+    """The whole PR as it will be pushed: all files, new ones included, from where the branch left its base."""
     wt = t["worktree"]
     run("git", "-C", wt, "add", "-A", check=True)
     fork = run("git", "-C", wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
     return run("git", "-C", wt, "diff", "--cached", fork, "--").stdout
 
 
-def undo_unstaged(wt):
-    """Throw away what changed after staged_diff; True if a file of the PR was edited.
+def snapshot(wt):
+    """Everything in the worktree, staged, as (tree, HEAD): what a read-only helper must leave as it found it."""
+    run("git", "-C", wt, "add", "-A", check=True)
+    return (run("git", "-C", wt, "write-tree", check=True).stdout.strip(),
+            run("git", "-C", wt, "rev-parse", "HEAD", check=True).stdout.strip())
 
-    New untracked files are leftovers of test runs the reviewer may do: removed, but not an offence.
-    Ignored files (the report files, build output) stay.
+
+def restore(wt, snap):
+    """Put the worktree back to `snap`; True if a read-only helper had changed it (reviewer, replanner).
+
+    A change is anything that reached the PR's files: edited, staged, deleted, a new staged file, or a commit.
+    New files it never staged are leftovers of test runs: removed, but not an offence. Ignored files stay.
     """
-    edited = run("git", "-C", wt, "diff", "--quiet").returncode != 0
+    tree, head = snap
+    moved = run("git", "-C", wt, "rev-parse", "HEAD").stdout.strip() != head
+    edited = moved or run("git", "-C", wt, "write-tree").stdout.strip() != tree \
+        or run("git", "-C", wt, "diff", "--quiet").returncode != 0
     if edited:
-        run("git", "-C", wt, "checkout", "-q", "--", ".", check=True)
-    run("git", "-C", wt, "clean", "-fdq", check=True)
+        if moved:
+            run("git", "-C", wt, "reset", "-q", "--soft", head, check=True)  # its commit never reaches the PR
+        run("git", "-C", wt, "read-tree", tree, check=True)
+        run("git", "-C", wt, "checkout-index", "-a", "-f", check=True)
+    run("git", "-C", wt, "clean", "-fdq", check=True)  # also removes new files it had staged
     return edited
 
 
@@ -785,8 +795,9 @@ def run_review(t, report, say):
             return None  # finish() blocks it as "changed no files"
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
+    snap = snapshot(wt)
     code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer")
-    if undo_unstaged(wt):
+    if restore(wt, snap):
         return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
                             "Reviewers must only inspect the worktree.")
     if not (wt / REVIEW_FILE).exists():
@@ -864,8 +875,9 @@ def run_replan(t, report, say):
         return "skipped"
     wt = Path(t["worktree"])
     (wt / REPLAN_FILE).unlink(missing_ok=True)
+    snap = snapshot(wt)
     code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner")
-    if undo_unstaged(wt):
+    if restore(wt, snap):
         say("== replanner changed files; its edits were undone and its result is ignored")
         return "ignored"
     if not (wt / REPLAN_FILE).exists():
@@ -1030,15 +1042,25 @@ def cleanup(t):
     """Close this task's herdr tab or workspace, remove its worktree and its local branch (only ones task-hub made).
 
     The branch on GitHub stays: it is the PR's. The local one would only pile up in task-hub's clone.
+    Returns "" when done, else what is left: the run record then stays, so the next check tries again.
     """
     close_herdr(t)
-    (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
     wt = Path(t.get("worktree") or "")
+    repo = clone_dir(t["repo"]) if t.get("repo") else None
     if t.get("worktree") and (DATA / "worktrees") in wt.parents and wt.exists():
-        run("git", "-C", clone_dir(t["repo"]), "worktree", "remove", "--force", wt)
-    if t.get("repo") and t.get("branch") == f"task/{t['id']}" and (clone_dir(t["repo"]) / ".git").exists():
-        run("git", "-C", clone_dir(t["repo"]), "branch", "-D", t["branch"])
+        run("git", "-C", repo, "worktree", "remove", "--force", wt)
+        if wt.exists():  # a failed removal unregisters it but leaves the folder, which git then refuses to touch
+            shutil.rmtree(wt, ignore_errors=True)
+            run("git", "-C", repo, "worktree", "prune")
+    if wt.exists() and (DATA / "worktrees") in wt.parents:
+        return f"worktree {home(wt)} could not be removed"
+    if repo and t.get("branch") == f"task/{t['id']}" and (repo / ".git").exists():
+        run("git", "-C", repo, "branch", "-D", t["branch"])
+        if run("git", "-C", repo, "rev-parse", "--verify", "-q", f"refs/heads/{t['branch']}").returncode == 0:
+            return f"branch {t['branch']} could not be deleted"
+    (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
     (RUNS / f"{t['id']}.json").unlink(missing_ok=True)
+    return ""
 
 
 # ---------- sync: board and runs in, new runs out ----------
@@ -1051,8 +1073,11 @@ def sync():
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         t = {"id": f.stem, **load_run(f.stem)}
         if t["id"] not in {x["id"] for x in open_} and not alive(t):
-            cleanup(t)
-            changed.append({"id": t["id"], "title": t.get("title", ""), "now": "cleaned up (card is Done)"})
+            left = cleanup(t)
+            if left:
+                lines.append(f"cleanup: task {t['id']}: {left}; trying again at the next check")
+            else:
+                changed.append({"id": t["id"], "title": t.get("title", ""), "now": "cleaned up (card is Done)"})
     for t in open_:
         before = t["status"]
         try:
@@ -1343,11 +1368,12 @@ def cmd_done(a):
         return
     if t["status"] == IN_PROGRESS and alive(t):
         fail(f"task {t['id']} is still running", "stop the agent in its herdr workspace first, then retry")
-    cleanup(t)
+    left = cleanup(t)
     if issue(t)["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
     set_status(t, DONE)
-    out("task:", f"  id: {t['id']}", f"  status: {DONE}")
+    out("task:", f"  id: {t['id']}", f"  status: {DONE}",
+        *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []))
 
 
 COMMANDS = {
