@@ -1111,6 +1111,50 @@ def cmd_home(_):
         "  Run `task watch` in a herdr pane to start Ready cards automatically")
 
 
+def cmd_list(_):
+    """The open cards, read only: unlike `task`, it starts nothing and changes nothing (for the /chief agent)."""
+    board_ = tasks()
+    counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
+    out("counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
+        *(table("tasks", board_, ["id", "title", "status", "repo", "agent"]) if board_ else ["tasks: 0 open tasks"]),
+        f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)")
+
+
+def event_line(e):
+    extra = [f"{k} {e[k]}" for k in ("reason", "decision", "pr") if e.get(k)]
+    return " | ".join([f"event: #{e['id']} {e['event']}", e.get("title", ""), e.get("repo", ""), *extra])
+
+
+def cmd_events(a):
+    """What task-hub did lately; with --follow, each new event as one line the moment it is written.
+
+    --follow is for an agent's background monitor (the /chief skill): every line it prints is one thing to react to.
+    """
+    if not a["follow"]:
+        recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
+        events = [json.loads(line) for line in recent if line.startswith("{")]
+        out(*([event_line(e) for e in events] or [f"events: none yet in {home(EVENTS)}"]))
+        return
+    pos = EVENTS.stat().st_size if EVENTS.exists() else 0  # only what happens from now on
+    print(f"events: following {home(EVENTS)} (Ctrl-C to stop)", flush=True)
+    try:
+        while True:
+            if EVENTS.exists() and EVENTS.stat().st_size > pos:
+                with EVENTS.open("rb") as f:
+                    f.seek(pos)
+                    chunk = f.read()
+                whole = chunk[:chunk.rfind(b"\n") + 1]  # a line still being written waits for the next look
+                pos += len(whole)
+                for line in whole.decode(errors="replace").splitlines():
+                    try:
+                        print(event_line(json.loads(line)), flush=True)
+                    except (ValueError, KeyError):
+                        continue
+            time.sleep(1)
+    except KeyboardInterrupt:
+        return
+
+
 def cmd_watch(_):
     board()  # fail fast on a bad config
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
@@ -1134,7 +1178,8 @@ def cmd_show(a):
     i = issue(t)
     lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr")
                          if t.get(k)]
-    body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "")
+    body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "") \
+        + ("\n\n" + i["replans"][-1].replace(REPLAN_MARK, "").strip() if i["replans"] else "")
     if len(body) > 1500 and not a["full"]:
         lines += ["body: |", *("  " + l for l in body[:1500].splitlines()),
                   f"  ... (truncated, {len(body)} chars total)",
@@ -1291,6 +1336,9 @@ COMMANDS = {
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True},
             'task new --title "..." --repo owner/name [--base branch] [--agent name] (--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
+    "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
+    "events": (cmd_events, [], {"follow": False},
+               "task events [--follow]  # what task-hub did lately; --follow prints each new event as it happens"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
