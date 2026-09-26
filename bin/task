@@ -11,6 +11,8 @@ CLI of your choice (claude, codex, pi, kiro, ...). The agent only edits files an
 moves the card. At most MAX_PARALLEL tasks are In progress at once.
 
 Board: Backlog -> Ready -> In progress -> In review -> Done   (or Blocked)
+An optional "wait for merge" column between In review and Done holds reviewed cards
+whose PR is approved but not merged yet; the merged PR moves them to Done as usual.
 """
 import configparser
 import datetime
@@ -26,9 +28,9 @@ from pathlib import Path
 
 VERSION = "0.5.0"
 MAX_PARALLEL = 3
-# the column names of GitHub's Kanban template, plus Blocked; matched without regard to case
-BACKLOG, READY, IN_PROGRESS, IN_REVIEW, BLOCKED, DONE = STATUSES = \
-    ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]
+# the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
+BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = STATUSES = \
+    ["Backlog", "Ready", "In progress", "In review", "wait for merge", "Blocked", "Done"]
 TEXT_FIELDS = ["Target repo", "Agent", "Base branch"]  # "Repo" is a reserved field name on GitHub
 REPORT_FILE = ".task-report.md"
 REPORT_MARK = "<!-- task-hub report -->"
@@ -173,7 +175,8 @@ def board():
     by_name = {f["name"].lower(): f for f in fields if f}
     status = by_name.get("status", {})
     options = {o["name"].lower(): o["id"] for o in status.get("options", [])}
-    missing = [f'Status option "{s}"' for s in STATUSES if s.lower() not in options]
+    missing = [f'Status option "{s}"' for s in STATUSES
+               if s.lower() not in options and s != WAIT_FOR_MERGE]  # wait for merge is optional
     missing += [f'text field "{n}"' + (f" (it is {by_name[n.lower()]['dataType']}, make it TEXT)"
                                         if n.lower() in by_name else "")
                 for n in TEXT_FIELDS if by_name.get(n.lower(), {}).get("dataType") != "TEXT"]
@@ -605,7 +608,7 @@ def sync():
                                report=report.strip())
                 kept.unlink(missing_ok=True)
                 set_status(t, BLOCKED)
-            elif before == IN_REVIEW and (t.get("base") or load_run(t["id"]).get("base")) \
+            elif before in (IN_REVIEW, WAIT_FOR_MERGE) and (t.get("base") or load_run(t["id"]).get("base")) \
                     and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or "") and pr_merged(t):
                 # GitHub documents "Closes ..." as working only for PRs into the default branch
                 gh("issue", "close", t["id"], "--repo", board()["issues"])

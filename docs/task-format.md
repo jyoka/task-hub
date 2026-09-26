@@ -9,7 +9,7 @@
 |---|---|---|
 | Issue のタイトル | 命令形の短い要約。PR のタイトルにもなります | あなた(`/task` / `task new`) |
 | Issue の本文 | Goal: やること、理由、チャットで決まった文脈、確認項目のチェックリスト。エージェントへの指示のすべてです | あなた |
-| カードの Status | Backlog / Ready / In progress / In review / Blocked / Done | あなた(Backlog と Ready) / task-hub(それ以外) |
+| カードの Status | Backlog / Ready / In progress / In review / wait for merge(任意) / Blocked / Done | あなた(Backlog と Ready と wait for merge) / task-hub(それ以外) |
 | カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
@@ -87,7 +87,7 @@ task-hub 自身が止めたとき(実行が止まった、開始できなかっ�
 - マージされると `Closes` によって Issue が閉じ、Project のワークフロー(Item closed)でカードが Done に移ります。
   次の確認で task-hub はカードが開いた列から消えたことに気づき、worktree と herdr のワークスペースを削除します
 - Base branch 向けの PR について、GitHub のドキュメントは「`Closes` はデフォルトブランチへのマージのときだけ効く」と
-  しています(実際には閉じた例もありますが、保証がありません)。そのため task-hub が In review のカードの PR を確認し、マージされていれば Issue を閉じてカードを Done にし、
+  しています(実際には閉じた例もありますが、保証がありません)。そのため task-hub が In review と wait for merge のカードの PR を確認し、マージされていれば Issue を閉じてカードを Done にし、
   worktree と herdr のワークスペースを削除します。この確認は GraphQL とは別枠の REST API で行います。
   そのタスクを別のマシンで実行した場合も、ブランチ `task/<番号>` から PR を探して確認します
 - Base branch が GitHub にない(手元にしかない、マージ後に削除された)場合は、実行のたびに開始前に確かめて開始せず、
