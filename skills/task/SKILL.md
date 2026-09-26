@@ -33,6 +33,6 @@ Only register what the user asked for. Never start or approve the task: that is 
    task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] --goal-file <tmpfile>
    ```
 
-   If `task` is not on PATH, use `"$HOME/AIprogramming PJ/task-hub/bin/task"`.
+   If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 
 3. Reply with the task id, its Issue URL, and one line: "Move the card to Ready (or run `task start`) when you want an agent to pick it up."

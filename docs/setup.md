@@ -29,11 +29,24 @@ gh project field-create <Project の番号> --owner <you> --name "Base branch" -
 
 ## インストール
 
+動かす用の clone を、開発用の clone とは別に作ります。`task` は実行のたびに、リンク先の `bin/task` と
+`worker/*.md` を読みます。開発用の clone にリンクすると、そこでブランチを切り替えるたびに、実行中の
+タスクボードが使うコードまで変わってしまいます(マージ前のコードで本物のタスクが動く)。
+
 ```
-git clone https://github.com/jyoka/task-hub.git "$HOME/AIprogramming PJ/task-hub"
-ln -s "$HOME/AIprogramming PJ/task-hub/bin/task" ~/.local/bin/task       # ~/.local/bin must be on PATH
+git clone https://github.com/jyoka/task-hub.git ~/.local/lib/task-hub
+ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task       # ~/.local/bin must be on PATH
 task --version
 ```
+
+更新は、PR をマージしたあとにこの clone で pull するだけです。`task watch` を動かしているなら、止めてから
+起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。
+
+```
+git -C ~/.local/lib/task-hub pull --ff-only
+```
+
+task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 -m unittest discover -s tests -v`)。
 
 ## GitHub 側の準備(1 回だけ)
 
@@ -94,8 +107,8 @@ task --version
 同じスキルフォルダがすべてのエージェントで使えます。各エージェントがスキルを探す場所にリンクしてください:
 
 ```
-ln -s "$HOME/AIprogramming PJ/task-hub/skills/task" ~/.claude/skills/task    # Claude Code
-ln -s "$HOME/AIprogramming PJ/task-hub/skills/task" ~/.agents/skills/task    # Codex, Pi
+ln -sfn ~/.local/lib/task-hub/skills/task ~/.claude/skills/task    # Claude Code
+ln -sfn ~/.local/lib/task-hub/skills/task ~/.agents/skills/task    # Codex, Pi
 ln -s ../../.agents/skills/task ~/.kiro/skills/task                          # Kiro
 ```
 
