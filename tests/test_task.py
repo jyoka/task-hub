@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -713,6 +714,7 @@ class TaskTest(unittest.TestCase):
         self.wait_for(lambda: self.replans(tid))
         replan = self.replans(tid)[-1]
         self.assertIn("Blocked: Need the Stripe test key.\nDecision: answered", replan)
+        self.assertIn("## Replanner", self.task("show", tid, "--full"))  # what the /desk agent reads
         self.assertIn("README.md:1", replan)
         self.assertEqual(self.status(tid), "Blocked")  # the human decides whether to re-run
         self.move(tid, "Ready")
@@ -860,6 +862,37 @@ class TaskTest(unittest.TestCase):
         (self.root / "herdr.json").write_text(json.dumps(db))
         self.task("done", b)
         self.assertNotIn(tab_b, self.herdr_db()["closed"])
+
+    def test_list_reads_the_board_and_starts_nothing(self):
+        tid = self.new("ok")
+        self.move(tid, "Ready")
+        out = self.task("list")
+        self.assertIn(f'"{tid}",Add hello,Ready,jyoka/app', out)
+        self.assertIn("needs_you: 0", out)
+        time.sleep(1)
+        self.assertEqual(self.status(tid), "Ready")  # `task` would have started it
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_events_shows_recent_ones_and_follow_prints_each_new_one(self):
+        old = self.new("ok")
+        self.assertIn(f"event: #{old} Backlog | Add hello | jyoka/app", self.task("events"))
+        follow = subprocess.Popen([str(BIN), "events", "--follow"], env=self.env, stdout=subprocess.PIPE, text=True)
+        lines = []
+        threading.Thread(target=lambda: [lines.append(line.strip()) for line in follow.stdout], daemon=True).start()
+        try:
+            self.wait_for(lambda: lines)  # "events: following ..."
+            tid = self.new("stuck")
+            self.task("start", tid)
+            self.wait_for(lambda: any(f"#{tid} Blocked" in line for line in lines))
+        finally:
+            follow.terminate()
+            follow.wait()
+        events = [line for line in lines if line.startswith("event:")]
+        self.assertFalse(any(f"#{old} " in line for line in events))  # only what happened after it started
+        self.assertEqual([line.split(" | ")[0] for line in events],
+                         [f"event: #{tid} Backlog", f"event: #{tid} Ready", f"event: #{tid} In progress",
+                          f"event: #{tid} Blocked"])
+        self.assertIn("reason Need the Stripe test key.", events[-1])
 
     def test_events_note_each_status_change_with_the_reason(self):
         ok, stuck = self.new("ok"), self.new("stuck")
