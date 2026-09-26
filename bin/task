@@ -477,23 +477,38 @@ def ensure_internal_excludes(wt, extra=()):
 
 
 def env_files(repo):
-    """The files that [env] in the config copies into this repo's worktrees (secrets its tests need, like .env)."""
+    """(source, destination in the worktree) for each file [env] in the config copies into this repo's worktrees.
+
+    An entry is "source" (lands at the worktree root under its own name) or "source -> path/in/worktree".
+    """
     c = config()
     value = c.get("env", repo, fallback="") if c.has_section("env") else ""  # keys are matched without regard to case
-    return [Path(p.strip()).expanduser() for p in value.split(",") if p.strip()]
+    pairs = []
+    for entry in (e.strip() for e in value.split(",")):
+        if entry:
+            src, _, dest = (s.strip() for s in entry.partition("->"))
+            pairs.append((Path(src).expanduser(), dest or Path(src).name))
+    return pairs
 
 
 def copy_env_files(t, wt):
     """Copy, never link: the agent may change its copy, not your checkout's. Never committed."""
-    files = env_files(t["repo"])
-    for src in files:
+    pairs, dests = env_files(t["repo"]), set()
+    for src, dest in pairs:
         if not src.is_file():
             raise RuntimeError(f"env file {src} for {t['repo']} is missing; fix [env] in {home(CONFIG)}")
-        if run("git", "-C", wt, "ls-files", "--error-unmatch", src.name).returncode == 0:
-            raise RuntimeError(f"env file {src.name} is tracked in {t['repo']}; copying it would change the PR")
-    for src in files:
-        shutil.copy2(src, wt / src.name)
-    ensure_internal_excludes(wt, [src.name for src in files])
+        target = (wt / dest).resolve()
+        if Path(dest).is_absolute() or not target.is_relative_to(wt.resolve()) or target == wt.resolve():
+            raise RuntimeError(f"env destination {dest} is outside the worktree; fix [env] in {home(CONFIG)}")
+        if dest in dests:
+            raise RuntimeError(f"env destination {dest} is given twice; fix [env] in {home(CONFIG)}")
+        dests.add(dest)
+        if run("git", "-C", wt, "ls-files", "--error-unmatch", dest).returncode == 0:
+            raise RuntimeError(f"env file {dest} is tracked in {t['repo']}; copying it would change the PR")
+    for src, dest in pairs:
+        (wt / dest).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, wt / dest)
+    ensure_internal_excludes(wt, [f"/{dest}" for _, dest in pairs])  # anchored: this path only
 
 
 def ensure_worktree(t):
