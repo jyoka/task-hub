@@ -45,7 +45,8 @@ task --version
 
 2. **GitHub Project を用意します**(既存のものでも構いません)。Project の設定で次を追加してください。
    - **Status** 欄: GitHub のかんばん(Kanban)テンプレートで作った Project には `Backlog`、`Ready`、`In progress`、
-     `In review`、`Done` が最初からあります。そこに **`Blocked`** を 1 つ追加します(大文字小文字は区別しません)
+     `In review`、`Done` が最初からあります。そこに **`Blocked`** を 1 つ追加します(大文字小文字は区別しません)。
+     任意で **`wait for merge`** も追加できます(レビュー済みでマージ待ちの列。無くても動きます)
    - テキスト欄 **Target repo**、**Agent**、**Base branch** を追加します(Target repo は作業先リポジトリ `owner/name`、
      Agent は使うエージェント名、Base branch は作業を始めるブランチで、Agent と Base branch は空でも構いません。
      `Repo` という名前は GitHub の予約語なので使えません)
