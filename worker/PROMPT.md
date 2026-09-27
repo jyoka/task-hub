@@ -14,6 +14,9 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
 
 1. Read the task below. The Goal is your whole brief. Also follow the repository's own agent
    instructions if it has any (AGENTS.md, CLAUDE.md, .kiro/steering, and so on).
+   If the Goal has a "Ready conditions" section, check each condition first. If one does not hold
+   (a file, function, or decision it needs is not there, a key is missing), stop at once without
+   changing files and report it as Blocked (below), naming the condition.
 2. Make the change. Keep it to what the Goal asks for.
 3. Run the project's tests and linters, and fix what you broke.
 4. Do **not** commit, push, create branches, or open pull requests. task-hub does all of that

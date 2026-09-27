@@ -34,7 +34,8 @@ def fail(msg):
 out = None
 cmd = a[:2]
 fields = dict(x.split("=", 1) for x in a[3::2]) if cmd == ["api", "graphql"] else {}  # -f name=value pairs
-kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get("query", "") else "field-list") \
+kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get("query", "") else
+                                          "add-blocked-by" if "addBlockedBy" in fields.get("query", "") else "field-list") \
     if cmd == ["api", "graphql"] else None
 if db.get("down") and kind and (db["down"] is True or kind == db["down"]):
     fail("GraphQL: API rate limit exceeded for user ID 1.")
@@ -56,11 +57,20 @@ elif kind == "item-list":
         node = {"id": iid, "content": {"number": it["number"], "title": issue["title"],
                                        "repository": {"nameWithOwner": db["issues_repo"]},
                                        "url": f"https://github.com/{db['issues_repo']}/issues/{it['number']}"}}
+        if "blockedBy(" in fields["query"]:
+            node["content"]["blockedBy"] = {"nodes": [
+                {"number": int(n), "title": db["issues"][n]["title"], "state": db["issues"][n]["state"],
+                 "stateReason": db["issues"][n].get("reason") or ("COMPLETED" if db["issues"][n]["state"] == "CLOSED" else None),
+                 "repository": {"nameWithOwner": db["issues_repo"]}} for n in issue.get("blocked_by", [])]}
         for alias, name in aliases:
             v = it["values"].get(name.lower()) if name in names else None
             node[alias] = None if v is None else {"name" if name == "Status" else "text": v}
         nodes.append(node)
     out = {"data": {"node": {"items": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+elif kind == "add-blocked-by":
+    issue, blocker = fields["issue"].removeprefix("I_"), fields["blocker"].removeprefix("I_")
+    db["issues"][issue].setdefault("blocked_by", []).append(blocker)
+    out = {"data": {"addBlockedBy": {"issue": {"number": int(issue)}}}}
 elif cmd == ["project", "item-add"]:
     number = int(opt("--url").rstrip("/").rsplit("/", 1)[-1])
     iid = f"PVTI_{number}"
@@ -86,12 +96,15 @@ elif cmd == ["issue", "create"]:
 elif cmd == ["issue", "comment"]:
     db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read()})
 elif cmd == ["issue", "view"]:
+    if a[2] not in db["issues"]:
+        fail(f"GraphQL: Could not resolve to an issue or pull request with the number of {a[2]}. (repository.issue)")
     i = db["issues"][a[2]]
-    out = {"body": i["body"], "state": i["state"], "comments": i["comments"], "labels": i.get("labels", [])}
+    out = {"id": f"I_{a[2]}", "body": i["body"], "state": i["state"], "comments": i["comments"], "labels": i.get("labels", [])}
 elif cmd == ["label", "create"]:
     db.setdefault("labels", []).append(a[2])
 elif cmd == ["issue", "close"]:
     db["issues"][a[2]]["state"] = "CLOSED"
+    db["issues"][a[2]]["reason"] = "NOT_PLANNED" if opt("--reason") == "not planned" else "COMPLETED"
 elif cmd == ["pr", "list"]:
     if opt("--repo") in db.get("broken_repos", []):
         fail("HTTP 404: Could not resolve to a Repository")
@@ -621,6 +634,60 @@ class TaskTest(unittest.TestCase):
         self.task()
         self.assertEqual(self.status(ids[0]), "Blocked")  # its run died
         self.assertEqual(self.wait(ids[3]), "In review")
+
+    # --- dependencies (GitHub's "Blocked by") ---
+
+    def close(self, tid, reason="COMPLETED"):
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["issues"][tid].update(state="CLOSED", reason=reason)
+            db["items"][f"PVTI_{tid}"]["values"]["status"] = "Done"  # GitHub's "Item closed" workflow
+            self.db.write_text(json.dumps(db))
+
+    def test_a_task_waits_for_its_blocker_and_starts_once_it_is_done(self):
+        first = self.new(title="first")
+        second = self.new("ok", "second", "jyoka/app", "--blocked-by", f"#{first}")
+        self.assertEqual(self.gh()["issues"][second]["blocked_by"], [first])
+        out = self.task("start", second)  # approving it early is fine: it waits
+        self.assertIn(f"waits_for: #{first} (Backlog)", out)
+        self.assertIn("waiting[1]", out)
+        self.assertEqual(self.status(second), "Ready")
+        self.assertIn(f'"#{first} (Backlog)"', self.task("list"))
+        self.task()
+        self.assertEqual(self.agent_calls(), [])
+        self.close(first)
+        self.assertIn("started[1]", self.task())
+        self.assertEqual(self.wait(second), "In review")
+        self.assertIn(f"Came after: #{first} first", self.agent_calls()[0]["prompt"])
+
+    def test_a_waiting_task_takes_no_slot(self):
+        blocker = self.new(title="blocker")
+        waiting = self.new("ok", "waiting", "jyoka/app", "--blocked-by", blocker)
+        others = [self.new("ok", f"t{i}") for i in range(3)]
+        for tid in [waiting, *others]:
+            self.move(tid, "Ready")
+        out = self.task()
+        self.assertIn("started[3]", out)
+        self.assertIn(f'"{waiting}",waiting,"#{blocker} (Backlog)"', out)
+        for tid in others:
+            self.wait(tid)
+        self.assertEqual(self.status(waiting), "Ready")
+        self.assertEqual(len(self.agent_calls()), 3)
+
+    def test_a_blocker_closed_as_not_planned_keeps_the_task_waiting(self):
+        blocker = self.new(title="blocker")
+        dependent = self.new("ok", "dependent", "jyoka/app", "--blocked-by", blocker)
+        self.close(blocker, "NOT_PLANNED")
+        self.assertIn(f"#{blocker} (closed as not planned)", self.task("start", dependent))
+        self.task()
+        self.assertEqual(self.status(dependent), "Ready")
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_blocked_by_is_checked_before_the_issue_is_created(self):
+        out = self.task("new", "--title", "x", "--repo", "jyoka/app", "--goal", "g", "--blocked-by", "9", code=1)
+        self.assertIn("no Issue #9", out)
+        self.task("new", "--title", "x", "--repo", "jyoka/app", "--goal", "g", "--blocked-by", "the api", code=2)
+        self.assertEqual(self.gh()["issues"], {})
 
     # --- blocked and re-runs ---
 
