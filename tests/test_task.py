@@ -354,8 +354,18 @@ elif cmd == ["pane", "wait-output"]:
     sys.exit(1)
 elif cmd == ["pane", "send-keys"]:
     pass
+elif cmd == ["notification", "show"]:
+    with open(os.environ["TASK_TEST_NOTIFY"], "a") as f:
+        f.write(json.dumps(a) + "\n")
 else:
     fail(f"fake herdr: unsupported {a}")
+'''
+
+FAKE_OSASCRIPT = r'''#!/usr/bin/env python3
+# macOS's notifier, so the tests never show a real notification; it notes the arguments it got.
+import json, os, sys
+with open(os.environ["TASK_TEST_NOTIFY"], "a") as f:
+    f.write(json.dumps(["osascript", *sys.argv[1:]]) + "\n")
 '''
 
 FAKE_TRANSCRIPT = r'''#!/usr/bin/env python3
@@ -417,7 +427,13 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"),
-                    "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
+                    "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
+                    "TASK_TEST_NOTIFY": str(root / "notifications.jsonl")}
+        fakebin = root / "fakebin"
+        fakebin.mkdir()
+        (fakebin / "osascript").write_text(FAKE_OSASCRIPT)
+        (fakebin / "osascript").chmod(0o755)
+        self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
         self.write_config()
         self.origin("jyoka/app")
@@ -983,7 +999,7 @@ class TaskTest(unittest.TestCase):
         (fakebin / "herdr").write_text(FAKE_HERDR)
         (fakebin / "herdr").chmod(0o755)
         self.env.pop("TASK_HERDR", None)
-        self.env.update(PATH=f"{fakebin}:{self.env['PATH']}", TASK_TEST_HERDR_DB=str(self.root / "herdr.json"))
+        self.env.update(TASK_TEST_HERDR_DB=str(self.root / "herdr.json"))  # fakebin is on PATH from setUp
 
     def herdr_db(self):
         return json.loads((self.root / "herdr.json").read_text())
@@ -1242,6 +1258,62 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(replan["digest"], {"decision": "human",
                                             "question": "Could you add the Stripe test key to [env]?"})
         self.assertNotIn("digest", self.events_of(ok)[0])  # Backlog: nothing to decide yet
+
+    def notifications(self):
+        f = self.root / "notifications.jsonl"
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
+
+    def test_in_review_and_blocked_show_a_notification_without_an_llm(self):
+        self.write_config(reviewer=True, replanner="agent")
+        ok, stuck = self.new("ok"), self.new("blocked REPLAN=human")
+        self.task("start", ok)
+        self.wait(ok)
+        self.task("start", stuck)
+        self.wait(stuck)
+        self.wait_for(lambda: len(self.notifications()) == 3)  # In review, Blocked, replan: not Backlog or In progress
+        (review, blocked, replan), pr = self.notifications(), self.pr(ok)["url"]
+        # herdr is off here: macOS's notifier, given the text as arguments (no AppleScript quoting to break)
+        self.assertEqual(review[:6], ["osascript", "-e", "on run argv", "-e",
+                                      "display notification (item 2 of argv) with title (item 1 of argv)", "-e"])
+        self.assertEqual(review[-2:], [f"#{ok} In review: Add hello", f"verdict: pass\nreview: hello.txt: wording\n{pr}"])
+        self.assertEqual(blocked[-2][:len(f"#{stuck} Blocked")], f"#{stuck} Blocked")
+        self.assertIn("reason: Need the Stripe test key.", blocked[-1])
+        self.assertEqual(replan[-2:], [f"#{stuck} replan: Add hello",
+                                       "decision: human\nquestion: Could you add the Stripe test key to [env]?"])
+        self.assertEqual(len(self.agent_calls()), 3)  # the agent, the reviewer's agent, the replanner: nothing more
+        self.assertEqual(len(self.reviewer_calls()), 1)
+
+    def test_notification_goes_through_herdr_when_it_runs(self):
+        self.use_herdr(workspaces=[("w1", "task-hub")])
+        tid = self.new_in_herdr("w1")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.wait_for(lambda: self.notifications())
+        self.assertEqual(self.notifications(), [["notification", "show", f"#{tid} In review: Add hello", "--body",
+                                                 f"review: hello.txt: wording\n{self.pr(tid)['url']}", "--sound", "done"]])
+
+    def test_notifications_can_be_turned_off_or_narrowed(self):
+        self.write_config(extra="\n[notify]\nevents =\n")
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.write_config(extra="\n[notify]\nevents = Blocked\n")
+        ok, stuck = self.new("ok"), self.new("blocked")
+        self.task("start", ok)
+        self.task("start", stuck)
+        self.wait(ok), self.wait(stuck)
+        self.wait_for(lambda: self.notifications())
+        time.sleep(0.5)  # a late In review notification would show up here
+        self.assertEqual([n[-2] for n in self.notifications()], [f"#{stuck} Blocked: Add hello"])
+
+    def test_a_broken_notifier_never_stops_the_run(self):
+        (self.root / "fakebin" / "osascript").write_text("#!/bin/sh\nsleep 30\nexit 1\n")  # hangs, then fails
+        tid = self.new("blocked")
+        self.task("start", tid)
+        began = time.time()
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertLess(time.time() - began, 20)
+        self.wait_for(lambda: "This pane stays open" in self.task("log", tid))  # the run went on to its end
 
     def test_digest_has_a_length_cap_and_a_research_task_gets_its_report(self):
         tid = self.new("long")
