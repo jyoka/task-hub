@@ -77,7 +77,7 @@ you:       answer in the Goal (or check the replanner's answer), move the card t
 | 話した作業をタスクに分けてもらう | `/chief` に話す。提案に「うん」と答えると登録と開始まで行います |
 | ターミナルからタスクを作る | `task new --title "..." --repo owner/name --goal "..." [--base feat/x] [--agent codex]` |
 | 調べもの(コードを変えない)を頼む | `task new --research ...`、または `/task` や `/chief` に「調べて」と頼む。レポートが成果物になり、PR なしで In review |
-| 前のタスクが終わってから始めさせる | `task new --blocked-by 12`(GitHub の Issue で「Blocked by」を付けても同じ)。先に Ready にしておけば、#12 が終わった時点で自動で始まります。`/task` と `/chief` は、分けたタスクに前後関係があれば付けます |
+| 前のタスクが終わってから始めさせる | `task new --blocked-by 12`(GitHub の Issue で「Blocked by」を付けても同じ)。先に Ready にしておけば、#12 が終わった時点で自動で始まります。`/task` と `/chief` は、分けたタスクに前後関係があれば付けます。PRD を to-issues で分けるときは [docs/issue-tracker.md](docs/issue-tracker.md) の手順で `task new` から登録させます |
 | main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出ます |
 | **始める** | |
 | タスクを承認してエージェントに作業させる | カードを Ready に移す、または `task start`(一覧から選択)/ `task start 12` |
@@ -204,6 +204,7 @@ docs/                  setup, agents, design, task format, operations, lessons
 
 - [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加
+- [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順
 - [docs/task-format.md](docs/task-format.md): Issue、レポートファイル、コメント、PR の形式
 - [docs/operations.md](docs/operations.md): 実行の見守り、herdr のタブ、events と stats、トラブルシューティング、後片付け
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
