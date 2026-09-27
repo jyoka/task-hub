@@ -35,6 +35,7 @@ GitHub Project をかんばんボードにして、そのタスクをコーデ�
  │                               worker が「Blocked」と書いた → replanner が仕分けて Issue にコメント
  │                   後片付け    マージを見て Done に。worktree、ブランチ、herdr のタブを片付ける
  │                   記録        events.jsonl(出来事。/chief を起こす)、metrics.jsonl(実行ごとの数字)
+ │                   通知        In review、Blocked などを herdr か macOS の通知で出す(LLM は使わない)
  │                        │
  └─ PR をマージ ◀─────────┘ In review
 ```
@@ -111,6 +112,10 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
 
+In review、Blocked、replanner の仕分け、Done は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
+通知、なければ macOS の通知)。文面はタイトル、判定か理由、見てほしいこと、PR の URL で、LLM は使わないので
+費用はかかりません。知らせを受けるためだけに `/chief` を開いておく必要はなく、相談したいときに開けば足ります。
+
 ## タスクの頼み方
 
 ### Goal に書くこと
@@ -186,6 +191,9 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 [setup]
 ; worker の前に worktree で実行する準備(仮想環境など)。失敗したら Blocked
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
+
+[notify]
+events = In review, Blocked, replan, Done   ; 通知を出す出来事(これが既定)。空にすると出さない
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -214,7 +222,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 | 内容 | 場所 |
 |---|---|
 | 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
-| 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る) |
+| 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
 | 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
 
