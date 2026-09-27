@@ -128,7 +128,7 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 ## herdr での見え方
 
 herdr が動いていれば、各タスクは "#<番号> <タイトル>" のタブで動きます。置き場所は、`/task`(や `/chief`)を
-頼んだ workspace、なければそのリポジトリの checkout を開いている workspace、どちらもなければタスク専用の
+頼んだ workspace(`task new` 以外で作った Issue は、`task start` や `task` を実行した workspace)、なければそのリポジトリの checkout を開いている workspace、どちらもなければタスク専用の
 workspace です。In review で終わったタブは自動で閉じ、Blocked で終わったタブは中身を見られるように残します。
 herdr がなくても、実行はバックグラウンドで動き、`task log` で追えます。
 
