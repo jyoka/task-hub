@@ -921,14 +921,20 @@ class TaskTest(unittest.TestCase):
     def herdr_db(self):
         return json.loads((self.root / "herdr.json").read_text())
 
-    def new_in_herdr(self, workspace, mode="ok"):
-        """/task run by an agent in a pane of that herdr workspace."""
+    @contextlib.contextmanager
+    def in_herdr(self, workspace):
+        """Commands run by an agent (or you) in a pane of that herdr workspace."""
         self.env.update(HERDR_ENV="1", HERDR_WORKSPACE_ID=workspace)
         try:
-            return self.new(mode)
+            yield
         finally:
             for k in ("HERDR_ENV", "HERDR_WORKSPACE_ID"):
                 self.env.pop(k)
+
+    def new_in_herdr(self, workspace, mode="ok"):
+        """/task run by an agent in a pane of that herdr workspace."""
+        with self.in_herdr(workspace):
+            return self.new(mode)
 
     def run_state(self, tid):
         return json.loads((self.root / ".local/state/task-hub/runs" / f"{tid}.json").read_text())
@@ -972,6 +978,42 @@ class TaskTest(unittest.TestCase):
         closed = self.herdr_db()["closed"][0]
         self.assertNotIn(closed, ("w1",))
         self.assertFalse(closed.startswith("w1:"))
+
+    def test_task_made_without_task_new_opens_where_it_was_started(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new("stuck")  # e.g. `gh issue create` from another skill: nothing noted where it was asked
+        with self.in_herdr("w2"):  # /chief in w2 runs `task start`
+            self.task("start", tid)
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w2:t"))
+
+    def test_task_run_by_hand_places_the_ready_cards_it_starts(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new("stuck")
+        self.move(tid, "Ready")
+        with self.in_herdr("w2"):
+            self.task()
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w2:t"))
+
+    def test_where_it_was_registered_wins_over_where_it_was_started(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new_in_herdr("w1", "stuck")
+        with self.in_herdr("w2"):
+            self.task("start", tid)
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w1:t"))
+
+    def test_watch_does_not_place_tasks_where_it_runs(self):
+        self.use_herdr(workspaces=[("w1", "task-hub")])
+        tid = self.new("stuck")
+        self.move(tid, "Ready")
+        self.env["TASK_WATCH_ONCE"] = "1"
+        with self.in_herdr("w1"):  # the watch runs in a pane of w1
+            self.task("watch")
+        self.wait(tid)
+        self.assertEqual(self.run_state(tid)["tab"], "")  # its own workspace, as before
+        self.assertNotEqual(self.run_state(tid)["workspace"], "w1")
 
     def test_where_asked_is_ignored_once_that_id_belongs_to_another_workspace(self):
         self.use_herdr(workspaces=[("w2", "バイトルCRM関連")])
