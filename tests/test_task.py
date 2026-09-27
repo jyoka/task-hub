@@ -1760,5 +1760,43 @@ class TaskTest(unittest.TestCase):
         self.assertRegex(self.task("--version").strip(), r"^\d+\.\d+\.\d+$")
 
 
+class FormatDurationTest(unittest.TestCase):
+    """Unit tests for the format_duration() utility in bin/task."""
+
+    def setUp(self):
+        import importlib.util, sys
+        spec = importlib.util.spec_from_loader(
+            "task",
+            importlib.machinery.SourceFileLoader("task", str(BIN)),
+        )
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_seconds_only(self):
+        self.assertEqual(self.mod.format_duration(0), "0s")
+        self.assertEqual(self.mod.format_duration(1), "1s")
+        self.assertEqual(self.mod.format_duration(59), "59s")
+
+    def test_minutes_without_remainder(self):
+        self.assertEqual(self.mod.format_duration(60), "1m")
+        self.assertEqual(self.mod.format_duration(120), "2m")
+
+    def test_minutes_with_seconds(self):
+        self.assertEqual(self.mod.format_duration(61), "1m 1s")
+        self.assertEqual(self.mod.format_duration(3599), "59m 59s")
+
+    def test_hours_without_remainder(self):
+        self.assertEqual(self.mod.format_duration(3600), "1h")
+        self.assertEqual(self.mod.format_duration(7200), "2h")
+
+    def test_hours_with_minutes(self):
+        self.assertEqual(self.mod.format_duration(3660), "1h 1m")
+        self.assertEqual(self.mod.format_duration(7500), "2h 5m")
+
+    def test_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self.mod.format_duration(-1)
+
+
 if __name__ == "__main__":
     unittest.main()
