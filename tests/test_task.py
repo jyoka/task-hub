@@ -147,6 +147,19 @@ from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+def transcript(path, lines):  # what Claude Code records of its API calls, for the USAGE tests
+    import datetime, json
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    f = Path(os.environ["HOME"]) / ".claude" / "projects" / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with f.open("a") as out:
+        for line in lines:
+            out.write(line if isinstance(line, str) else json.dumps(
+                {"type": "assistant", "cwd": os.getcwd(), "timestamp": stamp, **line}) + "\n")
+def call(mid, model, input_=0, output=0, cache_creation=0, cache_read=0, **extra):
+    return {"message": {"id": mid, "model": model, "usage": {
+        "input_tokens": input_, "output_tokens": output, "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read}}, **extra}
 if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
     kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
     out = {"answered": "## Decision\n\nanswered\n\n## Answer\n\nThe app is called app, see the README.\n\n"
@@ -166,9 +179,22 @@ if "You triage one blocked task-hub run" in prompt:  # used as the replanner; RE
     Path(".task-replan.md").write_text(out)
     sys.exit(0)
 if "adversarial reviewer of one completed task-hub run" in prompt:  # used as its own reviewer
+    if "USAGE" in prompt:
+        transcript("-wt/review-session.jsonl", [call("r1", "claude-opus-x", input_=1, output=3)])
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nreviewed by the agent itself\n")
     sys.exit(0)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
+if "USAGE" in prompt:
+    transcript("-wt/session.jsonl", [
+        call("m1", "claude-opus-x", input_=10, output=5, cache_creation=100, cache_read=1000),
+        call("m1", "claude-opus-x", input_=10, output=5, cache_creation=100, cache_read=1000, apiBlockIndex=1),  # 2nd block
+        call("s1", "claude-haiku-x", input_=1, output=2, isSidechain=True),  # a subagent, in the same file
+        {**call("o1", "claude-opus-x", output=999), "cwd": "/somewhere/else"},  # another session elsewhere
+        {**call("old", "claude-opus-x", output=999), "timestamp": "2000-01-01T00:00:00.000Z"},  # before this run
+        "{not json",
+        {"type": "user", "cwd": os.getcwd(), "message": "not an API call"},
+    ])
+    transcript("-wt/session/subagents/agent-a1.jsonl", [call("a1", "claude-haiku-x", input_=1, output=2)])
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
 if mode == "crash":
@@ -373,6 +399,7 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
+        self.env.pop("CLAUDE_CONFIG_DIR", None)  # Claude Code's transcripts are read from this HOME only
         self.write_config()
         self.origin("jyoka/app")
 
@@ -1227,6 +1254,44 @@ class TaskTest(unittest.TestCase):
         out = self.task("stats")
         self.assertIn("size: median 3 changed lines per PR over 2 runs", out)
         self.assertIn(f'largest[2]{{id,title,lines,files}}:\n  "{c}",Add hello,3,2\n  "{a}",Add hello,1,1', out)
+
+    def test_each_agent_start_records_what_claude_code_says_it_used(self):
+        self.write_config(reviewer="agent")
+        a = self.new("ok USAGE")
+        self.task("start", a)
+        self.wait(a)
+        self.metrics(1)
+        b = self.new("ok")  # an agent that leaves no Claude Code transcript
+        self.task("start", b)
+        self.wait(b)
+        runs = {r["id"]: r for r in self.metrics(2)}
+        agent, review = runs[a]["usage"]
+        self.assertIsInstance(agent.pop("seconds"), int)
+        # one call per message id; other folders, other times, and lines it cannot read do not count;
+        # the subagent's calls (in the same file, or in its own) count, and are also counted apart
+        self.assertEqual(agent, {"role": "agent", "agent": "fake", "calls": 3, "subagent_calls": 2, "input": 12,
+                                 "cache_creation": 100, "cache_read": 1000, "output": 9,
+                                 "models": ["claude-haiku-x", "claude-opus-x"]})
+        # the reviewer works in the same worktree right after: only its own call is its own
+        self.assertEqual((review["role"], review["calls"], review["input"], review["output"]), ("reviewer", 1, 1, 3))
+        self.assertEqual([sorted(u) for u in runs[b]["usage"]], [["agent", "role", "seconds"]] * 2)
+        log = (self.root / f".local/state/task-hub/logs/{a}.log").read_text()
+        self.assertIn("== agent used 3 calls, 1k tokens (9 out), 2 of the calls by subagents, "
+                      "models claude-haiku-x claude-opus-x", log)
+        out = self.task("stats")
+        self.assertIn("tokens: 1 of 2 runs measured, median 1k tokens and 4 API calls per run", out)
+        self.assertIn("roles[2]{role,starts,median_seconds,median_tokens}:\n  agent,2,", out)
+        self.assertIn(f'heaviest[1]{{id,title,tokens,calls,subagent_calls}}:\n  "{a}",Add hello,1125,4,2', out)
+
+    def test_stats_without_measured_runs_says_so(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait(tid)
+        self.metrics(1)
+        out = self.task("stats")
+        self.assertIn("tokens: 0 of 1 runs measured (read from Claude Code's transcripts; other agents record seconds "
+                      "only)", out)
+        self.assertNotIn("heaviest", out)
 
     def test_stats_sums_up_the_recorded_runs(self):
         self.assertIn("0 runs recorded yet", self.task("stats"))
