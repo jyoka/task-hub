@@ -105,6 +105,9 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 | **会話から登録して、ボードで承認** | 普段のエージェントとの会話で `/task`。Backlog にカードができるので、やってほしいときに Ready へ移します |
 | **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` と `task events` で様子を見ます |
 
+`/task` と `/chief` は Claude Code と Kiro での呼び方です。Pi では `/skill:chief`、Codex では `$chief` のように
+呼びます([docs/setup.md](docs/setup.md#task-と-chief-スキルのインストール))。
+
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
 
@@ -224,6 +227,7 @@ worker/REVIEW.md       reviewer の指示書(受け入れ条件を 1 つずつ�
 worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict、根拠付き)
 skills/task/SKILL.md   /task スキル
 skills/chief/SKILL.md  /chief スキル
+pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 docs/                  セットアップ、エージェント、設計、形式、運用、教訓
 ```
