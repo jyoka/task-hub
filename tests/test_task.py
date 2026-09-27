@@ -950,6 +950,36 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([line.split(" | ")[0] for line in lines], [f"event: #{ok} In review", f"event: #{stuck} Blocked"])
         self.assertEqual(self.task("events", "--only", "Blocked").strip().split(" | ")[0], f"event: #{stuck} Blocked")
 
+    def test_events_next_waits_for_the_next_event_then_exits_with_the_way_to_continue(self):
+        before = self.new("stuck")
+        self.task("start", before)
+        self.wait(before)  # a Blocked that happened before it started: not reported
+        p = subprocess.Popen([str(BIN), "events", "--next", "--only", "Blocked"], env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1.5)
+        self.assertIsNone(p.poll())  # still waiting: nothing Blocked yet
+        tid = self.new("stuck")
+        self.task("start", tid)
+        out, _ = p.communicate(timeout=30)  # it ends by itself: a background command's end wakes the agent
+        lines = out.strip().splitlines()
+        self.assertEqual(lines[0].split(" | ")[0], f"event: #{tid} Blocked")
+        self.assertRegex(lines[-1], r'^next: task events --next --after \d+ --only "Blocked"$')
+        self.assertEqual(len(lines), 2)
+
+    def test_events_next_after_a_cursor_misses_nothing_that_happened_in_between(self):
+        a = self.new("stuck")
+        self.task("start", a)
+        self.wait(a)
+        first = self.task("events", "--next", "--after", "0", "--only", "Blocked")
+        cursor = first.strip().splitlines()[-1].split("--after ")[1].split()[0]
+        b = self.new("stuck")  # happens while no watcher is running
+        self.task("start", b)
+        self.wait(b)
+        second = self.task("events", "--next", "--after", cursor, "--only", "Blocked")  # returns at once
+        self.assertEqual([line.split(" | ")[0] for line in second.strip().splitlines()[:-1]], [f"event: #{b} Blocked"])
+        bad = subprocess.run([str(BIN), "events", "--next", "--after", "x"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 2)
+
     def test_events_note_each_status_change_with_the_reason(self):
         ok, stuck = self.new("ok"), self.new("stuck")
         self.task("start", ok)
