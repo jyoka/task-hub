@@ -263,12 +263,15 @@ def gh_json(*args):
     return json.loads(gh(*args) or "null")
 
 
+ADD_BLOCKED_BY = """mutation($issue: ID!, $blocker: ID!) {
+  addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocker}) { issue { number } } }"""
 FIELDS_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { fields(first: 50) { nodes {
   ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } }"""
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
   items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id
-    content { ... on Issue { number title url repository { nameWithOwner } } }
+    content { ... on Issue { number title url repository { nameWithOwner }
+      blockedBy(first: 50) { nodes { number title state stateReason repository { nameWithOwner } } } } }
     status: fieldValueByName(name: "@Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
     repo: fieldValueByName(name: "@Target repo") { ... on ProjectV2ItemFieldTextValue { text } }
     agent: fieldValueByName(name: "@Agent") { ... on ProjectV2ItemFieldTextValue { text } }
@@ -336,9 +339,32 @@ def tasks(include_done=False):
         value = lambda k: ((item.get(k) or {}).get("name") or (item.get(k) or {}).get("text") or "").strip()
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
-             "base": value("base"), "url": content.get("url", "")}
+             "base": value("base"), "url": content.get("url", ""),
+             "blockers": [{"ref": f"#{n['number']}" if n["repository"]["nameWithOwner"].lower() == b["issues"].lower()
+                           else f"{n['repository']['nameWithOwner']}#{n['number']}",
+                           "number": str(n["number"]), "title": n.get("title", ""), "state": n.get("state", ""),
+                           "reason": n.get("stateReason") or ""}
+                          for n in (content.get("blockedBy") or {}).get("nodes") or [] if n]}
         result.append({**load_run(t["id"]), **t})
+    statuses = {t["id"]: t["status"] for t in result}
+    for t in result:
+        t["waits_for"] = ", ".join(f"{x['ref']} ({why})" for x, why in
+                                   ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why)
     return sorted(result, key=lambda t: int(t["id"]))
+
+
+def waiting_reason(blocker, statuses):
+    """Why this blocker still holds its task back, or "" when it is done.
+
+    Done means closed as completed (a merged PR, `task done`). Closed as not planned or as a duplicate means
+    the prerequisite was dropped, not delivered: the task keeps waiting until a human removes the link.
+    """
+    if blocker["state"] == "CLOSED":
+        reason = blocker["reason"]
+        return f"closed as {reason.lower().replace('_', ' ')}" if reason in ("NOT_PLANNED", "DUPLICATE") else ""
+    if blocker["ref"].startswith("#"):
+        return statuses.get(blocker["number"]) or "open, not on the board"
+    return "open"
 
 
 def canonical(status):
@@ -731,6 +757,8 @@ def build_prompt(t):
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
+             *([f"Came after: {', '.join(x['ref'] + ' ' + x['title'] for x in t['blockers'])} "
+                "(finished before this run started)"] if t.get("blockers") else []),
              *(["Kind: research. Your report is the deliverable: put your findings in its Report section. Change "
                 "files only if the Goal asks for a file."] if t.get("research") else []),
              "", i["body"].strip()]
@@ -1165,7 +1193,10 @@ def sync():
 
     board_ = tasks() if changed else open_
     free = MAX_PARALLEL - sum(t["status"] == IN_PROGRESS for t in board_)
-    ready = [t for t in board_ if t["status"] == READY]
+    waiting = [t for t in board_ if t["status"] == READY and t["waits_for"]]
+    if waiting:  # never started, so they take no slot; each starts once what it waits for is done
+        lines += table("waiting", waiting, ["id", "title", "waits_for"])
+    ready = [t for t in board_ if t["status"] == READY and not t["waits_for"]]
     if ready and free <= 0:
         lines.append(f"queue: {len(ready)} Ready task(s) waiting, all {MAX_PARALLEL} slots busy")
     started = []
@@ -1199,7 +1230,7 @@ def cmd_home(_):
         f"description: runs coding agents on the tasks of a GitHub Project, max {MAX_PARALLEL} at once",
         f"board: {board()['url']}",
         "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()), *lines)
-    out(*table("tasks", active, ["id", "title", "status", "agent"]) if active else ["tasks: 0 open tasks"])
+    out(*table("tasks", active, ["id", "title", "status", "agent", "waits_for"]) if active else ["tasks: 0 open tasks"])
     needs_you = StatusLifecycle.needs_user_count(counts)
     out("help[3]:",
         f"  {needs_you} task(s) need you (Backlog to approve, In review, Blocked)",
@@ -1212,7 +1243,7 @@ def cmd_list(_):
     board_ = tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
     out("counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
-        *(table("tasks", board_, ["id", "title", "status", "repo", "agent"]) if board_ else ["tasks: 0 open tasks"]),
+        *(table("tasks", board_, ["id", "title", "status", "repo", "agent", "waits_for"]) if board_ else ["tasks: 0 open tasks"]),
         f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)")
 
 
@@ -1381,16 +1412,25 @@ def cmd_stats(_):
 def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
-             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] (--goal "..." | --goal-file path)', 2)
+             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] (--goal "..." | --goal-file path)', 2)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a["repo"]):
         fail(f"--repo must look like owner/name, got {a['repo']!r}", code=2)
     if a["base"] and check_base(a["base"]):
         fail(check_base(a["base"]), code=2)
     check_agent(a["agent"])
+    blockers = [x.strip().lstrip("#") for x in (a["blocked_by"] or "").split(",") if x.strip()]
+    if not all(x.isdigit() for x in blockers):
+        fail(f"--blocked-by takes task numbers, e.g. 12 or 12,14; got {a['blocked_by']!r}", code=2)
     goal = Path(a["goal_file"]).read_text() if a["goal_file"] else (a["goal"] or "")
     if not goal.strip():
         fail("goal is empty", "pass --goal \"...\" or --goal-file path", 2)
     b = board()
+    blocker_ids = {}
+    for n in blockers:  # checked before the Issue exists: a typo must not leave a task that waits for nothing
+        try:
+            blocker_ids[n] = gh_json("issue", "view", n, "--repo", b["issues"], "--json", "id")["id"]
+        except RuntimeError:
+            fail(f"--blocked-by {n}: no Issue #{n} in {b['issues']}")
     f = DATA / "new-issue.md"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(goal.strip() + "\n")
@@ -1405,6 +1445,10 @@ def cmd_new(a):
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
     t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"]}
     remember_where_asked(t)
+    if blocker_ids:
+        this = gh_json("issue", "view", t["id"], "--repo", b["issues"], "--json", "id")["id"]
+        for blocker in blocker_ids.values():
+            graphql(ADD_BLOCKED_BY, issue=this, blocker=blocker)
     set_status(t, BACKLOG)
     set_text(t, "Target repo", a["repo"])
     if a["base"]:
@@ -1412,6 +1456,7 @@ def cmd_new(a):
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
     out("task:", f"  id: {t['id']}", f"  status: {BACKLOG}", f"  url: {url}",
+        *([f"  blocked_by: {', '.join('#' + n for n in blockers)} (it starts only after they are done)"] if blockers else []),
         "help[1]:", "  Move the card to Ready, or run `task start`, when you want an agent to pick it up")
 
 
@@ -1457,7 +1502,8 @@ def cmd_start(a):
     set_status(t, READY)
     lines = sync()
     t = get(t["id"])
-    out("task:", f"  id: {t['id']}", f"  title: {q(t['title'])}", f"  status: {t['status']}", *lines)
+    out("task:", f"  id: {t['id']}", f"  title: {q(t['title'])}", f"  status: {t['status']}",
+        *([f"  waits_for: {t['waits_for']} (it starts by itself once they are done)"] if t["waits_for"] else []), *lines)
 
 
 def cmd_done(a):
@@ -1483,8 +1529,8 @@ COMMANDS = {
     "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]  # the Issue and its latest report"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True,
-                          "research": False},
-            'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] '
+                          "research": False, "blocked-by": True},
+            'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
