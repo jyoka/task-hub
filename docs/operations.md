@@ -72,7 +72,7 @@ GitHub を読みます)。要点のない古いイベントや、あとから確
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
 件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定、
-PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)です。10〜15 分でレビューできる
+PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
 
@@ -85,6 +85,25 @@ Blocked の理由は次のどれかです。
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
 | `setup` | `[setup]` の準備が失敗した、または git が無視しないファイルを残した |
 | `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
+
+### エージェントの使用量
+
+実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
+`reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入り、エージェントの CLI の記録を読めたときだけ
+`calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、`output`(トークン数)、
+`subagent_calls`、`models` が入ります。今読めるのは Claude Code の記録(`~/.claude/projects`)だけで、ほかのエージェントでは
+トークンの欄がありません。読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
+
+```
+== agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+```
+
+`task stats` の `tokens:` の行は、使用量を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
+cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
+出します。`roles` は役割ごとの起動回数、測れた回数、秒数とトークン数の中央値、`heaviest` はトークン数の多い 3 実行です。
+起動の間にその worktree で動いた Claude Code の呼び出しは、すべてその起動の分として数えます(エージェント自身が
+起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
+この数字を見て決めます。
 
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。

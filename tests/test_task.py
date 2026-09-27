@@ -168,6 +168,8 @@ if "You triage one blocked task-hub run" in prompt:  # used as the replanner; RE
 if "adversarial reviewer of one completed task-hub run" in prompt:  # used as its own reviewer
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nreviewed by the agent itself\n")
     sys.exit(0)
+if "USAGE" in prompt:  # this agent leaves records the way Claude Code does
+    subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "agent"], check=True)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
@@ -229,6 +231,9 @@ from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+if "USAGE" in prompt:
+    import subprocess
+    subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
 text = Path("hello.txt").read_text() if Path("hello.txt").exists() else ""
 forced = re.findall(r"REVIEW=(\w+)", prompt)  # a goal word that picks the verdict, when present
 if forced == ["boldpass"]:
@@ -353,6 +358,38 @@ else:
     fail(f"fake herdr: unsupported {a}")
 '''
 
+FAKE_TRANSCRIPT = r'''#!/usr/bin/env python3
+# What Claude Code leaves in ~/.claude/projects during one launch, plus the lines task-hub must not count.
+import datetime, json, os, sys, time
+from pathlib import Path
+who = sys.argv[1]  # "agent" or "reviewer": their own ids, model, and numbers
+n = {"agent": 1, "reviewer": 7}[who]
+root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects" / "-some-folder"
+(root / f"{who}-session" / "subagents").mkdir(parents=True, exist_ok=True)
+def at(offset=0):
+    t = datetime.datetime.fromtimestamp(time.time() + offset, datetime.timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def line(mid, k=n, cwd=None, when=0, **extra):
+    return json.dumps({"type": "assistant", "cwd": cwd or os.getcwd(), "timestamp": at(when), "isSidechain": False,
+                       "message": {"id": mid, "model": f"claude-{who}", "usage": {
+                           "input_tokens": k, "cache_creation_input_tokens": 10 * k, "cache_read_input_tokens": 100 * k,
+                           "output_tokens": k, "service_tier": "standard"}}, **extra})
+(root / f"{who}-session.jsonl").write_text("\n".join([
+    line(f"{who}-1"), line(f"{who}-1"),  # one API call, written as two content blocks
+    line(f"{who}-2"),
+    line(f"{who}-3", isSidechain=True),  # a subagent, in the same file
+    line(f"{who}-old", 1000, when=-3600),  # an hour before this launch
+    line(f"{who}-elsewhere", 1000, cwd="/somewhere/else", note=f"ls {os.getcwd()}"),  # another session, looking at it
+    json.dumps({"type": "user", "cwd": os.getcwd(), "timestamp": at()}),
+    json.dumps({"type": "assistant", "cwd": os.getcwd(), "timestamp": at(), "message": "a format we do not know"}),
+    '{"type": "assistant", "cwd": "' + os.getcwd() + '", "broken',  # cut off mid-line
+]) + "\n")
+(root / f"{who}-session" / "subagents" / "agent-a1.jsonl").write_text(line(f"{who}-4") + "\n")  # a subagent's own file
+(root / f"{who}-garbage.jsonl").write_bytes(b"\xff\xfe" + os.getcwd().encode() + b"\x00\n")
+(root / f"{who}-unreadable.jsonl").write_text("{}\n")
+(root / f"{who}-unreadable.jsonl").chmod(0)
+'''
+
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
@@ -370,7 +407,8 @@ class TaskTest(unittest.TestCase):
                                  {"id": "F_base", "name": "Base branch", "type": "ProjectV2Field", "dataType": "TEXT"}]})
         self.calls = root / "agent-calls.txt"
         self.review_calls = root / "review-calls.txt"
-        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER)):
+        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER),
+                          ("transcript", FAKE_TRANSCRIPT)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
@@ -378,7 +416,9 @@ class TaskTest(unittest.TestCase):
         self.env = {**os.environ, **git_id, "HOME": str(root), "TASK_GH": str(root / "gh"), "TASK_HERDR": "0",
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
+                    "TASK_TEST_TRANSCRIPT": str(root / "transcript"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git"}
+        self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
         self.write_config()
         self.origin("jyoka/app")
 
@@ -1070,6 +1110,18 @@ class TaskTest(unittest.TestCase):
         self.task("done", b)
         self.assertNotIn(tab_b, self.herdr_db()["closed"])
 
+    def test_rerun_replaces_the_old_tab_even_if_the_run_file_has_no_id(self):
+        self.use_herdr(workspaces=[("w2", "別のプロジェクト")])
+        tid = self.new_in_herdr("w2", "stuck")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        old_tab = self.run_state(tid)["tab"]
+        self.assertNotIn("id", self.run_state(tid))  # run files keep the id only in their name
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertIn(old_tab, self.herdr_db()["closed"])
+        self.assertNotEqual(self.run_state(tid)["tab"], old_tab)
+
     def test_list_reads_the_board_and_starts_nothing(self):
         tid = self.new("ok")
         self.move(tid, "Ready")
@@ -1348,6 +1400,69 @@ class TaskTest(unittest.TestCase):
         self.assertIn("outcomes[2]{status,runs}:\n  In review,2\n  Blocked,1", out)
         self.assertIn("reviews: 2 reviewed runs, 1 sent back once, 1 of those passed after the retry", out)
         self.assertIn("blocked_by[1]{reason,runs}:\n  agent,1", out)
+
+    def test_each_launch_records_what_the_agent_cli_says_it_used(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok USAGE")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")  # broken lines, a binary file and an unreadable one: no matter
+        agent, reviewer = self.metrics(1)[0]["usage"]
+        self.assertIsInstance(agent.pop("seconds"), int)
+        self.assertIsInstance(reviewer.pop("seconds"), int)
+        # 4 calls each: the call written twice counts once, and neither the hour-old line, nor another cwd,
+        # nor the other launch in the same worktree is counted; 2 of them are subagents (flagged, or in subagents/)
+        self.assertEqual(agent, {"role": "agent", "agent": "fake", "calls": 4, "input": 4, "cache_creation": 40,
+                                 "cache_read": 400, "output": 4, "subagent_calls": 2, "models": ["claude-agent"]})
+        self.assertEqual(reviewer, {"role": "reviewer", "agent": "reviewer", "calls": 4, "input": 28,
+                                    "cache_creation": 280, "cache_read": 2800, "output": 28, "subagent_calls": 2,
+                                    "models": ["claude-reviewer"]})
+        log = self.task("log", tid, "--full")
+        self.assertIn("== agent used 4 calls, 448 tokens (4 out), 2 subagent calls, models claude-agent", log)
+        self.assertIn("== reviewer used 4 calls, 3.1k tokens (28 out), 2 subagent calls, models claude-reviewer", log)
+
+    def test_agent_without_records_leaves_only_its_seconds(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        [agent] = self.metrics(1)[0]["usage"]
+        self.assertEqual(set(agent), {"role", "agent", "seconds"})
+        self.assertNotIn(" used ", self.task("log", tid, "--full"))
+
+    def test_records_are_read_from_claude_config_dir_when_set(self):
+        self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")
+        tid = self.new("ok USAGE")
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertEqual(self.metrics(1)[0]["usage"][0]["calls"], 4)
+        self.assertTrue((self.root / "claude-config/projects").exists())
+        self.assertFalse((self.root / ".claude").exists())
+
+    def test_stats_shows_tokens_per_run_role_and_the_heaviest_runs(self):
+        base = {"repo": "jyoka/app", "agent": "fake", "started": "2026-09-01T00:00:00Z", "status": "In review",
+                "reviews": [], "retried": False, "blocked_by": "", "replan": ""}
+        use = lambda role, s, n, sub=0: {"role": role, "agent": "claude", "seconds": s, "calls": n, "input": 1,
+                                         "cache_creation": 0, "cache_read": 1000 * n - 2, "output": 1,
+                                         "subagent_calls": sub, "models": ["claude-x"]}
+        runs = [{**base, "id": "1", "title": "Old run"},  # before 0.7: no usage at all
+                {**base, "id": "2", "title": "Codex run", "usage": [{"role": "agent", "agent": "codex", "seconds": 30}]},
+                {**base, "id": "3", "title": "Small", "usage": [use("agent", 60, 10), use("reviewer", 20, 4)]},
+                {**base, "id": "4", "title": "Big", "usage": [use("agent", 100, 50, 3), use("reviewer", 40, 6),
+                                                              use("agent retry after review", 50, 20)]},
+                {**base, "id": "5", "title": "Mid", "usage": [use("agent", 80, 30, 1)]}]
+        path = self.root / ".local/state/task-hub/metrics.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(json.dumps(r) + "\n" for r in runs))
+        out = self.task("stats")
+        self.assertIn("tokens: 3 of 5 runs measured, median 30000 tokens and 30 calls per run (2 runs without usage", out)
+        self.assertIn("roles[3]{role,launches,measured,median_seconds,median_tokens}:\n"
+                      "  agent,4,3,80,30000\n  reviewer,2,2,40,6000\n  agent retry after review,1,1,50,20000", out)
+        self.assertIn('heaviest[3]{id,title,tokens,calls,subagent_calls}:\n'
+                      '  "4",Big,76000,76,3\n  "5",Mid,30000,30,1\n  "3",Small,14000,14,0', out)
+        path.write_text(json.dumps(runs[0]) + "\n")  # nothing measured yet
+        out = self.task("stats")
+        self.assertIn("tokens: 0 of 1 runs measured (1 runs without usage", out)
+        self.assertNotIn("roles", out)
+        self.assertNotIn("heaviest", out)
 
     def test_research_task_report_without_changes_goes_to_in_review_without_a_pr(self):
         tid = self.new("nochange", "Compare search libraries", "jyoka/app", "--research")
