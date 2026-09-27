@@ -102,7 +102,7 @@ GitHub の障害で起きることがあります。ステータスページ([gi
 確認してください。2026-09-23 には「Users may experience stale Project search results」という障害が出ていて、
 その間は新しく追加したカードが何時間も一覧に出ませんでした。この場合は、GitHub の復旧を待ちます。
 
-## `queue: N Ready task(s) waiting, all 3 slots busy`
+## `queue: N Ready task(s) waiting, all 5 slots busy`
 
 正常な状態です。実行中のタスクが終わると、次の確認(`task watch` なら 1 分以内)で開始されます。
 
