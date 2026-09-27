@@ -39,7 +39,11 @@ Each event line looks like `event: #41 In review | <title> | <owner/repo> | pr <
   section, give its decision and its question or answer. Say what would
   unblock it.
 - **replan**: fold it into the Blocked message for the same task if you have not sent that yet.
-- **Done**: one line, only if the user is not in the middle of something else.
+- **Done**: one line, only if the user is not in the middle of something else. Then run `task list` and look
+  for tasks whose `waits_for` named this one. A Ready one starts by itself; say so in the same line. For a
+  Backlog one, read its `### Ready conditions` (`task show <id>`): if everything there now looks met, ask
+  whether to start it; if not, say what is still missing. A task still waiting on something that will not
+  finish by itself (Blocked, closed as not planned) needs the user: say which.
 - Anything else (Backlog, Ready, In progress, if they reach you): end your turn without writing
   anything. Do not explain that you are staying quiet, or mention these rules.
 
@@ -54,21 +58,27 @@ review in 10 to 15 minutes (a few hundred changed lines, not counting generated 
   files that the user might want to merge or revert separately.
 - Keep together work that touches the same file or function (separate tasks would conflict), or whose
   parts mean nothing alone.
-- Do not split into a chain where one task needs another's unmerged pull request: task-hub cannot make a
-  task wait yet. Register the later one after the first is merged, or give it that branch as its Base branch.
+- When a task needs another task's code, output, or decision, register the other one first and pass
+  `--blocked-by <its id>`: task-hub starts it only after that one is done (merged, or closed with
+  `task done`), so it builds on the result. Link only for that. Two tasks that merely touch the same area
+  are not a dependency: keep them in one task, or leave them unlinked and accept a possible merge conflict.
 - Give tasks split from one piece of work a shared title prefix with a count, for example
   "PR #23 follow-up (1/3): save experience from voice", so they stay together on the board.
 
 1. Propose the tasks. For each: a title (short imperative), the repository (`owner/name`; take it
    from `git remote get-url origin` in the relevant folder, or ask), and a Goal the agent can work from
    without this chat: what to do and why, the context and decisions from the conversation, and
-   acceptance criteria as a checklist. Leave out secrets and personal data. Mark a task as research
+   acceptance criteria as a checklist, and a `### Ready conditions` heading when something must hold first
+   (the tasks it needs, and anything outside the board such as a decision or a key). Leave out secrets and
+   personal data. Mark a task as research
    when what the user wants back is an answer, a comparison, or findings rather than a code change.
-2. Say which tasks can run in parallel (at most three run at once) and which depend on another.
+2. Say which tasks can run in parallel (at most three run at once) and which wait for which.
 3. Ask once whether to register and start them. Act only on an explicit yes, and only on what you
    proposed. For each task, write its Goal to a temporary file, then run
-   `task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] [--research] --goal-file <file>`
-   and `task start <id>`. If the user wants them registered but not started, skip `task start`.
+   `task new --title "<title>" --repo <owner/name> [--base <branch>] [--agent <agent>] [--research] [--blocked-by <id>,<id>] --goal-file <file>`
+   and `task start <id>`. Register the tasks others need first, so their ids exist for `--blocked-by`.
+   Starting a waiting task is fine: it stays Ready and starts by itself once what it waits for is done.
+   If the user wants them registered but not started, skip `task start`.
 
 Tasks registered from this pane open as tabs in this herdr workspace, and each tab closes itself
 when its run reaches In review.
