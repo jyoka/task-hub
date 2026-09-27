@@ -23,15 +23,17 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 2. Start watching, with the first of these your harness has:
    - A `task_events_watch` tool (Pi with task-hub's extension): call it once. Events then arrive as
      messages that wake you, with their digest, and there is nothing to restart.
-   - A Monitor tool (Claude Code): first run `cat ~/.local/state/task-hub/events.jsonl 2>/dev/null | wc -l`
-     and keep the number as the cursor `<n>`. Then start this with the Monitor, with the longest timeout it allows:
+   - A Monitor tool (Claude Code): first run
+     `cat ~/.local/state/task-hub/events.jsonl 2>/dev/null | wc -l | tr -d ' '` and keep the bare number it
+     prints as the cursor `<n>`. Then start this with the Monitor, with the longest timeout it allows:
 
      ```sh
-     n=<n>; while o=$(task events --next --after $n --only "In review,Blocked,replan,Done" --digest); do printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
+     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
      ```
 
      Each batch of events arrives as one notification: the events with their digest, then a
-     `next: ... --after <n>` line. Keep that `<n>` as the new cursor.
+     `next: ... --after <n>` line. Keep that `<n>` as the new cursor. If `task` fails, the loop prints
+     one `watch stopped: <error>` line and exits with code 1.
    - A background command that wakes you when it exits: run
      `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
      the next event, prints it with its digest, and exits.
@@ -40,11 +42,13 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 
 With `task_events_watch`, skip this section.
 
-With the Monitor, leave it running; do not restart it after an event. When it expires or stops, start the same
-command again at once with `n=` set to your latest cursor (the last `next:` number, or the starting count if no
-event came yet), and end your turn without writing anything, unless it stopped with an error: then tell the user
-in one line. The cursor is a line number in the events file, so events written while it was down arrive as soon
-as it is back. Never start it without `--after`: that would skip them.
+With the Monitor, leave it running; do not restart it after an event. When it expires (the tool stopped it at
+its timeout), start the same command again at once with `n=` set to your latest cursor (the last `next:` number,
+or the starting count if no event came yet), and end your turn without writing anything. The cursor is a line
+number in the events file, so events written while it was down arrive as soon as it is back. Never start it
+without `--after`: that would skip them.
+If it printed a `watch stopped:` line or exited on its own with any code, do not start it again: tell the user in
+one line that watching stopped and why. Start it again only when the user asks, after the cause is fixed.
 
 With the background command, every time it wakes you, its last line is
 `next: task events --next --after <n> ... --digest`. Handle the events it printed (below), then at once start
