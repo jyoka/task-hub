@@ -485,13 +485,17 @@ def herdr_json(*args):
         return None
 
 
-def remember_where_asked(t):
-    """When a task is registered inside herdr (/task in an agent's pane), note that workspace for its tab.
+def remember_where_asked(t, keep=False):
+    """When a task is registered or started inside herdr (/task, /chief in an agent's pane), note that workspace for its tab.
+
+    keep: a start does not replace the workspace the task was registered in.
 
     Only HERDR_WORKSPACE_ID counts: outside herdr, `herdr pane current` answers with whatever pane has the focus.
     The label is kept too, because herdr can hand the same id to another workspace after a restart.
     """
     ws = os.environ.get("HERDR_WORKSPACE_ID", "") if os.environ.get("HERDR_ENV") == "1" else ""
+    if keep and (ASKED / f"{t['id']}.json").exists():
+        return
     info = herdr_json("workspace", "get", ws) if ws and herdr_available() else None
     if info:
         ASKED.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +1155,9 @@ def cleanup(t):
 
 # ---------- sync: board and runs in, new runs out ----------
 
-def sync():
+def sync(started_here=False):
+    """started_here: someone ran `task` or `task start` by hand, so the tasks it starts belong where they are.
+    Not for `task watch`: it starts whatever becomes Ready, wherever it happens to run."""
     lines, changed, errors = [], [], []
     open_ = tasks()
     # a card that left the open columns (GitHub moves it to Done when its Issue closes, e.g. the PR
@@ -1202,6 +1208,8 @@ def sync():
     started = []
     for t in ready[:max(free, 0)]:
         try:
+            if started_here:  # Issues made without `task new` (gh, GitHub, other skills) have no workspace yet
+                remember_where_asked(t, keep=True)
             launch(t)
         except RuntimeError as e:
             record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""), "agent": t.get("agent", ""),
@@ -1222,7 +1230,7 @@ def sync():
 # ---------- commands ----------
 
 def cmd_home(_):
-    lines = sync()
+    lines = sync(started_here=True)
     board_ = tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}  # Done is not fetched
     active = board_
@@ -1500,7 +1508,7 @@ def cmd_start(a):
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
     set_status(t, READY)
-    lines = sync()
+    lines = sync(started_here=True)
     t = get(t["id"])
     out("task:", f"  id: {t['id']}", f"  title: {q(t['title'])}", f"  status: {t['status']}",
         *([f"  waits_for: {t['waits_for']} (it starts by itself once they are done)"] if t["waits_for"] else []), *lines)
