@@ -169,6 +169,10 @@ if mode == "env":  # proves the agent got the env files: writes what it read
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
+if mode == "needsetup":  # proves [setup] ran first: writes what setup left in the virtualenv
+    Path("hello.txt").write_text("setup seen: " + Path(".venv/marker").read_text().strip() + "\n")
+    Path(".task-report.md").write_text(report)
+    sys.exit(0)
 if mode == "rewrite":  # replaces the README's one line: one line added, one removed
     Path("README.md").write_text("app, rewritten\n")
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
@@ -712,6 +716,41 @@ class TaskTest(unittest.TestCase):
             self.assertIn(why, self.comments(tid)[-1])
         self.assertEqual(self.agent_calls(), [])
         self.assertFalse((self.root / ".local/share/task-hub/worktrees/outside.env").exists())
+
+    def test_setup_runs_in_the_worktree_before_the_agent(self):
+        # like `uv venv`: the virtualenv carries its own .gitignore, so git never sees it
+        self.write_config("\n[setup]\njyoka/app = mkdir -p .venv\n  echo '*' > .venv/.gitignore\n"
+                          "  echo ready > .venv/marker\n")
+        tid = self.new("needsetup")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "setup seen: ready\n")
+        self.assertNotIn(".venv", self.origin_files(f"task/{tid}"))
+        self.assertIn("== setup: mkdir -p .venv", self.task("log", tid, "--full"))
+
+    def test_failing_setup_blocks_before_the_agent_starts(self):
+        self.write_config("\n[setup]\njyoka/app = echo installing\n  false\n  echo never\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("setup failed (exit 1)", self.comments(tid)[-1])
+        log = self.task("log", tid, "--full").splitlines()
+        self.assertIn("installing", log)
+        self.assertNotIn("never", log)  # the output line: it stops at the first failing line
+        self.assertEqual(self.metrics(1)[0]["blocked_by"], "setup")
+
+    def test_setup_that_leaves_committable_files_blocks(self):
+        self.write_config("\n[setup]\njyoka/app = mkdir -p .venv && echo x > .venv/lib.py\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("setup left files git would commit (.venv/lib.py)", self.comments(tid)[-1])
+        self.assertIsNone(self.pr(tid))
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
