@@ -1,0 +1,3 @@
+# Codex: only when the user invokes it ($task), like disable-model-invocation in SKILL.md
+policy:
+  allow_implicit_invocation: false
