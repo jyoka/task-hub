@@ -22,6 +22,11 @@
   使いません)。終わったとは、完了として閉じられたこと(PR のマージ、`task done`)です。「not planned」や
   「duplicate」として閉じられた場合は、前提が届いていないので待ち続けます。不要ならリンクを外してください。
   待っているカードは `task` と `task list` の `waits_for` に、何を待っているか(例: `#12 (Blocked)`)が出ます。
+- **本文にだけ書かれた前後関係**: `task new` を通さずに作った Issue(`gh issue create` やほかのスキル)は、本文の
+  `Blocked by` や `Ready conditions` の見出しの下に `#12` と書いてあっても、リンクがありません。task-hub は、
+  そこに書かれた番号がボード上の開いたカードなら、リンクと同じように開始を待たせ、`waits_for` に
+  `#12 (In review, only in the body: link it)` と出します。本文は開始を止めるためだけに読み、開始の許可には
+  使いません。Issue の画面の Relationships から「Blocked by」を付ければ、この表示は消えます。
 - **Ready conditions**: Goal の `### Ready conditions` の見出しに、それ以外の開始の条件を書きます。依存するタスクと
   そこから使うもの、決まっているべきこと、`.env` のキーなどです。コードは判定しません。エージェントが最初に確かめ、
   満たされていなければ何も変えずに Blocked で止まります。`/chief` は、待ち先が Done になったときにこれを読んで、

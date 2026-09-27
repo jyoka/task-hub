@@ -270,7 +270,7 @@ FIELDS_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { fields(fi
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
   items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id
-    content { ... on Issue { number title url repository { nameWithOwner }
+    content { ... on Issue { number title url body repository { nameWithOwner }
       blockedBy(first: 50) { nodes { number title state stateReason repository { nameWithOwner } } } } }
     status: fieldValueByName(name: "@Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
     repo: fieldValueByName(name: "@Target repo") { ... on ProjectV2ItemFieldTextValue { text } }
@@ -345,12 +345,29 @@ def tasks(include_done=False):
                            "number": str(n["number"]), "title": n.get("title", ""), "state": n.get("state", ""),
                            "reason": n.get("stateReason") or ""}
                           for n in (content.get("blockedBy") or {}).get("nodes") or [] if n]}
+        t["mentioned"] = mentioned_blockers(content.get("body") or "")
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
     for t in result:
-        t["waits_for"] = ", ".join(f"{x['ref']} ({why})" for x, why in
-                                   ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why)
+        linked = {x["number"] for x in t["blockers"] if x["ref"].startswith("#")}
+        # written in the body but never linked (the Issue was made with `gh issue create` or another skill):
+        # never enough to start, so an open one holds the task back like a link until someone links it
+        unlinked = [n for n in t.pop("mentioned") if n not in linked and n != t["id"] and n in statuses]
+        t["waits_for"] = ", ".join([f"{x['ref']} ({why})" for x, why in
+                                    ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why]
+                                   + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked])
     return sorted(result, key=lambda t: int(t["id"]))
+
+
+def mentioned_blockers(body):
+    """Task numbers under a "Blocked by" or "Ready conditions" heading of the Issue body, in order."""
+    found, inside = [], False
+    for line in body.splitlines():
+        if line.lstrip().startswith("#") and not re.match(r"\s*#\d", line):  # a heading, not "#12 ..."
+            inside = bool(re.match(r"\s*#+\s*(blocked by|ready conditions)\b", line, re.I))
+        elif inside:
+            found += [n for n in re.findall(r"(?<![\w/])#(\d+)\b", line) if n not in found]
+    return found
 
 
 def waiting_reason(blocker, statuses):
