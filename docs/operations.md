@@ -8,7 +8,9 @@
 
 - **herdr**: 各実行は "#<番号> <title>" という名前のタブで動き、エージェントの出力をリアルタイムで確認できます。
   タブを置く workspace は、次の順で決まります。
-  1. `/task` を頼んだ workspace(herdr のペインの中で登録したとき)
+  1. `/task` を頼んだ workspace(herdr のペインの中で登録したとき)。登録時の記録がなければ(`gh issue create`
+     やほかのスキル、GitHub の画面で作った Issue)、`task start` や `task` を手で実行した workspace。`task watch` が
+     始めたものは、watch の場所には置きません
   2. そのリポジトリの checkout を開いているペインがある workspace(スマホやボードから作ったカードなど)
   3. どちらもなければ、タスク専用の workspace "task <番号> · <リポジトリ名>: <title>" を作る
 

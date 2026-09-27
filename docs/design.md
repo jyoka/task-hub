@@ -64,6 +64,9 @@
    どちらもなければ、以前と同じくタスク専用の workspace を作ります。`herdr pane current` は herdr の外で呼ぶと
    フォーカスのあるペインを返すので使いません。workspace の id は herdr の再起動で別の workspace に使い回されうるので、
    名前も一緒に記録して確かめます。In review で終わったタブは閉じ、Blocked のタブは残します。
+   Issue は `task new` 以外(`gh issue create`、ほかのスキル、GitHub の画面)でも作られるので、登録時の記録に
+   頼り切らず、`task start` と `task` を手で実行したときにも、記録がなければその workspace を記録します
+   (登録時の記録があればそちらが優先)。`task watch` は、動いている場所と頼んだ場所が無関係なので記録しません。
    (`herdr worktree create` は親リポジトリ用に 2 つ目のワークスペースも開いてしまうため使っていません。)herdr が
    ない場合、実行はログ付きのバックグラウンドプロセスになります。task-hub は自分が作成したタブと workspace だけを
    閉じます。
