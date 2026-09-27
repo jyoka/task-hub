@@ -16,14 +16,21 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 1. Run `task list` (read only). In three or four lines, tell the user what is running and what
    needs them: In review (to check and merge), Blocked (to unblock), Backlog (waiting for approval).
    Never run `task` without arguments: it starts Ready cards.
-2. Start watching: run `task events --follow --only "In review,Blocked,replan,Done"` as a background
-   monitor that wakes you on each line it prints (for example Claude Code's Monitor tool). Re-arm it
-   when it expires. If your harness cannot run a background monitor, run `task events` at the start
-   of each of your replies instead and report what is new.
+2. Start watching: run `task events --next --only "In review,Blocked,replan,Done"` as a background
+   command (in Claude Code, a Bash command run in the background, or the Monitor tool). It waits for the
+   next event, prints it, and exits; its exit is what wakes you.
+
+## Keep watching
+
+Every time it wakes you, its last line is `next: task events --next --after <n> ...`. Handle the events
+it printed (below), then at once start exactly that `next:` command in the background again. It picks up
+from where the last one stopped, so nothing that happened in between is lost. Always keep one running.
+If your harness cannot run background commands, run `task events` at the start of each of your replies
+instead and report what is new.
 
 ## When an event arrives
 
-Each line looks like `event: #41 In review | <title> | <owner/repo> | pr <url>`.
+Each event line looks like `event: #41 In review | <title> | <owner/repo> | pr <url>`.
 
 - **In review**: run `task show <id> --full`. Tell the user the title, the automated review verdict, the one
   to three things from "Please review" they must check, and the PR link. No more than five lines. A research

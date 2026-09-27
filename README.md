@@ -86,7 +86,7 @@ you:       answer in the Goal (or check the replanner's answer), move the card t
 | 自分の対応が必要なものを知る | `/chief` が知らせてくる。自分で見るなら `task list`(読むだけ)か `task`(Ready のカードの開始も行う) |
 | ボード全体を見る | GitHub Project(ブラウザ、スマホアプリ) |
 | 実行を見守る | herdr のそのタスクのタブ、または `task log 12` |
-| 最近の出来事を見る | `task events`(`--follow` で起きるたびに 1 行、`--only "In review,Blocked"` で絞り込み) |
+| 最近の出来事を見る | `task events`(`--follow` で起きるたびに 1 行、`--next` で次の出来事を待って終わる、`--only "In review,Blocked"` で絞り込み) |
 | **受け入れる・直す** | |
 | レポートとレビューすべき点を読む | Issue の最新コメント、PR、または `task show 12 --full` |
 | 完了した作業を受け入れる | PR をマージします。Issue が閉じてカードは Done になります |

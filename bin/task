@@ -1179,10 +1179,15 @@ def event_line(e):
 def cmd_events(a):
     """What task-hub did lately; with --follow, each new event as one line the moment it is written.
 
-    --follow is for an agent's background monitor (the /chief skill): every line it prints is one thing to react to.
+    --follow is for a monitor that wakes its agent on every line it prints.
+    --next waits for the next wanted events, prints them and the command that continues from there, and exits:
+    for a harness that wakes its agent when a background command ends (the /chief skill uses it). The cursor is a
+    line number in the append-only EVENTS file, so nothing that happens between two runs is missed.
     """
     only = {e.strip().lower() for e in (a["only"] or "").split(",") if e.strip()}
     wanted = lambda e: not only or e.get("event", "").lower() in only
+    if a["next"]:
+        return events_next(a, wanted)
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
         events = [e for e in (json.loads(line) for line in recent if line.startswith("{")) if wanted(e)]
@@ -1206,6 +1211,35 @@ def cmd_events(a):
                             print(event_line(e), flush=True)
                     except (ValueError, KeyError):
                         continue
+            time.sleep(1)
+    except KeyboardInterrupt:
+        return
+
+
+def events_next(a, wanted):
+    def whole_lines():  # a line still being written is not counted until it is complete
+        text = EVENTS.read_text(errors="replace") if EVENTS.exists() else ""
+        return text[:text.rfind("\n") + 1].splitlines()
+
+    if a["after"] is not None and not a["after"].isdigit():
+        fail(f"--after takes the number printed on the last `next:` line, got {a['after']!r}", code=2)
+    cursor = int(a["after"]) if a["after"] is not None else len(whole_lines())  # none given: from now on
+    try:
+        while True:
+            lines = whole_lines()
+            found = []
+            for line in lines[cursor:]:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if wanted(e):
+                    found.append(event_line(e))
+            if found:
+                only = f' --only "{a["only"]}"' if a["only"] else ""
+                out(*found, f"next: task events --next --after {len(lines)}{only}")
+                return
+            cursor = max(cursor, len(lines))
             time.sleep(1)
     except KeyboardInterrupt:
         return
@@ -1409,9 +1443,9 @@ COMMANDS = {
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
-    "events": (cmd_events, [], {"follow": False, "only": True},
-               "task events [--follow] [--only \"In review,Blocked\"]  # what task-hub did lately; "
-               "--follow prints each new event as it happens"),
+    "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True},
+               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"]  # what task-hub did "
+               "lately; --follow prints each new event as it happens, --next waits for the next ones and exits"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
