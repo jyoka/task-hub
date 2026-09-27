@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 
-const DEFAULT_ONLY = "In review,Blocked,replan,Done";
+const DEFAULT_ONLY = "In review,Blocked,replan,Done,slow";
 
 // `task` on PATH, else the usual install (the same rule the skills follow)
 function taskBin(): string {

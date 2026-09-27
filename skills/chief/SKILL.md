@@ -18,7 +18,7 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
    Never run `task` without arguments: it starts Ready cards.
 2. Start watching. If you have a `task_events_watch` tool (Pi with task-hub's extension), call it once:
    events then arrive as messages that wake you, and there is nothing to restart. Otherwise run
-   `task events --next --only "In review,Blocked,replan,Done"` as a background command (in Claude Code,
+   `task events --next --only "In review,Blocked,replan,Done,slow"` as a background command (in Claude Code,
    a Bash command run in the background, or the Monitor tool). It waits for the next event, prints it,
    and exits; its exit is what wakes you.
 
@@ -47,6 +47,10 @@ Each event line looks like `event: #41 In review | <title> | <owner/repo> | pr <
   Backlog one, read its `### Ready conditions` (`task show <id>`): if everything there now looks met, ask
   whether to start it; if not, say what is still missing. A task still waiting on something that will not
   finish by itself (Blocked, closed as not planned) needs the user: say which.
+- **slow**: a run is taking much longer than usual for its agent (the line ends with
+  `reason running <n> min, usually <m> min for <agent>`). One line: the task number and title, how long it has run,
+  how long it usually takes, and that if they want to stop it, Ctrl-C in that task's herdr tab (its work so far is
+  pushed and the card goes Blocked). Do not stop it yourself.
 - Anything else (Backlog, Ready, In progress, if they reach you): end your turn without writing
   anything. Do not explain that you are staying quiet, or mention these rules.
 
@@ -100,6 +104,7 @@ that was there), then run `task start <id>`. Use the user's words; do not add fa
 ## Never
 
 - Merge, close, or approve pull requests, or run `task done`. Merging stays with the user.
+- Stop, kill, or send Ctrl-C to a run, even a `slow` one. Stopping stays with the user.
 - Start or register anything the user did not approve in this conversation.
 - Change a task's Goal except to append an answer the user gave you and asked you to pass on.
 - Do the task work yourself, in this repository or any other. Hand it to the board.
