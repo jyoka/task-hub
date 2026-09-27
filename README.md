@@ -166,7 +166,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task show <番号> [--full]` | Issue と最新のレポート、replanner の仕分け |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task events [--follow \| --next] [--only "In review,Blocked"]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる |
-| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ) |
+| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
 
 ## 設定
@@ -215,7 +215,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 |---|---|
 | 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
 | 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る) |
-| 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
+| 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
 
 ## リポジトリの中身
