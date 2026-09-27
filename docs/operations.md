@@ -26,9 +26,12 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 このファイルを見張れば、何かが起きた瞬間に分かります。`task events` は最近の 20 件を、`task events --follow` は
 新しい出来事を起きるたびに 1 行ずつ出します。`task events --next` は次の出来事を待って出力し、続きから読むための
 コマンドを `next: task events --next --after <n> ...` の行に出して終わります(`<n>` は events.jsonl の行番号なので、
-2 回の実行の間に起きたことも取りこぼしません)。総指揮のエージェント(`/chief`)は `--next` を裏で動かし、終わって
-起こされるたびに `next:` のコマンドで動かし直します。「終わったら起こす」バックグラウンド実行でも、「1 行ごとに
-起こす」監視でも同じように動きます。
+2 回の実行の間に起きたことも取りこぼしません)。総指揮のエージェント(`/chief`)は、Claude Code では
+`--next --after <n> --digest` をたどるシェルのループを Monitor で常駐させ、出来事と要点を 1 回の通知で受け取ります
+(出来事ごとの動かし直しも、出力ファイルを読む手間もありません)。Monitor は最長でも 30 分ほどで切れるので、
+`/chief` は最後に受け取った `next:` の `<n>` から張り直します。`--follow` はファイルの末尾から読み始めるため、
+張り直すまでの間に起きた出来事を落とします。そのため `/chief` は `--follow` を使いません。Monitor のないハーネスでは `--next --digest` を裏で動かし、終わって
+起こされるたびに `next:` のコマンドで動かし直します。Pi では拡張機能が同じ `--next --digest` のループを回します。
 
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
