@@ -1064,6 +1064,18 @@ class TaskTest(unittest.TestCase):
         self.task("done", b)
         self.assertNotIn(tab_b, self.herdr_db()["closed"])
 
+    def test_rerun_replaces_the_old_tab_even_if_the_run_file_has_no_id(self):
+        self.use_herdr(workspaces=[("w2", "バイトルCRM関連")])
+        tid = self.new_in_herdr("w2", "stuck")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        old_tab = self.run_state(tid)["tab"]
+        self.assertNotIn("id", self.run_state(tid))  # run files keep the id only in their name
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertIn(old_tab, self.herdr_db()["closed"])
+        self.assertNotEqual(self.run_state(tid)["tab"], old_tab)
+
     def test_list_reads_the_board_and_starts_nothing(self):
         tid = self.new("ok")
         self.move(tid, "Ready")
