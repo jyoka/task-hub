@@ -22,7 +22,11 @@
 
 task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
 このファイルを見張れば、何かが起きた瞬間に分かります。`task events` は最近の 20 件を、`task events --follow` は
-新しい出来事を起きるたびに 1 行ずつ出します。総指揮のエージェント(`/chief`)は、後者を裏で見張っています。
+新しい出来事を起きるたびに 1 行ずつ出します。`task events --next` は次の出来事を待って出力し、続きから読むための
+コマンドを `next: task events --next --after <n> ...` の行に出して終わります(`<n>` は events.jsonl の行番号なので、
+2 回の実行の間に起きたことも取りこぼしません)。総指揮のエージェント(`/chief`)は `--next` を裏で動かし、終わって
+起こされるたびに `next:` のコマンドで動かし直します。「終わったら起こす」バックグラウンド実行でも、「1 行ごとに
+起こす」監視でも同じように動きます。
 
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}
