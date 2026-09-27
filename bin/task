@@ -213,6 +213,54 @@ class AgentReport:
                             f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
+DIGEST_KEYS = ["verdict", "reason", "review", "report", "decision", "question", "answer", "goal_change", "pr"]
+DIGEST_ITEM, DIGEST_TEXT, DIGEST_REVIEW_ITEMS = 120, 240, 3  # the caps keep one digest under ~1000 chars
+
+
+def clip(text, limit):
+    """One line of at most limit chars: what a human needs to decide, not the whole text."""
+    s = " ".join((text or "").split())
+    return s if len(s) <= limit else s[:limit - 3].rstrip() + "..."
+
+
+def subsection(body, name):
+    """The first paragraph under '### name', or '' (what follows it in a replan comment is task-hub's own advice)."""
+    m = re.search(rf"(?m)^### {re.escape(name)}[ \t]*\n(.*?)(?=^##|\Z)", body, re.S)
+    return m.group(1).strip().split("\n\n")[0] if m else ""
+
+
+def digest(report="", replan=""):
+    """The short summary a human decides from, built from the report and replan comments task-hub writes on the
+    Issue. The run builds it from the text it is about to post, so writing an event reads nothing from GitHub."""
+    d = {}
+    if report:
+        m = re.search(r"\n\nPR: (\S+)\s*\Z", report)  # only the last line task-hub appends, not the agent's text
+        pr, report = (m.group(1), report[:m.start()]) if m else ("", report)
+        auto = section(report, "Automated review")
+        d["verdict"] = clip((re.findall(r"(?m)^Verdict: (.+)$", auto) or [""])[0], 40)
+        d["reason"] = clip(section(report, "Blocked"), DIGEST_TEXT)
+        lines = [l for l in section(report, "Please review").splitlines() if l.strip()]
+        items = [l.strip() for l in lines if re.match(r"([-*+]|\d+[.)])\s", l)] or [l.strip() for l in lines]
+        d["review"] = [clip(re.sub(r"^([-*+]|\d+[.)])\s+", "", l), DIGEST_ITEM) for l in items[:DIGEST_REVIEW_ITEMS]]
+        if len(items) > DIGEST_REVIEW_ITEMS:
+            d["review"].append(f"(+{len(items) - DIGEST_REVIEW_ITEMS} more)")
+        d["pr"] = pr
+        if not pr and not d["reason"]:  # In review without a PR is a research task: its report is the result
+            d["report"] = clip(section(report, "Report"), DIGEST_TEXT)
+    if replan:
+        d["decision"] = clip((re.findall(r"(?m)^Decision: (.+)$", replan) or [""])[0], 40)
+        d["question"] = clip(subsection(replan, "Question for you"), DIGEST_TEXT)
+        d["answer"] = clip(subsection(replan, "Answer"), DIGEST_TEXT)
+        d["goal_change"] = clip(subsection(replan, "Proposed goal change"), DIGEST_TEXT)
+    return {k: d[k] for k in DIGEST_KEYS if d.get(k)}
+
+
+def digest_lines(d, skip=()):
+    """The digest as indented `key: value` lines, one per Please review item."""
+    return [f"  {k}: {q(v)}" for k in DIGEST_KEYS if k not in skip
+            for v in (d.get(k) if isinstance(d.get(k), list) else [d.get(k)]) if v]
+
+
 # ---------- config ----------
 
 def config():
@@ -397,14 +445,17 @@ def get(tid):
     fail(f"task {tid} not found on the board", "run `task` to see the board")
 
 
-def set_status(t, status, reason=""):
+def set_status(t, status, reason="", digest_=None):
+    """digest_: the event's digest; a Blocked without one gets its reason as the digest."""
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
     b = board()
     gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
        "--single-select-option-id", b["status_options"][status.lower()])
     t["status"] = status
-    emit(t, status, reason=reason, pr=t.get("pr", ""))
+    if digest_ is None and status == BLOCKED and reason:
+        digest_ = {"reason": clip(reason, DIGEST_TEXT)}
+    emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_)
 
 
 def emit(t, event, **extra):
@@ -996,9 +1047,10 @@ def run_replan(t, report, say):
     else:
         say(f"== replanner wrote an unknown decision {decision!r}")
         return "ignored"
-    comment(t, "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details]))
+    body = "\n\n".join([f"{REPLAN_MARK}\n\n## Replanner\n\nBlocked: {blocked}\nDecision: {decision}", *details])
+    comment(t, body)
     say(f"== replanner decision: {decision}")
-    emit(t, "replan", decision=decision)
+    emit(t, "replan", decision=decision, digest=digest(replan=body))
     return decision
 
 
@@ -1103,10 +1155,10 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
-    report_comment(t, blocked=parsed.blocked, report=parsed.report, review=parsed.review,
-                   pr=t.get("pr", "") if ahead else "", auto_review=parsed.auto_review)
+    body = parsed.issue_comment(t.get("pr", "") if ahead else "")
+    comment(t, body)
     status = BLOCKED if parsed.blocked else IN_REVIEW
-    set_status(t, status, reason=parsed.blocked)
+    set_status(t, status, reason=parsed.blocked, digest_=digest(report=body))
     return status
 
 
@@ -1277,6 +1329,17 @@ def event_line(e):
     return " | ".join([f"event: #{e['id']} {e['event']}", e.get("title", ""), e.get("repo", ""), *extra])
 
 
+def event_lines(e, with_digest=False):
+    """The event's line and, with --digest, its digest below it (what the line already says is not repeated)."""
+    if not with_digest:
+        return [event_line(e)]
+    if e.get("digest"):
+        return [event_line(e), *digest_lines(e["digest"], skip=[k for k in ("reason", "decision", "pr") if e.get(k)])]
+    if e.get("event") in (IN_REVIEW, BLOCKED, "replan"):  # written before events carried a digest
+        return [event_line(e), f"  digest: none, run `task show {e['id']} --digest`"]
+    return [event_line(e)]
+
+
 def cmd_events(a):
     """What task-hub did lately; with --follow, each new event as one line the moment it is written.
 
@@ -1292,7 +1355,7 @@ def cmd_events(a):
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
         events = [e for e in (json.loads(line) for line in recent if line.startswith("{")) if wanted(e)]
-        out(*([event_line(e) for e in events] or [f"events: none yet in {home(EVENTS)}"]))
+        out(*([line for e in events for line in event_lines(e, a["digest"])] or [f"events: none yet in {home(EVENTS)}"]))
         return
     pos = EVENTS.stat().st_size if EVENTS.exists() else 0  # only what happens from now on
     # stderr: a monitor wakes its agent for each stdout line, and this one is not an event
@@ -1308,8 +1371,8 @@ def cmd_events(a):
                 for line in whole.decode(errors="replace").splitlines():
                     try:
                         e = json.loads(line)
-                        if wanted(e):
-                            print(event_line(e), flush=True)
+                        if wanted(e):  # one print: a monitor must see the event and its digest together
+                            print("\n".join(event_lines(e, a["digest"])), flush=True)
                     except (ValueError, KeyError):
                         continue
             time.sleep(1)
@@ -1335,10 +1398,11 @@ def events_next(a, wanted):
                 except ValueError:
                     continue
                 if wanted(e):
-                    found.append(event_line(e))
+                    found += event_lines(e, a["digest"])
             if found:
                 only = f' --only "{a["only"]}"' if a["only"] else ""
-                out(*found, f"next: task events --next --after {len(lines)}{only}")
+                more = " --digest" if a["digest"] else ""
+                out(*found, f"next: task events --next --after {len(lines)}{only}{more}")
                 return
             cursor = max(cursor, len(lines))
             time.sleep(1)
@@ -1365,8 +1429,12 @@ def cmd_watch(_):
 
 
 def cmd_show(a):
+    if a["full"] and a["digest"]:
+        fail("--full and --digest do not go together", "usage: task show <id> [--full | --digest]", 2)
     t = get(a["id"])
     i = issue(t)
+    if a["digest"]:
+        return show_digest(t, i)
     lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr")
                          if t.get(k)]
     body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "") \
@@ -1378,6 +1446,18 @@ def cmd_show(a):
     else:
         lines += ["body: |", *("  " + l for l in body.splitlines())]
     out(*lines)
+
+
+def show_digest(t, i):
+    """The same digest the events carry, rebuilt from the Issue: for events written without one, or to check later."""
+    report = i["report"]
+    blocked = section(report, "Blocked").split("\n")[0].strip()
+    replan = i["replans"][-1] if i["replans"] else ""
+    if not blocked or f"\nBlocked: {blocked}\n" not in replan:  # a replan of an earlier block is out of date
+        replan = ""
+    d = digest(report=report, replan=replan)
+    out("task:", *[f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo") if t.get(k)],
+        *(["digest:", *digest_lines(d)] if d else ["digest: none, no report on the Issue yet"]))
 
 
 def cmd_log(a):
@@ -1551,7 +1631,8 @@ COMMANDS = {
     "start": (cmd_start, ["id?"], {"agent": True},
               "task start [<id>] [--agent name]  # approve a Backlog task or re-run a Blocked one; no id = pick one"),
     "watch": (cmd_watch, [], {}, f"task watch  # start Ready cards automatically (checks every {WATCH_SECONDS}s)"),
-    "show": (cmd_show, ["id"], {"full": False}, "task show <id> [--full]  # the Issue and its latest report"),
+    "show": (cmd_show, ["id"], {"full": False, "digest": False},
+             "task show <id> [--full | --digest]  # the Issue and its latest report; --digest: only what to decide from"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True,
                           "research": False, "blocked-by": True},
@@ -1559,9 +1640,10 @@ COMMANDS = {
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
-    "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True},
-               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"]  # what task-hub did "
-               "lately; --follow prints each new event as it happens, --next waits for the next ones and exits"),
+    "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True, "digest": False},
+               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"] [--digest]  # what task-hub "
+               "did lately; --follow prints each new event as it happens, --next waits for the next ones and exits, "
+               "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
