@@ -9,11 +9,30 @@
 |---|---|---|
 | Issue のタイトル | 命令形の短い要約。PR のタイトルにもなります | あなた(`/task` / `task new`) |
 | Issue の本文 | Goal: やること、理由、チャットで決まった文脈、確認項目のチェックリスト。エージェントへの指示のすべてです | あなた |
+| Issue の「Blocked by」 | このタスクより先に終わっているべきタスク。GitHub の Issue の依存関係(リレーションシップ)です | あなた(`task new --blocked-by` / GitHub の画面) |
 | カードの Status | Backlog / Ready / In progress / In review / wait for merge(任意) / Blocked / Done | あなた(Backlog と Ready と wait for merge) / task-hub(それ以外) |
 | カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
 | Issue のコメント | task-hub のレポート(下記) | task-hub |
+
+### 開始の条件: Blocked by と Ready conditions
+
+- **Blocked by**: task-hub は、Ready のカードでも、Blocked by の Issue がすべて終わるまでは始めません(実行の枠も
+  使いません)。終わったとは、完了として閉じられたこと(PR のマージ、`task done`)です。「not planned」や
+  「duplicate」として閉じられた場合は、前提が届いていないので待ち続けます。不要ならリンクを外してください。
+  待っているカードは `task` と `task list` の `waits_for` に、何を待っているか(例: `#12 (Blocked)`)が出ます。
+- **Ready conditions**: Goal の `### Ready conditions` の見出しに、それ以外の開始の条件を書きます。依存するタスクと
+  そこから使うもの、決まっているべきこと、`.env` のキーなどです。コードは判定しません。エージェントが最初に確かめ、
+  満たされていなければ何も変えずに Blocked で止まります。`/chief` は、待ち先が Done になったときにこれを読んで、
+  開始してよいか提案します。
+
+```markdown
+### Ready conditions
+
+- #12 が終わっていること(#12 で追加する `User` 型を使う)
+- 決済のテスト用キーが `.env` にあること
+```
 
 Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
 カードを Ready に戻します。
