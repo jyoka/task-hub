@@ -621,19 +621,19 @@ class TaskTest(unittest.TestCase):
 
     # --- the limit ---
 
-    def test_parallel_limit_is_three(self):
-        ids = [self.new("ok", f"t{i}") for i in range(4)]
-        procs = [self.fake_running(tid) for tid in ids[:3]]
-        self.move(ids[3], "Ready")
+    def test_parallel_limit_is_five(self):
+        ids = [self.new("ok", f"t{i}") for i in range(6)]
+        procs = [self.fake_running(tid) for tid in ids[:5]]
+        self.move(ids[5], "Ready")
         out = self.task()
-        self.assertIn("all 3 slots busy", out)
-        self.assertEqual(self.status(ids[3]), "Ready")
+        self.assertIn("all 5 slots busy", out)
+        self.assertEqual(self.status(ids[5]), "Ready")
         self.assertEqual(self.agent_calls(), [])
         procs[0].kill()
         procs[0].wait()
         self.task()
         self.assertEqual(self.status(ids[0]), "Blocked")  # its run died
-        self.assertEqual(self.wait(ids[3]), "In review")
+        self.assertEqual(self.wait(ids[5]), "In review")
 
     # --- dependencies (GitHub's "Blocked by") ---
 

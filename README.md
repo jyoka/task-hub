@@ -27,7 +27,7 @@ GitHub Project をかんばんボードにして、そのタスクをコーデ�
  │                        │ 1 分ごとに読む
  │                        ▼
  │                 task-hub(bin/task、あなたの Mac で動くコード)
- │                   開始の判定  Ready で、待ち先がすべて完了していて、実行の枠(最大 3)が空いている
+ │                   開始の判定  Ready で、待ち先がすべて完了していて、実行の枠(最大 5)が空いている
  │                   準備        clone → worktree(task/<番号>)→ [env] のコピー → [setup] の実行
  │                   実行        worker → reviewer ─ pass ─────────▶ commit・push・PR → In review
  │                                  ▲        └ needs changes(1 回だけ差し戻す。2 回目も不合格なら Blocked)
@@ -66,7 +66,7 @@ task-hub が定義している役割は 5 つです。どれも Claude Code の 
 | 列 (Status) | 何が起きているか | あなたの対応 |
 |---|---|---|
 | **Backlog** | 登録済み、未承認 | やってほしいときに Ready へ |
-| **Ready** | 承認済み。枠(最大 3)が空けば始まる。「Blocked by」の待ち先が終わるまでは、枠を使わずに待つ(`task list` の `waits_for` に理由) | なし(待ち先が Blocked なら、そちらに対応) |
+| **Ready** | 承認済み。枠(最大 5)が空けば始まる。「Blocked by」の待ち先が終わるまでは、枠を使わずに待つ(`task list` の `waits_for` に理由) | なし(待ち先が Blocked なら、そちらに対応) |
 | **In progress** | worker が作業中。reviewer と、その差し戻しもこの間 | なし |
 | **In review** | PR ができた(調べものはレポートだけ)。reviewer を設定していれば、自動レビューも通っている | PR をレビューしてマージ(調べものは読んで `task done`) |
 | wait for merge(任意) | レビュー済みで、マージ待ち。列のないボードでは使わない | なし |
