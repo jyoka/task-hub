@@ -118,6 +118,14 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    コピーしたファイルはコミットしません。ファイルがない、またはリポジトリで追跡されている名前のときは、開始せずに
    Blocked にします。書いたリポジトリのエージェントは、そのキーで実際に API を呼べる(費用が出る)ことに注意してください。
 
+   In review や Blocked などの出来事は、herdr か macOS の通知で知らせます(LLM は使いません)。止めたいとき、
+   出来事を絞りたいときは `[notify]` に書きます([docs/operations.md](operations.md#通知llm-なし)):
+
+   ```ini
+   [notify]
+   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done。空にすると通知しない
+   ```
+
    たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
    (実行中にエージェントが自分でログインすることはできません)。
 

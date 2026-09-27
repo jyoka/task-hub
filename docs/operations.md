@@ -68,6 +68,33 @@ In review、Blocked、replan のイベントには、人が判断するための
 GitHub を読みます)。要点のない古いイベントや、あとから確かめたいときに使います。replanner のコメントは、
 最新のレポートと同じ Blocked の理由のものだけを使います。
 
+### 通知(LLM なし)
+
+task-hub は出来事を書くその場で、同じ内容を通知として出します。文面はイベントとその要点(digest)から組み立てる
+だけで、LLM も GitHub も使いません。知らせを受けるために `/chief` を開いておく必要はありません。
+
+- 見出し: `#<番号> <出来事>: <タイトル>`(例: `#41 In review: 保存できる項目に…`)
+- 本文: 要点を `verdict: pass`、`reason: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
+  最後の行が PR の URL(あれば)
+- 出し方: herdr が動いていれば `herdr notification show`(Blocked と replan は `--sound request`、ほかは
+  `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)。どちらもなければ出しません
+
+通知はイベントを書いたプロセス(実行中の `task _run`、`task watch`、`task`、`task start` など)がそのまま出します。
+見張り役のプロセスを別に動かす必要はなく、`task watch` を止めていても、実行が終わった瞬間に届きます。通知のコマンドは
+待たずに切り離して起動するので、通知が出せない、失敗する、止まったままになる、のどれでも task-hub の処理は
+そのまま続きます(その通知は出ないだけです)。
+
+どの出来事で通知するかは `~/.config/task-hub/config.ini` の `[notify]` で変えられます:
+
+```ini
+[notify]
+events = In review, Blocked, replan, Done   ; 既定。列の名前か replan をカンマ区切りで。空にすると通知しない
+```
+
+通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
+システム設定の「通知」で、herdr または「スクリプトエディタ」(osascript の通知はこの名前で出ます)が許可されて
+いるか確かめます。
+
 ## 実行の結果を集計する
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの

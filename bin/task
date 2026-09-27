@@ -43,6 +43,7 @@ REPLAN_MARK = "<!-- task-hub replan -->"
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
+NOTIFY_EVENTS = "In review, Blocked, replan, Done"  # [notify] events: which events show a notification; empty = none
 DEFAULT_AGENTS = {
     "claude": "claude -p --dangerously-skip-permissions {prompt}",
     "codex": "codex exec -s workspace-write {prompt}",
@@ -265,7 +266,8 @@ def digest_lines(d, skip=()):
 
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {}})
+    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {},
+                 "notify": {"events": NOTIFY_EVENTS}})
     c.read(CONFIG)
     return c
 
@@ -459,9 +461,45 @@ def set_status(t, status, reason="", digest_=None):
 
 
 def emit(t, event, **extra):
-    """Note what just happened in EVENTS, one JSON line, so a watcher learns of it without polling GitHub."""
-    append_jsonl(EVENTS, {"time": now(), "id": t["id"], "title": t.get("title", ""), "repo": t.get("repo", ""),
-                          "event": event, **{k: v for k, v in extra.items() if v}})
+    """Note what just happened in EVENTS, one JSON line, so a watcher learns of it without polling GitHub,
+    and show it as a notification: the human learns of it without an agent (and its tokens) watching."""
+    e = {"time": now(), "id": t["id"], "title": t.get("title", ""), "repo": t.get("repo", ""),
+         "event": event, **{k: v for k, v in extra.items() if v}}
+    append_jsonl(EVENTS, e)
+    notify(e)
+
+
+def notification(e):
+    """An event's notification (title, body), built from the event and its digest: no LLM, no GitHub."""
+    d = {**{k: e[k] for k in ("reason", "decision", "pr") if e.get(k)}, **(e.get("digest") or {})}
+    body = [f"{k}: {v}" for k in DIGEST_KEYS if k != "pr" for v in (d.get(k) if isinstance(d.get(k), list) else [d.get(k)])
+            if v]
+    return f"#{e['id']} {e['event']}: {e.get('title', '')}", "\n".join(body + ([d["pr"]] if d.get("pr") else []))
+
+
+def notify(e):
+    """Show the event on this machine if [notify] events lists it: herdr's notification if herdr runs, else macOS's.
+    Fire and forget: a missing or hanging notifier must never cost the run or the command that wrote the event."""
+    try:
+        wanted = {x.strip().lower() for x in config()["notify"].get("events", "").split(",") if x.strip()}
+    except configparser.Error:
+        return
+    if e["event"].lower() not in wanted:
+        return
+    title, body = notification(e)
+    if herdr_available():
+        sound = "request" if e["event"] in (BLOCKED, "replan") else "done"
+        cmd = ["herdr", "notification", "show", title, "--body", body, "--sound", sound]
+    elif shutil.which("osascript"):  # arguments, not a script built from the text: no quoting to get wrong
+        cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+               "-e", "end run", title, body]
+    else:
+        return
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
 
 
 def set_text(t, field, value):
