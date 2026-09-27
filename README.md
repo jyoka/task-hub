@@ -163,9 +163,9 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task new --title ... --repo owner/name (--goal ... \| --goal-file ...)` | タスクを登録する。`--base`、`--agent`、`--research`、`--blocked-by 12,14` |
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、または Blocked を再実行する。番号なしなら一覧から選ぶ |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
-| `task show <番号> [--full]` | Issue と最新のレポート、replanner の仕分け |
+| `task show <番号> [--full \| --digest]` | Issue と最新のレポート、replanner の仕分け。`--digest` は判断用の要点だけ |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
-| `task events [--follow \| --next] [--only "In review,Blocked"]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる |
+| `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す |
 | `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
 
