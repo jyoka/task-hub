@@ -16,14 +16,17 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 1. Run `task list` (read only). In three or four lines, tell the user what is running and what
    needs them: In review (to check and merge), Blocked (to unblock), Backlog (waiting for approval).
    Never run `task` without arguments: it starts Ready cards.
-2. Start watching: run `task events --next --only "In review,Blocked,replan,Done"` as a background
-   command (in Claude Code, a Bash command run in the background, or the Monitor tool). It waits for the
-   next event, prints it, and exits; its exit is what wakes you.
+2. Start watching. If you have a `task_events_watch` tool (Pi with task-hub's extension), call it once:
+   events then arrive as messages that wake you, and there is nothing to restart. Otherwise run
+   `task events --next --only "In review,Blocked,replan,Done"` as a background command (in Claude Code,
+   a Bash command run in the background, or the Monitor tool). It waits for the next event, prints it,
+   and exits; its exit is what wakes you.
 
 ## Keep watching
 
-Every time it wakes you, its last line is `next: task events --next --after <n> ...`. Handle the events
-it printed (below), then at once start exactly that `next:` command in the background again. It picks up
+With `task_events_watch`, skip this section. Every time the background command wakes you, its last line
+is `next: task events --next --after <n> ...`. Handle the events it printed (below), then at once start
+exactly that `next:` command in the background again. It picks up
 from where the last one stopped, so nothing that happened in between is lost. Always keep one running.
 If your harness cannot run background commands, run `task events` at the start of each of your replies
 instead and report what is new.
