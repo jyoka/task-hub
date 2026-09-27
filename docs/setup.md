@@ -140,6 +140,21 @@ done
 裏で監視を続けられるエージェント(Claude Code の Monitor など)が要ります。できないエージェントでは、返答のたびに
 `task events` で新しい出来事を確かめます。
 
+### ほかのスキルからボードに Issue を作るとき(to-issues など)
+
+Matt Pocock の `to-prd` / `to-issues` のように Issue を作るスキルは、そのままだと `gh issue create` で作るので、
+Target repo も前後関係のリンクも付きません。[issue-tracker.md](issue-tracker.md) に、ボードに作るときの手順
+(タスクは `task new --blocked-by`、PRD はボードに載せない普通の Issue)をまとめてあります。スキルの
+「issue tracker に publish する」手順の先頭に、これを読むよう 1 行足してください。例(to-issues の「5. Publish」の直後):
+
+```
+If the issues go to the user's task-hub board (the `[board] issues` repo in ~/.config/task-hub/config.ini),
+follow ~/.local/lib/task-hub/docs/issue-tracker.md instead of creating them with `gh issue create`.
+```
+
+スキルを更新すると、この 1 行は消えることがあります。消えても、本文の `Blocked by` に書かれた開いたカードは
+task-hub が開始を待たせるので、前後関係を無視して並行に始まることはありません([task-format.md](task-format.md))。
+
 ## Ready のカードを自動で始める
 
 herdr のペインを 1 つ用意して、次を動かしたままにします:
