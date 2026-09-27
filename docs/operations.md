@@ -31,14 +31,42 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 起こす」監視でも同じように動きます。
 
 ```json
-{"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}
-{"time": "2026-09-26T14:20:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない"}
-{"time": "2026-09-26T14:21:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "replan", "decision": "human"}
+{"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
+{"time": "2026-09-26T14:20:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない", "digest": {"reason": "前提の PR #26 がまだマージされていない"}}
+{"time": "2026-09-26T14:21:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "replan", "decision": "human", "digest": {"decision": "human", "question": "PR #26 を先にマージしてよいですか?"}}
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan` です。`reason`(Blocked の 1 行)、`pr`、`decision` は、あるときだけ入ります。マシンごとのファイルで、
+`replan` です。`reason`(Blocked の 1 行)、`pr`、`decision`、`digest` は、あるときだけ入ります。マシンごとのファイルで、
 そのマシンの task-hub が動かしたものだけが書かれます。
+
+### 判断用の要点(digest)
+
+In review、Blocked、replan のイベントには、人が判断するための要点 `digest` が入ります。task-hub が Issue に書く
+レポートや replanner のコメントと同じ内容から、書くその場で作るので、GitHub を読み直しません。読む側も
+`task show <番号> --full` を読まずに、イベントだけで判断できます。
+
+| キー | 入るとき | 中身 |
+|---|---|---|
+| `verdict` | 自動レビューがあるとき | 自動レビューの判定(`pass`、`needs changes`、`blocked`) |
+| `reason` | Blocked | 止まった理由の 1 行 |
+| `review` | レポートに Please review があるとき | 項目を最大 3 つ。多いときは `(+N more)` を足す |
+| `report` | PR のない In review(research タスク) | Report の頭 |
+| `decision` | replan | replanner の判定(`answered`、`human`、`goal-conflict`) |
+| `question` / `answer` / `goal_change` | replan | 人への質問、replanner の答え、Goal の変更案 |
+| `pr` | PR があるとき | PR の URL |
+
+長さには上限があります。1 項目 120 文字、`reason`・`report`・`question`・`answer`・`goal_change` は 240 文字で切り、
+1 件の要点は 1000 文字に収まります。
+
+`task events` に `--digest` を付けると(`--next`、`--follow`、引数なしのどれでも)、イベントの行の下に要点を
+`  review: ...` のように字下げして出します。行に出ている `reason`、`decision`、`pr` は繰り返しません。
+要点を持たない古いイベントには ``digest: none, run `task show <番号> --digest` `` と出ます。`--digest` なしの出力は
+これまでと同じです。`--next --digest` の `next:` の行には `--digest` も付くので、続きも同じ形で読めます。
+
+`task show <番号> --digest` は、同じ形の要点を Issue の最新のレポートと replanner のコメントから作ります(こちらは
+GitHub を読みます)。要点のない古いイベントや、あとから確かめたいときに使います。replanner のコメントは、
+最新のレポートと同じ Blocked の理由のものだけを使います。
 
 ## 実行の結果を集計する
 
