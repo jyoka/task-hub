@@ -594,6 +594,36 @@ def copy_env_files(t, wt):
     ensure_internal_excludes(wt, [f"/{dest}" for _, dest in pairs])  # anchored: this path only
 
 
+def setup_command(repo):
+    """The [setup] command for this repo's worktrees (for example creating its virtualenv), or ""."""
+    c = config()
+    return (c.get("setup", repo, fallback="") if c.has_section("setup") else "").strip()
+
+
+def run_setup(t, wt, say):
+    """Run [setup] in the worktree before the agent. Returns why the run cannot go on, or "".
+
+    It must leave nothing git would commit: a virtualenv the repository does not ignore would land in the PR.
+    """
+    cmd = setup_command(t["repo"])
+    if not cmd:
+        return ""
+    say(f"== setup: {cmd}")
+    before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
+    proc = subprocess.Popen(["sh", "-c", "set -e\n" + cmd], cwd=wt, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in proc.stdout:
+        say(line.rstrip("\n"))
+    code = proc.wait()
+    if code != 0:
+        return f"setup failed (exit {code}), see `task log {t['id']}`"
+    new = sorted(set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n")) - before)
+    if [f for f in new if f]:
+        shown = ", ".join(f for f in new if f)[:200]
+        return f"setup left files git would commit ({shown}); ignore them in the repository or change [setup]"
+    return ""
+
+
 def ensure_worktree(t):
     """The task's worktree on branch task/<number>; a re-run continues where the last run pushed."""
     repo_dir = ensure_clone(t["repo"])
@@ -946,6 +976,21 @@ def cmd_run(a):
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
               "blocked_by": "", "replan": ""}
+    stop = run_setup(t, wt, say)
+    if stop:  # the agent never starts: nothing of this run can be trusted without its environment
+        say(f"== {stop}")
+        try:
+            item = next((x for x in tasks() if x["id"] == t["id"]), None)
+            t["item"] = item["item"] if item else ""
+            report_comment(t, blocked=stop)
+            set_status(t, BLOCKED, reason=stop)
+        except RuntimeError as e:
+            say(f"== could not report it: {e}")
+        save_run(t)
+        record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": BLOCKED,
+                    "blocked_by": "setup"}, say)
+        say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
+        return
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent")
     say(f"== agent exited with code {code}")
 

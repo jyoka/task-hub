@@ -108,6 +108,10 @@ replanner = agent       ; エージェント自身の Blocked を仕分けて Is
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
 jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
+
+[setup]
+; エージェントの前に worktree で実行する準備(仮想環境など)。失敗したら Blocked
+jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -115,6 +119,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 | `reviewer` | reviewer が受け入れ条件を 1 つずつ根拠付きで確かめる。`needs changes` なら 1 回だけ差し戻し、それでも通らなければドラフト PR で Blocked | マージするかどうか |
 | `replanner` | リポジトリから答えられるものは根拠(`path:行番号` と引用)付きで答え、task-hub が根拠を実物と照らし合わせる。答えられないものは、あなたへの質問を 1 行にまとめる | Ready に戻すかどうか。Goal の本文は書き換えません |
 | `[env]` | 設定に書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
+| `[setup]` | 実行のたびに、エージェントの前に worktree で準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
 
 `agent` の代わりに `codex` などのエージェント名を書くと、そのエージェントに固定できます。空か省略なら、その
 自動化は行いません。詳しくは [docs/agents.md](docs/agents.md) と [docs/setup.md](docs/setup.md) を見てください。

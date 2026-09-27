@@ -53,6 +53,7 @@ Blocked の理由は次のどれかです。
 | `no report` | エージェントがレポートを書かずに終わった |
 | `no changes` | レポートはあるが、ファイルを変えなかった |
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
+| `setup` | `[setup]` の準備が失敗した、または git が無視しないファイルを残した |
 | `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
 
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
