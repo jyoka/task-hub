@@ -840,8 +840,104 @@ def restore(wt, snap):
     return edited
 
 
-def run_agent_process(agent, prompt, wt, say, label):
+def claude_projects():
+    """Where Claude Code keeps its transcripts: one JSON line per message, with the API usage on assistant lines."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(base).expanduser() if base else Path.home() / ".claude") / "projects"
+
+
+USAGE_KEYS = {"input": "input_tokens", "cache_creation": "cache_creation_input_tokens",
+              "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
+
+
+def transcript_call(line, dirs, began, ended):
+    """(message id, call) for an assistant line written in `dirs` between began and ended, else None."""
+    try:
+        d = json.loads(line)
+        if not isinstance(d, dict) or d.get("type") != "assistant":
+            return None
+        cwd = d.get("cwd") or ""
+        if not any(cwd == w or cwd.startswith(w.rstrip("/") + "/") for w in dirs):
+            return None
+        at = datetime.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+        if not began <= at <= ended:
+            return None
+        m, model = d["message"], d["message"].get("model") or ""
+        if model == "<synthetic>":  # Claude Code's own placeholder messages: no API call behind them
+            return None
+        call = {k: int(m["usage"].get(v) or 0) for k, v in USAGE_KEYS.items()}
+        call.update(model=model, subagent=d.get("isSidechain") is True)
+        return m.get("id") or d.get("uuid"), call
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError):  # a broken line or a changed format
+        return None
+
+
+def agent_usage(wt, began, ended):
+    """What the agent CLI's own records say one launch in `wt` used, or None when there are none.
+
+    Read from outside, never asked of the agent. Only Claude Code's transcripts can be read for now; other agents
+    simply have none. A line counts if its cwd is the worktree and its timestamp falls within the launch: the agent,
+    the reviewer, and the replanner run one after another in the same worktree, so the time tells them apart.
+    One API call is written as one line per content block, so calls are counted by message.id.
+    Files not written since the launch began are never opened, and lines without the worktree's path never parsed:
+    the user's own long conversations are in the same folders.
+    """
+    dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
+    needles = dirs | {json.dumps(w)[1:-1] for w in dirs}
+    calls, root = {}, claude_projects()
+    for folder, _, names in os.walk(root):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if not name.endswith(".jsonl") or os.path.getmtime(path) < began:
+                    continue
+                subagents = "subagents" in Path(path).relative_to(root).parts
+                with open(path, errors="replace") as f:
+                    for line in f:
+                        found = any(n in line for n in needles) and transcript_call(line, dirs, began, ended)
+                        if found:
+                            key, call = found
+                            call["subagent"] = call["subagent"] or subagents or calls.get(key, {}).get("subagent", False)
+                            calls[key] = call  # the last line of a call has its final usage
+            except OSError:  # removed or unreadable meanwhile
+                continue
+    if not calls:
+        return None
+    used = {k: sum(c[k] for c in calls.values()) for k in USAGE_KEYS}
+    return {"calls": len(calls), **used, "subagent_calls": sum(c["subagent"] for c in calls.values()),
+            "models": sorted({c["model"] for c in calls.values() if c["model"]})}
+
+
+def tokens(u):
+    return sum(u.get(k) or 0 for k in USAGE_KEYS)
+
+
+def short(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e4 else f"{n / 1e3:.1f}k" if n >= 1e3 else str(n)
+
+
+def run_agent_process(agent, prompt, wt, say, label, usage=None):
+    """Run one agent launch; its role, agent, seconds, and what it used (when readable) go into the `usage` list."""
     say(f"== {label}: {agent}")
+    began = time.time()
+    code = agent_process(agent, prompt, wt, say)
+    if usage is not None:
+        ended = time.time()
+        entry = {"role": label, "agent": agent, "seconds": round(ended - began)}
+        try:
+            used = agent_usage(wt, began, ended)
+        except Exception as e:  # like append_jsonl: measuring must never cost the run
+            say(f"== could not read what the {label} used: {e}")
+            used = None
+        if used:
+            entry.update(used)
+            say(f"== {label} used {used['calls']} calls, {short(tokens(used))} tokens ({short(used['output'])} out), "
+                f"{used['subagent_calls']} subagent calls, models {', '.join(used['models']) or 'unknown'}")
+        usage.append(entry)
+    return code
+
+
+def agent_process(agent, prompt, wt, say):
     proc = None
     try:
         proc = subprocess.Popen(agent_command(agent, prompt), cwd=wt, stdin=subprocess.DEVNULL,
@@ -872,7 +968,7 @@ def build_review_prompt(t, report, diff):
                       report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
 
 
-def run_review(t, report, say):
+def run_review(t, report, say, usage=None):
     """The reviewer's verdict on the whole PR, or None when no reviewer is set or there is nothing to review."""
     reviewer = helper_agent(t, "reviewer")  # "agent": the task's own agent, in a fresh context
     if not reviewer:
@@ -887,7 +983,7 @@ def run_review(t, report, say):
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
     snap = snapshot(wt)
-    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer")
+    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage)
     if restore(wt, snap):
         return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
                             "Reviewers must only inspect the worktree.")
@@ -900,12 +996,13 @@ def review_loop(t, report, code, say, record):
     """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked).
 
     Each verdict goes into record["reviews"], and record["retried"] says whether the agent was sent back.
+    Each launch is measured into record["usage"].
     """
     if not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
         return report, code, "", ""
     wt = Path(t["worktree"])
     for attempt in range(2):
-        review = run_review(t, report, say)
+        review = run_review(t, report, say, record["usage"])
         if review is None:
             return report, code, "", ""
         say(f"== reviewer verdict: {review.verdict or 'missing'}")
@@ -918,7 +1015,7 @@ def review_loop(t, report, code, say, record):
                               review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
         record["retried"] = True
         (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
-        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review")
+        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"])
         report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
         if not report.strip() or AgentReport(report).blocked:
             return report, code, review.issue_section(), ""
@@ -948,7 +1045,7 @@ def build_replan_prompt(t, report):
                       "", "## Goal", "", issue(t)["body"].strip(), "", "# The agent's report", "", report.strip(), ""])
 
 
-def run_replan(t, report, say):
+def run_replan(t, report, say, usage=None):
     """Triage the agent's own Blocked: answer it from the repository, or sharpen the question for the human.
 
     It only comments; the card stays Blocked and the human decides whether to move it to Ready.
@@ -967,7 +1064,7 @@ def run_replan(t, report, say):
     wt = Path(t["worktree"])
     (wt / REPLAN_FILE).unlink(missing_ok=True)
     snap = snapshot(wt)
-    code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner")
+    code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner", usage)
     if restore(wt, snap):
         say("== replanner changed files; its edits were undone and its result is ignored")
         return "ignored"
@@ -1024,7 +1121,7 @@ def cmd_run(a):
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
-              "blocked_by": "", "replan": ""}
+              "blocked_by": "", "replan": "", "usage": []}
     stop = run_setup(t, wt, say)
     if stop:  # the agent never starts: nothing of this run can be trusted without its environment
         say(f"== {stop}")
@@ -1040,7 +1137,7 @@ def cmd_run(a):
                     "blocked_by": "setup"}, say)
         say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
         return
-    code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent")
+    code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"])
     say(f"== agent exited with code {code}")
 
     report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
@@ -1057,7 +1154,7 @@ def cmd_run(a):
                                     else "agent" if AgentReport(report).blocked else "no changes")
         if status == BLOCKED and not review_blocked:  # the agent's own Blocked, not one task-hub gave
             try:
-                record["replan"] = run_replan(t, report, say)
+                record["replan"] = run_replan(t, report, say, record["usage"])
             except RuntimeError as e:  # the run itself is already on GitHub
                 record["replan"] = "failed"
                 say(f"== replanner failed: {e}")
@@ -1392,7 +1489,8 @@ def cmd_log(a):
 
 
 def cmd_stats(_):
-    """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions."""
+    """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions,
+    and what each agent launch used."""
     runs = []
     for line in (METRICS.read_text().splitlines() if METRICS.exists() else []):
         try:
@@ -1415,12 +1513,27 @@ def cmd_stats(_):
     for r in runs:
         by_agent.setdefault(r.get("agent") or "?", []).append(r)
     agents = [{"agent": name, "runs": len(rs), "in_review": sum(r["status"] == IN_REVIEW for r in rs),
-               "median_seconds": sorted(r.get("seconds", 0) for r in rs)[len(rs) // 2]}
+               "median_seconds": median(r.get("seconds", 0) for r in rs)}
               for name, rs in sorted(by_agent.items())]
     sized = sorted((r for r in runs if r.get("files")), key=lambda r: -(r["added"] + r["removed"]))
     largest = [{"id": r["id"], "title": r["title"], "lines": r["added"] + r["removed"], "files": r["files"]}
                for r in sized[:3]]
     sizes = sorted(r["added"] + r["removed"] for r in sized)
+    # usage: one entry per agent launch; token fields only where the agent CLI's records could be read
+    measured = [{"id": r["id"], "title": r["title"], "tokens": sum(tokens(u) for u in r["usage"]),
+                 "calls": sum(u.get("calls", 0) for u in r["usage"]),
+                 "subagent_calls": sum(u.get("subagent_calls", 0) for u in r["usage"])}
+                for r in runs if any("calls" in u for u in r.get("usage") or [])]
+    by_role = {}
+    for u in (u for r in runs for u in r.get("usage") or []):
+        by_role.setdefault(u.get("role") or "?", []).append(u)
+    roles = [{"role": role, "launches": len(us), "measured": sum("calls" in u for u in us),
+              "median_seconds": median(u.get("seconds", 0) for u in us),
+              "median_tokens": median(tokens(u) for u in us if "calls" in u)}
+             for role, us in sorted(by_role.items(), key=lambda kv: -len(kv[1]))]
+    heaviest = sorted(measured, key=lambda r: -r["tokens"])[:3]
+    unmeasured = f"{len(runs) - len(measured)} runs without usage: recorded before it was, or by an agent " \
+                 f"whose records task-hub cannot read (only Claude Code's for now)"
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
@@ -1431,7 +1544,18 @@ def cmd_stats(_):
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
-           *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []))
+           *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
+        f"tokens: {len(measured)} of {len(runs)} runs measured"
+        + (f", median {median(r['tokens'] for r in measured)} tokens and {median(r['calls'] for r in measured)} "
+           f"calls per run" if measured else "") + (f" ({unmeasured})" if len(runs) > len(measured) else ""),
+        *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
+        *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
+
+
+def median(values):
+    """The middle value (the upper one of an even count), or "" when there are none."""
+    values = sorted(values)
+    return values[len(values) // 2] if values else ""
 
 
 def cmd_new(a):
@@ -1562,7 +1686,8 @@ COMMANDS = {
     "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True},
                "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"]  # what task-hub did "
                "lately; --follow prints each new event as it happens, --next waits for the next ones and exits"),
-    "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner"),
+    "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
+              "tokens"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
 }
