@@ -165,8 +165,8 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task show <番号> [--full]` | Issue と最新のレポート、replanner の仕分け |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
-| `task events [--follow \| --next] [--only "In review,Blocked"]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる |
-| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ) |
+| `task events [--follow \| --next] [--only "In review,Blocked"]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。列の移動のほか、いつもより長引いている実行の `slow`(経過時間といつもの時間付き、1 回だけ)も出る |
+| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、`slow` が出た実行の数、PR の大きさ) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
 
 ## 設定
