@@ -94,7 +94,7 @@ you:       answer in the Goal (or check the replanner's answer), move the card t
 | Blocked のタスクを再実行する | Issue の Goal に答えを書き足してカードを Ready に戻す(同じブランチと PR で続行)。`/chief` に答えを伝えて頼んでも構いません |
 | タスクをクローズまたはキャンセルする | Issue を閉じる、または `task done 12` |
 | **振り返る** | |
-| 自動レビューや Blocked の傾向、PR の大きさを見る | `task stats`(このマシンで終わった実行の集計) |
+| 自動レビューや Blocked の傾向、PR の大きさ、トークン数を見る | `task stats`(このマシンで終わった実行の集計) |
 
 ## 自動化の設定
 
@@ -181,7 +181,7 @@ Issue ではないカードを無視するので、エージェントが動く�
 |---|---|
 | 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
 | 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る) |
-| 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
+| 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
 
 ## 構成
