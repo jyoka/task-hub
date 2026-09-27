@@ -54,7 +54,7 @@ elif kind == "item-list":
         if fields["q"] == "-status:Done" and it["values"].get("status") == "Done":
             continue
         issue = db["issues"][str(it["number"])]
-        node = {"id": iid, "content": {"number": it["number"], "title": issue["title"],
+        node = {"id": iid, "content": {"number": it["number"], "title": issue["title"], "body": issue["body"],
                                        "repository": {"nameWithOwner": db["issues_repo"]},
                                        "url": f"https://github.com/{db['issues_repo']}/issues/{it['number']}"}}
         if "blockedBy(" in fields["query"]:
@@ -710,6 +710,27 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(dependent), "Ready")
         self.assertEqual(self.agent_calls(), [])
 
+    def test_a_blocker_written_only_in_the_body_holds_the_task_until_it_is_linked(self):
+        first = self.new(title="first")
+        # made the way to-issues does it: the dependency is prose, there is no link
+        second = self.task("new", "--title", "second", "--repo", "jyoka/app", "--goal",
+                           f"Say hello. MODE:ok\n\n## Blocked by\n\n- #{first}\n")
+        second = re.search(r"id: (\d+)", second).group(1)
+        out = self.task("start", second)
+        self.assertIn(f"#{first} (Backlog, only in the body: link it)", out)
+        self.task()
+        self.assertEqual(self.agent_calls(), [])
+        self.close(first)  # done, so no longer an open card: the prose alone never holds a task forever
+        self.assertIn("started[1]", self.task())
+        self.assertEqual(self.wait(second), "In review")
+
+    def test_a_linked_blocker_named_in_the_body_is_not_reported_twice(self):
+        first = self.new(title="first")
+        second = self.task("new", "--title", "second", "--repo", "jyoka/app", "--blocked-by", first, "--goal",
+                           f"Say hello. MODE:ok\n\n### Ready conditions\n\n- #{first} is done\n")
+        second = re.search(r"id: (\d+)", second).group(1)
+        self.assertIn(f'"#{first} (Backlog)"', self.task("list"))
+
     def test_blocked_by_is_checked_before_the_issue_is_created(self):
         out = self.task("new", "--title", "x", "--repo", "jyoka/app", "--goal", "g", "--blocked-by", "9", code=1)
         self.assertIn("no Issue #9", out)
@@ -948,14 +969,20 @@ class TaskTest(unittest.TestCase):
     def herdr_db(self):
         return json.loads((self.root / "herdr.json").read_text())
 
-    def new_in_herdr(self, workspace, mode="ok"):
-        """/task run by an agent in a pane of that herdr workspace."""
+    @contextlib.contextmanager
+    def in_herdr(self, workspace):
+        """Commands run by an agent (or you) in a pane of that herdr workspace."""
         self.env.update(HERDR_ENV="1", HERDR_WORKSPACE_ID=workspace)
         try:
-            return self.new(mode)
+            yield
         finally:
             for k in ("HERDR_ENV", "HERDR_WORKSPACE_ID"):
                 self.env.pop(k)
+
+    def new_in_herdr(self, workspace, mode="ok"):
+        """/task run by an agent in a pane of that herdr workspace."""
+        with self.in_herdr(workspace):
+            return self.new(mode)
 
     def run_state(self, tid):
         return json.loads((self.root / ".local/state/task-hub/runs" / f"{tid}.json").read_text())
@@ -999,6 +1026,42 @@ class TaskTest(unittest.TestCase):
         closed = self.herdr_db()["closed"][0]
         self.assertNotIn(closed, ("w1",))
         self.assertFalse(closed.startswith("w1:"))
+
+    def test_task_made_without_task_new_opens_where_it_was_started(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new("stuck")  # e.g. `gh issue create` from another skill: nothing noted where it was asked
+        with self.in_herdr("w2"):  # /chief in w2 runs `task start`
+            self.task("start", tid)
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w2:t"))
+
+    def test_task_run_by_hand_places_the_ready_cards_it_starts(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new("stuck")
+        self.move(tid, "Ready")
+        with self.in_herdr("w2"):
+            self.task()
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w2:t"))
+
+    def test_where_it_was_registered_wins_over_where_it_was_started(self):
+        self.use_herdr(workspaces=[("w1", "task-hub"), ("w2", "バイトルCRM関連")])
+        tid = self.new_in_herdr("w1", "stuck")
+        with self.in_herdr("w2"):
+            self.task("start", tid)
+        self.wait(tid)
+        self.assertTrue(self.run_state(tid)["tab"].startswith("w1:t"))
+
+    def test_watch_does_not_place_tasks_where_it_runs(self):
+        self.use_herdr(workspaces=[("w1", "task-hub")])
+        tid = self.new("stuck")
+        self.move(tid, "Ready")
+        self.env["TASK_WATCH_ONCE"] = "1"
+        with self.in_herdr("w1"):  # the watch runs in a pane of w1
+            self.task("watch")
+        self.wait(tid)
+        self.assertEqual(self.run_state(tid)["tab"], "")  # its own workspace, as before
+        self.assertNotEqual(self.run_state(tid)["workspace"], "w1")
 
     def test_where_asked_is_ignored_once_that_id_belongs_to_another_workspace(self):
         self.use_herdr(workspaces=[("w2", "バイトルCRM関連")])
