@@ -458,9 +458,28 @@ class TaskTest(unittest.TestCase):
                     time.sleep(0.05)
                 else:
                     os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):  # macOS: EPERM if the run just ended and is not reaped yet
                 pass
+        self.stop_notifiers()
         self.tmp.cleanup()
+
+    def stop_notifiers(self):
+        """Stop what the runs left in their own sessions: notify() starts the notifier detached and never waits,
+        so the fake osascript/herdr can still be writing notifications.jsonl while the folder is being removed.
+        They run from fakebin through their #! line, so their command line names this test's folder."""
+        for _ in range(100):
+            ps = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True).stdout
+            pids = [int(line.split(None, 1)[0]) for line in ps.splitlines()
+                    if str(self.root) in line and int(line.split(None, 1)[0]) != os.getpid()]
+            if not pids:
+                return
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            time.sleep(0.05)
+        self.fail(f"processes still using {self.root}: {pids}")
 
     # --- helpers ---
 
