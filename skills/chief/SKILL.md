@@ -16,32 +16,62 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 1. Run `task list` (read only). In three or four lines, tell the user what is running and what
    needs them: In review (to check and merge), Blocked (to unblock), Backlog (waiting for approval).
    Never run `task` without arguments: it starts Ready cards.
-2. Start watching. If you have a `task_events_watch` tool (Pi with task-hub's extension), call it once:
-   events then arrive as messages that wake you, and there is nothing to restart. Otherwise run
-   `task events --next --only "In review,Blocked,replan,Done"` as a background command (in Claude Code,
-   a Bash command run in the background, or the Monitor tool). It waits for the next event, prints it,
-   and exits; its exit is what wakes you.
+   Add this once, in one or two lines, and never repeat it: /chief costs least in a session of its own,
+   because every wake-up re-reads the whole conversation; they can close it and start /chief again
+   whenever the conversation gets long, since everything it tracks is on the board; and a cheaper model
+   (for example Opus 5.5) is enough for summarizing and passing things on.
+2. Start watching, with the first of these your harness has:
+   - A `task_events_watch` tool (Pi with task-hub's extension): call it once. Events then arrive as
+     messages that wake you, with their digest, and there is nothing to restart.
+   - A Monitor tool (Claude Code): first run
+     `cat ~/.local/state/task-hub/events.jsonl 2>/dev/null | wc -l | tr -d ' '` and keep the bare number it
+     prints as the cursor `<n>`. Then start this with the Monitor, with the longest timeout it allows:
+
+     ```sh
+     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
+     ```
+
+     Each batch of events arrives as one notification: the events with their digest, then a
+     `next: ... --after <n>` line. Keep that `<n>` as the new cursor. If `task` fails, the loop prints
+     one `watch stopped: <error>` line and exits with code 1.
+   - A background command that wakes you when it exits: run
+     `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
+     the next event, prints it with its digest, and exits.
 
 ## Keep watching
 
-With `task_events_watch`, skip this section. Every time the background command wakes you, its last line
-is `next: task events --next --after <n> ...`. Handle the events it printed (below), then at once start
+With `task_events_watch`, skip this section.
+
+With the Monitor, leave it running; do not restart it after an event. When it expires (the tool stopped it at
+its timeout), start the same command again at once with `n=` set to your latest cursor (the last `next:` number,
+or the starting count if no event came yet), and end your turn without writing anything. The cursor is a line
+number in the events file, so events written while it was down arrive as soon as it is back. Never start it
+without `--after`: that would skip them.
+If it printed a `watch stopped:` line or exited on its own with any code, do not start it again: tell the user in
+one line that watching stopped and why. Start it again only when the user asks, after the cause is fixed.
+
+With the background command, every time it wakes you, its last line is
+`next: task events --next --after <n> ... --digest`. Handle the events it printed (below), then at once start
 exactly that `next:` command in the background again. It picks up
 from where the last one stopped, so nothing that happened in between is lost. Always keep one running.
-If your harness cannot run background commands, run `task events` at the start of each of your replies
+
+If your harness cannot run background commands, run `task events --digest` at the start of each of your replies
 instead and report what is new.
 
 ## When an event arrives
 
-Each event line looks like `event: #41 In review | <title> | <owner/repo> | pr <url>`.
+Each event is a line like `event: #41 In review | <title> | <owner/repo> | pr <url>`, followed by its digest:
+`key: value` lines (indented in the command's output) such as `verdict: pass`, one `review: ...` line per
+thing to check, `reason: ...`, `question: ...`. Tell the user from these lines; a `next:` line is only the cursor, never mention it. Do not run `task show <id> --full` for an
+event; read the full text only when the user asks for it. When the digest is missing or does not say what
+you need (a `digest: none` line, or an In review with neither `review:` nor `report:`), run `task show <id> --digest` once.
 
-- **In review**: run `task show <id> --full`. Tell the user the title, the automated review verdict, the one
-  to three things from "Please review" they must check, and the PR link. No more than five lines. A research
-  task has no PR: give the findings in a few lines instead, and say they can close it with `task done <id>`.
-- **Blocked**: run `task show <id> --full`. Say why in one line. If it ends with a `## Replanner`
-  section, give its decision and its question or answer. Say what would
-  unblock it.
-- **replan**: fold it into the Blocked message for the same task if you have not sent that yet.
+- **In review**: tell the user the title, the automated review `verdict`, the `review` items they must check,
+  and the PR link. No more than five lines. A research task has no PR: give its `report` in a few lines
+  instead, and say they can close it with `task done <id>`.
+- **Blocked**: give the `reason` in one line and say what would unblock it.
+- **replan**: give the `decision` and its `question`, `answer`, or `goal_change`. Fold it into the Blocked
+  message for the same task if you have not sent that yet.
 - **Done**: one line, only if the user is not in the middle of something else. Then run `task list` and look
   for tasks whose `waits_for` named this one. A Ready one starts by itself; say so in the same line. For a
   Backlog one, read its `### Ready conditions` (`task show <id>`): if everything there now looks met, ask
@@ -88,8 +118,8 @@ when its run reaches In review.
 
 ## When the user asks about the board
 
-Answer from `task list`, `task show <id> --full`, `task log <id>`, `task stats`, and `gh pr view <url>`.
-These only read.
+Answer from `task list`, `task show <id> --digest` (or `--full` when they want the whole text), `task log <id>`,
+`task stats`, and `gh pr view <url>`. These only read.
 
 ## When the user answers a Blocked task
 

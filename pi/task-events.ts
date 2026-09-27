@@ -36,12 +36,13 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // `task events --next` prints the events and the command that continues right after them, then exits.
+  // `task events --next --digest` prints the events, each with its digest (the indented lines below it), and the
+  // command that continues right after them, then exits.
   // Following that cursor loses nothing that happens between two runs.
   async function watch(only: string, signal: AbortSignal): Promise<void> {
     let after: string | undefined;
     while (!signal.aborted) {
-      const args = ["events", "--next", ...(after ? ["--after", after] : []), "--only", only];
+      const args = ["events", "--next", ...(after ? ["--after", after] : []), "--only", only, "--digest"];
       const result = await pi.exec(taskBin(), args, { signal }).catch(() => undefined);
       if (signal.aborted) return;
       const lines = result?.stdout.split("\n") ?? [];
@@ -53,7 +54,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       after = cursor;
-      const events = lines.filter((line) => line.startsWith("event:"));
+      const events = lines.filter((line) => line.startsWith("event:") || line.startsWith("  "));
       if (events.length) {
         tell(`task-hub events:\n${events.join("\n")}\n\nHandle them as the chief skill says.`, { events });
       }
