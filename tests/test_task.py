@@ -12,6 +12,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -368,6 +369,14 @@ with open(os.environ["TASK_TEST_NOTIFY"], "a") as f:
     f.write(json.dumps(["osascript", *sys.argv[1:]]) + "\n")
 '''
 
+FAKE_IDE = r'''#!/usr/bin/env python3
+# A stand-in IDE launcher: it records the arguments it got, so a test can check the worktree path
+# arrives as one argument (not split by a shell).
+import json, os, sys
+with open(os.environ["TASK_TEST_IDE_CALLS"], "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+'''
+
 FAKE_TRANSCRIPT = r'''#!/usr/bin/env python3
 # What Claude Code leaves in ~/.claude/projects during one launch, plus the lines task-hub must not count.
 import datetime, json, os, sys, time
@@ -428,11 +437,14 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
-                    "TASK_TEST_NOTIFY": str(root / "notifications.jsonl")}
+                    "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
+                    "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl")}
         fakebin = root / "fakebin"
         fakebin.mkdir()
         (fakebin / "osascript").write_text(FAKE_OSASCRIPT)
         (fakebin / "osascript").chmod(0o755)
+        (fakebin / "fake-ide").write_text(FAKE_IDE)
+        (fakebin / "fake-ide").chmod(0o755)
         self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
         self.write_config()
@@ -583,6 +595,10 @@ class TaskTest(unittest.TestCase):
 
     def reviewer_calls(self):
         return [eval(line) for line in self.review_calls.read_text().splitlines()] if self.review_calls.exists() else []
+
+    def ide_calls(self):
+        f = self.root / "ide-calls.jsonl"
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
     def run_file(self, tid):
         return self.root / ".local/state/task-hub/runs" / f"{tid}.json"
@@ -2071,6 +2087,43 @@ class TaskTest(unittest.TestCase):
 
     def test_version(self):
         self.assertRegex(self.task("--version").strip(), r"^\d+\.\d+\.\d+$")
+
+    # --- open ---
+
+    def make_worktree_record(self, tid):
+        """A run record and an existing worktree directory, as a run on this machine leaves behind."""
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        wt.mkdir(parents=True, exist_ok=True)
+        self.run_file(tid).parent.mkdir(parents=True, exist_ok=True)
+        self.run_file(tid).write_text(json.dumps({"repo": "jyoka/app", "branch": f"task/{tid}",
+                                                   "worktree": str(wt)}))
+        return wt
+
+    def test_open_launches_the_ide_with_the_worktree_path_as_one_argument(self):
+        wt = self.make_worktree_record("7")
+        self.write_config(extra=f"\n[ide]\nopen = {self.root}/fakebin/fake-ide --flag {{path}}\n")
+        out = self.task("open", "7")
+        self.assertIn("opening", out)
+        end = time.time() + 5
+        while time.time() < end and not self.ide_calls():
+            time.sleep(0.05)
+        self.assertEqual(self.ide_calls(), [["--flag", str(wt)]])
+
+    def test_open_without_ide_config_prints_the_path_and_launches_nothing(self):
+        wt = self.make_worktree_record("8")
+        out = self.task("open", "8")
+        self.assertIn(str(wt).replace(str(self.root), "~"), out)
+        self.assertIn("[ide]", out)
+        time.sleep(0.2)
+        self.assertEqual(self.ide_calls(), [])
+
+    def test_open_fails_when_there_is_no_worktree(self):
+        # never ran here: no run record at all
+        self.assertIn("no worktree", self.task("open", "9", code=1))
+        # ran here but the worktree was cleaned up
+        wt = self.make_worktree_record("10")
+        shutil.rmtree(wt)
+        self.assertIn("gone", self.task("open", "10", code=1))
 
 
 if __name__ == "__main__":
