@@ -126,6 +126,18 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    events = In review, Blocked   ; 既定は In review, Blocked, replan, Done。空にすると通知しない
    ```
 
+   IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの
+   worktree(`~/.local/share/task-hub/worktrees/<番号>`)を、このコマンドで開きます。`{path}` はシェルを通さず、
+   worktree のパスを 1 つの引数として置き換えます(`[agents]` の `{prompt}` と同じ扱い):
+
+   ```ini
+   [ide]
+   open = code {path}         ; VS Code。kiro {path}、cursor {path}、idea {path} なども可
+   ```
+
+   `[ide] open` を空にするか省略すると、`task open` は何も起動せず、worktree のパスを表示するだけです。worktree が
+   ない(このマシンで実行していない、または後片付け済み)ときは、理由を出して失敗します。
+
    たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
    (実行中にエージェントが自分でログインすることはできません)。
 
