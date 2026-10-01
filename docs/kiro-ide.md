@@ -1,5 +1,9 @@
 # Kiro IDE 版のセットアップ
 
+> **はじめて使う人は [kiro-quickstart.md](kiro-quickstart.md) へ。** Kiro IDE でこのリポジトリを開き、チャットに
+> 「セットアップして」と言うだけで、このページの手順をインストーラ(`sh kiro/install.sh`)が行います。
+> このページは、**インストーラが行うこと** の説明です。中身を知りたいとき、手で入れるとき、うまくいかないときに読みます。
+
 Kiro しか使えない仕事用の Mac で、ターミナルを開かずに task-hub の一周(登録 → Ready → 実行 → 知らせ → レビュー →
 マージ)を回すための手順です。計画と背景は [prd-kiro-ide.md](prd-kiro-ide.md) にあります。
 
@@ -13,9 +17,31 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | `kiro/hooks/task-hub-events.json` と `kiro/task-events-since` | 話しかけたときに、前回からの出来事をチャットの文脈に足すフック |
 | `kiro/workflows/task-hub-events.workflow.json` と `kiro/task-events-watch` | 話しかけていないときに出来事を待ち、`/chief` のチャットに届けるワークフロー |
 
-`sh kiro/install.sh` は、kiro-cli と 3〜5 章(スキル、steering、フックとワークフロー、Workflows の設定)を入れます。
-`--with-launchd` を付けると 6 章の plist も置き、`--start-launchd` で常駐を始めます。kiro-cli が無いときは、公式の DMG を
-`~/Applications` に展開して入れます(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます)。
+### インストーラが行うこと
+
+`sh kiro/install.sh` は、次の段階を順に確かめ、済んでいないものだけを行います(何度実行しても安全です。
+計画は [prd-kiro-installer.md](prd-kiro-installer.md) の 5 章)。このページの各章の手作業は、その段階が行うことの説明です。
+
+| 段階 | 行うこと | このページ |
+|---|---|---|
+| 1. 前提の確認 | macOS、CPU、git(無ければ情シスへの依頼文で止まる)、GitHub に届くか、システム設定のプロキシ | 1 章 |
+| 2. Python | 3.10 以上が無ければ uv を入れ、uv で Python 3.12 を取る | 1 章 |
+| 3. gh | 無ければ GitHub Releases の zip をチェックサムで確かめて `~/.local/bin` に置く | 1 章 |
+| 4. kiro-cli | あるものを `~/.local/bin/kiro-cli` にリンク。無ければ公式の DMG を `~/Applications` に展開する(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます) | 1 章 |
+| 5. task-hub 本体 | `~/.local/lib/task-hub` に clone し、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章 |
+| 6. ログイン | gh(ブラウザでコードを入れる)と kiro-cli(開いたターミナルで)。ここで止まり、本人がログインしてからもう一度実行する | 1 章 |
+| 7. ボード | `<you>/tasks`(private)と Project「task-hub」を作り、Status と欄をそろえる | [setup.md](setup.md#github-側の準備1-回だけ) |
+| 8. 設定 | config.ini に足りない項目だけを足し、`task list` で確かめる | 2 章 |
+| 9. Kiro との連携 | スキルと steering はリンク、フックとワークフローはコピー、Workflows を有効に | 3〜5 章 |
+| 10. 常駐(任意) | `--with-launchd` で plist を置き、`--start-launchd` で始める | 6 章 |
+| 11. 診断 | `sh kiro/doctor.sh` を呼び、全段階を ○ / × の一覧で出す(何も変えない) | — |
+
+- **診断** `sh kiro/doctor.sh` は、いつでも単独で実行できます。× の行の下に、次にすることが出ます。
+- **アンインストール** `sh kiro/uninstall.sh` は、消すものの一覧を出すだけで、`--yes` を付けると消します。消すのは、
+  インストーラが `~/.local/state/task-hub/install-manifest.json` に記録したものだけです。GitHub のボード、ログイン、
+  Kiro の settings.json、task-hub のデータ(worktree、ログ)は消しません(ボードの消し方は出力に出ます)。
+- Kiro のチャットで「セットアップして」と言ったときにこれらを実行させる約束は、リポジトリの
+  `.kiro/steering/setup.md` にあります(`inclusion: auto`。セットアップの話のときだけ読み込まれます)。
 
 実機ではまだ確かめていないところがあります。入れ終わったら、最後の「人が実機で確かめること」を順に試してください。
 
