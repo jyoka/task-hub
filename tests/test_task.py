@@ -15,11 +15,13 @@ import os
 import re
 import signal
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
@@ -196,6 +198,8 @@ if "adversarial reviewer of one completed task-hub run" in prompt:  # used as it
     sys.exit(0)
 if "USAGE" in prompt:  # this agent leaves records the way Claude Code does
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "agent"], check=True)
+for form in re.findall(r"\bKIRO(V1|V2|BAD)\b", prompt)[:1]:  # ... or the way kiro-cli does
+    subprocess.run([os.environ["TASK_TEST_KIRO"], form], check=True)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
@@ -444,6 +448,55 @@ def line(mid, k=n, cwd=None, when=0, **extra):
 (root / f"{who}-unreadable.jsonl").chmod(0)
 '''
 
+FAKE_KIRO = r'''#!/usr/bin/env python3
+# What kiro-cli leaves during one launch, in the shapes seen in tasks#43: V1 in its SQLite database (2.2.0's
+# --no-interactive), V2 in ~/.kiro/sessions/cli (newer versions); BAD is both in a format we do not know.
+# Each also writes the records task-hub must not count: another directory, and an hour before this launch.
+import datetime, json, os, sqlite3, sys, time
+from pathlib import Path
+form, cwd, now = sys.argv[1], os.getcwd(), time.time()
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+if form in ("V1", "BAD"):
+    data = Path.home() / ("Library/Application Support" if sys.platform == "darwin" else ".local/share") / "kiro-cli"
+    data.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(data / "data.sqlite3")
+    if form == "BAD":
+        db.execute("CREATE TABLE conversations_v2 (key TEXT, value TEXT)")
+    else:
+        db.execute("CREATE TABLE conversations_v2 (key TEXT NOT NULL, conversation_id TEXT NOT NULL, value TEXT NOT NULL, "
+                   "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (key, conversation_id))")
+        def row(cid, key, at, used, models, value=None):
+            value = value or json.dumps({"conversation_id": cid, "model_info": {"model_id": "auto", "rate_unit": "Credit"},
+                "user_turn_metadata": {"usage_info": [{"value": v, "unit": "credit", "unit_plural": "credits"} for v in used],
+                                       "requests": [{"request_id": f"r{i}", "model_id": m} for i, m in enumerate(models)]}})
+            db.execute("INSERT INTO conversations_v2 VALUES (?, ?, ?, ?, ?)", (key, cid, value, int(at * 1000) - 500, int(at * 1000)))
+        row("now", cwd, now, [0.1234, 0.5, 0.35], ["claude-sonnet-4.5"] * 2)  # one usage more than requests, as seen
+        row("old", cwd, now - 3600, [100], ["old-model"])
+        row("elsewhere", "/somewhere/else", now, [100], ["other-model"])
+        row("broken", cwd, now, [], [], value="not json")
+    db.commit()
+if form in ("V2", "BAD"):
+    root = Path.home() / ".kiro/sessions/cli"
+    root.mkdir(parents=True, exist_ok=True)
+    def turn(at, used, n):
+        return {"metering_usage": [{"value": v, "unit": "credit", "unitPlural": "credits"} for v in used],
+                "total_request_count": n, "end_timestamp": at, "input_token_count": 0, "output_token_count": 0}
+    def session(name, where, turns, model="claude-opus-5.5", at=now):
+        (root / f"{name}.json").write_text(json.dumps({"session_id": name, "cwd": where, "created_at": iso(at - 1),
+            "updated_at": iso(at), "session_state": {"conversation_metadata": {"user_turn_metadatas": turns},
+                                                     "rts_model_state": {"model_info": {"model_id": model}}}}))
+        os.utime(root / f"{name}.json", (at, at))
+    if form == "BAD":
+        session("odd", cwd, {"not": "a list"})
+        (root / "cut.json").write_text('{"cwd": "' + cwd + '", "sess')
+    else:
+        session("this", cwd, [turn(iso(now - 3600), [100], 50),  # an earlier turn of a resumed session
+                              turn(iso(now), [0.25, 0.5], 2), turn(int(now * 1000), [0.12], 1)])
+        (root / "this.jsonl").write_text(json.dumps({"kind": "Prompt"}) + "\n")  # the conversation: no usage
+        session("elsewhere", "/somewhere/else", [turn(iso(now), [100], 50)], "other-model")
+        session("old", cwd, [turn(iso(now - 3600), [100], 50)], "old-model", at=now - 3600)
+'''
+
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
@@ -462,7 +515,7 @@ class TaskTest(unittest.TestCase):
         self.calls = root / "agent-calls.txt"
         self.review_calls = root / "review-calls.txt"
         for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER),
-                          ("transcript", FAKE_TRANSCRIPT)):
+                          ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
@@ -470,7 +523,7 @@ class TaskTest(unittest.TestCase):
         self.env = {**os.environ, **git_id, "HOME": str(root), "TASK_GH": str(root / "gh"), "TASK_HERDR": "0",
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
-                    "TASK_TEST_TRANSCRIPT": str(root / "transcript"),
+                    "TASK_TEST_TRANSCRIPT": str(root / "transcript"), "TASK_TEST_KIRO": str(root / "kiro"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
                     "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
                     "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl")}
@@ -1858,6 +1911,52 @@ class TaskTest(unittest.TestCase):
         self.assertTrue((self.root / "claude-config/projects").exists())
         self.assertFalse((self.root / ".claude").exists())
 
+    def test_each_launch_records_the_credits_kiro_cli_says_it_used(self):
+        self.write_config(reviewer=True)
+        for n, (form, expected) in enumerate((("V1", {"calls": 2, "credits": 0.97, "models": ["auto", "claude-sonnet-4.5"]}),
+                                              ("V2", {"calls": 3, "credits": 0.87, "models": ["claude-opus-5.5"]})), 1):
+            shutil.rmtree(self.root / "Library", ignore_errors=True)
+            shutil.rmtree(self.root / ".local/share/kiro-cli", ignore_errors=True)
+            shutil.rmtree(self.root / ".kiro", ignore_errors=True)
+            tid = self.new(f"ok KIRO{form}")  # the agent's name is "fake": the records are read whatever it is
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+            agent, reviewer = self.metrics(n)[-1]["usage"]
+            # neither another directory, nor an hour before, nor a format we do not know; no token fields at all
+            self.assertEqual({k: v for k, v in agent.items() if k not in ("role", "agent", "seconds")}, expected, form)
+            # the reviewer ran next in the same worktree and left nothing: the agent's records are not its own
+            self.assertEqual(set(reviewer), {"role", "agent", "seconds"}, form)
+            self.assertIn(f"== agent used {expected['calls']} calls, {expected['credits']:.2f} credits, models "
+                          f"{', '.join(expected['models'])}", self.task("log", tid, "--full"))
+
+    def test_kiro_records_in_a_format_we_do_not_know_leave_only_the_seconds(self):
+        tid = self.new("ok KIROBAD")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        [agent] = self.metrics(1)[0]["usage"]
+        self.assertEqual(set(agent), {"role", "agent", "seconds"})
+        self.assertNotIn(" used ", self.task("log", tid, "--full"))
+
+    def test_a_locked_kiro_database_is_skipped_without_stopping(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        wt = self.root / "wt"
+        wt.mkdir()
+        began = time.time()
+        subprocess.run([self.root / "kiro", "V1"], cwd=wt, env=self.env, check=True)
+        env = {"HOME": str(self.root), "CLAUDE_CONFIG_DIR": str(self.root / ".claude")}
+        with unittest.mock.patch.dict(os.environ, env):
+            self.assertEqual(task.agent_usage(wt, began, time.time())["credits"], 0.97)
+            db = sqlite3.connect(task.kiro_db())
+            db.execute("BEGIN EXCLUSIVE")  # kiro-cli in the middle of a write
+            try:
+                self.assertIsNone(task.agent_usage(wt, began, time.time()))
+            finally:
+                db.close()
+            task.kiro_db().unlink()  # and no database at all
+            self.assertIsNone(task.agent_usage(wt, began, time.time()))
+
     def test_stats_shows_tokens_per_run_role_and_the_heaviest_runs(self):
         base = {"repo": "jyoka/app", "agent": "fake", "started": "2026-09-01T00:00:00Z", "status": "In review",
                 "reviews": [], "retried": False, "blocked_by": "", "replan": ""}
@@ -1884,6 +1983,30 @@ class TaskTest(unittest.TestCase):
         self.assertIn("tokens: 0 of 1 runs measured (1 runs without usage", out)
         self.assertNotIn("roles", out)
         self.assertNotIn("heaviest", out)
+
+    def test_stats_counts_kiro_credits_apart_from_tokens(self):
+        base = {"repo": "jyoka/app", "agent": "kiro", "started": "2026-09-01T00:00:00Z", "status": "In review",
+                "reviews": [], "retried": False, "blocked_by": "", "replan": ""}
+        claude = {"role": "agent", "agent": "claude", "seconds": 60, "calls": 10, "input": 1, "cache_creation": 0,
+                  "cache_read": 9998, "output": 1, "subagent_calls": 0, "models": ["claude-x"]}
+        kiro = lambda role, c: {"role": role, "agent": "kiro", "seconds": 100, "calls": 11, "credits": c, "models": ["auto"]}
+        runs = [{**base, "id": "1", "title": "Claude", "usage": [claude]},
+                {**base, "id": "2", "title": "Kiro", "usage": [kiro("agent", 3.56)]},
+                {**base, "id": "3", "title": "Kiro twice", "usage": [kiro("agent", 6.9), kiro("reviewer", 0.02)]},
+                {**base, "id": "4", "title": "Kiro big", "usage": [kiro("agent", 19.21)]},
+                {**base, "id": "5", "title": "Both", "usage": [claude, kiro("reviewer", 1.0)]}]
+        path = self.root / ".local/state/task-hub/metrics.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(json.dumps(r) + "\n" for r in runs))
+        out = self.task("stats")
+        # the Kiro launches are neither runs of 0 tokens nor calls of the Claude runs
+        self.assertIn("tokens: 2 of 5 runs measured, median 10000 tokens and 10 calls per run "
+                      "(3 runs without usage in tokens", out)
+        self.assertIn("credits: 4 of 5 runs measured, median 6.92 credits per run", out)
+        self.assertIn("roles[2]{role,launches,measured,median_seconds,median_tokens}:\n"
+                      "  agent,5,2,100,10000\n  reviewer,2,0,100,", out)
+        self.assertIn('heaviest[2]{id,title,tokens,calls,subagent_calls}:\n'
+                      '  "1",Claude,10000,10,0\n  "5",Both,10000,10,0', out)
 
     def test_research_task_report_without_changes_goes_to_in_review_without_a_pr(self):
         tid = self.new("nochange", "Compare search libraries", "jyoka/app", "--research")

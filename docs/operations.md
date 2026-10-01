@@ -137,19 +137,23 @@ Blocked の理由は次のどれかです。
 ### エージェントの使用量
 
 実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
-`reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入り、エージェントの CLI の記録を読めたときだけ
-`calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、`output`(トークン数)、
-`subagent_calls`、`models` が入ります。今読めるのは Claude Code の記録(`~/.claude/projects`)だけで、ほかのエージェントでは
-トークンの欄がありません。読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
+`reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入ります。エージェントの CLI の記録を読めたときだけ、
+Claude Code なら `calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、
+`output`(トークン数)、`subagent_calls`、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
+が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェントでは秒数だけです。
+読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
 
 ```
 == agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+== agent used 64 calls, 19.21 credits, models auto
 ```
 
-`task stats` の `tokens:` の行は、使用量を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
+`task stats` の `tokens:` の行は、トークン数を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
 cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
-出します。`roles` は役割ごとの起動回数、測れた回数、秒数とトークン数の中央値、`heaviest` はトークン数の多い 3 実行です。
-起動の間にその worktree で動いた Claude Code の呼び出しは、すべてその起動の分として数えます(エージェント自身が
+出します。Kiro の実行はトークン 0 としては数えず、`credits:` の行に、クレジットを測れた実行の数と 1 実行あたりの
+クレジットの中央値を出します。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
+`heaviest` はトークン数の多い 3 実行です。
+起動の間にその worktree で動いた Claude Code の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
 起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
 この数字を見て決めます。
 
