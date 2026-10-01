@@ -18,6 +18,16 @@
   何が起きたかを見られるように残し、`task done <番号>` か PR のマージで閉じます。task-hub が閉じるのは、自分が
   作ったタブだけです(herdr が同じ id を別のタブに使い回していないか、名前で確かめてから閉じます)。
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
+- **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
+  `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
+  `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です
+  (詳しくは [design.md](design.md) の「In progress の段階」)。`Blocked › replanning` は、カードはもう Blocked でも
+  replanner がまだ動いているという意味です。段階は手元の `runs/<番号>.json` の `stage` にだけあり、GitHub のボードと
+  `events.jsonl` には出ません。実行が終わると何も付かなくなります。
+- **生きている実行があるタスクは始まりません**: replanner が動いている間などに Ready に戻したカードは、`task` と
+  `task list` の `waits_for` に `its last run, still running (replanning)` と出て待ち、その実行が終わったあとの確認
+  (`task watch` なら 1 分以内)で始まります。同じ worktree で 2 つの実行が動かないようにするためです。`task done` も
+  `still running` で断るので、急ぐときはそのタブで Ctrl-C してから実行します。
 - エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
 
 ## 起きたことを受け取る(events.jsonl)
