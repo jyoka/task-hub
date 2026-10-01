@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1032,16 +1033,29 @@ def transcript_call(line, dirs, began, ended):
 
 
 def agent_usage(wt, began, ended):
-    """What the agent CLI's own records say one launch in `wt` used, or None when there are none.
+    """What the agent CLIs' own records say one launch in `wt` used, or None when there are none.
 
-    Read from outside, never asked of the agent. Only Claude Code's transcripts can be read for now; other agents
-    simply have none. A line counts if its cwd is the worktree and its timestamp falls within the launch: the agent,
-    the reviewer, and the replanner run one after another in the same worktree, so the time tells them apart.
-    One API call is written as one line per content block, so calls are counted by message.id.
+    Read from outside, never asked of the agent. Every reader is tried on every launch, whatever the agent's name:
+    Claude Code's transcripts (tokens) and kiro-cli's two session stores (credits); other agents simply have none.
+    A record counts if its directory is the worktree and its time falls within the launch: the agent, the reviewer,
+    and the replanner run one after another in the same worktree, so the time tells them apart.
+    """
+    dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
+    used = {}
+    for found in (read(dirs, began, ended) for read in (claude_usage, kiro_db_usage, kiro_session_usage)):
+        for k, v in (found or {}).items():
+            used[k] = sorted(set(used.get(k, [])) | set(v)) if k == "models" else used.get(k, 0) + v
+    if "credits" in used:
+        used["credits"] = round(used["credits"], 2)  # Kiro meters to the second decimal point
+    return used or None
+
+
+def claude_usage(dirs, began, ended):
+    """Claude Code's calls: one API call is written as one line per content block, so they are counted by message.id.
+
     Files not written since the launch began are never opened, and lines without the worktree's path never parsed:
     the user's own long conversations are in the same folders.
     """
-    dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
     needles = dirs | {json.dumps(w)[1:-1] for w in dirs}
     calls, root = {}, claude_projects()
     for folder, _, names in os.walk(root):
@@ -1067,6 +1081,94 @@ def agent_usage(wt, began, ended):
             "models": sorted({c["model"] for c in calls.values() if c["model"]})}
 
 
+def kiro_db():
+    """kiro-cli's v1 session store: a SQLite database, one row per (directory, conversation)."""
+    base = Path.home() / "Library/Application Support" if sys.platform == "darwin" \
+        else Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    return base / "kiro-cli" / "data.sqlite3"
+
+
+def kiro_sessions():
+    """kiro-cli's v2 session store: one <uuid>.json per session, next to its conversation (<uuid>.jsonl)."""
+    return Path.home() / ".kiro" / "sessions" / "cli"
+
+
+def credits(usage):
+    """The credits in kiro-cli's [{"value": 0.12, "unit": "credit"}, ...]; kiro-cli keeps no token counts."""
+    return sum(float(u["value"]) for u in usage or [] if u.get("unit") == "credit")
+
+
+def kiro_db_usage(dirs, began, ended):
+    """Conversations kiro-cli 2.2.0's --no-interactive wrote in the worktree during the launch (v1, checked on it).
+
+    Opened read-only; missing, locked, or of another shape, it simply has nothing to say.
+    """
+    path = kiro_db()
+    if not path.is_file():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = db.execute(f"SELECT value FROM conversations_v2 WHERE key IN ({','.join('?' * len(dirs))}) "
+                              "AND created_at <= ? AND updated_at >= ?",
+                              (*dirs, int(ended * 1000), int(began * 1000))).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    used = {"calls": 0, "credits": 0.0, "models": set()}
+    for (value,) in rows:
+        try:
+            d = json.loads(value)
+            turn = d["user_turn_metadata"]
+            requests = turn.get("requests") or []
+            spent = credits(turn.get("usage_info"))
+            models = {r.get("model_id") for r in requests} | {(d.get("model_info") or {}).get("model_id")}
+        except (ValueError, KeyError, TypeError, AttributeError):  # a value of a format we do not know
+            continue
+        used["calls"] += len(requests)
+        used["credits"] += spent
+        used["models"] |= {m for m in models if m and isinstance(m, str)}
+    return {**used, "models": sorted(used["models"])} if used["calls"] or used["credits"] else None
+
+
+def kiro_session_usage(dirs, began, ended):
+    """User turns kiro-cli's v2 sessions (newer versions) ended in the worktree during the launch.
+
+    Their input/output token counts are always 0, so only the credits are read. Files not written since the launch
+    began are never opened.
+    """
+    used = {"calls": 0, "credits": 0.0, "models": set()}
+    for path in kiro_sessions().glob("*.json"):
+        try:
+            if path.stat().st_mtime < began:
+                continue
+            d = json.loads(path.read_text(errors="replace"))
+            cwd = d.get("cwd") or ""
+            if not any(cwd == w or cwd.startswith(w.rstrip("/") + "/") for w in dirs):
+                continue
+            state = d["session_state"]
+            turns = [t for t in state["conversation_metadata"]["user_turn_metadatas"]
+                     if began <= epoch(t.get("end_timestamp") or d.get("updated_at")) <= ended]
+            spent = sum(credits(t.get("metering_usage")) for t in turns)
+            calls = sum(int(t.get("total_request_count") or 0) for t in turns)
+            model = ((state.get("rts_model_state") or {}).get("model_info") or {}).get("model_id")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):  # gone, or another format
+            continue
+        if turns:
+            used["calls"] += calls
+            used["credits"] += spent
+            used["models"] |= {model} if model and isinstance(model, str) else set()
+    return {**used, "models": sorted(used["models"])} if used["calls"] or used["credits"] else None
+
+
+def epoch(at):
+    """Seconds since 1970 from an ISO 8601 time or a number (milliseconds when that large)."""
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        return at / 1000 if at > 1e11 else at
+    return datetime.datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()
+
+
 def tokens(u):
     return sum(u.get(k) or 0 for k in USAGE_KEYS)
 
@@ -1090,8 +1192,12 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None):
             used = None
         if used:
             entry.update(used)
-            say(f"== {label} used {used['calls']} calls, {short(tokens(used))} tokens ({short(used['output'])} out), "
-                f"{used['subagent_calls']} subagent calls, models {', '.join(used['models']) or 'unknown'}")
+            said = [f"{used['calls']} calls"]
+            if "output" in used:
+                said += [f"{short(tokens(used))} tokens ({short(used['output'])} out)", f"{used['subagent_calls']} subagent calls"]
+            if "credits" in used:
+                said.append(f"{used['credits']:.2f} credits")
+            say(f"== {label} used {', '.join(said)}, models {', '.join(used['models']) or 'unknown'}")
         usage.append(entry)
     return code
 
@@ -1747,21 +1853,24 @@ def cmd_stats(_):
     largest = [{"id": r["id"], "title": r["title"], "lines": r["added"] + r["removed"], "files": r["files"]}
                for r in sized[:3]]
     sizes = sorted(r["added"] + r["removed"] for r in sized)
-    # usage: one entry per agent launch; token fields only where the agent CLI's records could be read
+    # usage: one entry per agent launch; token fields only where the agent CLI's records have them (Claude Code's),
+    # credits only where they have those (Kiro's): a Kiro launch is not a launch of 0 tokens
     measured = [{"id": r["id"], "title": r["title"], "tokens": sum(tokens(u) for u in r["usage"]),
-                 "calls": sum(u.get("calls", 0) for u in r["usage"]),
+                 "calls": sum(u.get("calls", 0) for u in r["usage"] if "output" in u),
                  "subagent_calls": sum(u.get("subagent_calls", 0) for u in r["usage"])}
-                for r in runs if any("calls" in u for u in r.get("usage") or [])]
+                for r in runs if any("output" in u for u in r.get("usage") or [])]
+    credited = [round(sum(u["credits"] for u in r["usage"] if "credits" in u), 2)
+                for r in runs if any("credits" in u for u in r.get("usage") or [])]
     by_role = {}
     for u in (u for r in runs for u in r.get("usage") or []):
         by_role.setdefault(u.get("role") or "?", []).append(u)
-    roles = [{"role": role, "launches": len(us), "measured": sum("calls" in u for u in us),
+    roles = [{"role": role, "launches": len(us), "measured": sum("output" in u for u in us),
               "median_seconds": median(u.get("seconds", 0) for u in us),
-              "median_tokens": median(tokens(u) for u in us if "calls" in u)}
+              "median_tokens": median(tokens(u) for u in us if "output" in u)}
              for role, us in sorted(by_role.items(), key=lambda kv: -len(kv[1]))]
     heaviest = sorted(measured, key=lambda r: -r["tokens"])[:3]
-    unmeasured = f"{len(runs) - len(measured)} runs without usage: recorded before it was, or by an agent " \
-                 f"whose records task-hub cannot read (only Claude Code's for now)"
+    unmeasured = f"{len(runs) - len(measured)} runs without usage in tokens: recorded before it was, or by an " \
+                 f"agent whose records have none (only Claude Code's have them; Kiro's have credits)"
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
@@ -1776,6 +1885,8 @@ def cmd_stats(_):
         f"tokens: {len(measured)} of {len(runs)} runs measured"
         + (f", median {median(r['tokens'] for r in measured)} tokens and {median(r['calls'] for r in measured)} "
            f"calls per run" if measured else "") + (f" ({unmeasured})" if len(runs) > len(measured) else ""),
+        *([f"credits: {len(credited)} of {len(runs)} runs measured, median {median(credited):.2f} credits per run"]
+          if credited else []),
         *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
         *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
 
