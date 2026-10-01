@@ -10,6 +10,9 @@ GitHub Project をかんばんボードにして、そのタスクをコーデ�
 
 その間の実装、レビュー、PR の作成、止まったときの仕分け、順番待ちは、task-hub とエージェントが進めます。
 
+> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** Kiro IDE でこのリポジトリを開き、
+> チャットに「セットアップして」と言うだけで入ります(ターミナルも管理者権限も要りません)。
+
 ## 全体構成
 
 ```
@@ -237,6 +240,8 @@ worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict�
 skills/task/SKILL.md   /task スキル
 skills/chief/SKILL.md  /chief スキル
 pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
+kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
+.kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 docs/                  セットアップ、エージェント、設計、形式、運用、教訓
 ```
@@ -248,6 +253,8 @@ docs/                  セットアップ、エージェント、設計、形式
 ## ドキュメント
 
 - [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
+- [docs/kiro-quickstart.md](docs/kiro-quickstart.md): Kiro IDE で「セットアップして」と言って使いはじめる手順(画面の操作だけ)
+- [docs/kiro-ide.md](docs/kiro-ide.md): Kiro IDE 版のセットアップの中身(インストーラが行うこと)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加
 - [docs/task-format.md](docs/task-format.md): Issue、Blocked by と Ready conditions、レポートファイル、コメント、PR の形式
 - [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順

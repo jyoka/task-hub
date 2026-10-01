@@ -5,6 +5,7 @@ and the settings.json part of stage 9 (Kiro).
   install-board board <label> <GitHub login> <work folder>
   install-board config <label> <work folder>
   install-board kiro-settings <label> <work folder>
+  install-board check board|config|kiro-settings      (for kiro/doctor.sh: looks, changes nothing)
 
 `board` uses the board config.ini names, if any. Otherwise it finds or makes the private repo <login>/tasks and the
 Project titled "task-hub", and makes it what docs/setup.md asks for: the Status options in task-hub's order, the
@@ -274,18 +275,27 @@ def config(label, work):
 
 # ---------- stage 9: Kiro's settings.json ----------
 
-def kiro_settings(label, work):
-    """Sets "kiroAgent.workflows.enabled": true as #56 found safe: nothing when it is already on; a new file when there
-    is none; a rewrite (after a backup) when the file is plain JSON; and when it is JSONC (comments or trailing commas,
-    which VS Code allows), no change, only how to do it in Kiro."""
+def read_kiro_settings():
+    """(its text, its data or None when it is not plain JSON, whether Workflows are on)"""
     path = KIRO_SETTINGS
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     try:
         data = json.loads(text) if text.strip() else {}
     except ValueError:
         data = None
-    if isinstance(data, dict) and data.get(WORKFLOWS_KEY) is True or data is None and re.search(
-            r'^\s*"kiroAgent\.workflows\.enabled"\s*:\s*true\b', text, re.M):
+    data = data if isinstance(data, dict) else None
+    on = data.get(WORKFLOWS_KEY) is True if data is not None else bool(re.search(
+        r'^\s*"kiroAgent\.workflows\.enabled"\s*:\s*true\b', text, re.M))
+    return text, data, on
+
+
+def kiro_settings(label, work):
+    """Sets "kiroAgent.workflows.enabled": true as #56 found safe: nothing when it is already on; a new file when there
+    is none; a rewrite (after a backup) when the file is plain JSON; and when it is JSONC (comments or trailing commas,
+    which VS Code allows), no change, only how to do it in Kiro."""
+    path = KIRO_SETTINGS
+    text, data, on = read_kiro_settings()
+    if on:
         kind, what = "same", ""
     elif not isinstance(data, dict):
         kind = "manual"
@@ -308,8 +318,81 @@ def kiro_settings(label, work):
     return kind == "changed"
 
 
+# ---------- kiro/doctor.sh: the same things, only looked at ----------
+
+INSTALL = "sh kiro/install.sh を実行してください(Kiro のチャットなら「セットアップして」)"
+
+
+def check_board():
+    task = load_task()
+    c = read_config(task.CONFIG)
+    project, issues = (c.get("board", k, fallback="").strip() for k in ("project", "issues"))
+    if not project or not issues:
+        return False, f"{tilde(task.CONFIG)} に [board] がありません", INSTALL
+    if not re.fullmatch(r"[\w.-]+/\d+", project):
+        return False, f"{tilde(task.CONFIG)} の [board] project が正しくありません({project})", \
+            "[board] の project を <owner>/<番号> に直すか消してから、" + INSTALL
+    owner, number = project.split("/")
+    project_id = gh_json("project", "view", number, "--owner", owner, "--format", "json")["id"]
+    node = graphql(STATE_QUERY, id=project_id)["node"]
+    url = node["url"]
+    fields = {f["name"].lower(): f for f in node["fields"]["nodes"] if f}
+    options = {o["name"].lower() for o in (fields.get("status") or {}).get("options") or []}
+    lacks = [f"Status の選択肢 {s}" for s in task.StatusLifecycle.required() if s.lower() not in options] \
+        + [f"テキスト欄 {n}" for n in task.TEXT_FIELDS if (fields.get(n.lower()) or {}).get("dataType") != "TEXT"]
+    if lacks:
+        return False, f"{url} に {'、'.join(lacks)} がありません", INSTALL
+    flows = {w["name"]: w for w in node["workflows"]["nodes"] if w}
+    by_hand = ([f"「{ITEM_CLOSED}」を有効に"] if not flows.get(ITEM_CLOSED, {}).get("enabled") else []) \
+        + [f"「{n}」を無効に" for n in STATUS_WORKFLOWS if flows.get(n, {}).get("enabled")]
+    if by_hand:
+        return False, f"{url} のワークフローが task-hub に合っていません", \
+            f"{url}/workflows を開き、{'、'.join(by_hand)}してください"
+    return True, f"{url}、{issues}", ""
+
+
+def check_config():
+    task = load_task()
+    path = task.CONFIG
+    if not path.exists():
+        return False, f"{tilde(path)} がありません", INSTALL
+    c = read_config(path)
+    lacks = [f"[{s}] {k}" for s, k in (("board", "project"), ("board", "issues"), ("runner", "agent"),
+                                        ("check", "kiro"), ("ide", "open")) if not c.has_option(s, k)]
+    if lacks:
+        return False, f"{tilde(path)} に {'、'.join(lacks)} がありません", INSTALL
+    return True, f"{tilde(path)}、agent = {c.get('runner', 'agent').strip()}", ""
+
+
+def check_kiro_settings():
+    _, data, on = read_kiro_settings()
+    if on:
+        return True, "Workflows は有効", ""
+    if data is None:
+        return False, "Workflows が有効になっていません", \
+            "Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください"
+    return False, "Workflows が有効になっていません", INSTALL
+
+
+def check(what):
+    """Prints "ok<TAB>detail" or "ng<TAB>detail<TAB>next step" for kiro/doctor.sh. Changes nothing."""
+    try:
+        ok, detail, step = {"board": check_board, "config": check_config, "kiro-settings": check_kiro_settings}[what]()
+    except Stop as e:
+        ok, detail, step = False, e.args[0], e.args[1]
+    except GhError as e:
+        ok, detail, step = False, f"GitHub で確かめられませんでした({e})", \
+            "ネットワークとログインを確かめて、もう一度診断してください"
+    except Exception as e:  # never a traceback instead of the list
+        ok, detail, step = False, f"思わぬエラーです({type(e).__name__}: {e})", "この出力を task-hub の担当者に知らせてください"
+    print("\t".join(["ok", detail] if ok else ["ng", detail, step]))
+    return 0
+
+
 def main(argv):
     command, label, *rest = argv
+    if command == "check":
+        return check(label)
     try:
         changed = {"board": board, "config": config, "kiro-settings": kiro_settings}[command](label, *rest)
     except (Stop, GhError) as e:
