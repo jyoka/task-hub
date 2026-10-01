@@ -5,7 +5,10 @@
 - task-hub is cloned from a local bare repo (TASK_INSTALL_REPO), whose bin/task only prints its arguments.
 - PATH has a fake bin folder first, then only the system folders (no Homebrew, pyenv, ...). The fakes:
   xcode-select (points to a folder whose usr/bin/git is the real git), scutil (no proxy), open (logs what it opens),
-  kiro-cli (logged in while the file kiro-logged-in exists), and per test python3 / gh.
+  kiro-cli (logged in while the file kiro-logged-in exists), hdiutil (a "disk image" is a tar), codesign,
+  launchctl (never the real one: it logs, and keeps "loaded" in a file), security (no keychain), and per test python3 / gh.
+- Kiro CLI's download server is the same local server (TASK_INSTALL_KIRO_CLI), with a manifest.json and a "DMG".
+  /Applications is a folder of the test (TASK_INSTALL_APPLICATIONS), so the Mac's own Kiro CLI.app is not found.
 - gh (the one in the release zip, or one on PATH) is FAKE_GH: GitHub (the login, repos, Projects) is one JSON file.
 """
 import hashlib
@@ -25,7 +28,16 @@ import zipfile
 from pathlib import Path
 
 INSTALL = Path(__file__).resolve().parent.parent / "kiro" / "install.sh"
-TASK = INSTALL.parent.parent / "bin" / "task"
+REPO = INSTALL.parent.parent
+TASK = REPO / "bin" / "task"
+# what stage 9 puts in ~/.kiro, from the clone: (in the clone, in ~/.kiro)
+KIRO_LINKS = [("skills/task", "skills/task"), ("skills/chief", "skills/chief"),
+              ("kiro/steering/task-hub.md", "steering/task-hub.md")]
+KIRO_COPIES = [("kiro/hooks/task-hub-events.json", "hooks/task-hub-events.json"),
+               ("kiro/workflows/task-hub-events.workflow.json", "workflows/task-hub-events.workflow.json")]
+KIRO_SETTINGS = "Library/Application Support/Kiro/User/settings.json"
+PLIST = "Library/LaunchAgents/com.task-hub.watch.plist"
+KIRO_CLI_VERSION = "2.26.1"
 GH_TAG, UV_TAG = "v2.0.0", "0.9.0"
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 ZPROFILE_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
@@ -292,8 +304,24 @@ class InstallTest(unittest.TestCase):
         self.script("open", f'#!/bin/sh\necho "$*" >> "{self.opened}"\n')
         self.kiro_logged_in = root / "kiro-logged-in"
         self.kiro_logged_in.touch()
-        self.script("kiro-cli", f'#!/bin/sh\n[ "$1" = whoami ] || exit 2\n[ -e "{self.kiro_logged_in}" ] && exit 0\n'
-                                'echo "Not logged in" >&2\nexit 1\n')
+        self.script("kiro-cli", self.fake_kiro_cli("on PATH"))
+        self.applications = root / "Applications"
+        self.hdiutil_calls, self.codesign_calls = root / "hdiutil-calls.txt", root / "codesign-calls.txt"
+        self.script("hdiutil", f'#!/bin/sh\necho "$*" >> "{self.hdiutil_calls}"\nfor a; do last=$a; done\n'
+                               'case $1 in\n  attach)\n'
+                               f'    [ -e "{root}/hdiutil-fails" ] && {{ echo "hdiutil: attach failed - not permitted" >&2; exit 1; }}\n'
+                               '    while [ $# -gt 0 ]; do [ "$1" = -mountpoint ] && mp=$2; shift; done\n'
+                               '    mkdir -p "$mp" && tar -xzf "$last" -C "$mp" ;;\n'
+                               '  detach) rm -rf "$last" ;;\n  *) exit 2 ;;\nesac\n')
+        self.script("codesign", f'#!/bin/sh\necho "$*" >> "{self.codesign_calls}"\n'
+                                f'[ -e "{root}/codesign-fails" ] && {{ echo "$4: invalid signature" >&2; exit 1; }}\nexit 0\n')
+        self.launchctl_calls, self.launchd_loaded = root / "launchctl-calls.txt", root / "launchd-loaded"
+        self.script("launchctl", f'#!/bin/sh\necho "$*" >> "{self.launchctl_calls}"\ncase $1 in\n'
+                                 f'  print) [ -e "{self.launchd_loaded}" ] ;;\n'
+                                 f'  bootstrap) touch "{self.launchd_loaded}" ;;\n'
+                                 f'  bootout) rm -f "{self.launchd_loaded}" ;;\n  *) exit 2 ;;\nesac\n')
+        self.api_key = root / "api-key-in-keychain"
+        self.script("security", f'#!/bin/sh\n[ "$1" = find-generic-password ] && [ -e "{self.api_key}" ]\n')
         self.gh_db = root / "gh.json"
         self.gh_db.write_text(json.dumps({"auth": {"login": "alice", "scopes": "gist, project, read:org, repo"},
                                           "code": "ABCD-1234", "approve": None, "repos": {}, "projects": [],
@@ -306,6 +334,7 @@ class InstallTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.publish_gh()
         self.publish_uv()
+        self.publish_kiro_cli()
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
                   "GIT_COMMITTER_EMAIL": "t@e"}
         self.git_env = {**os.environ, **git_id}
@@ -315,6 +344,7 @@ class InstallTest(unittest.TestCase):
                                          "github_token", "task_install_gh_login")}
         self.env.update(git_id, HOME=str(self.home), PATH=f"{self.fakebin}:{SYSTEM_PATH}",
                         TASK_INSTALL_GITHUB=self.server.url, TASK_INSTALL_REPO=f"file://{root}/origin.git",
+                        TASK_INSTALL_KIRO_CLI=self.server.url + "/kiro", TASK_INSTALL_APPLICATIONS=str(self.applications),
                         TASK_TEST_GH_DB=str(self.gh_db))
 
     # --- helpers ---
@@ -362,17 +392,48 @@ class InstallTest(unittest.TestCase):
             self.server.files[f"{base}/{name}"] = data
             self.server.files[f"{base}/{name}.sha256"] = f"{sha256(data)}  {name}\n".encode()
 
+    def fake_kiro_cli(self, where):
+        return (f'#!/bin/sh\ncase $1 in\n  --version) echo "kiro-cli {KIRO_CLI_VERSION} ({where})" ;;\n'
+                f'  whoami) [ -e "{self.kiro_logged_in}" ] && exit 0; echo "Not logged in" >&2; exit 1 ;;\n'
+                '  *) exit 2 ;;\nesac\n')
+
+    def publish_kiro_cli(self, sha=None):
+        """The manifest.json of prod.download.cli.kiro.dev (its form on 2026-10-02), and a "DMG" (a tar for the fake
+        hdiutil) with Kiro CLI.app in it."""
+        dmg = tar_bytes({"Kiro CLI.app/Contents/MacOS/kiro-cli": self.fake_kiro_cli("from the DMG"),
+                         "Kiro CLI.app/Contents/Info.plist": "<plist/>\n"})
+        base = "/kiro/stable"
+        self.server.files[f"{base}/latest/manifest.json"] = json.dumps({"version": KIRO_CLI_VERSION, "packages": [
+            {"os": "linux", "fileType": "zip", "architecture": "x86_64", "download": f"{KIRO_CLI_VERSION}/kirocli.zip",
+             "sha256": sha256(b"linux")},
+            {"os": "macos", "fileType": "dmg", "architecture": "universal", "download": f"{KIRO_CLI_VERSION}/Kiro CLI.dmg",
+             "sha256": sha or sha256(dmg), "cliPath": "Contents/MacOS/kiro-cli"}]}).encode()
+        self.server.files[f"{base}/{KIRO_CLI_VERSION}/Kiro%20CLI.dmg"] = dmg
+
     def make_origin(self, task=FAKE_TASK):
         src = self.root / "src"
         (src / "bin").mkdir(parents=True)
         (src / "bin/task").write_text(task)
         (src / "bin/task").chmod(0o755)
+        for path, _ in KIRO_LINKS + KIRO_COPIES:  # the real ones
+            (src / path).parent.mkdir(parents=True, exist_ok=True)
+            if (REPO / path).is_dir():
+                shutil.copytree(REPO / path, src / path, ignore=shutil.ignore_patterns("__pycache__"))
+            else:
+                shutil.copy(REPO / path, src / path)
         for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"], ["git", "commit", "-qm", "init"],
                     ["git", "clone", "-q", "--bare", str(src), str(self.root / "origin.git")]):
             subprocess.run(cmd, cwd=src, env=self.git_env, check=True, capture_output=True)
 
-    def install(self, code=0):
-        r = subprocess.run(["sh", str(INSTALL)], env=self.env, capture_output=True, text=True,
+    def change_origin(self, path, text):
+        """A new commit in task-hub's repo, that the next install pulls."""
+        src = self.root / "src"
+        (src / path).write_text(text)
+        for cmd in (["git", "commit", "-qam", f"change {path}"], ["git", "push", "-q", str(self.root / "origin.git"), "main"]):
+            subprocess.run(cmd, cwd=src, env=self.git_env, check=True, capture_output=True)
+
+    def install(self, code=0, args=()):
+        r = subprocess.run(["sh", str(INSTALL), *args], env=self.env, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=120)
         self.assertEqual(r.returncode, code, r.stdout + r.stderr)
         lines = r.stdout.strip().splitlines()
@@ -401,7 +462,7 @@ class InstallTest(unittest.TestCase):
         return out
 
     def stage_lines(self, lines):
-        return [line for line in lines if line[:2] in ("1.", "2.", "3.", "5.", "6.", "7.", "8.")]
+        return [line for line in lines if line.split(".")[0].isdigit()]
 
     def github(self):
         return json.loads(self.gh_db.read_text())
@@ -465,8 +526,16 @@ class InstallTest(unittest.TestCase):
                                             "private の alice/tasks、Project alice/1、") for line in lines), lines)
         self.assertTrue(any(line.startswith("8. 設定: 作りました(~/.config/task-hub/config.ini。task list で確かめました)")
                             for line in lines), lines)
-        self.assertEqual(lines[-1], "次にすること: Kiro との連携(docs/kiro-ide.md)を進めてください。"
-                                    "この段階はまだインストーラにありません")
+        self.assertIn(f"4. kiro-cli: リンクしました(~/.local/bin/kiro-cli → {self.fakebin}/kiro-cli)", lines)
+        self.assertTrue(any(line.startswith("9. Kiro との連携: 入れました(") and "Kiro を再起動すると読み込まれます" in line
+                            for line in lines), lines)
+        self.assertIn("10. 常駐: 飛ばしました(任意です。task watch を launchd で動かすときは --with-launchd を付けて実行します)",
+                      lines)
+        self.assertEqual(lines[-1], "次にすること: Kiro を再起動し(開いているチャットには、少なくともウィンドウの再読み込みが"
+                                    "要ります)、新しいチャットで /task を試してください")
+        self.assertFalse((self.home / PLIST).exists())
+        self.assertFalse(self.launchctl_calls.exists(), "launchctl is not run without --with-launchd")
+        self.assertFalse(self.hdiutil_calls.exists())
         # uv from its release, then Python through uv (trusting the keychain); /usr/bin/python3 was not used
         self.assertEqual(self.uv_calls.read_text().splitlines(), ["python install 3.12 UV_SYSTEM_CERTS=1 HTTPS_PROXY="])
         self.assertTrue((local / "bin/uv").is_file())
@@ -485,8 +554,15 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.manifest(), {
             "version": 1, "python": python,
             "installed": {"uv": str(local / "bin/uv"), "uv-python": "3.12", "gh": str(local / "bin/gh"),
+                          "kiro-cli": str(local / "bin/kiro-cli"),
                           "task-hub": str(local / "lib/task-hub"), "task": str(wrapper), "zprofile": ZPROFILE_LINE,
-                          "config": str(self.home / ".config/task-hub/config.ini")}})
+                          "config": str(self.home / ".config/task-hub/config.ini"),
+                          "kiro-skill-task": str(self.home / ".kiro/skills/task"),
+                          "kiro-skill-chief": str(self.home / ".kiro/skills/chief"),
+                          "kiro-steering": str(self.home / ".kiro/steering/task-hub.md"),
+                          "kiro-hook": str(self.home / ".kiro/hooks/task-hub-events.json"),
+                          "kiro-workflow": str(self.home / ".kiro/workflows/task-hub-events.workflow.json"),
+                          "kiro-settings": str(self.home / KIRO_SETTINGS)}})
         self.assertEqual([p for p in (self.home / ".local/state/task-hub").iterdir() if p.name.startswith("install.")],
                          [], "the work folder is removed")
 
@@ -497,10 +573,11 @@ class InstallTest(unittest.TestCase):
         lines = self.install()
         stages = self.stage_lines(lines)
         self.assertEqual([line.split(":")[0] for line in stages],
-                         ["1. 前提の確認", "2. Python", "3. gh", "5. task-hub 本体", "6. GitHub のログイン",
-                          "6. kiro-cli のログイン", "7. ボード", "8. 設定"])
-        self.assertTrue(all(line.split(": ", 1)[1].startswith("済み") for line in stages), stages)
+                         ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. task-hub 本体", "6. GitHub のログイン",
+                          "6. kiro-cli のログイン", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"])
+        self.assertTrue(all(line.split(": ", 1)[1].startswith("済み") for line in stages[:-1]), stages)
         self.assertIn("すべて済みです。変えたものはありません。", lines)
+        self.assertEqual(lines[-1], "次にすること: Kiro の新しいチャットで /task を試してください")
         self.assertEqual(self.downloads(), [])
         self.assertEqual(len(self.uv_calls.read_text().splitlines()), 1)
         self.assertEqual(self.snapshot(), before)
@@ -518,7 +595,8 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"exec '{python}' ", (self.home / ".local/bin/task").read_text())
         m = self.manifest()
         self.assertEqual(m["python"], python)
-        self.assertEqual(sorted(m["installed"]), ["config", "gh", "task", "task-hub", "zprofile"])  # not the Python
+        self.assertNotIn("uv-python", m["installed"])  # not the Python
+        self.assertNotIn("uv", m["installed"])
 
     def test_uses_a_gh_already_on_path(self):
         self.use_python3()
@@ -728,16 +806,12 @@ class InstallTest(unittest.TestCase):
                                     "開いたターミナルで、ログインの方法を選んでブラウザで承認してください")
         command = self.home / ".local/state/task-hub/kiro-login.command"
         self.assertEqual(self.opened.read_text(), f"{command}\n")
-        self.assertIn(f"'{self.fakebin}/kiro-cli' 'login'", command.read_text())
+        self.assertIn(f"'{self.home}/.local/bin/kiro-cli' 'login'", command.read_text())
         self.assertEqual(self.github()["projects"], [], "later stages do not run")
         self.kiro_logged_in.touch()
         lines = self.install()
         self.assertIn("6. kiro-cli のログイン: 済み", lines)
         self.assertFalse(command.exists())
-        # no kiro-cli at all: what works without it goes on (installing it is a stage of its own)
-        (self.fakebin / "kiro-cli").unlink()
-        lines = self.install()
-        self.assertIn("6. kiro-cli のログイン: 飛ばしました(kiro-cli が見つかりません。Kiro IDE だけで使う範囲は進めます)", lines)
 
     def test_keeps_an_existing_board_and_config_ini_and_only_adds_what_is_missing(self):
         self.use_python3()
@@ -823,6 +897,236 @@ class InstallTest(unittest.TestCase):
                 self.assertIn(why, lines[-2])
                 self.assertEqual(ini.read_text(), text)
                 self.assertEqual(self.github()["projects"], [])
+
+
+    # --- kiro-cli, Kiro, launchd ---
+
+    def test_links_a_kiro_cli_app_that_is_there(self):
+        self.use_python3()
+        (self.fakebin / "kiro-cli").unlink()
+        for where in (self.applications, self.home / "Applications"):
+            with self.subTest(str(where)):
+                cli = where / "Kiro CLI.app/Contents/MacOS/kiro-cli"
+                cli.parent.mkdir(parents=True)
+                cli.write_text(self.fake_kiro_cli("in an app"))
+                cli.chmod(0o755)
+                lines = self.install()
+                self.assertIn(f"4. kiro-cli: リンクしました(~/.local/bin/kiro-cli → {cli})".replace(str(self.home), "~"),
+                              lines)
+                self.assertEqual(os.readlink(self.home / ".local/bin/kiro-cli"), str(cli))
+                self.assertNotIn("kiro-cli-app", self.manifest()["installed"], "the app was there: not ours")
+                self.assertFalse(self.hdiutil_calls.exists())
+                shutil.rmtree(where / "Kiro CLI.app")  # the link breaks: the next one is found
+
+    def test_installs_kiro_cli_from_its_dmg_when_there_is_none(self):
+        self.use_python3()
+        (self.fakebin / "kiro-cli").unlink()
+        lines = self.install()
+        app = self.home / "Applications/Kiro CLI.app"
+        self.assertIn("4. kiro-cli: Kiro CLI を取っています(公式の手順ではありません: 公式のスクリプトは管理者権限の要る "
+                      "/Applications に入れるため)…", lines)
+        self.assertIn("4. kiro-cli: 入れました(~/Applications/Kiro CLI.app、~/.local/bin/kiro-cli。公式の手順ではありません)",
+                      lines)
+        self.assertIn(f"/kiro/stable/{KIRO_CLI_VERSION}/Kiro%20CLI.dmg", self.downloads())
+        attach, detach = self.hdiutil_calls.read_text().splitlines()
+        self.assertTrue(attach.startswith("attach -readonly -nobrowse -noautoopen -mountpoint "), attach)
+        self.assertEqual(detach.split()[:2], ["detach", "-quiet"])
+        self.assertEqual(len(self.codesign_calls.read_text().splitlines()), 2)  # the app, and who signed kiro-cli
+        self.assertIn('certificate leaf[subject.OU] = "94KV3E626L"', self.codesign_calls.read_text())
+        self.assertEqual(os.readlink(self.home / ".local/bin/kiro-cli"), str(app / "Contents/MacOS/kiro-cli"))
+        out = subprocess.run([str(self.home / ".local/bin/kiro-cli"), "--version"], capture_output=True, text=True)
+        self.assertIn("from the DMG", out.stdout)
+        self.assertFalse((self.home / "Applications/.Kiro CLI.app.tmp").exists())
+        self.assertEqual(self.manifest()["installed"]["kiro-cli-app"], str(app))
+        self.assertEqual(self.manifest()["installed"]["kiro-cli"], str(self.home / ".local/bin/kiro-cli"))
+        self.assertIn("6. kiro-cli のログイン: 済み", lines)
+        # again: nothing downloaded
+        self.server.log[:] = []
+        lines = self.install()
+        self.assertIn("4. kiro-cli: 済み(~/.local/bin/kiro-cli)", lines)
+        self.assertEqual(self.downloads(), [])
+
+    def test_stops_when_the_kiro_cli_dmg_cannot_be_trusted_or_opened(self):
+        self.use_python3()
+        (self.fakebin / "kiro-cli").unlink()
+        for case, why in (("checksum", "Kiro CLI の DMG のチェックサムが合いません"),
+                          ("signature", "Kiro CLI の署名を確かめられませんでした"),
+                          ("mount", "Kiro CLI の DMG を開けませんでした")):
+            with self.subTest(case):
+                self.publish_kiro_cli(sha=sha256(b"tampered") if case == "checksum" else None)
+                for f in ("codesign-fails", "hdiutil-fails"):
+                    (self.root / f).unlink(missing_ok=True)
+                if case == "signature":
+                    (self.root / "codesign-fails").touch()
+                if case == "mount":
+                    (self.root / "hdiutil-fails").touch()
+                lines = self.install(code=1)
+                self.assertTrue(lines[-2].startswith(f"4. kiro-cli: 止まりました。{why}"), lines)
+                self.assertFalse((self.home / "Applications/Kiro CLI.app").exists())
+                self.assertFalse(os.path.lexists(self.home / ".local/bin/kiro-cli"))
+                self.assertFalse((self.home / ".local/lib/task-hub").exists(), "later stages do not run")
+                if case == "signature":  # attached, then detached on the way out
+                    self.assertEqual(self.hdiutil_calls.read_text().splitlines()[-1].split()[:2], ["detach", "-quiet"])
+                if case == "mount":
+                    self.assertIn("情シスに、Kiro CLI を /Applications に入れてもらってから", lines[-1])
+
+    def test_links_skills_and_steering_and_copies_hooks_and_workflows(self):
+        self.use_python3()
+        kiro, lib = self.home / ".kiro", self.home / ".local/lib/task-hub"
+        # a link from the manual steps in docs/kiro-ide.md, which Kiro does not read: becomes a copy
+        (kiro / "hooks").mkdir(parents=True)
+        (kiro / "hooks/task-hub-events.json").symlink_to(lib / "kiro/hooks/task-hub-events.json")
+        lines = self.install()
+        line = next(line for line in lines if line.startswith("9. "))
+        self.assertIn("~/.kiro/skills/task(リンク)", line)
+        self.assertIn("~/.kiro/hooks/task-hub-events.json(コピーし直し)", line)
+        self.assertIn("~/.kiro/workflows/task-hub-events.workflow.json(コピー)", line)
+        for src, dst in KIRO_LINKS:
+            self.assertTrue((kiro / dst).is_symlink(), dst)
+            self.assertEqual(os.readlink(kiro / dst), str(lib / src))
+        for src, dst in KIRO_COPIES:
+            self.assertFalse((kiro / dst).is_symlink(), dst)
+            self.assertEqual((kiro / dst).read_bytes(), (REPO / src).read_bytes())
+        self.assertEqual([p.name for p in (kiro / "hooks").iterdir()], ["task-hub-events.json"], "no temporary file left")
+
+        # task-hub updated: the next run pulls it and copies the hook and the workflow again; the links stay
+        before = self.snapshot()
+        hook = (REPO / KIRO_COPIES[0][0]).read_text().replace("task-hub events", "task-hub events v2")
+        self.change_origin(KIRO_COPIES[0][0], hook)
+        workflow = (REPO / KIRO_COPIES[1][0]).read_text().replace('"pollIntervalSec": 60', '"pollIntervalSec": 30')
+        self.change_origin(KIRO_COPIES[1][0], workflow)
+        lines = self.install()
+        line = next(line for line in lines if line.startswith("9. "))
+        self.assertEqual(line, "9. Kiro との連携: 入れました(~/.kiro/hooks/task-hub-events.json(コピーし直し)、"
+                               "~/.kiro/workflows/task-hub-events.workflow.json(コピーし直し)。Kiro を再起動すると読み込まれます)")
+        self.assertEqual((kiro / KIRO_COPIES[0][1]).read_text(), hook)
+        self.assertEqual((kiro / KIRO_COPIES[1][1]).read_text(), workflow)
+        after = self.snapshot()
+        self.assertEqual({k: v for k, v in after.items() if ".kiro/skills" in k or ".kiro/steering" in k},
+                         {k: v for k, v in before.items() if ".kiro/skills" in k or ".kiro/steering" in k})
+
+    def test_keeps_a_link_to_another_checkout(self):
+        self.use_python3()
+        mine = self.root / "my-task-hub/skills/task"
+        mine.mkdir(parents=True)
+        (self.home / ".kiro/skills").mkdir(parents=True)
+        (self.home / ".kiro/skills/task").symlink_to(mine)
+        lines = self.install()
+        line = next(line for line in lines if line.startswith("9. "))
+        self.assertIn("~/.kiro/skills/task は別のものを指しているので、そのままにしました", line)
+        self.assertEqual(os.readlink(self.home / ".kiro/skills/task"), str(mine))
+        self.assertNotIn("kiro-skill-task", self.manifest()["installed"])
+        self.assertTrue((self.home / ".kiro/skills/chief").is_symlink())
+
+    def test_turns_on_workflows_in_kiro_settings_and_keeps_the_rest(self):
+        self.use_python3()
+        settings = self.home / KIRO_SETTINGS
+        settings.parent.mkdir(parents=True)
+        mine = ('{\n  "workbench.colorTheme": "Kiro Dark",\n  "editor.fontSize": 13.5,\n  "files.exclude": {"**/.git": true},\n'
+                '  "kiroAgent.workflows.enabled": false,\n  "telemetry.telemetryLevel": null,\n  "x.ja": "日本語"\n}\n')
+        settings.write_text(mine)
+        lines = self.install()
+        backups = list(settings.parent.glob("settings.json.bak-*"))
+        self.assertEqual([b.read_text() for b in backups], [mine])
+        data = json.loads(settings.read_text())
+        self.assertEqual(data, {**json.loads(mine), "kiroAgent.workflows.enabled": True})
+        self.assertEqual(list(data), list(json.loads(mine)), "the order is kept")
+        self.assertIn('\n  "workbench.colorTheme": "Kiro Dark",\n', settings.read_text(), "and the indent")
+        self.assertIn('"x.ja": "日本語"', settings.read_text())
+        line = next(line for line in lines if line.startswith("9. "))
+        self.assertIn(f"~/{KIRO_SETTINGS}(Workflows を有効に。元の内容は ~/{KIRO_SETTINGS}.bak-", line)
+        # already on: untouched
+        before = settings.read_text()
+        self.install()
+        self.assertEqual(settings.read_text(), before)
+        self.assertEqual(len(list(settings.parent.glob("settings.json.bak-*"))), 1)
+
+    def test_does_not_rewrite_kiro_settings_with_comments(self):
+        self.use_python3()
+        settings = self.home / KIRO_SETTINGS
+        settings.parent.mkdir(parents=True)
+        for text in ('{\n  // my font\n  "editor.fontSize": 14,\n}\n',
+                     '{\n  "editor.fontSize": 14,\n  // "kiroAgent.workflows.enabled": true\n}\n'):
+            with self.subTest(text):
+                settings.write_text(text)
+                lines = self.install()
+                self.assertEqual(settings.read_text(), text)
+                self.assertEqual(list(settings.parent.glob("settings.json.bak-*")), [])
+                line = next(line for line in lines if line.startswith("9. "))
+                self.assertIn(f"~/{KIRO_SETTINGS} はコメントか末尾のカンマがあるので書き換えていません。"
+                              "Kiro のコマンドパレットで「Enable Workflows」を実行してください", line)
+                self.assertEqual(lines[-1], "次にすること: Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、"
+                                            "Kiro を再起動してください")
+                self.assertNotIn("kiro-settings", self.manifest()["installed"])
+        # on already, in a file with comments: nothing to do
+        settings.write_text('{\n  // mine\n  "kiroAgent.workflows.enabled": true,\n}\n')
+        lines = self.install()
+        self.assertEqual(lines[-1], "次にすること: Kiro の新しいチャットで /task を試してください")
+
+    def test_launchd_only_with_the_option_and_started_only_when_asked(self):
+        self.use_python3()
+        plist = self.home / PLIST
+        lines = self.install(args=["--with-launchd"])
+        self.assertTrue(plist.is_file())
+        self.assertEqual(subprocess.run(["plutil", "-lint", str(plist)], capture_output=True).returncode, 0)
+        p = json.loads(subprocess.run(["plutil", "-convert", "json", "-o", "-", str(plist)], capture_output=True,
+                                      text=True, check=True).stdout)
+        local = self.home / ".local"
+        self.assertEqual(p["Label"], "com.task-hub.watch")
+        self.assertEqual(p["ProgramArguments"], [str(local / "bin/task"), "watch"], "no key in the keychain: no key")
+        self.assertEqual(p["EnvironmentVariables"], {
+            "PATH": f"{local}/bin:{self.fakebin}:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.home)})
+        self.assertEqual(p["StandardErrorPath"], str(local / "state/task-hub/watch.err.log"))
+        self.assertTrue(p["RunAtLoad"] and p["KeepAlive"])
+        self.assertIn("10. 常駐: 置きました(~/Library/LaunchAgents/com.task-hub.watch.plist、まだ始めていません。"
+                      "KIRO_API_KEY は使いません(", "\n".join(lines))
+        self.assertEqual(lines[-1], "次にすること: 常駐を始めてよければ、sh kiro/install.sh --start-launchd を実行してください"
+                                    "(ログインしている間 task watch が動き、Ready のカードを始めます)")
+        self.assertEqual(self.launchctl_calls.read_text().splitlines(), [f"print gui/{os.getuid()}/com.task-hub.watch"],
+                         "not started before the user said yes")
+        self.assertEqual(self.manifest()["installed"]["launchd"], str(plist))
+
+        # the user said yes
+        lines = self.install(args=["--start-launchd"])
+        self.assertIn(f"bootstrap gui/{os.getuid()} {plist}", self.launchctl_calls.read_text().splitlines())
+        self.assertTrue(any(line.startswith("10. 常駐: 始めました(") for line in lines), lines)
+        lines = self.install(args=["--with-launchd"])
+        self.assertTrue(any(line.startswith("10. 常駐: 済み(~/Library/LaunchAgents/com.task-hub.watch.plist、動いています")
+                            for line in lines), lines)
+        self.assertEqual(sum(c.startswith("bootstrap") for c in self.launchctl_calls.read_text().splitlines()), 1)
+
+        # a key in the keychain: read when task watch starts, never written in the plist; reloaded when asked
+        self.api_key.touch()
+        lines = self.install(args=["--with-launchd"])
+        self.assertIn("常駐に変えた設定を読み込ませてよければ", lines[-1])
+        p = json.loads(subprocess.run(["plutil", "-convert", "json", "-o", "-", str(plist)], capture_output=True,
+                                      text=True, check=True).stdout)
+        self.assertEqual(p["ProgramArguments"][:2], ["/bin/sh", "-c"])
+        self.assertIn("KIRO_API_KEY=$(/usr/bin/security find-generic-password -s task-hub-kiro-api-key -w) || ",
+                      p["ProgramArguments"][2])
+        self.assertIn(f"exec '{local}/bin/task' watch", p["ProgramArguments"][2])
+        self.assertNotIn("KIRO_API_KEY", p["EnvironmentVariables"])
+        self.install(args=["--start-launchd"])
+        calls = self.launchctl_calls.read_text().splitlines()
+        self.assertEqual(calls[-2:], [f"bootout gui/{os.getuid()}/com.task-hub.watch", f"bootstrap gui/{os.getuid()} {plist}"])
+        # without the option, again: left as it is
+        before = plist.read_text()
+        n = len(calls)
+        lines = self.install()
+        self.assertEqual(plist.read_text(), before)
+        self.assertEqual(len(self.launchctl_calls.read_text().splitlines()), n)
+
+    def test_does_not_replace_a_plist_of_the_users_own(self):
+        self.use_python3()
+        plist = self.home / PLIST
+        plist.parent.mkdir(parents=True)
+        plist.write_text("<plist>mine</plist>\n")
+        lines = self.install(code=1, args=["--with-launchd"])
+        self.assertTrue(lines[-2].startswith("10. 常駐: 止まりました。~/Library/LaunchAgents/com.task-hub.watch.plist が既に"
+                                             "あります"), lines)
+        self.assertEqual(plist.read_text(), "<plist>mine</plist>\n")
+        self.assertFalse(self.launchctl_calls.exists())
+        self.install(code=1, args=["--nope"])
 
 
 if __name__ == "__main__":

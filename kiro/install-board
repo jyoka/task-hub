@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""kiro/install-board: stages 7 (board) and 8 (config.ini) of kiro/install.sh (docs/prd-kiro-installer.md, section 5).
+"""kiro/install-board: stages 7 (board) and 8 (config.ini) of kiro/install.sh (docs/prd-kiro-installer.md, section 5),
+and the settings.json part of stage 9 (Kiro).
 
   install-board board <label> <GitHub login> <work folder>
   install-board config <label> <work folder>
+  install-board kiro-settings <label> <work folder>
 
 `board` uses the board config.ini names, if any. Otherwise it finds or makes the private repo <login>/tasks and the
 Project titled "task-hub", and makes it what docs/setup.md asks for: the Status options in task-hub's order, the
 text fields, the board view, and no workflow that sets the Status besides "Item closed" (task-hub sets it).
 A board config.ini names is the user's: options and fields are only added (the cards keep their values), and what
 is not as docs/setup.md asks is said, not changed. `config` adds what config.ini lacks, then runs `task list`.
+`kiro-settings` turns Kiro's Workflows on in its settings.json, and writes what it did to <work folder>/kiro-settings
+for install.sh to say (it prints nothing unless it stops).
 The board and config.ini are found from the GitHub API and the files each time, so running it again is safe.
 
 Prints the stage's lines as install.sh does. Exit status: 0 = nothing changed, 3 = changed something, 1 = stopped
@@ -42,6 +46,8 @@ SET_OPTIONS = """mutation($field: ID!, $options: [ProjectV2SingleSelectFieldOpti
   updateProjectV2Field(input: {fieldId: $field, singleSelectOptions: $options}) { clientMutationId } }"""
 DELETE_WORKFLOW = """mutation($id: ID!) { deleteProjectV2Workflow(input: {workflowId: $id}) { deletedWorkflowId } }"""
 CONFIG_HEADER = "; task-hub の設定。kiro/install.sh が作りました(書き方は docs/setup.md)\n"
+KIRO_SETTINGS = Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json"
+WORKFLOWS_KEY = "kiroAgent.workflows.enabled"  # boolean, false by default; read by each new chat
 
 
 class Stop(Exception):
@@ -266,10 +272,46 @@ def config(label, work):
     return result != "済み"
 
 
+# ---------- stage 9: Kiro's settings.json ----------
+
+def kiro_settings(label, work):
+    """Sets "kiroAgent.workflows.enabled": true as #56 found safe: nothing when it is already on; a new file when there
+    is none; a rewrite (after a backup) when the file is plain JSON; and when it is JSONC (comments or trailing commas,
+    which VS Code allows), no change, only how to do it in Kiro."""
+    path = KIRO_SETTINGS
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and data.get(WORKFLOWS_KEY) is True or data is None and re.search(
+            r'^\s*"kiroAgent\.workflows\.enabled"\s*:\s*true\b', text, re.M):
+        kind, what = "same", ""
+    elif not isinstance(data, dict):
+        kind = "manual"
+        what = (f"{tilde(path)} はコメントか末尾のカンマがあるので書き換えていません。"
+                "Kiro のコマンドパレットで「Enable Workflows」を実行してください")
+        todo = Path(work) / "todo"
+        if not todo.exists():  # the board's step, if any, comes first
+            todo.write_text("Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください")
+    elif not text.strip():
+        write(path, json.dumps({WORKFLOWS_KEY: True}, indent=4) + "\n")
+        kind, what = "changed", f"{tilde(path)}(Workflows を有効に)"
+    else:
+        backup = path.with_name(f"{path.name}.bak-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(path, backup)
+        indent = re.search(r'^([ \t]+)"', text, re.M)
+        data[WORKFLOWS_KEY] = True  # the other settings keep their order
+        write(path, json.dumps(data, indent=indent.group(1) if indent else 4, ensure_ascii=False) + "\n")
+        kind, what = "changed", f"{tilde(path)}(Workflows を有効に。元の内容は {tilde(backup)})"
+    (Path(work) / "kiro-settings").write_text(f"{kind}\t{what}\n{path}\n")  # the file, for the manifest
+    return kind == "changed"
+
+
 def main(argv):
     command, label, *rest = argv
     try:
-        changed = {"board": board, "config": config}[command](label, *rest)
+        changed = {"board": board, "config": config, "kiro-settings": kiro_settings}[command](label, *rest)
     except (Stop, GhError) as e:
         if isinstance(e, GhError):
             e = Stop(f"GitHub の操作が失敗しました({e})", "ネットワークとログイン(gh auth status)を確かめて、もう一度実行してください")
