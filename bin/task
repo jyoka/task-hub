@@ -50,6 +50,9 @@ DEFAULT_AGENTS = {
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
 }
+DEFAULT_CHECKS = {  # [check]: run before a task starts; exit 0 = the agent can be used now. "" = no check
+    "kiro": "kiro-cli whoami",
+}
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
@@ -281,7 +284,8 @@ def digest_lines(d, skip=()):
 
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {},
+    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
+                 "agents": DEFAULT_AGENTS, "check": DEFAULT_CHECKS, "board": {},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     c.read(CONFIG)
     return c
@@ -308,6 +312,30 @@ def helper_agent(t, key):
     """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
     name = config()["runner"].get(key, "").strip()
     return t["agent"] if name == "agent" else name
+
+
+def pass_env():
+    """[runner] pass_env: names of variables (API keys and the like) a run in a herdr pane gets too."""
+    return [n for n in re.split(r"[\s,]+", config()["runner"].get("pass_env", "")) if n]
+
+
+def check_ready(name):
+    """Run [check] <name>, if set; raise with its last lines when the agent cannot be used now (e.g. logged out)."""
+    cmd = config()["check"].get(name, "").strip()
+    if not cmd:
+        return
+    try:
+        r = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        result, output = f"exited {r.returncode}", r.stdout + r.stderr
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        r, result, output = None, "failed", str(e)
+    if r and r.returncode == 0:
+        return
+    for k in pass_env():  # a key the check prints never reaches the comment or the events
+        if os.environ.get(k):
+            output = output.replace(os.environ[k], "***")
+    tail = " | ".join(line.strip() for line in output.strip().splitlines()[-3:])
+    raise RuntimeError(f'agent "{name}" is not ready: `{cmd}` {result}: {tail[-200:]}')
 
 
 def check_agent(name):
@@ -828,6 +856,9 @@ def launch(t):
         name = helper_agent(t, key)
         if name and not config().has_option("agents", name):
             raise RuntimeError(f'unknown {key} "{name}" in the config')
+    for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
+        if name:  # before the worktree and before any credit is spent
+            check_ready(name)
     wt = ensure_worktree(t)
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -855,11 +886,14 @@ def launch(t):
     set_status(t, IN_PROGRESS)
     if t["workspace"]:
         # the pane's shell starts with the herdr server's environment, not ours: a small launcher
-        # carries over what the run depends on (config/data under HOME, agents on PATH, settings)
+        # carries over what the run depends on (config/data under HOME, agents on PATH, settings, [runner] pass_env)
+        names = ("HOME", "PATH", *pass_env())
         keep = {k: v for k, v in os.environ.items()
-                if k in ("HOME", "PATH") or k.startswith(("TASK_", "GIT_AUTHOR_", "GIT_COMMITTER_"))}
+                if k in names or k.startswith(("TASK_", "GIT_AUTHOR_", "GIT_COMMITTER_"))}
         launcher = DATA / "run" / f"{t['id']}.sh"
         launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.touch(mode=0o600)
+        launcher.chmod(0o600)  # it may hold API keys
         launcher.write_text("#!/bin/sh\nexec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
         pane = res["root_pane"]["pane_id"]
         herdr("pane", "run", pane, shlex.join(["sh", str(launcher)]))
