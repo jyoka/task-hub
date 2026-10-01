@@ -49,6 +49,13 @@ task --version
 git -C ~/.local/lib/task-hub pull --ff-only
 ```
 
+Kiro IDE の Workflows を使っているなら、pull のあとにワークフローの定義をコピーし直します(リンクではなくコピーで
+入れているため、pull だけでは変わりません。[kiro-ide.md](kiro-ide.md#話しかけていないとき-workflows-の-watch)):
+
+```
+rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
+```
+
 task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 -m unittest discover -s tests -v`)。
 
 ## GitHub 側の準備(1 回だけ)
@@ -200,11 +207,15 @@ done
   ワークフローの定義 `kiro/workflows/task-hub-events.workflow.json` を入れると、`/chief` が始めるときにそれを動かし、
   `kiro/task-events-watch` が 60 秒ごとに `task events --after` で新しい出来事を確かめます(待っている間はモデルを
   使わず、クレジットを使いません)。出来事があれば、次のステップが要点を `/chief` のチャットに届けます。
-  ワークフローが動いていなければ、`/chief` は今までどおり返答のたびに確かめます。実機ではまだ確かめていません。
-  詳しい手順は [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る) にあります。
+  ワークフローが動いていなければ、`/chief` は今までどおり返答のたびに確かめます。Kiro IDE 1.2.4 で、コピーで
+  入れたときに出来事が `/chief` に届くことを確かめました(2026-10-01)。詳しい手順は
+  [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る) にあります。
+
+  ワークフローの定義は、リンクではなく **コピー** で入れます。Kiro は実体のパスで許可された場所の中にあるかを
+  判定するので、リンクでは Recipes に出ず、`run_workflow` も拒否されます。task-hub を更新したらコピーし直します。
 
   ```
-  mkdir -p ~/.kiro/workflows && ln -sfn ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
+  mkdir -p ~/.kiro/workflows && rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
   ```
 
 - **Codex**: 確かめていません。起こせない場合、`/chief` は返答のたびに `task events` で新しい出来事を確かめます
@@ -335,8 +346,10 @@ plist を書き換えたら、`bootout` してから `bootstrap` し直すと確
 だけで、plist の変更を読み直したいときは登録し直します)。
 
 **task-hub を更新したとき。** 動かす用の clone を pull したら(`git -C ~/.local/lib/task-hub pull --ff-only`)、
-常駐している `task watch` を再起動して新しいコードを読ませます。herdr のペインで動かしているときに止めてから
-起動し直すのと同じで、launchd では次のどちらかです(実行中のタスクは、始めたときのコードのまま最後まで動きます)。
+常駐している `task watch` を再起動して新しいコードを読ませます(Kiro IDE の Workflows を使っているなら、
+[インストール](#インストール) のとおりワークフローの定義もコピーし直します)。herdr のペインで動かしているときに
+止めてから起動し直すのと同じで、launchd では次のどちらかです(実行中のタスクは、始めたときのコードのまま最後まで
+動きます)。
 
 ```
 launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
