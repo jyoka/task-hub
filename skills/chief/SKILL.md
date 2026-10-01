@@ -34,6 +34,12 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      Each batch of events arrives as one notification: the events with their digest, then a
      `next: ... --after <n>` line. Keep that `<n>` as the new cursor. If `task` fails, the loop prints
      one `watch stopped: <error>` line and exits with code 1.
+   - Kiro IDE with Workflows turned on and the `task-hub-events` recipe installed
+     (`~/.kiro/workflows/task-hub-events.workflow.json`): launch it once with `run_workflow`. Its `watch` polls
+     `task events` without using the model, and each batch of events reaches this chat as a `send_message` from its
+     `tell-chief` step. Do not run `task events --next` yourself, and do not tell again events the workflow already
+     brought (task-hub's prompt hook may add them to your context too). If the recipe is missing, the launch fails,
+     or the run stops, tell the user in one line and check at each reply instead (below).
    - A background command that wakes you when it exits: run
      `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
      the next event, prints it with its digest, and exits.
@@ -41,6 +47,8 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 ## Keep watching
 
 With `task_events_watch`, skip this section.
+
+With the Kiro workflow running, skip this section too: it keeps its own cursor and goes on after each event.
 
 With the Monitor, leave it running; do not restart it after an event. When it expires (the tool stopped it at
 its timeout), start the same command again at once with `n=` set to your latest cursor (the last `next:` number,
