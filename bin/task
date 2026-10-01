@@ -46,7 +46,8 @@ MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for t
 WATCH_SECONDS = 60
 NOTIFY_EVENTS = "In review, Blocked, replan, Done"  # [notify] events: which events show a notification; empty = none
 DEFAULT_AGENTS = {
-    "claude": "claude -p --dangerously-skip-permissions {prompt}",
+    "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
+              " claude -p --dangerously-skip-permissions {prompt}",
     "codex": "codex exec -s workspace-write {prompt}",
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
