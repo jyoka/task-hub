@@ -194,15 +194,119 @@ task-hub が開始を待たせるので、前後関係を無視して並行に�
 
 ## Ready のカードを自動で始める
 
+`task watch` を動かしておくと、1 分ごとにボードを確認し、Ready のカードを(同時 5 つまで)始めます。外出先で
+スマホからカードを Ready に移すだけで、Mac が起きていれば作業が始まります。`task watch` を動かしていないときは、
+`task` を実行したタイミングで始まります。
+
+動かし方は 2 通りあります。どちらか一方を選びます。
+
+### herdr のペインで動かす
+
 herdr のペインを 1 つ用意して、次を動かしたままにします:
 
 ```
 task watch
 ```
 
-1 分ごとにボードを確認し、Ready のカードを(同時 5 つまで)始めます。外出先でスマホからカードを Ready に
-移すだけで、Mac が起きていれば作業が始まります。`task watch` を動かしていないときは、`task` を実行した
-タイミングで始まります。
+出力をそのまま目で追えるのが利点です。ターミナルやペインを閉じると止まるので、IDE 中心で作業していて
+ターミナルを開いたままにしないなら、次の launchd での常駐を選びます。
+
+### launchd で常駐させる(ターミナルを開いておかない)
+
+macOS のユーザーエージェント(launchd)に登録すると、ログインしている間はずっと `task watch` が動き、落ちても
+自動で立ち上がり直します。ターミナルや herdr のペインを開いておく必要はありません。
+
+`~/Library/LaunchAgents/com.task-hub.watch.plist` を次の内容で作ります(`youruser` は自分のユーザー名に、
+パスは自分の環境に合わせて置き換えます):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.task-hub.watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/youruser/.local/bin/task</string>
+    <string>watch</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/youruser/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/youruser</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/youruser/.local/state/task-hub/watch.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/youruser/.local/state/task-hub/watch.err.log</string>
+</dict>
+</plist>
+```
+
+- **`RunAtLoad`** は登録した瞬間とログインのたびに起動し、**`KeepAlive`** は落ちても立ち上げ直します。
+- **`StandardOutPath` / `StandardErrorPath`** に `task watch` の出力とエラーを書き出します。上の例では
+  実行ログと同じ `~/.local/state/task-hub/` に置いています(このディレクトリは `task` が使うので通常はすでに
+  あります。なければ `mkdir -p ~/.local/state/task-hub` で作ります)。個々のタスクのエージェント出力はこれとは別に
+  `~/.local/state/task-hub/logs/<番号>.log`(`task log`)に残ります。
+- **`EnvironmentVariables` の `PATH`** が要です。launchd から起動したプロセスの PATH は最小限で、ログインシェルの
+  `.zshrc` などは読まれません。`task` 自身に加えて、それが呼び出す `git`、`gh`、エージェントの CLI(`claude`、
+  `kiro-cli` など)、Homebrew で入れたコマンドが見えるように、それらの置き場所をすべて `PATH` に並べます。
+  上の例は Apple Silicon の Homebrew(`/opt/homebrew/bin`)を含めています。Intel Mac なら `/usr/local/bin`、
+  エージェントの CLI を別の場所(`~/.local/bin` や `/opt/homebrew/bin` 以外)に入れているならそのディレクトリも
+  足します。自分の対話シェルでの `echo $PATH` を参考にすると確実です。`gh` がログイン情報を読めるよう `HOME` も
+  渡しています。
+
+登録・停止・再起動は `launchctl` で行います(`gui/$(id -u)` は自分のログインセッションを指します):
+
+```
+# 登録して起動する
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.task-hub.watch.plist
+
+# 動いているか確認する
+launchctl print gui/$(id -u)/com.task-hub.watch
+
+# 止めて登録も外す
+launchctl bootout gui/$(id -u)/com.task-hub.watch
+
+# その場で再起動する(plist を書き換えたあとや、更新後に効かせるとき)
+launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
+```
+
+plist を書き換えたら、`bootout` してから `bootstrap` し直すと確実です(`kickstart -k` はプロセスを入れ替える
+だけで、plist の変更を読み直したいときは登録し直します)。
+
+**task-hub を更新したとき。** 動かす用の clone を pull したら(`git -C ~/.local/lib/task-hub pull --ff-only`)、
+常駐している `task watch` を再起動して新しいコードを読ませます。herdr のペインで動かしているときに止めてから
+起動し直すのと同じで、launchd では次のどちらかです(実行中のタスクは、始めたときのコードのまま最後まで動きます)。
+
+```
+launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
+# または
+launchctl bootout   gui/$(id -u)/com.task-hub.watch
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.task-hub.watch.plist
+```
+
+**herdr のタブと通知はどうなるか。** launchd から動かした `task watch` が始めたタスクは、watch のペインが
+ないので、そのタスクの置き場所は「登録時に記録された workspace」→「そのリポジトリの checkout を開いている
+ペインがある workspace」→「タスク専用の workspace を新しく作る」の順で決まります(herdr のペインで動かした
+場合も、`task watch` が始めたタスクは watch の場所には置かないので、扱いは同じです。README の
+「見え方と、手元に残るもの」と [operations.md](operations.md#実行の様子を見る) を参照)。通知は、実行が
+終わったプロセス自身が出します。herdr が動いていれば herdr の通知、動いていなければ macOS の通知
+(`osascript`)になるので、launchd から動かしていても In review や Blocked は届きます([operations.md](operations.md#通知llm-なし))。
 
 ## 初回の実行
 
