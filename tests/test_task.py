@@ -8,6 +8,8 @@
 """
 import contextlib
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -20,6 +22,7 @@ import unittest
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
+UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
 
 FAKE_GH = r'''#!/usr/bin/env python3
 import fcntl, json, os, re, sys
@@ -218,6 +221,14 @@ def set_gh(key):  # under the fake gh's lock, like every other writer
     with open(path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         db = json.load(open(path)); db[key] = True
+        Path(path).write_text(json.dumps(db))
+if "DRAG" in prompt:  # the human drags the card back to Backlog while the agent works
+    import fcntl, json
+    path = os.environ["TASK_TEST_GH_DB"]
+    with open(path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        db = json.load(open(path))
+        db["items"]["PVTI_" + re.search(r"Task (\d+):", prompt)[1]]["values"]["status"] = "Backlog"
         Path(path).write_text(json.dumps(db))
 if mode == "prfail":  # GitHub is up, but opening the PR is refused
     set_gh("pr_create_fails")
@@ -437,6 +448,8 @@ class TaskTest(unittest.TestCase):
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
         self.write_config()
         self.origin("jyoka/app")
+        self.stderr = []  # of every `task` the test ran, for the warning check in tearDown
+        self.moves_expected = False
 
     def tearDown(self):
         runs = self.root / ".local/state/task-hub/runs"
@@ -461,7 +474,16 @@ class TaskTest(unittest.TestCase):
             except (ProcessLookupError, PermissionError):  # macOS: EPERM if the run just ended and is not reaped yet
                 pass
         self.stop_notifiers()
+        warned = self.unexpected_moves()
         self.tmp.cleanup()
+        if not self.moves_expected:
+            self.assertEqual(warned, [])
+
+    def unexpected_moves(self):
+        """set_status's warnings, from the commands the test ran and from the runs' logs."""
+        logs = self.root / ".local/state/task-hub/logs"
+        texts = self.stderr + [f.read_text(errors="replace") for f in logs.glob("*.log")] if logs.exists() else self.stderr
+        return [line for text in texts for line in text.splitlines() if UNEXPECTED_MOVE in line]
 
     def stop_notifiers(self):
         """Stop what the runs left in their own sessions: notify() starts the notifier detached and never waits,
@@ -521,6 +543,7 @@ class TaskTest(unittest.TestCase):
 
     def task(self, *args, code=0):
         r = subprocess.run([str(BIN), *args], env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.stderr.append(r.stderr)
         self.assertEqual(r.returncode, code, f"{r.stdout}{r.stderr}")
         return r.stdout
 
@@ -2038,6 +2061,34 @@ class TaskTest(unittest.TestCase):
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("watch")
         self.assertEqual(self.gh()["item_list_calls"], 1)
+
+    # --- status transitions ---
+
+    def test_unexpected_move_warns_but_the_card_still_moves(self):
+        self.moves_expected = True
+        tid = self.new("ok DRAG")  # the run's finish finds the card in Backlog: Backlog -> In review is not ours
+        self.task("start", tid)
+        self.wait_for(lambda: self.status(tid) == "In review")  # wait() would stop at the drag
+        self.assertEqual(self.unexpected_moves(), [f"warning: task {tid} moved Backlog -> In review, {UNEXPECTED_MOVE}"])
+        events = (self.root / ".local/state/task-hub/events.jsonl").read_text()
+        self.assertNotIn(UNEXPECTED_MOVE, events)  # an event would wake /chief
+
+    def test_run_checks_its_move_to_blocked_too(self):
+        self.moves_expected = True
+        tid = self.new("blocked DRAG")
+        self.task("start", tid)
+        self.wait_for(lambda: self.status(tid) == "Blocked")  # wait() would stop at the drag
+        self.assertEqual(self.unexpected_moves(), [f"warning: task {tid} moved Backlog -> Blocked, {UNEXPECTED_MOVE}"])
+
+    def test_design_diagram_matches_the_transitions(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        design = (BIN.parent.parent / "docs" / "design.md").read_text()
+        chart = re.search(r"```mermaid\nstateDiagram-v2\n(.*?)```", design, re.S)[1]
+        names = {"[*]": None, **{alias: name for name, alias in re.findall(r'state "([^"]+)" as (\w+)', chart)}}
+        drawn = {(names.get(a, a), names.get(b, b)) for a, b in re.findall(r"^\s*(\S+) --> (\S+?):?(?:\s|$)", chart, re.M)}
+        self.assertEqual(drawn, task.StatusLifecycle.transitions)
 
     # --- CLI behaviour ---
 

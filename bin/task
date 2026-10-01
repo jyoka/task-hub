@@ -124,6 +124,21 @@ class StatusLifecycle:
     startable_explicitly = {BACKLOG, BLOCKED, READY}
     watched_for_merge = {IN_REVIEW, WAIT_FOR_MERGE}
     needs_user = {BACKLOG, IN_REVIEW, BLOCKED}
+    # (from, to) of every move task-hub itself makes; None = not on the board yet. A human's drag on GitHub and
+    # GitHub's workflows are not in it: task-hub never makes them. docs/design.md draws it; keep the two in step.
+    transitions = {
+        (None, BACKLOG),  # cmd_new
+        *{(s, READY) for s in startable_explicitly},  # cmd_start; Ready -> Ready changes only the Agent field
+        (READY, IN_PROGRESS),  # launch
+        (READY, BLOCKED), (IN_PROGRESS, BLOCKED),  # sync: launch failed; cmd_run: setup failed, finish raised; pid gone
+        (IN_PROGRESS, IN_REVIEW),  # finish
+        *{(s, DONE) for s in watched_for_merge},  # sync: the PR was merged
+        *{(s, DONE) for s in all if s != DONE},  # cmd_done
+    }
+
+    @classmethod
+    def expected(cls, before, after):
+        return (before, after) in cls.transitions
 
     @classmethod
     def required(cls):
@@ -451,6 +466,11 @@ def set_status(t, status, reason="", digest_=None):
     """digest_: the event's digest; a Blocked without one gets its reason as the digest."""
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
+    # a t without "status" came from somewhere that does not know it: unchecked, rather than another GitHub call
+    if "status" in t and not StatusLifecycle.expected(t["status"], status):
+        # stderr, never EVENTS: an event wakes /chief, and that costs tokens
+        print(f"warning: task {t['id']} moved {t['status'] or '(new)'} -> {status}, "
+              "not in StatusLifecycle.transitions", file=sys.stderr, flush=True)
     b = board()
     gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
        "--single-select-option-id", b["status_options"][status.lower()])
@@ -1216,8 +1236,7 @@ def cmd_run(a):
     if stop:  # the agent never starts: nothing of this run can be trusted without its environment
         say(f"== {stop}")
         try:
-            item = next((x for x in tasks() if x["id"] == t["id"]), None)
-            t["item"] = item["item"] if item else ""
+            take_card(t)
             report_comment(t, blocked=stop)
             set_status(t, BLOCKED, reason=stop)
         except RuntimeError as e:
@@ -1234,8 +1253,7 @@ def cmd_run(a):
     review, review_blocked = "", ""
     try:
         report, code, review, review_blocked = review_loop(t, report, code, say, record)
-        item = next((x for x in tasks() if x["id"] == t["id"]), None)
-        t["item"] = item["item"] if item else ""
+        take_card(t)
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
         record.update(pr_size(t, wt))
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
@@ -1268,6 +1286,14 @@ def cmd_run(a):
         close_herdr(closing)  # this process ends with its tab
         return
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
+
+
+def take_card(t):
+    """The card's item and Status, from the one board read the run makes anyway: the run file has neither."""
+    item = next((x for x in tasks() if x["id"] == t["id"]), None)
+    t["item"] = item["item"] if item else ""
+    if item:
+        t["status"] = item["status"]
 
 
 def finish(t, report, code, say, auto_review="", blocked_override=""):
@@ -1710,7 +1736,8 @@ def cmd_new(a):
              *labels).strip().splitlines()[-1]
     f.unlink(missing_ok=True)
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
-    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"]}
+    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"],
+         "status": None}
     remember_where_asked(t)
     if blocker_ids:
         this = gh_json("issue", "view", t["id"], "--repo", b["issues"], "--json", "id")["id"]
