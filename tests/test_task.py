@@ -808,6 +808,16 @@ class TaskTest(unittest.TestCase):
         self.assertIn([], [c["argv0"] for c in self.agent_calls()])
         self.assertIn(["--other"], [c["argv0"] for c in self.agent_calls()])
 
+    def test_builtin_claude_cannot_run_commands_in_the_background(self):
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):  # a config without [agents] claude
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            cmd = task.agent_command("claude", "do it")
+        # claude -p ends without waiting for a backgrounded test, so the run has no report (tasks#47, #51)
+        self.assertEqual(cmd, ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
+                               "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions", "do it"])
+
     def test_unknown_agent_on_a_card_blocks_only_that_card(self):
         bad, good = self.new(title="bad"), self.new(title="good")
         db = self.gh()
