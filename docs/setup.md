@@ -159,7 +159,9 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    既定はありません)。`KIRO_API_KEY` だけのときに `kiro-cli whoami` が成功するかは未確認です。**API キーだけで使う
    場合は、先に手で `kiro-cli whoami; echo $?` が 0 になるか確かめてから** `[check]` に書いてください。詳しくは
    [agents.md](agents.md#始める前の確認と実行に渡す環境変数) を参照してください。launchd から動かすときは、
-   キーを plist の `EnvironmentVariables` に入れます(plist はほかの人が読めない権限にしてください)。
+   キーを平文でファイルに残さないよう、macOS のキーチェーンに入れて起動時に読み出します。手順は
+   [kiro-ide.md](kiro-ide.md#kiro_api_key-は-plist-に書かずキーチェーンから読む) にあります。キーチェーンを使えないときの
+   代わりとして plist の `EnvironmentVariables` に入れることもできますが、その plist はほかの人が読めない権限にしてください。
 
 ## /task と /chief スキルのインストール
 
