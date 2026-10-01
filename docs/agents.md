@@ -97,7 +97,7 @@ claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800
 aider = aider --yes-always --message {prompt}
 ```
 
-コマンドは `shlex` の規則で引数に分けるので、空白を含む引数は `'Edit,Write,Bash(npm test:*)'` のように引用符で囲んでください。
+`{prompt}` 以外の、自分で書く引数に空白が含まれるときは、`'Edit,Write,Bash(npm test:*)'` のように引用符で囲んでください。コマンドは `shlex` の規則で引数に分けます。
 
 `claude` を上書きするときも、組み込みと同じ `env ...` の 3 つの環境変数を付けてください。付けないと、長いテストが Bash ツールの時間の上限(既定 2 分、最大 10 分)を超えたときにバックグラウンドへ回され、`claude -p` はその終わりを待たずにレポートなしで終わります。
 
