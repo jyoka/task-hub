@@ -1,0 +1,11 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "task-hub events",
+      "description": "Adds what task-hub did since the last prompt (In review, Blocked, replan, Done) to the context. Install: mkdir -p ~/.kiro/hooks && ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json",
+      "trigger": "UserPromptSubmit",
+      "action": {"type": "command", "command": "$HOME/.local/lib/task-hub/kiro/task-events-since"}
+    }
+  ]
+}

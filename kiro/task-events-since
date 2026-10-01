@@ -1,0 +1,33 @@
+#!/bin/sh
+# Kiro IDE Prompt Submit hook: adds what task-hub did since the last prompt (In review, Blocked, replan, Done)
+# to the agent's context. Install: mkdir -p ~/.kiro/hooks &&
+#   ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
+# It always exits 0: a failing Prompt Submit hook would block the prompt. On failure it prints one note at most.
+state="$HOME/.local/state/task-hub"
+cursor_file="$state/kiro-cursor"
+task=$(command -v task 2>/dev/null) || task="$HOME/.local/lib/task-hub/bin/task"
+
+cursor=$(cat "$cursor_file" 2>/dev/null)
+case "$cursor" in
+  ''|*[!0-9]*) first=1; cursor=0 ;;  # first prompt (or a broken cursor): start from now, not from the past
+  *) first= ;;
+esac
+
+if ! out=$("$task" events --after "$cursor" --digest --only "In review,Blocked,replan,Done" 2>/dev/null); then
+  echo "task-hub: could not read events (\`$task events\` failed)"
+  exit 0
+fi
+next=$(printf '%s\n' "$out" | sed -n 's/^next: task events.* --after \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+if [ -z "$next" ]; then
+  echo "task-hub: could not read events (no \`next:\` line from \`$task events\`)"
+  exit 0
+fi
+mkdir -p "$state" 2>/dev/null && printf '%s\n' "$next" > "$cursor_file.tmp" 2>/dev/null \
+  && mv "$cursor_file.tmp" "$cursor_file" 2>/dev/null
+[ -n "$first" ] && exit 0
+events=$(printf '%s\n' "$out" | grep -v '^next: ')
+if [ -n "$events" ]; then
+  echo "task-hub: new events since your last message:"
+  printf '%s\n' "$events"
+fi
+exit 0

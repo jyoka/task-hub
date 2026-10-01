@@ -1532,10 +1532,12 @@ def cmd_events(a):
     --next waits for the next wanted events, prints them and the command that continues from there, and exits:
     for a harness that wakes its agent when a background command ends (the /chief skill uses it). The cursor is a
     line number in the append-only EVENTS file, so nothing that happens between two runs is missed.
+    --after N alone does not wait: the wanted events after line N, if any, and the `next:` line, for a hook that
+    must return at once (kiro/task-events-since).
     """
     only = {e.strip().lower() for e in (a["only"] or "").split(",") if e.strip()}
     wanted = lambda e: not only or e.get("event", "").lower() in only
-    if a["next"]:
+    if a["next"] or (a["after"] is not None and not a["follow"]):  # --follow keeps ignoring --after
         return events_next(a, wanted)
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
@@ -1584,10 +1586,11 @@ def events_next(a, wanted):
                     continue
                 if wanted(e):
                     found += event_lines(e, a["digest"])
-            if found:
+            if found or not a["next"]:  # --after alone: what is there now, even nothing
                 only = f' --only "{a["only"]}"' if a["only"] else ""
                 more = " --digest" if a["digest"] else ""
-                out(*found, f"next: task events --next --after {len(lines)}{only}{more}")
+                wait = " --next" if a["next"] else ""
+                out(*found, f"next: task events{wait} --after {len(lines)}{only}{more}")
                 return
             cursor = max(cursor, len(lines))
             time.sleep(1)
@@ -1881,8 +1884,9 @@ COMMANDS = {
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
     "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True, "digest": False},
-               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"] [--digest]  # what task-hub "
-               "did lately; --follow prints each new event as it happens, --next waits for the next ones and exits, "
+               "task events [--follow | --next [--after N] | --after N] [--only \"In review,Blocked\"] [--digest]  # what "
+               "task-hub did lately; --follow prints each new event as it happens, --next waits for the next ones and "
+               "exits, --after N alone prints those after line N without waiting, "
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),
