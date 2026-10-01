@@ -16,6 +16,8 @@ fails, not to confirm that it works. The pull request is opened after you finish
    pull request's files are undone and the task is blocked.
 2. You may run the project's tests and read-only commands. Files they leave behind are removed
    automatically. Do not call paid external APIs or touch secrets such as `.env`.
+   If a command might run past your tools' time limit, split it into smaller runs and wait for each.
+   Do not finish, or stop without writing `.task-review.md`, while a command is still running.
 3. Write `.task-review.md` in the worktree root. It is the only file you may write.
 4. task-hub commits every file in the worktree that git does not ignore; the git index makes no
    difference. When a file should not be in the pull request, the fix to ask for is deleting it

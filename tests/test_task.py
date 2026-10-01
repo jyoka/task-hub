@@ -771,6 +771,9 @@ class TaskTest(unittest.TestCase):
         call = self.agent_calls()[0]
         self.assertTrue(call["cwd"].endswith(f"worktrees/{tid}"))
         self.assertIn("Do **not** commit", call["prompt"])
+        self.assertIn("split it into smaller runs", call["prompt"])  # a tool may background a long test run
+        self.assertIn("while a command is still running", call["prompt"])
+        self.assertIn("which parts you ran", call["prompt"])
         self.assertIn("Task 1: Add hello", call["prompt"])
         self.assertIn("Branch: task/1", call["prompt"])
         self.assertIn("Say hello. MODE:ok", call["prompt"])
@@ -2097,6 +2100,7 @@ class TaskTest(unittest.TestCase):
         prompt = self.reviewer_calls()[0]["prompt"]
         self.assertIn("Say hello. MODE:ok", prompt)  # the Goal, with its acceptance criteria
         self.assertIn("+hello from mode ok", prompt)  # hello.txt is a new file
+        self.assertIn("split it into smaller runs", prompt)  # a tool may background a long test run
 
     def test_reviewer_sees_the_whole_branch_on_a_rerun(self):
         self.write_config(reviewer=True)
