@@ -24,6 +24,8 @@ from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
 KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
+KIRO_WATCH = BIN.parent.parent / "kiro" / "task-events-watch"
+KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.workflow.json"
 UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
 
 FAKE_GH = r'''#!/usr/bin/env python3
@@ -1498,6 +1500,77 @@ class TaskTest(unittest.TestCase):
         cursor.write_text("garbage\n")
         self.assertEqual(self.kiro_hook(), [])  # a broken cursor starts over from now
         self.assertEqual(cursor.read_text().strip(), "2")
+
+    def kiro_watch(self, cursor=None, task=None, stdin=None):
+        """kiro/task-events-watch as a Kiro Workflows `watch` poll runs it: the poll's JSON on stdin, one result on
+        stdout, exit 0. `task` on PATH is bin/task or the given script."""
+        bindir = self.root / "kiro-bin"
+        bindir.mkdir(exist_ok=True)
+        (bindir / "task").unlink(missing_ok=True)
+        if task:
+            (bindir / "task").write_text(task)
+            (bindir / "task").chmod(0o755)
+        else:
+            (bindir / "task").symlink_to(BIN)
+        if stdin is None:
+            stdin = json.dumps({"cursor": cursor, "config": {"pollIntervalSec": 60, "commandTimeoutSec": 30},
+                                "workspacePath": str(self.root), "additionalDirectories": []})
+        r = subprocess.run([str(KIRO_WATCH)], env={**self.env, "PATH": f"{bindir}:{self.env['PATH']}"},
+                           input=stdin, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)  # 2, 126, 127 would fail the watch node; others are idle polls
+        result = json.loads(r.stdout)  # exactly one JSON object, nothing else on stdout
+        self.assertIn(result["outcome"], ("idle", "new-activity"))
+        self.assertIn("cursor", result)  # required, even when null
+        return result, r.stderr
+
+    def test_kiro_watch_is_idle_until_wanted_events_come_then_hands_them_over(self):
+        self.add_events(("1", "Blocked", {"reason": "Old news."}))
+        self.assertEqual(self.kiro_watch(None)[0], {"outcome": "idle", "cursor": 1})  # first poll: the past is not news
+        self.assertEqual(self.kiro_watch(1)[0], {"outcome": "idle", "cursor": 1})
+        self.add_events(("2", "Ready", {}))
+        self.assertEqual(self.kiro_watch(1)[0], {"outcome": "idle", "cursor": 2})  # Ready is not wanted
+        n = self.add_events(("2", "In review", {"pr": "https://github.com/jyoka/app/pull/2",
+                                                "digest": {"verdict": "pass", "review": ["api/save.py"]}}),
+                            ("3", "Done", {}))
+        result, _ = self.kiro_watch(2)
+        self.assertEqual((result["outcome"], result["cursor"]), ("new-activity", n))
+        lines = result["payload"].splitlines()
+        self.assertEqual([line.split(" | ")[0] for line in lines if line.startswith("event:")],
+                         ["event: #2 In review", "event: #3 Done"])
+        self.assertIn("  verdict: pass", lines)
+        self.assertIn("  review: api/save.py", lines)
+        self.assertFalse(any(line.startswith("next:") for line in lines))
+        self.assertEqual(self.kiro_watch(n)[0], {"outcome": "idle", "cursor": n})  # already handed over
+
+    def test_kiro_watch_prints_a_valid_idle_result_when_task_fails(self):
+        self.add_events(("1", "Blocked", {}))
+        result, err = self.kiro_watch(0, task="#!/bin/sh\necho 'boom'\necho 'boom' >&2\nexit 1\n")
+        self.assertEqual(result, {"outcome": "idle", "cursor": 0})  # the old cursor: the event is not skipped
+        self.assertEqual(len(err.strip().splitlines()), 1)  # one note on stderr
+        self.assertNotIn("boom", err)
+        self.assertEqual(self.kiro_watch(0, task="#!/bin/sh\necho 'no next line'\n")[0],
+                         {"outcome": "idle", "cursor": 0})
+        self.assertEqual(self.kiro_watch(None, task="#!/bin/sh\nexit 1\n")[0], {"outcome": "idle", "cursor": None})
+        self.assertEqual(self.kiro_watch(0)[0]["outcome"], "new-activity")  # told once `task` works again
+        self.assertEqual(self.kiro_watch(stdin="")[0], {"outcome": "idle", "cursor": 1})  # run by hand: from now
+        self.assertEqual(self.kiro_watch("garbage")[0], {"outcome": "idle", "cursor": 1})
+
+    def test_kiro_workflow_watches_with_the_script_and_tells_chief(self):
+        recipe = json.loads(KIRO_WORKFLOW.read_text())
+        self.assertEqual(KIRO_WORKFLOW.name, f"{recipe['name']}.workflow.json")
+        self.assertLessEqual(set(recipe), {"name", "description", "inputs", "modelId", "effortLevel", "steps"})
+        loop, = recipe["steps"]
+        self.assertEqual(loop["type"], "repeat")
+        self.assertTrue({"id", "steps", "maxIterations", "onMaxIterations"} <= set(loop))
+        watch, tell = loop["steps"]
+        self.assertEqual((watch["type"], watch["handler"]), ("watch", "command"))
+        self.assertEqual(watch["config"]["command"], "$HOME/.local/lib/task-hub/kiro/task-events-watch")
+        self.assertGreaterEqual(watch["config"]["pollIntervalSec"], 10)  # Kiro's minimum
+        self.assertNotIn("args", watch["config"])  # rejected by Kiro
+        self.assertNotIn("{{", watch["config"]["command"])  # rejected by Kiro
+        self.assertEqual(tell["type"], "step")
+        self.assertIn(f"{{{{{watch['id']}.output}}}}", tell["prompt"])
+        self.assertIn("send_message", tell["prompt"])
 
     def test_events_note_each_status_change_with_the_reason(self):
         ok, stuck = self.new("ok"), self.new("stuck")

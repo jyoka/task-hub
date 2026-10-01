@@ -49,6 +49,7 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 最後に `next: task events --after <m> ...` の行を出して、**待たずに** 終わります(出来事がなくても `next:` の行は出し、
 コード 0 で終わります)。`--only` と `--digest` もそのまま使えます。Kiro IDE の Prompt Submit フック
 (`kiro/task-events-since`)はこれを使い、話しかけるたびに前回からの In review、Blocked、replan、Done を文脈に足します。
+Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを使い、`next:` の番号を Workflows のカーソルにします。
 
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
