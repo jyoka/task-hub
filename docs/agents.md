@@ -92,10 +92,12 @@ v1 のデータベースは読み取り専用で開き、ロックされてい�
 ```ini
 [agents]
 ; stricter Claude: allow only edits and test commands
-claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --allowedTools Edit,Write,Bash(npm test:*) {prompt}
+claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --allowedTools 'Edit,Write,Bash(npm test:*)' {prompt}
 ; a new agent
 aider = aider --yes-always --message {prompt}
 ```
+
+コマンドは `shlex` の規則で引数に分けるので、空白を含む引数は `'Edit,Write,Bash(npm test:*)'` のように引用符で囲んでください。
 
 `claude` を上書きするときも、組み込みと同じ `env ...` の 3 つの環境変数を付けてください。付けないと、長いテストが Bash ツールの時間の上限(既定 2 分、最大 10 分)を超えたときにバックグラウンドへ回され、`claude -p` はその終わりを待たずにレポートなしで終わります。
 
