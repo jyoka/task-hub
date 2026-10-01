@@ -135,6 +135,7 @@ for s in task chief; do ln -sfn ~/.local/lib/task-hub/skills/$s ~/.kiro/skills/$
 
 - `/task` と `/chief` は、ユーザーが明示的に頼んだとき(`/task`、`/chief` と打った、またはタスクにしてと言った)だけ使う
 - タスクを自分から登録(`task new`)、開始(`task start`、引数なしの `task`)、承認しない
+- `/chief` の中では、提案への「うん」か、対象を名指しした明示的な依頼(開始・`task done`・マージ)にだけ従う
 - フックが足した出来事は知らせるためのもので、何かを始める合図ではない
 
 グローバルの steering の場所 `~/.kiro/steering/` にリンクします(IDE と CLI の両方で、すべてのワークスペースに効きます):
@@ -283,7 +284,9 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 4. **確かめる**: 手元で動かして確かめたいタスクは、`task open <番号>` で worktree を Kiro IDE で開きます。
    Kiro のチャットで「`task open <番号>` を実行して」と頼むか、Kiro の中のターミナルで実行します。
    Blocked のタスクは、`/chief` に答えを渡して頼むか、Issue の Goal に答えを書き足してカードを Ready に戻します。
-5. **マージ**: GitHub で PR を読み、マージします。Issue が閉じ、カードは Done になります。マージは人だけが行います。
+5. **マージ**: GitHub で PR を読み、マージします。Issue が閉じ、カードは Done になります。マージするかを決めるのは
+   人だけです。IDE から離れずに済ませたいときは、`/chief` に「PR #12 をマージして」「#49 を done にして」と
+   名指しで頼めば実行します(頼まれずに自分からマージすることはありません)。
 
 ## 8. 人が実機で確かめること
 

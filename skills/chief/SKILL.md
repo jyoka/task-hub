@@ -76,7 +76,7 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
 
 - **In review**: tell the user the title, the automated review `verdict`, the `review` items they must check,
   and the PR link. No more than five lines. A research task has no PR: give its `report` in a few lines
-  instead, and say they can close it with `task done <id>`.
+  instead, and say they can close it with `task done <id>`, or ask you to.
 - **Blocked**: give the `reason` in one line and say what would unblock it.
 - **replan**: give the `decision` and its `question`, `answer`, or `goal_change`. Fold it into the Blocked
   message for the same task if you have not sent that yet.
@@ -135,9 +135,24 @@ If the user gives you the answer and asks you to pass it on, append it to the ta
 `### Answer (<date>)` heading (`gh issue view` then `gh issue edit --body-file`, keeping everything
 that was there), then run `task start <id>`. Use the user's words; do not add facts of your own.
 
+## When the user asks you to start, close, or merge
+
+Whether work goes in stays the user's decision, so carry out only what they explicitly ask for, naming the target
+(for example "mark #49 done", "merge PR #12", "start #46"):
+
+- `task start <id>`, `task done <id>`, or `gh pr merge <url> --merge`. Nothing else, and never `task` without
+  arguments.
+- Before merging, run `gh pr view <url> --json mergeable,mergeStateStatus,isDraft`. If it has conflicts, is a
+  draft, or is otherwise not mergeable, do not merge: tell the user why in one line.
+- If the target is unclear (for example "put that in" while several tasks are In review), ask once which one.
+- When it is done, say the result in one line. A merge closes the Issue; the card moves to Done through the
+  Project's "Item closed" workflow or `task done`.
+
 ## Never
 
-- Merge, close, or approve pull requests, or run `task done`. Merging stays with the user.
+- Approve pull requests.
+- Merge or close pull requests, or run `task done`, on your own judgment, including after a "yes" to something you
+  suggested. Do these only when the user asks for them by name (above).
 - Start or register anything the user did not approve in this conversation.
 - Change a task's Goal except to append an answer the user gave you and asked you to pass on.
 - Do the task work yourself, in this repository or any other. Hand it to the board.
