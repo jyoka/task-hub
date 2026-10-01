@@ -282,7 +282,7 @@ def digest_lines(d, skip=()):
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {},
-                 "notify": {"events": NOTIFY_EVENTS}})
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     c.read(CONFIG)
     return c
 
@@ -1632,6 +1632,29 @@ def cmd_log(a):
         *([f"help: Run `task log {t['id']} --full` for all lines"] if len(lines) > len(shown) else []))
 
 
+def cmd_open(a):
+    """Open this task's worktree in the IDE named by [ide] open, or, if none is set, print its path."""
+    t = {"id": a["id"], **load_run(a["id"])}
+    wt = t.get("worktree")
+    if not wt:
+        fail(f"task {t['id']} has no worktree on this machine (it has not run here)",
+             f"run it here with `task start {t['id']}`, or open it on the machine that ran it")
+    if not Path(wt).exists():
+        fail(f"the worktree for task {t['id']} is gone: {home(wt)}",
+             "it was cleaned up after the task finished; re-run the task to recreate it")
+    template = config()["ide"].get("open", "").strip()
+    if not template:
+        out(home(wt), f"help: set  [ide]  open = code {{path}}  in {home(CONFIG)} to open it in your IDE")
+        return
+    cmd = [wt if part == "{path}" else part for part in shlex.split(template)]
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError as e:
+        fail(f"could not run [ide] open ({cmd[0]}): {e}", f"check  [ide]  open  in {home(CONFIG)}")
+    out(f"opening {home(wt)} with: {template}")
+
+
 def cmd_stats(_):
     """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions,
     and what each agent launch used."""
@@ -1823,6 +1846,8 @@ COMMANDS = {
     "show": (cmd_show, ["id"], {"full": False, "digest": False},
              "task show <id> [--full | --digest]  # the Issue and its latest report; --digest: only what to decide from"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
+    "open": (cmd_open, ["id"], {},
+             "task open <id>  # open the task's worktree in your IDE ([ide] open), or print its path"),
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True,
                           "research": False, "blocked-by": True},
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
