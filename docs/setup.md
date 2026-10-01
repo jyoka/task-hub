@@ -174,7 +174,18 @@ done
   ln -sfn ~/.local/lib/task-hub/pi/task-events.ts ~/.pi/agent/extensions/task-events.ts
   ```
 
-- **Codex、Kiro**: 確かめていません。起こせない場合、`/chief` は返答のたびに `task events` で新しい出来事を確かめます
+- **Kiro IDE**: Workflows(IDE 1.2 から。設定の `kiroAgent.workflows.enabled` で有効にします)の `watch` を使います。
+  ワークフローの定義 `kiro/workflows/task-hub-events.workflow.json` を入れると、`/chief` が始めるときにそれを動かし、
+  `kiro/task-events-watch` が 60 秒ごとに `task events --after` で新しい出来事を確かめます(待っている間はモデルを
+  使わず、クレジットを使いません)。出来事があれば、次のステップが要点を `/chief` のチャットに届けます。
+  ワークフローが動いていなければ、`/chief` は今までどおり返答のたびに確かめます。実機ではまだ確かめていません。
+  詳しい手順は Kiro IDE 版のセットアップ手順で書きます。
+
+  ```
+  mkdir -p ~/.kiro/workflows && ln -sfn ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
+  ```
+
+- **Codex**: 確かめていません。起こせない場合、`/chief` は返答のたびに `task events` で新しい出来事を確かめます
   (あなたが話しかけるまで気づきません)。
 
 `/chief` は総指揮のエージェントです。作業している herdr の workspace のペインで、エージェントを起動して `/chief` と
