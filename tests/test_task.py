@@ -144,14 +144,30 @@ if out is not None:
     print(json.dumps(out))
 '''
 
+RUN_STAGE = r'''
+def run_stage(prompt):  # the stage task-hub noted in the run record before it launched this process
+    import json, re
+    from pathlib import Path
+    f = Path.home() / ".local/state/task-hub/runs" / (re.search(r"Task (\d+):", prompt)[1] + ".json")
+    return json.loads(f.read_text()).get("stage") if f.exists() else None
+'''
+
 FAKE_AGENT = r'''#!/usr/bin/env python3
 import os, re, subprocess, sys
 from pathlib import Path
 prompt = sys.argv[-1]
+''' + RUN_STAGE + r'''
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt)}) + "\n")
 if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
     kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
+    if kind == "slow":  # keeps running, with the card already Blocked, until the test creates the release file
+        import time
+        release = Path(os.environ["TASK_TEST_AGENT_CALLS"] + ".release")
+        end = time.time() + 30
+        while not release.exists() and time.time() < end:
+            time.sleep(0.1)
+        kind = "human"
     out = {"answered": "## Decision\n\nanswered\n\n## Answer\n\nThe app is called app, see the README.\n\n"
                        "## Evidence\n\n- README.md:1: `app`\n",
            "invented": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
@@ -240,8 +256,9 @@ FAKE_REVIEWER = r'''#!/usr/bin/env python3
 import os, re, sys
 from pathlib import Path
 prompt = sys.argv[-1]
+''' + RUN_STAGE + r'''
 with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt)}) + "\n")
 if "USAGE" in prompt:
     import subprocess
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
@@ -1020,6 +1037,57 @@ class TaskTest(unittest.TestCase):
         self.assertEqual((wt / "README.md").read_text(), "app\n")
         status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True).stdout
         self.assertNotIn("README.md", status)
+
+    def test_ready_while_the_replanner_runs_waits_for_it(self):
+        self.write_config(replanner="agent")
+        tid = self.new("blocked REPLAN=slow")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: len(self.agent_calls()) == 2)  # the replanner has started; its card is Blocked
+        self.move(tid, "Ready")  # the human re-runs it before the replanner is done
+        out = self.task()
+        self.assertNotIn("started[", out)
+        self.assertIn("still running (replanning)", out)  # in the waiting table
+        self.assertIn(f'"{tid}",Add hello,Ready › replanning,jyoka/app', self.task("list"))
+        self.assertIn("waits_for", self.task("list"))
+        self.task("done", tid, code=1)  # nor closed under the run's feet
+        time.sleep(1)
+        self.assertEqual(len(self.work_prompts()), 1)  # no second run in the same worktree
+        Path(f"{self.calls}.release").write_text("")
+        self.wait_for(lambda: self.replans(tid))
+        self.wait_for(lambda: "still running" not in self.task("list"))
+        self.assertIn("started[1]", self.task())  # once the replanner is done, the re-run starts
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.work_prompts()), 2)
+
+    def test_each_stage_is_in_the_run_record_and_shown_while_the_run_goes(self):
+        seen = self.root / "stage-at-setup.json"
+        self.write_config(reviewer=True, replanner="agent",
+                          extra=f"\n[setup]\njyoka/app = cp {self.run_file(1)} {seen}\n")
+        tid = self.new("reviewfix")  # reviewed, sent back once, reviewed again
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(json.loads(seen.read_text())["stage"], "setup")
+        self.assertEqual([c["stage"] for c in self.agent_calls()], ["agent", "retry"])
+        self.assertEqual([c["stage"] for c in self.reviewer_calls()], ["review", "review"])
+        self.wait_for(lambda: self.run_state(tid)["stage"] == "")  # the run has ended: nothing to show
+        self.assertIn(f'"{tid}",Add hello,In review,jyoka/app', self.task("list"))
+        stuck = self.new("blocked REPLAN=human")
+        self.task("start", stuck)
+        self.wait_for(lambda: self.replans(stuck))
+        self.assertEqual(self.agent_calls()[-1]["stage"], "replanning")
+        slow = self.new("slow")
+        self.task("start", slow)
+        self.wait_for(lambda: "waiting" in self.task("log", slow))
+        self.assertEqual(self.run_state(slow)["stage"], "agent")
+        self.assertIn(f'"{slow}",Add hello,In progress › agent,jyoka/app', self.task("list"))
+        self.assertIn("status: In progress › agent", self.task("show", slow))
+        os.kill(int(self.run_state(slow)["pid"]), signal.SIGINT)
+        self.assertEqual(self.wait(slow), "Blocked")
+        self.wait_for(lambda: f'"{slow}",Add hello,Blocked,jyoka/app' in self.task("list"))  # once the run is gone
+        events = (self.root / ".local/state/task-hub/events.jsonl").read_text()
+        self.assertEqual({json.loads(line)["event"] for line in events.splitlines()},
+                         {"Backlog", "Ready", "In progress", "In review", "Blocked", "replan"})  # none for a stage
 
     def test_no_replanner_for_blocks_task_hub_gave(self):
         self.write_config(replanner="agent")

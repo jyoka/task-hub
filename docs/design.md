@@ -168,6 +168,49 @@ stateDiagram-v2
     Blocked --> Done: task done
 ```
 
+### In progress の段階と、生きている実行のガード
+
+In progress の中には段階があります(0.6)。ステートチャートの階層(状態の中の状態)の考え方で、今どこにいるかを
+実行の記録(`~/.local/state/task-hub/runs/<番号>.json` の `stage`)に書きます。GitHub には書かず、段階の変化は
+`events.jsonl` にも書きません(`/chief` を起こす回数が増えて費用が上がるため)。`task list` と `task show` は、
+実行がまだ生きているときだけ `In progress › review` のように出します。実行が終わると `stage` は空に戻ります。
+
+| 段階 | 中身 | 書くところ |
+|---|---|---|
+| `preparing` | worktree、`[env]`、プロンプト、herdr のタブ、実行の開始を確かめる | `launch` |
+| `setup` | `[setup]`(設定があるときだけ) | `run_setup` |
+| `agent` | 実装エージェント | `cmd_run` |
+| `review` | reviewer(設定があるときだけ。差し戻しのあとにもう一度) | `run_review` |
+| `retry` | 差し戻しを受けた実装エージェント(1 回まで) | `review_loop` |
+| `finishing` | commit、push、PR、Issue へのコメント、カードを動かす | `cmd_run` |
+| `replanning` | エージェント自身の Blocked を replanner が仕分ける(カードはもう Blocked) | `run_replan` |
+
+```mermaid
+stateDiagram-v2
+    state "In progress" as InProgress {
+        [*] --> preparing
+        preparing --> setup: setup の設定あり
+        preparing --> agent
+        setup --> agent
+        agent --> review: reviewer あり
+        agent --> finishing
+        review --> retry: needs changes(1 回目)
+        retry --> review
+        review --> finishing
+    }
+    finishing --> replanning: エージェント自身の Blocked
+    note right of replanning: Status は Blocked、プロセスは生きている
+```
+
+Status と実行中のプロセスは、2 つの期間でずれます。`launch` は herdr で実行が始まったことを確かめる前に
+In progress にし、始まらなければ Blocked にしますが、ペインではあとから実行が始まることがあります。replanner は
+`finish` がカードを Blocked にした **あと** に走ります。どちらの間にも人が Ready に戻せるので、0.6.0 では同じ
+worktree で 2 つ目の実行が始まりえました(replanner の場合はテストで再現)。そこで、プロセスが生きている
+(`alive`: 記録した pid が `task _run` のまま、または pid を書く前で開始から 2 分以内)タスクは、Status が何であっても
+開始しません。`task list` と `task` の `waits_for` に `its last run, still running (replanning)` と出し、Ready の
+カードはプロセスが終わったあとの確認で始まります。`task done` も In progress のときと同じく断ります。
+判定はボードを読むたびに `ps` を呼ぶだけで、GitHub の呼び出しは増えません。
+
 ## CLI の形
 
 `bin/task` はエージェント向け CLI の AXI の規約に従います。コンパクトな TOON 出力、現在の状態を表示する
@@ -194,7 +237,8 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
 「推測」はまだ確かめていないものです。
 
 - herdr の起動待ちがタイムアウトしても、ペインではあとから実行が始まることがあります(推測)。カードは Blocked
-  なのに実行が進み、その間に再実行すると 2 つの実行が同じ worktree を使います。
+  なのに実行が進みます。その間の再実行は、生きている実行のガード(「In progress の段階と、生きている実行の
+  ガード」)で始まらなくなりました(0.6)。
 - 起動の失敗を GitHub に書く途中でさらに GitHub エラーが起きると、その回の確認の残り(ほかの Ready のカードの開始など)が
   止まります(確認済み)。次の回には再開します。
 - 小さなクラッシュ経路(確認済み): エージェント起動の直前に Ctrl-C するとトレースバックが出る。`gh` が JSON でない
