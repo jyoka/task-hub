@@ -35,6 +35,11 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 `/chief` は張り直さずに人に 1 行で知らせます。Monitor のないハーネスでは `--next --digest` を裏で動かし、終わって
 起こされるたびに `next:` のコマンドで動かし直します。Pi では拡張機能が同じ `--next --digest` のループを回します。
 
+待てない呼び出し側には、`--next` を付けない `task events --after <n>` があります。`<n>` 行目より後の出来事を出し、
+最後に `next: task events --after <m> ...` の行を出して、**待たずに** 終わります(出来事がなくても `next:` の行は出し、
+コード 0 で終わります)。`--only` と `--digest` もそのまま使えます。Kiro IDE の Prompt Submit フック
+(`kiro/task-events-since`)はこれを使い、話しかけるたびに前回からの In review、Blocked、replan、Done を文脈に足します。
+
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
 {"time": "2026-09-26T14:20:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない", "digest": {"reason": "前提の PR #26 がまだマージされていない"}}
