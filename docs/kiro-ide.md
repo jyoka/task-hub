@@ -185,12 +185,20 @@ mkdir -p ~/.kiro/hooks && ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-even
    ```
 
    設定に Workflows がなければ、まだそのアカウントでは使えません(フックと通知だけで使えます)。
-2. ワークフローの定義をユーザーの場所 `~/.kiro/workflows/` にリンクします:
+2. ワークフローの定義をユーザーの場所 `~/.kiro/workflows/` に **コピー** します(リンクにはしません):
 
    ```
-   mkdir -p ~/.kiro/workflows && ln -sfn ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
+   mkdir -p ~/.kiro/workflows && rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
    ```
 
+   Kiro は、ワークフローのファイルが許可された場所(`~/.kiro/workflows/` など)の中にあるかを、リンクの先の実体の
+   パスでも判定します。シンボリックリンクだと実体が `~/.local/lib/task-hub/kiro/workflows/` にあるので、Recipes に
+   出ず、`run_workflow` も拒否されます。コピーしたあとは、Kiro のコマンド「Refresh Recipes」を実行するか、
+   新しいチャットを開くと読み直されます。先に `rm -f` するのは、前の手順で作ったリンクが残っていると、`cp` が
+   リンク先と同じファイルだとして何もせずに失敗するためです。
+
+   **task-hub を更新したら**(`git -C ~/.local/lib/task-hub pull --ff-only`)、上の同じコマンドでコピーし直し、
+   「Refresh Recipes」か新しいチャットで読み直させます。コピーなので、更新しても自動では変わりません。
 3. `/chief` 専用のチャットを開いて `/chief` と打ちます。`/chief` は始めるときに `run_workflow` で
    `task-hub-events` を 1 回動かします。
 
@@ -293,18 +301,33 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 エージェントは IDE の画面を動かせないので、次は人が確かめます([prd-kiro-ide.md](prd-kiro-ide.md) の 7 章)。
 確かめた日付と IDE の版を書き添えておくと、次に版が上がったときに役立ちます。
 
+これまでに確かめた版: 2026-10-01、Kiro IDE 1.2.4、kiro-cli 2.2.0(以下「2026-10-01 の試験」)。
+
 - [ ] **`/task` が候補に出て動くか**: Kiro IDE のチャットで `/` を打ち、`task` と `chief` が候補に出るか。
   使い捨てのリポジトリ(`<you>/task-sandbox`)について話してから `/task` を呼び、`task new` まで動いて Backlog に
   カードができるか
+- [x] **steering がリンクで読み込まれるか**: 2026-10-01 の試験で、`~/.kiro/steering/task-hub.md` へのシンボリック
+  リンクが Kiro のセッションに読み込まれていた(リンクで動く)
 - [ ] **頼んでいないのに登録しないか**: `/task` と打たずに「この修正、あとでやりたい」のように話したとき、
   エージェントが `task new` や `task start` を実行しようとしないか(steering の約束が効いているか)
 - [ ] **フックの出力がチャットに入るか**: 何か 1 つ話しかけたあと、カードを In review か Blocked にする出来事を
   起こし(たとえば使い捨てのタスクを実行する)、もう一度話しかけたときに、エージェントがその出来事に触れるか。
-  Hooks の一覧に `task-hub events` が出ているか
-- [ ] **Workflows で出来事が届くか**: `/chief` を開き、`task-hub-events` のワークフローが動いていることを確かめて
-  から、話しかけずに出来事を起こし、`/chief` のチャットに知らせが届くか(待っている間にクレジットが減らないか)
+  Hooks の一覧に `task-hub events` が出ているか。2026-10-01 の試験では未確認(`~/.kiro/hooks/task-hub-events.json`
+  はシンボリックリンクのまま。リンクで Hooks の一覧に出るかも、まだ分かっていない)
+- [x] **Workflows で出来事が届くか**: 2026-10-01 の試験で確認。
+  - 設定 `kiroAgent.workflows.enabled`(IDE 1.2 から)は、ユーザーが手で有効にした
+  - ワークフローの定義を **シンボリックリンク** で `~/.kiro/workflows/` に置くと、Recipes に出ず、`/chief` の
+    `run_workflow` も「許可された場所なのに拒否される」で失敗した(Kiro が実体のパスで場所を判定するため)
+  - **コピー** に替えると、Recipes に出て、`run_workflow` で起動でき、`task done` の Done の出来事が 24 秒後に
+    `/chief` のチャットに届いた
+- [ ] **ワークフローが待っている間にクレジットが減らないか**: `/chief` でワークフローを動かしたまま、出来事のない
+  時間を置いて、クレジットの残りが変わらないか
+- [x] **kiro-cli での実行**: 2026-10-01 の試験で確認。`[check] kiro = kiro-cli whoami` は IAM Identity Center での
+  ログインで終了コード 0。kiro-cli での実行(dip-ka-jo/tasks#49)は 68 秒で In review になり、0.65 クレジットが
+  `metrics.jsonl` に入った
 - [ ] **`kiro -n` で新しいウィンドウが開くか**: `kiro -n ~/.local/share/task-hub/worktrees/<番号>` で、今のウィンドウを
-  置き換えずに新しいウィンドウで開くか。開くなら `[ide] open = kiro -n {path}` にして、`task open <番号>` で確かめる
+  置き換えずに新しいウィンドウで開くか。開くなら `[ide] open = kiro -n {path}` にして、`task open <番号>` で確かめる。
+  2026-10-01 の試験では、`kiro -n` も `task open` も未確認
 - [ ] **launchd からの無人実行が続くか**: IDE を閉じ、ターミナルも開かずに、スマホからカードを Ready に移して
   In review まで進むか。翌日(ログインし直したあと)も同じように動くか。`kiro-cli whoami` が API キーだけで
   0 になるか、キーチェーンの読み出しで確認のダイアログが出ないか(`~/.local/state/task-hub/watch.err.log` と

@@ -242,7 +242,8 @@ docs/                  セットアップ、エージェント、設計、形式
 ```
 
 `task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。PR をマージしたら
-`git -C ~/.local/lib/task-hub pull --ff-only` で更新します。
+`git -C ~/.local/lib/task-hub pull --ff-only` で更新します(Kiro IDE の Workflows を使っているなら、ワークフローの
+定義もコピーし直します。[docs/setup.md](docs/setup.md#インストール))。
 
 ## ドキュメント
 
