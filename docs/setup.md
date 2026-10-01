@@ -49,10 +49,11 @@ task --version
 git -C ~/.local/lib/task-hub pull --ff-only
 ```
 
-Kiro IDE の Workflows を使っているなら、pull のあとにワークフローの定義をコピーし直します(リンクではなくコピーで
-入れているため、pull だけでは変わりません。[kiro-ide.md](kiro-ide.md#話しかけていないとき-workflows-の-watch)):
+Kiro IDE を使っているなら、pull のあとにフックとワークフローの定義をコピーし直します(リンクではなくコピーで
+入れているため、pull だけでは変わりません。[kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る)):
 
 ```
+rm -f ~/.kiro/hooks/task-hub-events.json && cp ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
 rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
 ```
 
