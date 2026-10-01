@@ -13,6 +13,10 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | `kiro/hooks/task-hub-events.json` と `kiro/task-events-since` | 話しかけたときに、前回からの出来事をチャットの文脈に足すフック |
 | `kiro/workflows/task-hub-events.workflow.json` と `kiro/task-events-watch` | 話しかけていないときに出来事を待ち、`/chief` のチャットに届けるワークフロー |
 
+`sh kiro/install.sh` は、kiro-cli と 3〜5 章(スキル、steering、フックとワークフロー、Workflows の設定)を入れます。
+`--with-launchd` を付けると 6 章の plist も置き、`--start-launchd` で常駐を始めます。kiro-cli が無いときは、公式の DMG を
+`~/Applications` に展開して入れます(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます)。
+
 実機ではまだ確かめていないところがあります。入れ終わったら、最後の「人が実機で確かめること」を順に試してください。
 
 ## 1. 前提
@@ -160,8 +164,11 @@ PATH になければ `~/.local/lib/task-hub/bin/task` を使います。
 ### 話しかけたとき: Prompt Submit のフック
 
 ```
-mkdir -p ~/.kiro/hooks && ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
+mkdir -p ~/.kiro/hooks && rm -f ~/.kiro/hooks/task-hub-events.json && cp ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
 ```
+
+ワークフローと同じく、リンクではなく **コピー** します(Kiro はフックのシンボリックリンクを読みません。下の「Workflows の watch」の 2)。
+task-hub を更新したら、同じコマンドでコピーし直します(`sh kiro/install.sh` を実行し直しても同じです)。
 
 - トリガーは `UserPromptSubmit` です。チャットで送信するたびに `kiro/task-events-since` が動き(LLM は使いません)、
   前回からの出来事を `task-hub: new events since your last message:` に続けて文脈に足します。
@@ -313,7 +320,7 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 - [ ] **フックの出力がチャットに入るか**: 何か 1 つ話しかけたあと、カードを In review か Blocked にする出来事を
   起こし(たとえば使い捨てのタスクを実行する)、もう一度話しかけたときに、エージェントがその出来事に触れるか。
   Hooks の一覧に `task-hub events` が出ているか。2026-10-01 の試験では未確認(`~/.kiro/hooks/task-hub-events.json`
-  はシンボリックリンクのまま。リンクで Hooks の一覧に出るかも、まだ分かっていない)
+  はシンボリックリンクのままだった。2026-10-02 に、Kiro IDE 1.2.4 はフックのリンクを読まないと分かったので、コピーで入れる)
 - [x] **Workflows で出来事が届くか**: 2026-10-01 の試験で確認。
   - 設定 `kiroAgent.workflows.enabled`(IDE 1.2 から)は、ユーザーが手で有効にした
   - ワークフローの定義を **シンボリックリンク** で `~/.kiro/workflows/` に置くと、Recipes に出ず、`/chief` の
