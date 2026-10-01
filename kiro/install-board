@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""kiro/install-board: stages 7 (board) and 8 (config.ini) of kiro/install.sh (docs/prd-kiro-installer.md, section 5).
+
+  install-board board <label> <GitHub login> <work folder>
+  install-board config <label> <work folder>
+
+`board` uses the board config.ini names, if any. Otherwise it finds or makes the private repo <login>/tasks and the
+Project titled "task-hub", and makes it what docs/setup.md asks for: the Status options in task-hub's order, the
+text fields, the board view, and no workflow that sets the Status besides "Item closed" (task-hub sets it).
+A board config.ini names is the user's: options and fields are only added (the cards keep their values), and what
+is not as docs/setup.md asks is said, not changed. `config` adds what config.ini lacks, then runs `task list`.
+The board and config.ini are found from the GitHub API and the files each time, so running it again is safe.
+
+Prints the stage's lines as install.sh does. Exit status: 0 = nothing changed, 3 = changed something, 1 = stopped
+(the last line says what to do next). What is left to do by hand goes to <work folder>/todo.
+"""
+import configparser
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+TITLE = "task-hub"  # of the Project it makes
+COLORS = {"backlog": "GRAY", "ready": "BLUE", "in progress": "YELLOW", "in review": "ORANGE",
+          "wait for merge": "PINK", "blocked": "RED", "done": "PURPLE"}
+ITEM_CLOSED = "Item closed"  # sets Done when an Issue is closed: the only workflow that should be on
+# A new Project has these on too (2026-10-02): they set the Status, which then undoes task-hub's moves
+STATUS_WORKFLOWS = ["Item added to project", "Pull request linked to issue", "Pull request merged"]
+STATE_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { url items { totalCount }
+  fields(first: 50) { nodes { ... on ProjectV2FieldCommon { id name dataType }
+    ... on ProjectV2SingleSelectField { options { id name color description } } } }
+  workflows(first: 50) { nodes { id name enabled } }
+  repositories(first: 50) { nodes { nameWithOwner } }
+  views(first: 50) { nodes { layout } } } } }"""
+# replaces all the options: one with an id keeps it, so the cards that have it keep their Status (tried 2026-10-02)
+SET_OPTIONS = """mutation($field: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
+  updateProjectV2Field(input: {fieldId: $field, singleSelectOptions: $options}) { clientMutationId } }"""
+DELETE_WORKFLOW = """mutation($id: ID!) { deleteProjectV2Workflow(input: {workflowId: $id}) { deletedWorkflowId } }"""
+CONFIG_HEADER = "; task-hub の設定。kiro/install.sh が作りました(書き方は docs/setup.md)\n"
+
+
+class Stop(Exception):
+    """Stops the stage: what went wrong, and the one thing to do next."""
+
+
+class GhError(Exception):
+    pass
+
+
+def load_task():
+    """bin/task of this checkout, as a module: the board has to be what it checks."""
+    sys.dont_write_bytecode = True  # no __pycache__ in the checkout
+    loader = importlib.machinery.SourceFileLoader("task_hub_bin",
+                                                  str(Path(__file__).resolve().parent.parent / "bin" / "task"))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def tilde(p):
+    p, home = str(p), str(Path.home())
+    return "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
+
+
+def gh(*args, stdin=None):
+    r = subprocess.run(["gh", *map(str, args)], input=stdin, capture_output=True, text=True)
+    if r.returncode != 0:
+        last = ((r.stderr or r.stdout).strip().splitlines() or [f"exit {r.returncode}"])[-1]
+        raise GhError(f"gh {' '.join(map(str, args[:2]))}: {last}")
+    return r.stdout
+
+
+def gh_json(*args):
+    return json.loads(gh(*args))
+
+
+def graphql(query, **variables):
+    return json.loads(gh("api", "graphql", "--input", "-",
+                         stdin=json.dumps({"query": query, "variables": variables})))["data"]
+
+
+def read_config(path):
+    c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)  # as bin/task reads it
+    try:
+        c.read(path, encoding="utf-8")
+    except (configparser.Error, UnicodeDecodeError) as e:
+        raise Stop(f"{tilde(path)} を読めません({str(e).splitlines()[0]})", "そのファイルを直してから、もう一度実行してください")
+    return c
+
+
+# ---------- stage 7: the board ----------
+
+def board(label, login, work):
+    task = load_task()
+    c = read_config(task.CONFIG)
+    project, issues = (c.get("board", k, fallback="").strip() for k in ("project", "issues"))
+    made = []
+    if project or issues:
+        if not (re.fullmatch(r"[\w.-]+/\d+", project) and re.fullmatch(r"[\w.-]+/[\w.-]+", issues)):
+            raise Stop(f"{tilde(task.CONFIG)} の [board] が正しくありません(project = {project}、issues = {issues})",
+                       "[board] の project(<owner>/<番号>)と issues(<owner>/<リポジトリ>)を直すか消してから、"
+                       "もう一度実行してください")
+        owner, number = project.split("/")
+        ours = False
+    else:
+        owner, issues, ours = login, f"{login}/tasks", True
+        try:
+            gh("repo", "view", issues, "--json", "name")
+        except GhError:
+            gh("repo", "create", issues, "--private", "--description", "task-hub のタスク(kiro/install.sh が作りました)")
+            made.append(f"private の {issues}")
+        found = [p for p in gh_json("project", "list", "--owner", owner, "--format", "json", "--limit", "200")["projects"]
+                 if p.get("title") == TITLE]
+        if found:
+            number = found[0]["number"]
+        else:
+            number = gh_json("project", "create", "--owner", owner, "--title", TITLE, "--format", "json")["number"]
+            made.append(f"Project {owner}/{number}")
+    project_id = gh_json("project", "view", number, "--owner", owner, "--format", "json")["id"]
+    node = graphql(STATE_QUERY, id=project_id)["node"]
+    url = node["url"]
+    fields = {f["name"].lower(): f for f in node["fields"]["nodes"] if f}
+
+    # what cannot be added to is checked before anything is changed
+    status = fields.get("status")
+    if not status or status.get("dataType") != "SINGLE_SELECT":
+        raise Stop(f"Project {owner}/{number} に Status 欄(単一選択)がありません",
+                   f"Project の設定({url}/settings)で Status 欄を作ってから、もう一度実行してください")
+    for name in task.TEXT_FIELDS:
+        f = fields.get(name.lower())
+        if f and f.get("dataType") != "TEXT":
+            raise Stop(f"Project {owner}/{number} の「{f['name']}」欄がテキスト欄ではありません({f.get('dataType')})",
+                       f"Project の設定({url}/settings)でその欄の名前を変えるか消してから、もう一度実行してください")
+
+    changes = []
+    have = status.get("options") or []
+    option = lambda o: {"id": o["id"], "name": o["name"], "color": o["color"], "description": o.get("description") or ""}
+    new_option = lambda name: {"name": name, "color": COLORS[name.lower()], "description": ""}
+    if ours and node["items"]["totalCount"] == 0:  # a new board: exactly task-hub's columns, in its order
+        by_name = {o["name"].lower(): o for o in have}
+        # one of the same name keeps its id: Done keeps the cards "Item closed" moves there
+        options = [{**option(by_name[n.lower()]), "name": n} if n.lower() in by_name else new_option(n)
+                   for n in task.StatusLifecycle.all]
+        if [o["name"] for o in have] != [o["name"] for o in options]:
+            graphql(SET_OPTIONS, field=status["id"], options=options)
+            changes.append("Status の選択肢")
+    else:  # cards may have any of the options: keep them all, add the missing ones
+        names = {o["name"].lower() for o in have}
+        missing = [n for n in (task.StatusLifecycle.all if ours else task.StatusLifecycle.required())
+                   if n.lower() not in names]
+        if missing:
+            graphql(SET_OPTIONS, field=status["id"], options=[*map(option, have), *map(new_option, missing)])
+            changes.append("Status の選択肢 " + "・".join(missing))
+    missing = [n for n in task.TEXT_FIELDS if n.lower() not in fields]
+    for name in missing:
+        gh("project", "field-create", number, "--owner", owner, "--name", name, "--data-type", "TEXT")
+    if missing:
+        changes.append("テキスト欄 " + "・".join(missing))
+
+    flows = {w["name"]: w for w in node["workflows"]["nodes"] if w}
+    in_the_way = [w for name, w in flows.items() if name in STATUS_WORKFLOWS and w.get("enabled")]
+    if ours:
+        repo = issues.split("/")[1]
+        if issues.lower() not in (r["nameWithOwner"].lower() for r in node["repositories"]["nodes"] if r):
+            gh("project", "link", number, "--owner", owner, "--repo", repo)
+            changes.append(f"{issues} とのリンク")
+        for w in in_the_way:  # there is no API to turn a workflow off; a deleted one is off
+            graphql(DELETE_WORKFLOW, id=w["id"])
+        if in_the_way:
+            changes.append(f"Status を変えるワークフロー {len(in_the_way)} つの削除")
+            in_the_way = []
+        if not any(v and v.get("layout") == "BOARD_LAYOUT" for v in node["views"]["nodes"]):
+            try:  # only for people to look at (task-hub does not need it); a new board view groups by Status
+                gh("api", "-X", "POST", f"/users/{owner}/projectsV2/{number}/views", "-f", "name=Board",
+                   "-f", "layout=board")
+                changes.append("ボード表示")
+            except GhError:
+                pass
+    by_hand = ([f"「{ITEM_CLOSED}」を有効に"] if not flows.get(ITEM_CLOSED, {}).get("enabled") else []) \
+        + (["「" + "」「".join(w["name"] for w in in_the_way) + "」を無効に"] if in_the_way else [])
+
+    (Path(work) / "board").write_text(json.dumps({"project": f"{owner}/{number}", "issues": issues}))
+    detail = f"{url}、{issues}"
+    if made or changes:
+        print(f"{label}: {'作りました' if made else '足しました'}({detail}: {'、'.join(made + changes)})")
+    else:
+        print(f"{label}: 済み({detail})")
+    if by_hand:
+        todo = f"{url}/workflows を開き、{'、'.join(by_hand)}してください(task-hub が動かす Status を変えないため)"
+        print(f"{label}: 画面での操作が残っています。{todo}")
+        (Path(work) / "todo").write_text(todo)
+    return bool(made or changes)
+
+
+# ---------- stage 8: config.ini ----------
+
+def section_of(line):
+    """The section a line starts, as configparser reads it, or None. An indented line continues a value."""
+    m = re.match(r"\[(?P<header>.+)\]", line.rstrip()) if line[:1] not in (" ", "\t") else None
+    return m.group("header") if m else None
+
+
+def add_options(text, missing):
+    """text with each (section, key, value) added at the end of its section (a new one at the end of the file)."""
+    lines = text.splitlines()
+    for section in dict.fromkeys(s for s, _, _ in missing):
+        new = [f"{k} = {v}" for s, k, v in missing if s == section]
+        start = next((i for i, line in enumerate(lines) if section_of(line) == section), None)
+        if start is None:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines += ["", f"[{section}]", *new]
+            continue
+        end = next((i for i in range(start + 1, len(lines)) if section_of(lines[i]) is not None), len(lines))
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
+        lines[end:end] = new
+    return "\n".join(lines) + "\n"
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def config(label, work):
+    task = load_task()
+    b = json.loads((Path(work) / "board").read_text())
+    want = [("board", "project", b["project"]), ("board", "issues", b["issues"]), ("runner", "agent", "kiro"),
+            ("check", "kiro", "kiro-cli whoami"), ("ide", "open", "kiro {path}")]
+    path = task.CONFIG
+    if not path.exists():
+        write(path, CONFIG_HEADER + add_options("", want).lstrip("\n"))
+        result, detail = "作りました", tilde(path)
+    else:
+        c = read_config(path)
+        missing = [(s, k, v) for s, k, v in want if not c.has_option(s, k)]  # a value already there is the user's
+        if missing:
+            backup = path.with_name(f"{path.name}.bak-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+            shutil.copy2(path, backup)
+            write(path, add_options(path.read_text(encoding="utf-8"), missing))
+            result = "足しました"
+            detail = f"{tilde(path)} に {'、'.join(f'[{s}] {k}' for s, k, _ in missing)}。元の内容は {tilde(backup)}"
+        else:
+            result, detail = "済み", tilde(path)
+
+    try:  # what the user runs: the wrapper, with the board just made
+        r = subprocess.run([str(Path.home() / ".local" / "bin" / "task"), "list"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=180)
+        lines = (r.stdout + r.stderr).strip().splitlines()
+        error = None if r.returncode == 0 else \
+            next((line for line in lines if line.startswith("error:")), lines[-1] if lines else f"exit {r.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        error = str(e)
+    if error:
+        raise Stop(f"task list が動きませんでした({error})",
+                   "表示されたエラーを直してから、もう一度実行してください。分からなければ task-hub の担当者に知らせてください")
+    print(f"{label}: {result}({detail}。task list で確かめました)")
+    return result != "済み"
+
+
+def main(argv):
+    command, label, *rest = argv
+    try:
+        changed = {"board": board, "config": config}[command](label, *rest)
+    except (Stop, GhError) as e:
+        if isinstance(e, GhError):
+            e = Stop(f"GitHub の操作が失敗しました({e})", "ネットワークとログイン(gh auth status)を確かめて、もう一度実行してください")
+        print(f"{label}: 止まりました。{e.args[0]}")
+        print(f"次にすること: {e.args[1]}")
+        return 1
+    except Exception as e:  # never a traceback instead of the next step
+        print(f"{label}: 止まりました。思わぬエラーです({type(e).__name__}: {e})")
+        print("次にすること: この出力を task-hub の担当者に知らせてください")
+        return 1
+    return 3 if changed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

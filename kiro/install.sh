@@ -6,6 +6,7 @@
 # ~/.local/state/task-hub/install-manifest.json, for the uninstaller.
 # For tests: TASK_INSTALL_GITHUB replaces https://github.com (release downloads, the reachability check),
 # TASK_INSTALL_REPO the URL that task-hub is cloned from.
+# TASK_INSTALL_GH_LOGIN=terminal: log in to GitHub in a Terminal window from the start (see stage_gh_login).
 set -u
 
 GITHUB=${TASK_INSTALL_GITHUB:-https://github.com}
@@ -14,17 +15,19 @@ LIB_DIR=$HOME/.local/lib/task-hub
 STATE_DIR=$HOME/.local/state/task-hub
 MANIFEST=$STATE_DIR/install-manifest.json
 ZPROFILE_LINE='export PATH="$HOME/.local/bin:$PATH"'
-# The stages, in order. Each is a function stage_<name>; later stages (kiro-cli, login, board, ...) are added here.
-STAGES="prereq python gh task_hub"
+CONFIG=$HOME/.config/task-hub/config.ini
+DEVICE_URL=https://github.com/login/device
+# The stages, in order. Each is a function stage_<name>; later stages (kiro-cli, Kiro, ...) are added here.
+STAGES="prereq python gh task_hub gh_login kiro_login board config"
 # What the manifest records: "python" (the one ~/.local/bin/task uses) and, under "installed", what this script
 # put there (only that: an existing gh or Python is used, not recorded). Shell variable M_<key>, "_" for "-".
-MANIFEST_KEYS="uv uv_python gh task_hub task zprofile"
+MANIFEST_KEYS="uv uv_python gh task_hub task zprofile config"
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 orig_path=$PATH
 PATH=$BIN_DIR:$PATH  # finds what an earlier run put there
 export PATH
-changed=
+changed= todo=  # todo: what is left to do by hand, said on the last line
 
 say() { printf '%s\n' "$*"; }
 tilde() { case $1 in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
@@ -287,6 +290,133 @@ exec $(shquote "$PY") $(shquote "$LIB_DIR/bin/task") \"\$@\""
   fi
 }
 
+gh_user() {  # sets GH_USER and GH_SCOPES from the token gh uses; fails when gh is not logged in
+  r=$(gh api -i user 2>/dev/null) || return 1
+  GH_SCOPES=$(printf '%s\n' "$r" | tr -d '\r' | grep -i '^x-oauth-scopes:' | sed 's/^[^:]*: *//' | head -n 1)
+  GH_USER=$(printf '%s\n' "$r" | sed -n 's/^{"login":"\([^"]*\)".*/\1/p' | head -n 1)  # the body starts with it
+  [ -n "$GH_USER" ]
+}
+
+device_code() { sed -n 's/.*\([A-Z0-9]\{4\}-[A-Z0-9]\{4\}\).*/\1/p' "$1" 2>/dev/null | head -n 1; }
+
+open_terminal() {  # $1: file name, rest: the command. Writes it to a .command file and opens that in Terminal
+  file=$STATE_DIR/$1
+  shift
+  { printf '#!/bin/sh\n# task-hub: made by kiro/install.sh. Runs this in a Terminal window, where it can ask its questions.\n'
+    sep=
+    for a in "$@"; do printf '%s%s' "$sep" "$(shquote "$a")"; sep=' '; done
+    printf '\necho\necho "終わったら、このウィンドウを閉じて、もう一度 kiro/install.sh を実行してください"\n'
+  } > "$file" && chmod 755 "$file" || die "$(tilde "$file") を書けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+  open "$file" >/dev/null 2>&1 || die "ターミナルを開けませんでした" "Finder で $(tilde "$file") をダブルクリックして進め、終わったらもう一度実行してください"
+}
+
+stage_gh_login() {
+  label="6. GitHub のログイン"
+  pidfile=$STATE_DIR/gh-login.pid log=$STATE_DIR/gh-login.log
+  GH_USER= GH_SCOPES=
+  if gh_user && case ", $GH_SCOPES," in *", project,"*) true ;; *) false ;; esac; then
+    rm -f "$pidfile" "$log" "$STATE_DIR/gh-login.command"
+    # git (task-hub's clones and pushes) uses the same login; non-interactive `gh auth login` does not set that up
+    if "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -q 'auth git-credential'; then
+      ok 済み "$GH_USER"
+      return
+    fi
+    gh auth setup-git -h github.com >"$work/gh.log" 2>&1 \
+      || die "git に GitHub のログインを設定できませんでした($(tail -n 1 "$work/gh.log"))" "もう一度実行してください"
+    changed=1
+    ok 設定しました "${GH_USER}、git も gh のログインを使います"
+    return
+  fi
+  if [ -n "$GH_USER" ]; then
+    set -- auth refresh -h github.com -s project
+    need="Projects の権限(project)が要ります"
+  else
+    set -- auth login --web -s project -h github.com -p https
+    need="GitHub にログインしていません"
+  fi
+  if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then  # gh refuses to log in while one is set
+    die "${need}。環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません" \
+      "その環境変数を外すか、project の権限があるトークンにしてから、もう一度実行してください"
+  fi
+  pid=$(cat "$pidfile" 2>/dev/null) || pid=
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then  # the login an earlier run started is still waiting
+    die "${need}。ブラウザでの承認を待っています" "$DEVICE_URL でコード $(device_code "$log") を入れて承認してから、もう一度実行してください"
+  fi
+  gh=$(command -v gh)
+  if [ -n "$pid" ] || [ "${TASK_INSTALL_GH_LOGIN:-}" = terminal ]; then
+    # The login an earlier run left waiting in the background is gone without logging in: it timed out, or it was
+    # stopped when the command that ran this script ended. Log in in a Terminal window instead.
+    open_terminal gh-login.command "$gh" "$@"
+    die "${need}。開いたターミナルで、案内に沿ってブラウザで承認してください" "承認が終わったら、もう一度実行してください"
+  fi
+  # Without a terminal, gh prints a one-time code, then waits (up to 15 minutes) until it is entered in the browser.
+  # It runs in a session of its own so that it outlives this script, and the next run checks whether it got through.
+  TMPDIR=$STATE_DIR/ "$PY" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$gh" "$@" \
+    </dev/null >"$log" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$pidfile"
+  i=0 code=
+  while [ "$i" -lt 60 ]; do
+    code=$(device_code "$log")
+    [ -n "$code" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+    i=$((i + 1))
+  done
+  if [ -z "$code" ]; then
+    kill "$pid" 2>/dev/null
+    rm -f "$pidfile"
+    die "gh のログインを始められませんでした($(tail -n 1 "$log"))" "ネットワーク(VPN、プロキシ)を確かめて、もう一度実行してください"
+  fi
+  open "$DEVICE_URL" >/dev/null 2>&1
+  die "${need}。ブラウザで $DEVICE_URL を開きました。コード $code を入れて承認してください" "承認が終わったら、もう一度実行してください"
+}
+
+stage_kiro_login() {
+  label="6. kiro-cli のログイン"
+  if ! kiro=$(command -v kiro-cli 2>/dev/null); then
+    ok 飛ばしました "kiro-cli が見つかりません。Kiro IDE だけで使う範囲は進めます"
+    return
+  fi
+  if "$kiro" whoami </dev/null >/dev/null 2>&1; then
+    rm -f "$STATE_DIR/kiro-login.command"
+    ok 済み
+    return
+  fi
+  # Not in the background as gh's: kiro-cli login first asks how to log in, in a menu that needs a terminal.
+  open_terminal kiro-login.command "$kiro" login
+  die "kiro-cli にログインしていません。開いたターミナルで、ログインの方法を選んでブラウザで承認してください" \
+    "ログインが終わったら、もう一度実行してください"
+}
+
+helper() {  # kiro/install-board: the board and config.ini, where JSON and INI files are easier in Python
+  "$PY" "$here/kiro/install-board" "$@"
+  case $? in
+    0) ;;
+    3) changed=1 ;;
+    1) exit 1 ;;  # it said why and what to do next
+    *) die "思わぬエラーで終わりました" "task-hub の担当者に知らせてください" ;;
+  esac
+  [ -s "$work/todo" ] && todo=$(cat "$work/todo")
+  return 0
+}
+
+stage_board() {
+  label="7. ボード"
+  helper board "$label" "$GH_USER" "$work"
+}
+
+stage_config() {
+  label="8. 設定"
+  new=
+  [ -e "$CONFIG" ] || new=1
+  helper config "$label" "$work"
+  if [ -n "$new" ] && [ -f "$CONFIG" ]; then
+    M_config=$CONFIG
+    write_manifest
+  fi
+}
+
 # --- main ---
 
 say "task-hub をセットアップします(管理者権限は使いません)"
@@ -309,4 +439,8 @@ if [ -n "$changed" ]; then
 else
   say "すべて済みです。変えたものはありません。"
 fi
-say "次にすること: GitHub にログインしてください(gh auth login -s project。この段階はまだインストーラにありません)"
+if [ -n "$todo" ]; then
+  say "次にすること: $todo"
+else
+  say "次にすること: Kiro との連携(docs/kiro-ide.md)を進めてください。この段階はまだインストーラにありません"
+fi
