@@ -28,6 +28,7 @@ import zipfile
 from pathlib import Path
 
 INSTALL = Path(__file__).resolve().parent.parent / "kiro" / "install.sh"
+DOCTOR, UNINSTALL = INSTALL.with_name("doctor.sh"), INSTALL.with_name("uninstall.sh")
 REPO = INSTALL.parent.parent
 TASK = REPO / "bin" / "task"
 # what stage 9 puts in ~/.kiro, from the clone: (in the clone, in ~/.kiro)
@@ -380,12 +381,14 @@ class InstallTest(unittest.TestCase):
         base = f"/astral-sh/uv/releases/download/{UV_TAG}"
         self.server.redirects["/astral-sh/uv/releases/latest"] = f"/astral-sh/uv/releases/tag/{UV_TAG}"
         self.server.files[f"/astral-sh/uv/releases/tag/{UV_TAG}"] = b"release page"
-        # The fake uv: `uv python install 3.12` links python3.12 to the Python running the tests.
+        # The fake uv: `uv python install 3.12` links python3.12 to the Python running the tests; uninstall unlinks it.
         uv = (f'#!/bin/sh\necho "$* UV_SYSTEM_CERTS=${{UV_SYSTEM_CERTS:-}} HTTPS_PROXY=${{HTTPS_PROXY:-}}"'
               f' >> "{self.uv_calls}"\n'
-              '[ "$1 $2" = "python install" ] || exit 2\n'
               'dir=${UV_PYTHON_BIN_DIR:-$HOME/.local/bin}\n'
-              f'mkdir -p "$dir" && ln -sf "{sys.executable}" "$dir/python$3"\n')
+              'case "$1 $2" in\n'
+              f'  "python install") mkdir -p "$dir" && ln -sf "{sys.executable}" "$dir/python$3" ;;\n'
+              '  "python uninstall") rm -f "$dir/python$3" ;;\n'
+              '  *) exit 2 ;;\nesac\n')
         for triple in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
             name = f"uv-{triple}.tar.gz"
             data = tar_bytes({f"uv-{triple}/uv": uv, f"uv-{triple}/uvx": "#!/bin/sh\n"})
@@ -1082,8 +1085,9 @@ class InstallTest(unittest.TestCase):
                       "KIRO_API_KEY は使いません(", "\n".join(lines))
         self.assertEqual(lines[-1], "次にすること: 常駐を始めてよければ、sh kiro/install.sh --start-launchd を実行してください"
                                     "(ログインしている間 task watch が動き、Ready のカードを始めます)")
-        self.assertEqual(self.launchctl_calls.read_text().splitlines(), [f"print gui/{os.getuid()}/com.task-hub.watch"],
-                         "not started before the user said yes")
+        self.assertEqual(set(self.launchctl_calls.read_text().splitlines()), {f"print gui/{os.getuid()}/com.task-hub.watch"},
+                         "not started before the user said yes (the diagnosis only looks too)")
+        self.assertIn("× 10. 常駐: ~/Library/LaunchAgents/com.task-hub.watch.plist はありますが、動いていません", lines)
         self.assertEqual(self.manifest()["installed"]["launchd"], str(plist))
 
         # the user said yes
@@ -1107,14 +1111,16 @@ class InstallTest(unittest.TestCase):
         self.assertIn(f"exec '{local}/bin/task' watch", p["ProgramArguments"][2])
         self.assertNotIn("KIRO_API_KEY", p["EnvironmentVariables"])
         self.install(args=["--start-launchd"])
-        calls = self.launchctl_calls.read_text().splitlines()
+        calls = [c for c in self.launchctl_calls.read_text().splitlines() if not c.startswith("print ")]
         self.assertEqual(calls[-2:], [f"bootout gui/{os.getuid()}/com.task-hub.watch", f"bootstrap gui/{os.getuid()} {plist}"])
         # without the option, again: left as it is
         before = plist.read_text()
-        n = len(calls)
+        changes = lambda: [c for c in self.launchctl_calls.read_text().splitlines() if not c.startswith("print ")]
+        n = len(changes())
         lines = self.install()
         self.assertEqual(plist.read_text(), before)
-        self.assertEqual(len(self.launchctl_calls.read_text().splitlines()), n)
+        self.assertEqual(len(changes()), n)
+        self.assertIn("○ 10. 常駐: ~/Library/LaunchAgents/com.task-hub.watch.plist、動いています", lines)
 
     def test_does_not_replace_a_plist_of_the_users_own(self):
         self.use_python3()
@@ -1127,6 +1133,194 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(plist.read_text(), "<plist>mine</plist>\n")
         self.assertFalse(self.launchctl_calls.exists())
         self.install(code=1, args=["--nope"])
+
+
+    # --- the diagnosis and the uninstaller ---
+
+    def run_script(self, script, code, args=()):
+        r = subprocess.run(["sh", str(script), *args], env=self.env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        self.assertEqual(r.stderr, "")
+        lines = r.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("次にすること: "), lines)
+        self.assertEqual(sum(line.startswith("次にすること") for line in lines), 1, lines)
+        return lines
+
+    def doctor(self, code):
+        return self.run_script(DOCTOR, code)
+
+    def uninstall(self, code=0, yes=False):
+        return self.run_script(UNINSTALL, code, ["--yes"] if yes else [])
+
+    def marks(self, lines):
+        """{stage: "○" or "×"} of the diagnosis's list"""
+        return {line[2:].split(":")[0]: line[0] for line in lines if line[:2] in ("○ ", "× ")}
+
+    STAGE_NAMES = ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. task-hub 本体", "6. GitHub のログイン",
+                   "6. kiro-cli のログイン", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"]
+
+    def test_doctor_on_a_mac_with_nothing_installed(self):
+        (self.fakebin / "kiro-cli").unlink()
+        self.change_github(lambda db: db.update(auth=None))
+        lines = self.doctor(1)
+        self.assertEqual(lines[0], "task-hub の診断です(何も変えません)")
+        marks = self.marks(lines)
+        self.assertEqual(list(marks), self.STAGE_NAMES)
+        self.assertEqual(marks, {**{n: "×" for n in self.STAGE_NAMES}, "1. 前提の確認": "○", "10. 常駐": "○"})
+        self.assertIn("○ 10. 常駐: 使っていません(任意。使うなら sh kiro/install.sh --with-launchd)", lines)
+        self.assertIn("× 3. gh: gh がありません", lines)
+        self.assertIn("× 9. Kiro との連携: ~/.kiro/skills/task、~/.kiro/skills/chief、~/.kiro/steering/task-hub.md、"
+                      "~/.kiro/hooks/task-hub-events.json、~/.kiro/workflows/task-hub-events.workflow.json がありません", lines)
+        # each × has its next step under it
+        for i, line in enumerate(lines):
+            if line.startswith("× "):
+                self.assertTrue(lines[i + 1].startswith("    → "), lines[i:i + 2])
+        self.assertEqual(lines[-2], "足りないものが 9 つあります。")
+        self.assertEqual(lines[-1], "次にすること: sh kiro/install.sh を実行してください(Kiro のチャットなら「セットアップして」)")
+        self.assertEqual(self.snapshot(), {}, "it changed nothing")
+        # no git: the first thing to do is 情シス's
+        shutil.rmtree(self.dev)
+        lines = self.doctor(1)
+        self.assertTrue(lines[1].startswith("× 1. 前提の確認: git がありません"), lines)
+        self.assertIn("情シスに Command Line Tools を入れてもらってください", lines[-1])
+
+    def test_doctor_after_a_full_install_lists_everything_there_and_changes_nothing(self):
+        lines = self.install()
+        # the installer's own run of it: the list, before its one next step
+        self.assertIn("診断:", lines)
+        at = lines.index("診断:")
+        self.assertEqual(list(self.marks(lines[at:])), self.STAGE_NAMES)
+        self.assertEqual(set(self.marks(lines[at:]).values()), {"○"}, lines)
+        before = self.snapshot()
+        self.change_github(lambda db: db["calls"].clear())
+        lines = self.doctor(0)
+        self.assertEqual(set(self.marks(lines).values()), {"○"}, lines)
+        self.assertIn("○ 7. ボード: https://github.com/users/alice/projects/1、alice/tasks", lines)
+        self.assertIn("○ 9. Kiro との連携: スキル、steering、フック、ワークフロー、Workflows は有効", lines)
+        self.assertEqual(lines[-2:], ["すべて揃っています。", "次にすること: Kiro の新しいチャットで /task を試してください"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.writes(), [])
+
+    def test_doctor_names_what_broke_and_what_to_do(self):
+        self.use_python3()
+        self.install()
+        (self.home / ".kiro/hooks/task-hub-events.json").write_text("{}\n")  # an old copy
+        self.kiro_logged_in.unlink()
+        def item_closed_off(db):
+            for w in db["projects"][0]["workflows"]:
+                if w["name"] == "Item closed":
+                    w["enabled"] = False
+        self.change_github(item_closed_off)
+        lines = self.doctor(1)
+        marks = self.marks(lines)
+        self.assertEqual([n for n, m in marks.items() if m == "×"], ["6. kiro-cli のログイン", "7. ボード", "9. Kiro との連携"])
+        i = lines.index("× 7. ボード: https://github.com/users/alice/projects/1 のワークフローが task-hub に合っていません")
+        self.assertEqual(lines[i + 1], "    → https://github.com/users/alice/projects/1/workflows を開き、「Item closed」を"
+                                       "有効にしてください")
+        self.assertIn("× 9. Kiro との連携: ~/.kiro/hooks/task-hub-events.json が task-hub の今の版と違います", lines)
+        self.assertEqual(lines[-1], "次にすること: sh kiro/install.sh を実行し、開いたターミナルでログインしてください")
+        # JSONC settings.json without Workflows: the command palette
+        (self.home / ".kiro/hooks/task-hub-events.json").write_bytes((REPO / KIRO_COPIES[0][0]).read_bytes())
+        (self.home / KIRO_SETTINGS).write_text('{\n  // mine\n  "editor.fontSize": 14,\n}\n')
+        lines = self.doctor(1)
+        i = lines.index("× 9. Kiro との連携: Workflows が有効になっていません")
+        self.assertIn("「Enable Workflows」", lines[i + 1])
+
+    def test_uninstall_removes_only_what_the_manifest_lists(self):
+        mine = {".zprofile": "export EDITOR=vi\n", ".local/bin/mytool": "#!/bin/sh\n", ".kiro/skills/other/SKILL.md": "x\n",
+                ".local/state/task-hub/events.jsonl": "{}\n"}
+        for rel, text in mine.items():
+            (self.home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.home / rel).write_text(text)
+        self.install(args=["--start-launchd"])  # everything, uv and its Python too
+        m = self.manifest()["installed"]
+        self.assertTrue({"uv", "uv-python", "gh", "launchd", "config", "kiro-settings"} <= set(m), m)
+        self.assertIn(ZPROFILE_LINE, (self.home / ".zprofile").read_text())
+        github = {k: v for k, v in self.github().items() if k != "calls"}
+        self.change_github(lambda db: db["calls"].clear())
+
+        # without --yes: the list, nothing removed
+        before = self.snapshot()
+        lines = self.uninstall()
+        self.assertEqual(self.snapshot(), before)
+        self.assertIn("- ~/.local/lib/task-hub(task-hub の clone)", lines)
+        self.assertIn("- uv で入れた Python 3.12", lines)
+        self.assertIn("- ~/.kiro/skills/task(リンク)", lines)
+        self.assertIn("- GitHub のボード(alice/tasks と Project alice/1)。要らなければ、GitHub の画面で消します:", lines)
+        self.assertIn("    Project: https://github.com/users/alice/projects/1/settings の一番下「Delete this project」", lines)
+        self.assertEqual(lines[-1], "次にすること: 消してよければ、sh kiro/uninstall.sh --yes を実行してください")
+
+        lines = self.uninstall(yes=True)
+        self.assertFalse([line for line in lines if line.startswith("消せませんでした")], lines)
+        self.assertEqual(lines[-1], "次にすること: Kiro を再起動してください(/task と /chief、フック、ワークフローが外れます)")
+        left = self.snapshot()
+        for rel, text in mine.items():  # the user's own files, as they were
+            self.assertEqual(left.pop(rel), text.encode(), rel)
+        self.assertTrue(left.pop(KIRO_SETTINGS), "settings.json is the user's: kept")
+        left.pop(".gitconfig")  # gh's login for git: kept with the login
+        for rel in list(left):
+            if rel.startswith(".local/state/task-hub/"):  # task-hub's data (the watch logs)
+                left.pop(rel)
+        self.assertEqual(left, {}, "nothing else of the installer's is left")
+        self.assertFalse((self.home / ".local/state/task-hub/install-manifest.json").exists())
+        self.assertFalse(self.launchd_loaded.exists(), "task watch was stopped")
+        self.assertIn(f"bootout gui/{os.getuid()}/com.task-hub.watch", self.launchctl_calls.read_text().splitlines())
+        self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
+        self.assertEqual({k: v for k, v in self.github().items() if k != "calls"}, github, "the board on GitHub stays")
+        self.assertEqual(self.writes(), [])
+        # again: nothing to do
+        lines = self.uninstall()
+        self.assertIn("がありません。このインストーラで入れたものはありません。", lines[0])
+
+    def test_uninstall_keeps_what_is_no_longer_the_installers(self):
+        self.use_python3()
+        self.install()
+        task = self.home / ".local/bin/task"
+        task.write_text("#!/bin/sh\necho mine\n")  # replaced by the user since
+        outside = self.root / "not-home-gh"
+        outside.write_text("gh\n")
+        manifest = self.home / ".local/state/task-hub/install-manifest.json"
+        m = json.loads(manifest.read_text())
+        m["installed"]["gh"] = str(outside)  # never anything outside HOME
+        manifest.write_text(json.dumps(m))
+        lines = self.uninstall(yes=True)
+        self.assertNotIn("消しました: ~/.local/bin/task", lines)
+        self.assertEqual(task.read_text(), "#!/bin/sh\necho mine\n")
+        self.assertTrue(outside.exists())
+        self.assertFalse((self.home / ".local/lib/task-hub").exists())
+        self.assertFalse(os.path.lexists(self.home / ".kiro/skills/task"))
+
+
+class SteeringTest(unittest.TestCase):
+    """The steering files have the front matter Kiro reads (https://kiro.dev/docs/steering/)."""
+
+    def front_matter(self, path):
+        lines = path.read_text().splitlines()
+        self.assertEqual(lines[0], "---", path)
+        end = lines.index("---", 1)
+        fields = dict(line.split(": ", 1) for line in lines[1:end])
+        self.assertIn(fields.get("inclusion"), ("always", "fileMatch", "manual", "auto"), path)
+        if fields["inclusion"] == "auto":
+            self.assertRegex(fields.get("name", ""), r"^[a-z0-9-]+$", path)
+            self.assertTrue(fields.get("description"), path)
+        if fields["inclusion"] == "fileMatch":
+            self.assertTrue(fields.get("fileMatchPattern"), path)
+        return fields
+
+    def test_the_setup_steering_is_read_only_when_the_talk_is_about_setup(self):
+        setup = REPO / ".kiro/steering/setup.md"
+        fields = self.front_matter(setup)
+        # always would put it in every chat in this repo; a worker of a task-hub task reads .kiro/steering too
+        self.assertEqual(fields["inclusion"], "auto")
+        for word in ("セットアップして", "続けて"):
+            self.assertIn(word, fields["description"])
+        text = setup.read_text()
+        self.assertIn("sh kiro/install.sh", text)
+        self.assertIn("worker", text)  # what a worker (Kiro CLI reads every steering file) is to do with it
+
+    def test_the_global_steering(self):
+        self.front_matter(REPO / "kiro/steering/task-hub.md")
 
 
 if __name__ == "__main__":

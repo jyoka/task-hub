@@ -5,7 +5,8 @@
 # --start-launchd (which implies --with-launchd), after the user said yes.
 # Each stage checks whether it is already done and skips it, so running this again is always safe.
 # Everything goes under $HOME. What this script put there is recorded in
-# ~/.local/state/task-hub/install-manifest.json, for the uninstaller.
+# ~/.local/state/task-hub/install-manifest.json, for the uninstaller (kiro/uninstall.sh). At the end it runs
+# kiro/doctor.sh, which can also be run by itself at any time.
 # For tests: TASK_INSTALL_GITHUB replaces https://github.com (release downloads, the reachability check),
 # TASK_INSTALL_REPO the URL that task-hub is cloned from, TASK_INSTALL_KIRO_CLI https://prod.download.cli.kiro.dev,
 # TASK_INSTALL_APPLICATIONS /Applications (where an installed Kiro CLI.app is looked for).
@@ -709,6 +710,10 @@ for stage in $STAGES; do
   "stage_$stage"
 done
 
+# 11. the diagnosis: the list only; the one next step is said below
+doctor_ok=1
+PATH=$orig_path sh "$here/kiro/doctor.sh" --in-install || doctor_ok=  # the PATH it was run with: is ~/.local/bin on it
+
 if [ -n "$changed" ]; then
   say "ここまで終わりました。"
 else
@@ -716,6 +721,8 @@ else
 fi
 if [ -n "$todo" ]; then
   say "次にすること: $todo"
+elif [ -z "$doctor_ok" ]; then
+  say "次にすること: 診断の × の行の → のとおりにしてください"
 elif [ -n "$restart" ]; then
   say "次にすること: Kiro を再起動し(開いているチャットには、少なくともウィンドウの再読み込みが要ります)、新しいチャットで /task を試してください"
 else
