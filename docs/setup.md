@@ -3,6 +3,9 @@
 ボードはマシン(アカウント)ごとに 1 つです。個人用 Mac は個人の GitHub Project、仕事用 Mac は仕事用の
 GitHub Project を使います。手順はどちらも同じです。
 
+Kiro しか使えない Mac で、Kiro IDE からターミナルを開かずに使うときは、このページに加えて
+[kiro-ide.md](kiro-ide.md) の手順(設定、steering、フック、ワークフロー、launchd の違い)を使います。
+
 ## 必要なもの
 
 - Python 3.10 以上(`python3 --version`)と git が入った macOS
@@ -196,7 +199,7 @@ done
   `kiro/task-events-watch` が 60 秒ごとに `task events --after` で新しい出来事を確かめます(待っている間はモデルを
   使わず、クレジットを使いません)。出来事があれば、次のステップが要点を `/chief` のチャットに届けます。
   ワークフローが動いていなければ、`/chief` は今までどおり返答のたびに確かめます。実機ではまだ確かめていません。
-  詳しい手順は Kiro IDE 版のセットアップ手順で書きます。
+  詳しい手順は [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る) にあります。
 
   ```
   mkdir -p ~/.kiro/workflows && ln -sfn ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
