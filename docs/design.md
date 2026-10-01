@@ -137,6 +137,37 @@
    試します(決定事項 4)。上限、警告、停止はまだしません。どこに線を引くかは `task stats` の実績を見て決めます。
    読み取りの失敗(壊れた行、読めないファイル、形式の変化)は、`metrics.jsonl` への書き込みと同じく実行を止めません。
 
+## Status の遷移
+
+task-hub 自身がカードを動かす遷移は、`StatusLifecycle.transitions` の表にあるものだけです(0.6)。`set_status` は
+今の Status からの遷移を表と照らし合わせ、表にない遷移では stderr に 1 行の警告を出します。カードは止めずに動かし、
+警告は `events.jsonl` に書きません(`/chief` を起こして費用が増えるため)。今の Status は、ボードを読んだときの値を
+使います。`task _run` は実行の記録しか持たないので、すでに取っているカードの一覧の値を使い、GitHub の呼び出しは
+増やしません(決定事項 10)。それでも分からないときは照らし合わせません。人が GitHub の画面で動かす遷移と、
+GitHub のワークフローによる遷移は、task-hub が書かないので表にありません。下の図は表と同じもので、テストで
+一致を確かめています。
+
+```mermaid
+stateDiagram-v2
+    state "In progress" as InProgress
+    state "In review" as InReview
+    state "wait for merge" as WaitForMerge
+    [*] --> Backlog: task new
+    Backlog --> Ready: task start
+    Blocked --> Ready: task start
+    Ready --> Ready: task start --agent
+    Ready --> InProgress: launch
+    Ready --> Blocked: launch failed
+    InProgress --> Blocked: setup failed, finish, run stopped
+    InProgress --> InReview: finish
+    InReview --> Done: PR merged, task done
+    WaitForMerge --> Done: PR merged, task done
+    Backlog --> Done: task done
+    Ready --> Done: task done
+    InProgress --> Done: task done
+    Blocked --> Done: task done
+```
+
 ## CLI の形
 
 `bin/task` はエージェント向け CLI の AXI の規約に従います。コンパクトな TOON 出力、現在の状態を表示する
