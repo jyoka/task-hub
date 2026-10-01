@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Kiro Workflows `watch` handler (`handler: command`, kiro/workflows/task-hub-events.workflow.json): wakes /chief
+when task-hub writes an event it should tell (In review, Blocked, replan, Done), without a model turn while waiting.
+
+Kiro runs it once per poll with {"cursor": ..., "config": ...} on stdin and reads one JSON object from stdout:
+{"outcome": "idle" | "new-activity", "cursor": <line number of the events file>, "payload": <event lines>}.
+See https://kiro.dev/docs/workflows/authoring/#watch-anything-else-with-command
+The first poll (cursor null) starts from now: the past is not news. It always exits 0 with a valid result: when `task`
+fails, the poll is idle with the old cursor (so nothing is skipped) and one note goes to stderr.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+WANTED = "In review,Blocked,replan,Done"
+
+
+def result(outcome, cursor, payload=None):
+    print(json.dumps({"outcome": outcome, "cursor": cursor, **({"payload": payload} if payload else {})},
+                     ensure_ascii=False))
+
+
+def main():
+    try:
+        cursor = json.loads(sys.stdin.read() or "null").get("cursor")
+    except (ValueError, AttributeError):
+        cursor = None
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+        cursor = None  # first poll (or a broken cursor)
+    task = shutil.which("task") or os.path.expanduser("~/.local/lib/task-hub/bin/task")
+    try:
+        r = subprocess.run([task, "events", "--after", str(cursor or 0), "--digest", "--only", WANTED],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        r = subprocess.CompletedProcess(e.filename, 127, "", str(e))
+    lines = r.stdout.splitlines()
+    nexts = [m.group(1) for m in (re.match(r"next: task events.* --after (\d+)", line) for line in lines) if m]
+    if r.returncode or not nexts:
+        why = "failed" if r.returncode else "printed no `next:` line"
+        print(f"task-hub: could not read events (`{task} events` {why})", file=sys.stderr)
+        return result("idle", cursor)
+    events = "\n".join(line for line in lines if not line.startswith("next: "))
+    if cursor is None or not events.strip():
+        return result("idle", int(nexts[-1]))
+    result("new-activity", int(nexts[-1]), events)
+
+
+main()
