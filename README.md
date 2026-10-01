@@ -51,7 +51,7 @@ task-hub が定義している役割は 5 つです。どれも Claude Code の 
 | **reviewer**(任意) | task-hub が起動(worker の後、PR の前) | Goal の受け入れ条件を 1 つずつ、PR 全体と照らし合わせる | `.task-review.md` だけ | [worker/REVIEW.md](worker/REVIEW.md) |
 | **replanner**(任意) | task-hub が起動(worker が自分で Blocked と書いたとき) | 止まった理由を「リポジトリから答えられる / 人に聞く / Goal が矛盾」に仕分ける | 何も書けない(コメントの本文を返すだけ) | [worker/REPLAN.md](worker/REPLAN.md) |
 | **/task** | あなたのエージェントの会話 | 今の会話を Backlog のタスクとして登録する | ボードへの登録だけ | [skills/task](skills/task/SKILL.md) |
-| **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する | 登録と開始だけ(マージはしない) | [skills/chief](skills/chief/SKILL.md) |
+| **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する。名指しで頼まれたら開始・`task done`・マージを実行する | 登録・開始・`task done`・マージ(どれもあなたが頼んだときだけ。自分からはしない) | [skills/chief](skills/chief/SKILL.md) |
 
 ### 分担
 
