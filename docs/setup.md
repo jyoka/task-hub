@@ -139,7 +139,23 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    ない(このマシンで実行していない、または後片付け済み)ときは、理由を出して失敗します。
 
    たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
-   (実行中にエージェントが自分でログインすることはできません)。
+   (実行中にエージェントが自分でログインすることはできません)。無人で動かす(launchd の `task watch`)なら、
+   Pro 以上のプランの API キー(`ksk_` で始まる)を `KIRO_API_KEY` に入れ、herdr のペインの実行にも渡します:
+
+   ```ini
+   [runner]
+   agent = kiro
+   pass_env = KIRO_API_KEY    ; herdr のペインで動く実行にも渡す環境変数の名前(カンマか空白区切り)
+
+   [check]
+   kiro = kiro-cli whoami     ; 組み込みの既定。始める前に実行し、失敗したらエージェントを起動せずに Blocked
+   ```
+
+   task-hub は各タスクを始める前に `[check]` のコマンドを実行し、失敗したらクレジットを使う前に、そのコマンドと
+   出力の最後の数行を理由にしてカードを Blocked にします。`KIRO_API_KEY` だけのときに `kiro-cli whoami` が成功するかは
+   未確認です。失敗するなら `[check] kiro =` を空にしてください。詳しくは
+   [agents.md](agents.md#始める前の確認と実行に渡す環境変数) を参照してください。launchd から動かすときは、
+   キーを plist の `EnvironmentVariables` に入れます(plist はほかの人が読めない権限にしてください)。
 
 ## /task と /chief スキルのインストール
 

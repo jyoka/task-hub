@@ -150,7 +150,8 @@ import os, re, subprocess, sys
 from pathlib import Path
 prompt = sys.argv[-1]
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt,
+                  "key": os.environ.get("FAKE_AGENT_KEY")}) + "\n")
 if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
     kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
     out = {"answered": "## Decision\n\nanswered\n\n## Answer\n\nThe app is called app, see the README.\n\n"
@@ -355,8 +356,9 @@ elif cmd == ["pane", "list"]:
     res(locked(lambda db: {"panes": list(db["panes"].values())}))
 elif cmd == ["pane", "run"]:
     pane = locked(lambda db: db["panes"][a[2]])
+    # like a real pane, the shell has the herdr server's environment, not the caller's: only what the launcher passes
     subprocess.Popen(["sh", "-c", a[3]], cwd=pane["cwd"], stdin=subprocess.DEVNULL, stdout=open(out_file(a[2]), "ab"),
-                     stderr=subprocess.STDOUT, start_new_session=True)
+                     stderr=subprocess.STDOUT, start_new_session=True, env={"PATH": os.environ["PATH"]})
 elif cmd == ["pane", "wait-output"]:
     end = time.time() + int(opt("--timeout")) / 1000
     while time.time() < end:
@@ -517,12 +519,13 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False, replanner=""):
+    def write_config(self, extra="", reviewer=False, replanner="", pass_env=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
                        + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
-                       + (f"replanner = {replanner}\n" if replanner else "") + "\n"
+                       + (f"replanner = {replanner}\n" if replanner else "")
+                       + (f"pass_env = {pass_env}\n" if pass_env else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -960,6 +963,49 @@ class TaskTest(unittest.TestCase):
         self.assertIn("setup left files git would commit (.venv/lib.py)", self.comments(tid)[-1])
         self.assertIsNone(self.pr(tid))
 
+    def check_script(self, name, lines, code):
+        """A stand-in for an agent's readiness check (like `kiro-cli whoami`): prints lines, exits with code."""
+        path = self.root / name
+        path.write_text("#!/bin/sh\n" + "".join(f"echo '{line}'\n" for line in lines) + f"exit {code}\n")
+        path.chmod(0o755)
+        return path
+
+    def test_failing_check_blocks_before_the_agent_starts_and_names_why(self):
+        secret = "ksk_secret_value_123"
+        self.env["FAKE_AGENT_KEY"] = secret
+        check = self.check_script("whoami", ["checking", "token " + secret, "Not logged in: run login"], 1)
+        self.write_config(f"\n[check]\nfake = {check} --quiet\n", pass_env="FAKE_AGENT_KEY")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertFalse((self.root / ".local/share/task-hub/worktrees" / tid).exists())
+        why = self.comments(tid)[-1]
+        self.assertIn(f'agent "fake" is not ready: `{check} --quiet` exited 1', why)
+        self.assertIn("Not logged in: run login", why)
+        self.assertIn("token ***", why)  # the last lines, without the key's value
+        events = (self.root / ".local/state/task-hub/events.jsonl").read_text()
+        self.assertIn("not ready", events)
+        self.assertNotIn(secret, why + events)
+
+    def test_reviewer_and_replanner_are_checked_before_the_start_too(self):
+        bad = self.check_script("loggedout", ["Not logged in"], 1)
+        for key in ("reviewer", "replanner"):
+            self.write_config(f"\n[check]\nother = {bad}\n", **{key: "other"})
+            tid = self.new("ok")
+            self.task("start", tid)
+            self.assertEqual(self.status(tid), "Blocked")
+            self.assertEqual(self.agent_calls(), [])
+            self.assertIn('agent "other" is not ready', self.comments(tid)[-1])
+
+    def test_agents_without_a_check_or_with_a_passing_one_run_as_before(self):
+        ok = self.check_script("ok", ["logged in"], 0)
+        self.write_config(f"\n[check]\nreviewer = {ok}\nother = false\n", reviewer=True)
+        tid = self.new("ok")  # fake has no check; other's failing check is not its business
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 1)
+
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
         tid = self.new("ok")
@@ -1098,6 +1144,24 @@ class TaskTest(unittest.TestCase):
         self.assertTrue(tab.startswith("w2:t"))  # a tab in the workspace where it was asked for
         self.assertEqual(sorted(db["workspaces"]), ["w1", "w2"])  # no workspace of its own
         self.assertEqual((self.run_state(tid)["tab"], self.run_state(tid)["workspace"]), ("", ""))
+
+    def test_pass_env_reaches_the_run_in_a_herdr_pane_but_no_log_or_event(self):
+        secret = "ksk_secret_value_456"
+        self.use_herdr()
+        self.env.update(FAKE_AGENT_KEY=secret, OTHER_SECRET="not-passed")
+        self.write_config(pass_env="FAKE_AGENT_KEY, NOT_SET")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.agent_calls()[0]["key"], secret)  # the pane did not have it: the launcher brought it
+        launcher = (self.root / ".local/share/task-hub/run" / f"{tid}.sh")
+        self.assertIn(f"FAKE_AGENT_KEY={secret}", launcher.read_text())
+        self.assertNotIn("OTHER_SECRET", launcher.read_text())
+        self.assertNotIn("NOT_SET", launcher.read_text())
+        self.assertEqual(launcher.stat().st_mode & 0o777, 0o600)
+        seen = [self.task("log", tid, "--full"), (self.root / ".local/state/task-hub/events.jsonl").read_text(),
+                *self.comments(tid), *[f.read_text(errors="replace") for f in self.root.glob("herdr.json*")]]
+        self.assertEqual([text for text in seen if secret in text], [])
 
     def test_task_not_asked_in_herdr_opens_next_to_a_checkout_of_its_repo(self):
         other = self.checkout("other", "https://github.com/jyoka/other.git")
