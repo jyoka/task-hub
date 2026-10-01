@@ -23,6 +23,7 @@ import unittest
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
+KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
 UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
 
 FAKE_GH = r'''#!/usr/bin/env python3
@@ -145,15 +146,33 @@ if out is not None:
     print(json.dumps(out))
 '''
 
+RUN_STAGE = r'''
+def run_stage(prompt):  # the stage task-hub noted in the run record before it launched this process
+    import json, re
+    from pathlib import Path
+    f = Path.home() / ".local/state/task-hub/runs" / (re.search(r"Task (\d+):", prompt)[1] + ".json")
+    return json.loads(f.read_text()).get("stage") if f.exists() else None
+'''
+
 FAKE_AGENT = r'''#!/usr/bin/env python3
 import os, re, subprocess, sys
 from pathlib import Path
 prompt = sys.argv[-1]
+''' + RUN_STAGE + r'''
 with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt,
-                  "key": os.environ.get("FAKE_AGENT_KEY")}) + "\n")
+    launcher = Path.home() / ".local/share/task-hub/run" / (re.search(r"Task (\d+):", prompt)[1] + ".sh")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt),
+                  "key": os.environ.get("FAKE_AGENT_KEY"), "other": os.environ.get("OTHER_SECRET"),
+                  "launcher_left": launcher.exists()}) + "\n")
 if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
     kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
+    if kind == "slow":  # keeps running, with the card already Blocked, until the test creates the release file
+        import time
+        release = Path(os.environ["TASK_TEST_AGENT_CALLS"] + ".release")
+        end = time.time() + 30
+        while not release.exists() and time.time() < end:
+            time.sleep(0.1)
+        kind = "human"
     out = {"answered": "## Decision\n\nanswered\n\n## Answer\n\nThe app is called app, see the README.\n\n"
                        "## Evidence\n\n- README.md:1: `app`\n",
            "invented": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
@@ -242,8 +261,9 @@ FAKE_REVIEWER = r'''#!/usr/bin/env python3
 import os, re, sys
 from pathlib import Path
 prompt = sys.argv[-1]
+''' + RUN_STAGE + r'''
 with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt}) + "\n")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt)}) + "\n")
 if "USAGE" in prompt:
     import subprocess
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
@@ -1083,6 +1103,57 @@ class TaskTest(unittest.TestCase):
         status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True).stdout
         self.assertNotIn("README.md", status)
 
+    def test_ready_while_the_replanner_runs_waits_for_it(self):
+        self.write_config(replanner="agent")
+        tid = self.new("blocked REPLAN=slow")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: len(self.agent_calls()) == 2)  # the replanner has started; its card is Blocked
+        self.move(tid, "Ready")  # the human re-runs it before the replanner is done
+        out = self.task()
+        self.assertNotIn("started[", out)
+        self.assertIn("still running (replanning)", out)  # in the waiting table
+        self.assertIn(f'"{tid}",Add hello,Ready › replanning,jyoka/app', self.task("list"))
+        self.assertIn("waits_for", self.task("list"))
+        self.task("done", tid, code=1)  # nor closed under the run's feet
+        time.sleep(1)
+        self.assertEqual(len(self.work_prompts()), 1)  # no second run in the same worktree
+        Path(f"{self.calls}.release").write_text("")
+        self.wait_for(lambda: self.replans(tid))
+        self.wait_for(lambda: "still running" not in self.task("list"))
+        self.assertIn("started[1]", self.task())  # once the replanner is done, the re-run starts
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.work_prompts()), 2)
+
+    def test_each_stage_is_in_the_run_record_and_shown_while_the_run_goes(self):
+        seen = self.root / "stage-at-setup.json"
+        self.write_config(reviewer=True, replanner="agent",
+                          extra=f"\n[setup]\njyoka/app = cp {self.run_file(1)} {seen}\n")
+        tid = self.new("reviewfix")  # reviewed, sent back once, reviewed again
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(json.loads(seen.read_text())["stage"], "setup")
+        self.assertEqual([c["stage"] for c in self.agent_calls()], ["agent", "retry"])
+        self.assertEqual([c["stage"] for c in self.reviewer_calls()], ["review", "review"])
+        self.wait_for(lambda: self.run_state(tid)["stage"] == "")  # the run has ended: nothing to show
+        self.assertIn(f'"{tid}",Add hello,In review,jyoka/app', self.task("list"))
+        stuck = self.new("blocked REPLAN=human")
+        self.task("start", stuck)
+        self.wait_for(lambda: self.replans(stuck))
+        self.assertEqual(self.agent_calls()[-1]["stage"], "replanning")
+        slow = self.new("slow")
+        self.task("start", slow)
+        self.wait_for(lambda: "waiting" in self.task("log", slow))
+        self.assertEqual(self.run_state(slow)["stage"], "agent")
+        self.assertIn(f'"{slow}",Add hello,In progress › agent,jyoka/app', self.task("list"))
+        self.assertIn("status: In progress › agent", self.task("show", slow))
+        os.kill(int(self.run_state(slow)["pid"]), signal.SIGINT)
+        self.assertEqual(self.wait(slow), "Blocked")
+        self.wait_for(lambda: f'"{slow}",Add hello,Blocked,jyoka/app' in self.task("list"))  # once the run is gone
+        events = (self.root / ".local/state/task-hub/events.jsonl").read_text()
+        self.assertEqual({json.loads(line)["event"] for line in events.splitlines()},
+                         {"Backlog", "Ready", "In progress", "In review", "Blocked", "replan"})  # none for a stage
+
     def test_no_replanner_for_blocks_task_hub_gave(self):
         self.write_config(replanner="agent")
         tid = self.new("noreport REPLAN=answered")
@@ -1145,7 +1216,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(sorted(db["workspaces"]), ["w1", "w2"])  # no workspace of its own
         self.assertEqual((self.run_state(tid)["tab"], self.run_state(tid)["workspace"]), ("", ""))
 
-    def test_pass_env_reaches_the_run_in_a_herdr_pane_but_no_log_or_event(self):
+    def test_pass_env_reaches_the_run_in_a_herdr_pane_but_no_file_log_or_event(self):
         secret = "ksk_secret_value_456"
         self.use_herdr()
         self.env.update(FAKE_AGENT_KEY=secret, OTHER_SECRET="not-passed")
@@ -1153,12 +1224,11 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
-        self.assertEqual(self.agent_calls()[0]["key"], secret)  # the pane did not have it: the launcher brought it
-        launcher = (self.root / ".local/share/task-hub/run" / f"{tid}.sh")
-        self.assertIn(f"FAKE_AGENT_KEY={secret}", launcher.read_text())
-        self.assertNotIn("OTHER_SECRET", launcher.read_text())
-        self.assertNotIn("NOT_SET", launcher.read_text())
-        self.assertEqual(launcher.stat().st_mode & 0o777, 0o600)
+        call = self.agent_calls()[0]
+        self.assertEqual(call["key"], secret)  # the pane did not have it: the launcher brought it
+        self.assertIsNone(call["other"])  # not in pass_env: not carried over
+        self.assertFalse(call["launcher_left"])  # the launcher removed itself before the run, which went on
+        self.assertEqual(list((self.root / ".local/share/task-hub/run").iterdir()), [])
         seen = [self.task("log", tid, "--full"), (self.root / ".local/state/task-hub/events.jsonl").read_text(),
                 *self.comments(tid), *[f.read_text(errors="replace") for f in self.root.glob("herdr.json*")]]
         self.assertEqual([text for text in seen if secret in text], [])
@@ -1344,6 +1414,90 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([line.split(" | ")[0] for line in second.strip().splitlines()[:-1]], [f"event: #{b} Blocked"])
         bad = subprocess.run([str(BIN), "events", "--next", "--after", "x"], env=self.env, capture_output=True, text=True)
         self.assertEqual(bad.returncode, 2)
+
+    def add_events(self, *events):
+        """Append events as task-hub writes them, without running tasks."""
+        path = self.root / ".local/state/task-hub/events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            for tid, event, extra in events:
+                f.write(json.dumps({"time": "2026-10-01T00:00:00Z", "id": tid, "title": "Add hello", "repo": "jyoka/app",
+                                    "event": event, **extra}) + "\n")
+        return len(path.read_text().splitlines())
+
+    def events_after(self, *args):
+        """`task events --after ...`, which must return at once: a hook cannot wait."""
+        r = subprocess.run([str(BIN), "events", "--after", *args], env=self.env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip().splitlines()
+
+    def test_events_after_alone_prints_what_came_after_n_without_waiting(self):
+        self.assertEqual(self.events_after("0"), ["next: task events --after 0"])  # no events.jsonl yet
+        n = self.add_events(("1", "Backlog", {}), ("1", "In review", {"pr": "https://github.com/jyoka/app/pull/1",
+                                                                       "digest": {"verdict": "pass"}}),
+                            ("2", "Blocked", {"reason": "Need a key.", "digest": {"reason": "Need a key."}}))
+        lines = self.events_after("1")
+        self.assertEqual([line.split(" | ")[0] for line in lines[:-1]], ["event: #1 In review", "event: #2 Blocked"])
+        self.assertEqual(lines[-1], f"next: task events --after {n}")
+        self.assertEqual(self.events_after(str(n)), [f"next: task events --after {n}"])  # nothing new: still the line
+        only = self.events_after("0", "--only", "Blocked")
+        self.assertEqual(only, ["event: #2 Blocked | Add hello | jyoka/app | reason Need a key.",
+                                f'next: task events --after {n} --only "Blocked"'])
+        digest = self.events_after("0", "--only", "In review,Blocked", "--digest")
+        self.assertEqual(digest[0].split(" | ")[0], "event: #1 In review")
+        self.assertTrue(digest[1].startswith("  verdict: "))
+        self.assertEqual(digest[2].split(" | ")[0], "event: #2 Blocked")  # its reason is on the line already
+        self.assertEqual(digest[-1], f'next: task events --after {n} --only "In review,Blocked" --digest')
+        self.assertEqual(len(digest), 4)
+        bad = subprocess.run([str(BIN), "events", "--after", "x"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 2)
+
+    def kiro_hook(self, task=None):
+        """kiro/task-events-since as Kiro runs it, with `task` on PATH being bin/task or the given script."""
+        bindir = self.root / "kiro-bin"
+        bindir.mkdir(exist_ok=True)
+        (bindir / "task").unlink(missing_ok=True)
+        if task:
+            (bindir / "task").write_text(task)
+            (bindir / "task").chmod(0o755)
+        else:
+            (bindir / "task").symlink_to(BIN)
+        r = subprocess.run([str(KIRO_HOOK)], env={**self.env, "PATH": f"{bindir}:{self.env['PATH']}"},
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)  # anything else would block the prompt in Kiro
+        return r.stdout.strip().splitlines()
+
+    def test_kiro_hook_prints_only_the_new_wanted_events_once(self):
+        self.add_events(("1", "Blocked", {"reason": "Old news."}))
+        self.assertEqual(self.kiro_hook(), [])  # first prompt: the past is not news
+        cursor = self.root / ".local/state/task-hub/kiro-cursor"
+        self.assertEqual(cursor.read_text().strip(), "1")
+        self.add_events(("2", "Ready", {}), ("2", "In review", {"digest": {"verdict": "pass"}}), ("3", "Done", {}))
+        lines = self.kiro_hook()
+        self.assertEqual(lines[0], "task-hub: new events since your last message:")
+        self.assertEqual([line.split(" | ")[0] for line in lines if line.startswith("event:")],
+                         ["event: #2 In review", "event: #3 Done"])  # Ready is not wanted
+        self.assertIn("  verdict: pass", lines)
+        self.assertFalse(any(line.startswith("next:") for line in lines))
+        self.assertEqual(self.kiro_hook(), [])  # already told
+        self.assertEqual(cursor.read_text().strip(), "4")
+
+    def test_kiro_hook_exits_0_when_task_fails(self):
+        self.add_events(("1", "Blocked", {}))
+        self.kiro_hook()
+        self.add_events(("2", "Blocked", {}))
+        lines = self.kiro_hook(task="#!/bin/sh\necho 'boom' >&2\nexit 1\n")
+        self.assertLessEqual(len(lines), 1)  # at most a one-line note
+        self.assertNotIn("boom", "\n".join(lines))
+        self.assertEqual(self.kiro_hook(task="#!/bin/sh\necho 'no next line'\n")[0][:9], "task-hub:")
+        cursor = self.root / ".local/state/task-hub/kiro-cursor"
+        self.assertEqual(cursor.read_text().strip(), "1")  # not moved: the event is told next time
+        self.assertEqual([line.split(" | ")[0] for line in self.kiro_hook() if line.startswith("event:")],
+                         ["event: #2 Blocked"])
+        cursor.write_text("garbage\n")
+        self.assertEqual(self.kiro_hook(), [])  # a broken cursor starts over from now
+        self.assertEqual(cursor.read_text().strip(), "2")
 
     def test_events_note_each_status_change_with_the_reason(self):
         ok, stuck = self.new("ok"), self.new("stuck")

@@ -148,12 +148,13 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    pass_env = KIRO_API_KEY    ; herdr のペインで動く実行にも渡す環境変数の名前(カンマか空白区切り)
 
    [check]
-   kiro = kiro-cli whoami     ; 組み込みの既定。始める前に実行し、失敗したらエージェントを起動せずに Blocked
+   kiro = kiro-cli whoami     ; 例。始める前に実行し、失敗したらエージェントを起動せずに Blocked
    ```
 
    task-hub は各タスクを始める前に `[check]` のコマンドを実行し、失敗したらクレジットを使う前に、そのコマンドと
-   出力の最後の数行を理由にしてカードを Blocked にします。`KIRO_API_KEY` だけのときに `kiro-cli whoami` が成功するかは
-   未確認です。失敗するなら `[check] kiro =` を空にしてください。詳しくは
+   出力の最後の数行を理由にしてカードを Blocked にします。`[check]` に書いたエージェントだけを確認します(組み込みの
+   既定はありません)。`KIRO_API_KEY` だけのときに `kiro-cli whoami` が成功するかは未確認です。**API キーだけで使う
+   場合は、先に手で `kiro-cli whoami; echo $?` が 0 になるか確かめてから** `[check]` に書いてください。詳しくは
    [agents.md](agents.md#始める前の確認と実行に渡す環境変数) を参照してください。launchd から動かすときは、
    キーを plist の `EnvironmentVariables` に入れます(plist はほかの人が読めない権限にしてください)。
 

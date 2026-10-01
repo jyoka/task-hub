@@ -50,9 +50,6 @@ DEFAULT_AGENTS = {
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
 }
-DEFAULT_CHECKS = {  # [check]: run before a task starts; exit 0 = the agent can be used now. "" = no check
-    "kiro": "kiro-cli whoami",
-}
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
@@ -67,7 +64,7 @@ METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, 
 EVENTS = STATE / "events.jsonl"  # one line per status change task-hub makes, for whatever watches (see docs/operations.md)
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
-            "research"]
+            "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
 
 
@@ -285,7 +282,7 @@ def digest_lines(d, skip=()):
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
-                 "agents": DEFAULT_AGENTS, "check": DEFAULT_CHECKS, "board": {},
+                 "agents": DEFAULT_AGENTS, "check": {}, "board": {},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     c.read(CONFIG)
     return c
@@ -320,7 +317,7 @@ def pass_env():
 
 
 def check_ready(name):
-    """Run [check] <name>, if set; raise with its last lines when the agent cannot be used now (e.g. logged out)."""
+    """Run [check] <name>, if set (exit 0 = ready); raise with its last lines when the agent cannot be used now."""
     cmd = config()["check"].get(name, "").strip()
     if not cmd:
         return
@@ -442,13 +439,18 @@ def tasks(include_done=False):
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
     for t in result:
+        t["running"] = alive(t)
+        # its own run is still going whatever the Status says (a replanner after Blocked, a late herdr start):
+        # never start a second run in the same worktree
+        own = [f"its last run, still running ({t.get('stage') or 'starting'})"] \
+            if t["running"] and t["status"] != IN_PROGRESS else []
         linked = {x["number"] for x in t["blockers"] if x["ref"].startswith("#")}
         # written in the body but never linked (the Issue was made with `gh issue create` or another skill):
         # never enough to start, so an open one holds the task back like a link until someone links it
         unlinked = [n for n in t.pop("mentioned") if n not in linked and n != t["id"] and n in statuses]
         t["waits_for"] = ", ".join([f"{x['ref']} ({why})" for x, why in
                                     ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why]
-                                   + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked])
+                                   + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked] + own)
     return sorted(result, key=lambda t: int(t["id"]))
 
 
@@ -475,6 +477,11 @@ def waiting_reason(blocker, statuses):
     if blocker["ref"].startswith("#"):
         return statuses.get(blocker["number"]) or "open, not on the board"
     return "open"
+
+
+def shown_status(t):
+    """The Status, with the stage of the run that is still going: "In progress › review"."""
+    return f"{t['status']} › {t['stage']}" if t.get("running") and t.get("stage") else t["status"]
 
 
 def canonical(status):
@@ -590,6 +597,11 @@ def load_run(tid):
 def save_run(t):
     RUNS.mkdir(parents=True, exist_ok=True)
     (RUNS / f"{t['id']}.json").write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+
+
+def set_stage(t, stage):
+    t["stage"] = stage
+    save_run(t)
 
 
 def record_run(record, say=None):
@@ -792,6 +804,7 @@ def run_setup(t, wt, say):
     cmd = setup_command(t["repo"])
     if not cmd:
         return ""
+    set_stage(t, "setup")
     say(f"== setup: {cmd}")
     before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
     proc = subprocess.Popen(["sh", "-c", "set -e\n" + cmd], cwd=wt, stdin=subprocess.DEVNULL,
@@ -863,6 +876,7 @@ def launch(t):
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
+    t["stage"] = "preparing"
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     t["research"] = "yes" if issue(t)["research"] else ""
     prompt_file(t).write_text(build_prompt(t))  # kept, so you can always see what the agent was told
@@ -894,7 +908,8 @@ def launch(t):
         launcher.parent.mkdir(parents=True, exist_ok=True)
         launcher.touch(mode=0o600)
         launcher.chmod(0o600)  # it may hold API keys
-        launcher.write_text("#!/bin/sh\nexec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
+        launcher.write_text("#!/bin/sh\nrm -f " + shlex.quote(str(launcher)) + "  # it may hold API keys: gone once read\n"
+                            "exec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
         pane = res["root_pane"]["pane_id"]
         herdr("pane", "run", pane, shlex.join(["sh", str(launcher)]))
         # a brand-new shell can swallow the Enter while it is still starting up: confirm the run began
@@ -904,6 +919,7 @@ def launch(t):
             if herdr("pane", "wait-output", pane, "--match", f"== task {t['id']}:", "--timeout", "8000").returncode == 0:
                 break
         else:
+            launcher.unlink(missing_ok=True)  # never ran, so never removed itself
             raise RuntimeError(f"the run did not start in herdr {'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
         with open(t["log"], "ab") as log:
@@ -1125,6 +1141,7 @@ def run_review(t, report, say, usage=None):
             return None  # finish() blocks it as "changed no files"
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
+    set_stage(t, "review")
     snap = snapshot(wt)
     code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage)
     if restore(wt, snap):
@@ -1157,6 +1174,7 @@ def review_loop(t, report, code, say, record):
         feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
                               review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
         record["retried"] = True
+        set_stage(t, "retry")
         (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
         code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"])
         report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
@@ -1206,6 +1224,7 @@ def run_replan(t, report, say, usage=None):
         return "skipped"
     wt = Path(t["worktree"])
     (wt / REPLAN_FILE).unlink(missing_ok=True)
+    set_stage(t, "replanning")
     snap = snapshot(wt)
     code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner", usage)
     if restore(wt, snap):
@@ -1275,11 +1294,12 @@ def cmd_run(a):
             set_status(t, BLOCKED, reason=stop)
         except RuntimeError as e:
             say(f"== could not report it: {e}")
-        save_run(t)
+        set_stage(t, "")
         record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": BLOCKED,
                     "blocked_by": "setup"}, say)
         say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
         return
+    set_stage(t, "agent")
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"])
     say(f"== agent exited with code {code}")
 
@@ -1287,6 +1307,7 @@ def cmd_run(a):
     review, review_blocked = "", ""
     try:
         report, code, review, review_blocked = review_loop(t, report, code, say, record)
+        set_stage(t, "finishing")
         take_card(t)
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
         record.update(pr_size(t, wt))
@@ -1310,7 +1331,7 @@ def cmd_run(a):
             set_status(t, BLOCKED, reason=f"task-hub could not finish the run: {str(e)[:300]}")
         except RuntimeError:  # GitHub unreachable too: the next sync sees the dead run and blocks the card
             say(f"== the agent's report is kept in {home(wt / REPORT_FILE)}")
-    save_run(t)  # the pid stays: once this process is gone, `alive` knows the run has ended
+    set_stage(t, "")  # the pid stays: once this process is gone, `alive` knows the run has ended
     record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": status}, say)
     if status == IN_REVIEW and (t.get("tab") or t.get("workspace")):  # nothing more to see here: `task log` keeps it
         say(f"== task {t['id']} is now {status}. Closing this tab; `task log {t['id']}` has the output.")
@@ -1515,7 +1536,9 @@ def cmd_list(_):
     board_ = tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
     out("counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
-        *(table("tasks", board_, ["id", "title", "status", "repo", "agent", "waits_for"]) if board_ else ["tasks: 0 open tasks"]),
+        *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], ["id", "title", "status", "repo", "agent",
+                                                                               "waits_for"])
+          if board_ else ["tasks: 0 open tasks"]),
         f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)")
 
 
@@ -1542,10 +1565,12 @@ def cmd_events(a):
     --next waits for the next wanted events, prints them and the command that continues from there, and exits:
     for a harness that wakes its agent when a background command ends (the /chief skill uses it). The cursor is a
     line number in the append-only EVENTS file, so nothing that happens between two runs is missed.
+    --after N alone does not wait: the wanted events after line N, if any, and the `next:` line, for a hook that
+    must return at once (kiro/task-events-since).
     """
     only = {e.strip().lower() for e in (a["only"] or "").split(",") if e.strip()}
     wanted = lambda e: not only or e.get("event", "").lower() in only
-    if a["next"]:
+    if a["next"] or (a["after"] is not None and not a["follow"]):  # --follow keeps ignoring --after
         return events_next(a, wanted)
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
@@ -1594,10 +1619,11 @@ def events_next(a, wanted):
                     continue
                 if wanted(e):
                     found += event_lines(e, a["digest"])
-            if found:
+            if found or not a["next"]:  # --after alone: what is there now, even nothing
                 only = f' --only "{a["only"]}"' if a["only"] else ""
                 more = " --digest" if a["digest"] else ""
-                out(*found, f"next: task events --next --after {len(lines)}{only}{more}")
+                wait = " --next" if a["next"] else ""
+                out(*found, f"next: task events{wait} --after {len(lines)}{only}{more}")
                 return
             cursor = max(cursor, len(lines))
             time.sleep(1)
@@ -1630,8 +1656,9 @@ def cmd_show(a):
     i = issue(t)
     if a["digest"]:
         return show_digest(t, i)
-    lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr")
-                         if t.get(k)]
+    lines = ["task:"] + [f"  {k}: {q(shown_status(t) if k == 'status' else t.get(k))}"
+                         for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr") if t.get(k)] \
+        + ([f"  waits_for: {q(t['waits_for'])}"] if t.get("waits_for") else [])
     body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "") \
         + ("\n\n" + i["replans"][-1].replace(REPLAN_MARK, "").strip() if i["replans"] else "")
     if len(body) > 1500 and not a["full"]:
@@ -1862,8 +1889,9 @@ def cmd_done(a):
     if t["status"] == DONE:
         out(f"task: #{t['id']} already Done (no-op)")
         return
-    if t["status"] == IN_PROGRESS and alive(t):
-        fail(f"task {t['id']} is still running", "stop the agent in its herdr workspace first, then retry")
+    if t["running"]:  # whatever the Status: a replanner runs after the card is Blocked
+        fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
+             "stop the agent in its herdr workspace first, then retry")
     left = cleanup(t)
     if issue(t)["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
@@ -1889,8 +1917,9 @@ COMMANDS = {
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
     "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True, "digest": False},
-               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"] [--digest]  # what task-hub "
-               "did lately; --follow prints each new event as it happens, --next waits for the next ones and exits, "
+               "task events [--follow | --next [--after N] | --after N] [--only \"In review,Blocked\"] [--digest]  # what "
+               "task-hub did lately; --follow prints each new event as it happens, --next waits for the next ones and "
+               "exits, --after N alone prints those after line N without waiting, "
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),
