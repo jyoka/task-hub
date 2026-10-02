@@ -35,11 +35,16 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      `next: ... --after <n>` line. Keep that `<n>` as the new cursor. If `task` fails, the loop prints
      one `watch stopped: <error>` line and exits with code 1.
    - Kiro IDE with Workflows turned on and the `task-hub-events` recipe installed
-     (`~/.kiro/workflows/task-hub-events.workflow.json`): launch it once with `run_workflow`. Its `watch` polls
+     (`~/.kiro/workflows/task-hub-events.workflow.json`): first run
+     `t=$(date +%Y%m%d%H%M%S)-$$-$RANDOM; mkdir -p ~/.local/state/task-hub && printf '%s\n' "$t" > ~/.local/state/task-hub/kiro-chief-token && echo "$t"`
+     and keep the token it prints. Then launch the workflow once with `run_workflow`, with the input
+     `chief_token` set to that token. A workflow an earlier /chief launched sees the new token and ends itself at
+     its next poll, so only this chat gets the events. The workflow's `watch` polls
      `task events` without using the model, and each batch of events reaches this chat as a `send_message` from its
      `tell-chief` step. Do not run `task events --next` yourself, and do not tell again events the workflow already
      brought (task-hub's prompt hook may add them to your context too). If the recipe is missing, the launch fails,
-     or the run stops, tell the user in one line and check at each reply instead (below).
+     or the run stops, tell the user in one line and check at each reply instead (below). But if its last message
+     says watching moved to a newer /chief chat, say so in one line and do not watch in this chat any more.
    - A background command that wakes you when it exits: run
      `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
      the next event, prints it with its digest, and exits.
