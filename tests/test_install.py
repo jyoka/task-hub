@@ -755,6 +755,42 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(lines[-2].startswith(f"6. task-hub 本体: 止まりました。file://{self.root}/origin.git の kiro-v99 を "
                                              "clone できませんでした("), lines)
 
+    def test_doctor_on_a_ref_compares_commits_with_the_newest_kiro_tag(self):
+        """The installer's clone on --ref main: a kiro-v* older than main is not a new version, and nothing is fetched."""
+        self.use_python3()
+        self.release("kiro-v1")
+        self.change_origin("bin/task", FAKE_TASK + "# main, after kiro-v1\n")
+        self.install(args=["--ref", "main"])
+        self.assertEqual(self.lib_at(), "branch main")
+        line = f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH"
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [line, f"    (配布版 kiro-v1 より新しい main({self.short()}) です。次にインストーラを実行すると "
+                                "kiro-v1 に戻ります(main を続けるなら --ref main))"])
+        # a release after it, not fetched yet: its commit is not here, so it is not known which is newer
+        self.release("kiro-v2")
+        before = self.snapshot()
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [line, "    (新しい版があるかは確かめられませんでした(kiro-v2 のコミットが手元にありません))"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.lib_git("tag", "-l", "kiro-v2"), "", "the diagnosis fetched nothing")
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.home / ".local/lib/task-hub"), "cat-file", "-e",
+                                            f"{self.short('kiro-v2^{commit}')}^{{commit}}"], capture_output=True).returncode, 0)
+        # once fetched: the tag's commit is not in main's history here, so it is a new version
+        self.lib_git("fetch", "-q", "--tags")
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [line, "    (新しい版 kiro-v2 があります。sh kiro/install.sh を実行してください(Kiro のチャットなら"
+                                "「セットアップして」))"])
+        # main on the release's commit
+        self.install(args=["--ref", "main"])
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH",
+                          f"    (配布版 kiro-v2 と同じコミットの main({self.short()}) です。次にインストーラを実行すると "
+                          "kiro-v2 に戻ります(main を続けるなら --ref main))"])
+        self.install()
+        self.assertEqual(self.lib_at(), "tag kiro-v2")
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         ["○ 6. task-hub 本体: ~/.local/lib/task-hub(kiro-v2、最新)、~/.local/bin/task、~/.zprofile に PATH"])
+
     def test_uses_a_python3_of_3_10_or_later_on_path(self):
         self.script("python3.13", "#!/bin/sh\nexit 1\n")  # a pyenv shim of a version that is not installed
         python = self.use_python3()
