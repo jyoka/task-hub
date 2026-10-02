@@ -3,6 +3,8 @@
 # (docs/prd-kiro-installer.md, section 5, stage 11). It changes nothing: no file, no login, nothing on GitHub.
 #   sh kiro/doctor.sh [--in-install]
 # --in-install: kiro/install.sh runs it at its end; then only the list, the installer says the one next step.
+# It judges whether task-hub works, not whether it has the installer's form: a manual install (docs/setup.md: the
+# link ~/.local/bin/task, a kiro-cli on PATH, git logged in another way) that works is ○, with a note under it.
 # Exit status: 0 = everything there, 1 = something missing.
 # For tests: TASK_INSTALL_GITHUB replaces https://github.com (the reachability check).
 set -u
@@ -33,6 +35,7 @@ done
 missing=0 first_step=
 tilde() { case $1 in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 ok() { printf '○ %s: %s\n' "$label" "$1"; }
+note() { printf '    (%s)\n' "$1"; }
 ng() {  # $1: what is missing, $2: what to do next
   printf '× %s: %s\n' "$label" "$1"
   printf '    → %s\n' "$2"
@@ -42,6 +45,14 @@ ng() {  # $1: what is missing, $2: what to do next
 python_ok() { [ -n "$1" ] && [ "$1" != /usr/bin/python3 ] && [ -x "$1" ] \
   && "$1" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; }
 runs() { [ -x "$1" ] && "$1" --version >/dev/null 2>&1; }
+resolve() {  # $1: a path, with its links followed (the folders above as they are named, for tilde)
+  f=$1 n=0
+  while [ -L "$f" ] && [ "$n" -lt 20 ]; do
+    t=$(readlink "$f") n=$((n + 1))
+    case $t in /*) f=$t ;; *) f=$(dirname "$f")/$t ;; esac
+  done
+  d=$(cd "$(dirname "$f")" 2>/dev/null && pwd) && printf '%s/%s' "$d" "$(basename "$f")"
+}
 helper() {  # $1: board | config | kiro-settings, $2: before the detail when it is ok
   # kiro/install-board check prints "ok<TAB>detail" or "ng<TAB>detail<TAB>next"
   tab=$(printf '\t')
@@ -96,13 +107,26 @@ if [ -n "$PY" ]; then ok "$(tilde "$PY")"; else ng "Python 3.10 以上があり�
 label="3. gh"
 if gh=$(command -v gh 2>/dev/null) && "$gh" --version >/dev/null 2>&1; then ok "$(tilde "$gh")"; else gh=; ng "gh がありません" "$INSTALL"; fi
 
-# 4. kiro-cli
+# task-hub's clone: the installer's, or the one ~/.local/bin/task links to (docs/setup.md, by hand)
+clone=$LIB_DIR by_hand=
+if [ -L "$BIN_DIR/task" ] && t=$(resolve "$BIN_DIR/task"); then
+  case $t in */bin/task) [ -d "${t%/bin/task}/.git" ] && clone=${t%/bin/task} by_hand=1 ;; esac
+fi
+
+# 4. kiro-cli: the installer's link, else one on PATH that runs
 label="4. kiro-cli"
-if runs "$BIN_DIR/kiro-cli"; then ok "$(tilde "$BIN_DIR/kiro-cli")"; else ng "$(tilde "$BIN_DIR/kiro-cli") がないか、動きません" "$INSTALL"; fi
+if runs "$BIN_DIR/kiro-cli"; then
+  ok "$(tilde "$BIN_DIR/kiro-cli")"
+elif k=$(PATH=$orig_path; command -v kiro-cli 2>/dev/null) && runs "$k"; then
+  ok "$(tilde "$k")"
+  note "手で入れた構成です。$(tilde "$BIN_DIR/kiro-cli") はなく、PATH にあるものを使います"
+else
+  ng "$(tilde "$BIN_DIR/kiro-cli") がないか、動きません" "$INSTALL"
+fi
 
 # 5. logins
 label="5. GitHub のログイン"
-gh_ok=
+gh_ok=  # gh is logged in with project: the board can be checked
 if [ -z "$gh" ]; then
   ng "gh がないので確かめていません" "$INSTALL"
 elif ! r=$(gh api -i user 2>/dev/null); then
@@ -112,12 +136,26 @@ else
   user=$(printf '%s\n' "$r" | sed -n 's/^{"login":"\([^"]*\)".*/\1/p' | head -n 1)
   case ", $scopes," in
     *", project,"*)
+      gh_ok=1
+      # git: gh's login (the installer's), else any login that reaches a private repo: the board's, or task-hub's
+      repo=$(sed -n '/^[[:space:]]*\[board\]/,/^[[:space:]]*\[/s/^[[:space:]]*issues[[:space:]]*[=:][[:space:]]*\([^;# ]*\).*/\1/p' \
+        "$HOME/.config/task-hub/config.ini" 2>/dev/null | head -n 1)
+      if [ -n "$repo" ]; then
+        url=$GITHUB/$repo.git
+      else
+        url=
+        [ -z "$GIT" ] || url=$("$GIT" -C "$clone" remote get-url origin 2>/dev/null) || url=
+        repo=$url
+      fi
       if [ -n "$GIT" ] && "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null \
         | grep -q 'auth git-credential'; then
-        gh_ok=1
         ok "$user"
+      elif [ -n "$GIT" ] && [ -n "$url" ] \
+        && GIT_TERMINAL_PROMPT=0 "$GIT" ls-remote --heads "$url" </dev/null >/dev/null 2>&1; then
+        ok "$user"
+        note "手で入れた構成です。git は gh 以外のログインで ${repo} に届きます"
       else
-        ng "${user}。git が gh のログインを使っていません" "$INSTALL"
+        ng "${user}。git が gh のログインを使っておらず、${repo:-GitHub の private リポジトリ} に届きません" "$INSTALL"
       fi
       ;;
     *) ng "${user}。Projects の権限(project)がありません" "sh kiro/install.sh を実行し、案内どおりにブラウザで承認してください" ;;
@@ -135,18 +173,27 @@ fi
 # 6. task-hub itself
 label="6. task-hub 本体"
 wrapper=$BIN_DIR/task
-if [ ! -d "$LIB_DIR/.git" ]; then
-  ng "$(tilde "$LIB_DIR") がありません" "$INSTALL"
-elif [ -L "$wrapper" ] || ! grep -q '^# task-hub: made by kiro/install.sh' "$wrapper" 2>/dev/null; then
+task_py=  # by hand: the Python of bin/task's #! line
+if [ -n "$by_hand" ]; then
+  case $(head -n 1 "$clone/bin/task" 2>/dev/null) in
+    '#!/usr/bin/env '*) task_py=$(command -v "$(head -n 1 "$clone/bin/task" | sed 's|^#!/usr/bin/env *||; s| .*||')" 2>/dev/null) ;;
+    '#!'*) task_py=$(head -n 1 "$clone/bin/task" | sed 's|^#! *||; s| .*||') ;;
+  esac
+fi
+if [ ! -d "$clone/.git" ]; then
+  ng "$(tilde "$clone") がありません" "$INSTALL"
+elif [ -n "$by_hand" ] && ! python_ok "$task_py"; then
+  ng "$(tilde "$wrapper") の Python(${task_py:-見つかりません})が 3.10 以上ではありません" "$INSTALL"
+elif [ -z "$by_hand" ] && { [ -L "$wrapper" ] || ! grep -q '^# task-hub: made by kiro/install.sh' "$wrapper" 2>/dev/null; }; then
   ng "$(tilde "$wrapper") がないか、インストーラのものではありません" "$INSTALL"
 elif ! "$wrapper" --version >/dev/null 2>&1; then
   ng "$(tilde "$wrapper") が動きません" "$INSTALL"
 else
   # the version, and whether there is a newer kiro-v* (as kiro/install.sh decides: its clone, in the manifest or not
   # on a branch, follows the newest kiro-v*; a clone on a branch made by hand is only pulled). ls-remote: no fetch
-  lib=$(tilde "$LIB_DIR") note=
+  lib=$(tilde "$clone") note=
   if [ -n "$GIT" ]; then
-    g() { GIT_TERMINAL_PROMPT=0 "$GIT" -C "$LIB_DIR" "$@"; }
+    g() { GIT_TERMINAL_PROMPT=0 "$GIT" -C "$clone" "$@"; }
     kiro_newest() { grep -E '^kiro-v[0-9]+$' | sort -t v -k 2,2n | tail -n 1; }
     M_task_hub=$(plutil -extract installed.task-hub raw -o - "$MANIFEST" 2>/dev/null) || M_task_hub=
     current=
@@ -181,33 +228,49 @@ else
       fi
       ;;
   esac
-  [ -z "$note" ] || printf '    (%s)\n' "$note"
+  [ -z "$by_hand" ] || note "手で入れた構成です。$(tilde "$wrapper") は clone の bin/task へのリンクで、インストーラの wrapper ではありません"
+  [ -z "$note" ] || note "$note"
 fi
 
-# 7, 8. the board and config.ini (kiro/install-board check: read-only)
+# 7, 8. the board and config.ini (kiro/install-board check: read-only). The board needs only gh, not git
 label="7. ボード"
 if [ -z "$PY" ]; then ng "Python がないので確かめていません" "$INSTALL"
-elif [ -z "$gh_ok" ]; then ng "GitHub にログインできていないので確かめていません" "$INSTALL"
+elif [ -z "$gh_ok" ]; then ng "gh が Projects の権限でログインできていないので確かめていません" "$INSTALL"
 else helper board
 fi
 label="8. 設定"
 if [ -z "$PY" ]; then ng "Python がないので確かめていません" "$INSTALL"; else helper config; fi
 
 # 9. Kiro: links to the clone for skills and steering, copies the same as the clone's for the hook and the workflow
+# (a copy that differs only in the description, or a hook's name, which Kiro only shows: ○ with a note)
 label="9. Kiro との連携"
-lacks= stale= other=
+lacks= stale= other= loose=
+works_same() {  # $1, $2: the hook or the workflow; the same but for what Kiro only shows
+  [ -n "$PY" ] && "$PY" - "$1" "$2" >/dev/null 2>&1 <<'EOF'
+import json, sys
+def acts(d):  # everything else (trigger, action, command, steps, the workflow's name /chief runs it by) is what it does
+    d = {k: v for k, v in d.items() if k != "description"}
+    if "hooks" in d:
+        d["hooks"] = [{k: v for k, v in h.items() if k not in ("name", "description")} for h in d["hooks"]]
+    return d
+a, b = (acts(json.load(open(p, encoding="utf-8"))) for p in sys.argv[1:])
+sys.exit(a != b)
+EOF
+}
 same() { if [ -d "$1" ]; then [ "$(cd -P "$1" && pwd)" = "$(cd -P "$2" 2>/dev/null && pwd)" ]; else cmp -s "$1" "$2"; fi; }
 for x in skills/task:skills/task skills/chief:skills/chief kiro/steering/task-hub.md:steering/task-hub.md; do
-  src=$LIB_DIR/${x%%:*} dst=$KIRO_DIR/${x#*:}
+  src=$clone/${x%%:*} dst=$KIRO_DIR/${x#*:}
   if [ ! -e "$dst" ]; then lacks="${lacks}$(tilde "$dst")、"
   elif ! same "$dst" "$src"; then other="${other}$(tilde "$dst")、"  # someone's own: the installer keeps it too
   fi
 done
 for x in kiro/hooks/task-hub-events.json:hooks/task-hub-events.json \
   kiro/workflows/task-hub-events.workflow.json:workflows/task-hub-events.workflow.json; do
-  src=$LIB_DIR/${x%%:*} dst=$KIRO_DIR/${x#*:}
+  src=$clone/${x%%:*} dst=$KIRO_DIR/${x#*:}
   if [ ! -f "$dst" ] || [ -L "$dst" ]; then lacks="${lacks}$(tilde "$dst")、"
-  elif ! cmp -s "$src" "$dst"; then stale="${stale}$(tilde "$dst")、"
+  elif cmp -s "$src" "$dst"; then :
+  elif works_same "$src" "$dst"; then loose="${loose}$(tilde "$dst")、"
+  else stale="${stale}$(tilde "$dst")、"
   fi
 done
 if [ -n "$lacks" ]; then
@@ -218,7 +281,8 @@ elif [ -z "$PY" ]; then
   ng "Python がないので Workflows の設定を確かめていません" "$INSTALL"
 else
   helper kiro-settings "スキル、steering、フック、ワークフロー、"
-  [ "$r" = ok ] && [ -n "$other" ] && printf '    (%s は別のものを指しています。インストーラもそのままにします)\n' "${other%、}"
+  [ "$r" = ok ] && [ -n "$other" ] && note "${other%、} は別のものを指しています。インストーラもそのままにします"
+  [ "$r" = ok ] && [ -n "$loose" ] && note "${loose%、} は task-hub の今の版と説明(description)か名前だけが違います。動作は同じです"
 fi
 
 # 10. launchd (optional)
