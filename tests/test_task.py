@@ -1569,9 +1569,10 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.kiro_hook(), [])  # a broken cursor starts over from now
         self.assertEqual(cursor.read_text().strip(), "2")
 
-    def kiro_watch(self, cursor=None, task=None, stdin=None):
+    def kiro_watch(self, cursor=None, task=None, stdin=None, token=None):
         """kiro/task-events-watch as a Kiro Workflows `watch` poll runs it: the poll's JSON on stdin, one result on
-        stdout, exit 0. `task` on PATH is bin/task or the given script."""
+        stdout, exit 0. `task` on PATH is bin/task or the given script. `token` is the run's `chief_token` in config
+        (None: an older recipe without it)."""
         bindir = self.root / "kiro-bin"
         bindir.mkdir(exist_ok=True)
         (bindir / "task").unlink(missing_ok=True)
@@ -1581,15 +1582,43 @@ class TaskTest(unittest.TestCase):
         else:
             (bindir / "task").symlink_to(BIN)
         if stdin is None:
-            stdin = json.dumps({"cursor": cursor, "config": {"pollIntervalSec": 60, "commandTimeoutSec": 30},
+            config = {"pollIntervalSec": 60, "commandTimeoutSec": 30, **({"chief_token": token} if token is not None else {})}
+            stdin = json.dumps({"cursor": cursor, "config": config,
                                 "workspacePath": str(self.root), "additionalDirectories": []})
         r = subprocess.run([str(KIRO_WATCH)], env={**self.env, "PATH": f"{bindir}:{self.env['PATH']}"},
                            input=stdin, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)  # 2, 126, 127 would fail the watch node; others are idle polls
         result = json.loads(r.stdout)  # exactly one JSON object, nothing else on stdout
-        self.assertIn(result["outcome"], ("idle", "new-activity"))
+        self.assertIn(result["outcome"], ("idle", "new-activity", "terminal-state"))
         self.assertIn("cursor", result)  # required, even when null
         return result, r.stderr
+
+    def test_kiro_watch_ends_when_a_newer_chief_wrote_its_token(self):
+        token_file = self.root / ".local/state/task-hub/kiro-chief-token"
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        self.add_events(("1", "Blocked", {}))
+        # no token file yet: every run goes on, with or without a token
+        self.assertEqual(self.kiro_watch(None, token="t1")[0], {"outcome": "idle", "cursor": 1})
+        token_file.write_text("t1\n")  # /chief #1 wrote its token and launched its run with it
+        self.assertEqual(self.kiro_watch(1, token="t1")[0], {"outcome": "idle", "cursor": 1})
+        n = self.add_events(("2", "In review", {}))
+        result = self.kiro_watch(1, token="t1")[0]
+        self.assertEqual((result["outcome"], result["cursor"]), ("new-activity", n))  # the same token: as before
+        token_file.write_text("t2\n")  # /chief #2 opened: run #1 ends at its next poll, run #2 goes on
+        self.add_events(("3", "Done", {}))
+        result = self.kiro_watch(n, token="t1")[0]
+        self.assertEqual((result["outcome"], result["cursor"]), ("terminal-state", n))
+        self.assertTrue(result["payload"].startswith("replaced:"))  # tell-chief still runs once: not the old events
+        self.assertNotIn("event:", result["payload"])
+        self.assertEqual(self.kiro_watch(n, token="t2")[0]["outcome"], "new-activity")
+        # an older recipe (no token in config), or a launch without the input (the template left as is): as before
+        self.assertEqual(self.kiro_watch(n)[0]["outcome"], "new-activity")
+        self.assertEqual(self.kiro_watch(n, token="{{chief_token}}")[0]["outcome"], "new-activity")
+        self.assertEqual(self.kiro_watch(n, token="")[0]["outcome"], "new-activity")
+        token_file.write_text("")  # an empty or missing token file: as before
+        self.assertEqual(self.kiro_watch(n, token="t1")[0]["outcome"], "new-activity")
+        token_file.unlink()
+        self.assertEqual(self.kiro_watch(n, token="t1")[0]["outcome"], "new-activity")
 
     def test_kiro_watch_is_idle_until_wanted_events_come_then_hands_them_over(self):
         self.add_events(("1", "Blocked", {"reason": "Old news."}))
@@ -1630,12 +1659,18 @@ class TaskTest(unittest.TestCase):
         loop, = recipe["steps"]
         self.assertEqual(loop["type"], "repeat")
         self.assertTrue({"id", "steps", "maxIterations", "onMaxIterations"} <= set(loop))
+        self.assertEqual(len({"stopCondition", "stopWhen"} & set(loop)), 1)  # Kiro: exactly one of them
         watch, tell = loop["steps"]
+        self.assertEqual(loop["stopWhen"], f"{watch['id']}.terminal")  # the watch's terminal-state ends the run
         self.assertEqual((watch["type"], watch["handler"]), ("watch", "command"))
         self.assertEqual(watch["config"]["command"], "$HOME/.local/lib/task-hub/kiro/task-events-watch")
         self.assertGreaterEqual(watch["config"]["pollIntervalSec"], 10)  # Kiro's minimum
         self.assertNotIn("args", watch["config"])  # rejected by Kiro
         self.assertNotIn("{{", watch["config"]["command"])  # rejected by Kiro
+        self.assertTrue(all(isinstance(v, str) for v in recipe["inputs"].values()))  # Kiro: name -> type hint
+        self.assertEqual(watch["config"]["chief_token"], "{{chief_token}}")  # the launch's token reaches the script
+        self.assertIn("chief_token", recipe["inputs"])
+        self.assertIn("replaced:", tell["prompt"])
         self.assertEqual(tell["type"], "step")
         self.assertIn(f"{{{{{watch['id']}.output}}}}", tell["prompt"])
         self.assertIn("send_message", tell["prompt"])
