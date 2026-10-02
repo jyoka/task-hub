@@ -206,14 +206,30 @@ else
     fi
     if [ -z "$M_task_hub" ] && [ -n "$branch" ]; then
       note="ブランチ $branch の上の clone です。インストーラはタグに切り替えず、pull だけします"
-    elif ! remote=$(g ls-remote --tags --refs origin 'kiro-v*' 2>/dev/null); then
+    elif ! remote=$(g ls-remote --tags origin 'kiro-v*' 2>/dev/null); then
       note="新しい版があるかは確かめられませんでした(origin に届きません)"
     else
       newest=$(printf '%s\n' "$remote" | sed 's|.*refs/tags/||' | kiro_newest)
-      if [ -n "$newest" ] && { [ -z "$current" ] || [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; }; then
-        note="新しい版 $newest があります。$INSTALL"
-      elif [ -n "$newest" ]; then
-        ver="${ver}、最新"
+      if [ -z "$newest" ]; then :
+      elif [ -n "$current" ]; then
+        if [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; then note="新しい版 $newest があります。$INSTALL"
+        else ver="${ver}、最新"
+        fi
+      else  # not on a kiro-v* tag (--ref): by commits, the newest tag's (its ^{} line, if annotated) and HEAD
+        sha=$(printf '%s\n' "$remote" | awk -v t="refs/tags/$newest" '$2 == t || $2 == t "^{}" { s = $1 } END { print s }')
+        if ! g cat-file -e "$sha^{commit}" 2>/dev/null; then
+          note="新しい版があるかは確かめられませんでした($newest のコミットが手元にありません)"
+        elif ! g merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+          note="新しい版 $newest があります。$INSTALL"
+        else  # --ref is for that run only: the next install goes back to the newest tag
+          if [ -n "$branch" ]; then at="$branch($(g rev-parse --short HEAD 2>/dev/null))" ref=$branch
+          else at=$ver ref=$(g describe --tags --exact-match HEAD 2>/dev/null) || ref=
+          fi
+          if [ "$(g rev-parse HEAD 2>/dev/null)" = "$sha" ]; then note="配布版 $newest と同じコミットの $at です"
+          else note="配布版 $newest より新しい $at です"
+          fi
+          note="${note}。次にインストーラを実行すると $newest に戻ります${ref:+($ref を続けるなら --ref $ref)}"
+        fi
       fi
     fi
     lib="$lib($ver)"
