@@ -28,7 +28,7 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 2. Python | 3.10 以上が無ければ uv を入れ、uv で Python 3.12 を取る | 1 章 |
 | 3. gh | 無ければ GitHub Releases の zip をチェックサムで確かめて `~/.local/bin` に置く | 1 章 |
 | 4. kiro-cli | あるものを `~/.local/bin/kiro-cli` にリンク。無ければ公式の DMG を `~/Applications` に展開する(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます) | 1 章 |
-| 5. task-hub 本体 | `~/.local/lib/task-hub` に clone し、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章 |
+| 5. task-hub 本体 | `~/.local/lib/task-hub` に clone し(配布する版、つまり一番新しい `kiro-v*` のタグ。2 回目からは新しいタグがあれば切り替える)、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章、9 章 |
 | 6. ログイン | gh(ブラウザでコードを入れる)と kiro-cli(開いたターミナルで)。ここで止まり、本人がログインしてからもう一度実行する | 1 章 |
 | 7. ボード | `<you>/tasks`(private)と Project「task-hub」を作り、Status と欄をそろえる | [setup.md](setup.md#github-側の準備1-回だけ) |
 | 8. 設定 | config.ini に足りない項目だけを足し、`task list` で確かめる | 2 章 |
@@ -43,7 +43,7 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 - Kiro のチャットで「セットアップして」と言ったときにこれらを実行させる約束は、リポジトリの
   `.kiro/steering/setup.md` にあります(`inclusion: auto`。セットアップの話のときだけ読み込まれます)。
 
-実機ではまだ確かめていないところがあります。入れ終わったら、最後の「人が実機で確かめること」を順に試してください。
+実機ではまだ確かめていないところがあります。入れ終わったら、8 章の「人が実機で確かめること」を順に試してください。
 
 ## 1. 前提
 
@@ -371,3 +371,50 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
   In review まで進むか。翌日(ログインし直したあと)も同じように動くか。`kiro-cli whoami` が API キーだけで
   0 になるか、キーチェーンの読み出しで確認のダイアログが出ないか(`~/.local/state/task-hub/watch.err.log` と
   `task log <番号>` で見ます)
+
+## 9. 配布する版を出す
+
+同僚に配るのは、開発中の main ではなく、`kiro-v<数字>` のタグを付けた版です(計画は
+[prd-kiro-installer.md](prd-kiro-installer.md) の 3 章)。インストーラ(段階 5)は、次のように版を選びます。
+
+- **新しく clone するとき**: origin にある `kiro-v<数字>` のうち、数字が一番大きいもの(`kiro-v10` は `kiro-v9` より
+  新しい)を checkout します。タグが 1 つもなければ、既定のブランチ(main)です。
+- **2 回目から**: インストーラが入れた clone(manifest の `task-hub` に記録がある、またはタグの上にある)は、
+  `git fetch --tags` して、もっと新しい `kiro-v*` があれば切り替えます。結果は「5. task-hub 本体」の行に出ます
+  (例: `入れました(kiro-v1 → kiro-v2)`)。
+- **ブランチの上の clone を手で入れたとき**(開発用。main を追う clone): 今までどおり `git pull --ff-only` だけで、
+  タグには切り替えません。
+- **開発者が版を選ぶとき**: `sh kiro/install.sh --ref main` や `--ref kiro-v1`(ブランチかタグ)。その回だけです。
+  次に `--ref` なしで実行すると、インストーラが入れた clone は一番新しい `kiro-v*` に戻ります。
+- 今の版と、もっと新しい版があるかは、`sh kiro/doctor.sh` の「5. task-hub 本体」の行に出ます(何も変えません)。
+
+版を出す手順:
+
+1. main に、配りたい変更がすべて入っていることを確かめます。
+2. 人が、使い捨ての macOS ユーザーで通しの確認をします(下の 7 つ)。テストではなく、本物の Mac と Kiro IDE で
+   確かめます。この時点ではタグがまだ無いので、clone は main になります(確かめるのは、これから付ける版と同じ
+   コミットです)。
+   1. システム設定 →「ユーザとグループ」で **管理者でない** ユーザーを作り、そのユーザーでログインする
+   2. Kiro IDE を開き、[kiro-quickstart.md](kiro-quickstart.md) の 1 章どおり「Clone Repository」で
+      jyoka/task-hub を開く
+   3. チャットで「セットアップして」と言い、止まるたびに案内どおりにログインして「続けて」と言う。管理者パスワードを
+      一度も聞かれないことと、かかった時間(30 分以内か)を記録する
+   4. 最後の「診断:」がすべて ○ かを見る(画面での操作が残れば、ガイド 4 章のとおりにして「続けて」)
+   5. Kiro を再起動し、新しいチャットで `/task` → Backlog にカードができる → Ready に移す → In review と通知まで
+      進むか確かめる
+   6. 「診断して」で ○ の一覧が出ることを確かめる。次に「アンインストールして」→「はい」と言い、`~/.local/bin`、
+      `~/.local/lib/task-hub`、`~/.kiro` のリンクとコピーが消えて、GitHub のボードが残ることを確かめる
+   7. ボードを GitHub の画面で消し、使い捨てのユーザーを削除する
+3. 確かめたコミット(main)に、次の番号のタグを付けて push します。
+
+   ```
+   git tag -a kiro-vN -m "kiro-vN: <この版で変わったこと>" <確かめたコミット>
+   git push origin kiro-vN
+   ```
+
+   番号は、今ある一番大きい `kiro-v*` の次です(`git ls-remote --tags origin 'kiro-v*'` で見られます)。
+4. 同僚は、Kiro のチャットで「セットアップして」ともう一度言うと、新しい版に切り替わります。
+
+**タグは消したり、付け替えたりしません。** 同僚の clone は、手元にあるタグを信じています。付け替えると
+`git fetch --tags` が失敗し(古い版のまま進みます)、同じ名前で中身の違う版が出回ります。直したいときは、
+直したコミットに次の番号のタグを付けます。
