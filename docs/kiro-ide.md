@@ -37,6 +37,9 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 11. 診断 | `sh kiro/doctor.sh` を呼び、全段階を ○ / × の一覧で出す(何も変えない) | — |
 
 - **診断** `sh kiro/doctor.sh` は、いつでも単独で実行できます。× の行の下に、次にすることが出ます。
+  判定するのは「インストーラの形か」ではなく「task-hub が動くか」です。[setup.md](setup.md) の手順で手で入れた構成
+  (`~/.local/bin/task` が clone の `bin/task` へのリンク、PATH にある kiro-cli、gh 以外のログインで GitHub に届く git、
+  説明だけが違うフックのコピー)は、動いていれば ○ にして、その下に「手で入れた構成です」などの注記を出します。
 - **アンインストール** `sh kiro/uninstall.sh` は、消すものの一覧を出すだけで、`--yes` を付けると消します。消すのは、
   インストーラが `~/.local/state/task-hub/install-manifest.json` に記録したものだけです。GitHub のボード、ログイン、
   Kiro の settings.json、task-hub のデータ(worktree、ログ)は消しません(ボードの消し方は出力に出ます)。
