@@ -11,6 +11,7 @@
   /Applications is a folder of the test (TASK_INSTALL_APPLICATIONS), so the Mac's own Kiro CLI.app is not found.
 - gh (the one in the release zip, or one on PATH) is FAKE_GH: GitHub (the login, repos, Projects) is one JSON file.
 """
+import base64
 import hashlib
 import http.server
 import io
@@ -119,9 +120,15 @@ def handle(db):
         return (f"HTTP/2.0 200 OK\r\nContent-Type: application/json\r\nX-Oauth-Scopes: {auth['scopes']}\r\n\r\n"
                 + json.dumps({"login": auth["login"], "id": 1}, separators=(",", ":")))
     if a[:2] == ["auth", "setup-git"]:
+        # for github.com, and for the test's GitHub (TASK_INSTALL_GITHUB), which plays it
         with open(os.path.join(os.environ["HOME"], ".gitconfig"), "a") as f:
-            f.write(f'[credential "https://github.com"]\n\thelper =\n\thelper = !{sys.argv[0]} auth git-credential\n')
+            for host in ("https://github.com", os.environ.get("TASK_INSTALL_GITHUB")):
+                if host:
+                    f.write(f'[credential "{host}"]\n\thelper =\n\thelper = !{sys.argv[0]} auth git-credential\n')
         return ""
+    if a[:2] == ["auth", "git-credential"]:  # git asks for the login (get), or tells how it went (store, erase)
+        sys.stdin.read()
+        return f"username=x-access-token\npassword=gho_{auth['login']}" if a[2:] == ["get"] else ""
     if a[:2] == ["repo", "view"]:
         if a[2] not in db["repos"]:
             raise Fail(f"GraphQL: Could not resolve to a Repository with the name '{a[2]}'. (repository)")
@@ -250,11 +257,15 @@ def tar_bytes(files):
 
 
 class Releases(http.server.ThreadingHTTPServer):
-    """A tiny GitHub: `files` maps a path to bytes, `redirects` a path to another path. Logs every path asked for."""
+    """A tiny GitHub: `files` maps a path to bytes, `redirects` a path to another path. Logs every path asked for.
+    /git/<path>: the files of git_root/<path>, for git's dumb HTTP, and only with the token the fake gh gives git for
+    alice (as a private repo on github.com)."""
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), ReleasesHandler)
         self.files, self.redirects, self.log = {"/": b"github"}, {}, []
+        self.git_root = None
+        self.git_auth = "Basic " + base64.b64encode(b"x-access-token:gho_alice").decode()
         self.url = f"http://127.0.0.1:{self.server_address[1]}"
 
 
@@ -274,7 +285,17 @@ class ReleasesHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        data = srv.files.get(self.path)
+        if self.path.startswith("/git/") and srv.git_root:
+            if self.headers.get("Authorization") != srv.git_auth:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="GitHub"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            f = srv.git_root / self.path.split("?")[0].removeprefix("/git/")
+            data = f.read_bytes() if f.is_file() else None
+        else:
+            data = srv.files.get(self.path)
         self.send_response(200 if data is not None else 404)
         data = data if data is not None else b"not found"
         self.send_header("Content-Length", str(len(data)))
@@ -468,11 +489,11 @@ class InstallTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.root / "origin.git"), "rev-parse", "--short", ref],
                               capture_output=True, text=True).stdout.strip()
 
-    def line5(self, lines):
-        return next(line for line in lines if line.startswith("5. "))
+    def line6(self, lines):
+        return next(line for line in lines if line.startswith("6. "))
 
-    def doctor5(self, lines):
-        i = next(i for i, line in enumerate(lines) if line.startswith(("○ 5. ", "× 5. ")))
+    def doctor6(self, lines):
+        i = next(i for i, line in enumerate(lines) if line.startswith(("○ 6. ", "× 6. ")))
         return lines[i:i + 2] if lines[i + 1].startswith("    (") else lines[i:i + 1]
 
     def install(self, code=0, args=()):
@@ -562,9 +583,9 @@ class InstallTest(unittest.TestCase):
         local = self.home / ".local"
         self.assertTrue(any(line.startswith("2. Python: 入れました") for line in lines), lines)
         self.assertTrue(any(line.startswith("3. gh: 入れました") for line in lines), lines)
-        self.assertTrue(any(line.startswith("5. task-hub 本体: 入れました") for line in lines), lines)
-        self.assertIn("6. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
-        self.assertIn("6. kiro-cli のログイン: 済み", lines)
+        self.assertTrue(any(line.startswith("6. task-hub 本体: 入れました") for line in lines), lines)
+        self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
+        self.assertIn("5. kiro-cli のログイン: 済み", lines)
         self.assertTrue(any(line.startswith("7. ボード: 作りました(https://github.com/users/alice/projects/1、alice/tasks: "
                                             "private の alice/tasks、Project alice/1、") for line in lines), lines)
         self.assertTrue(any(line.startswith("8. 設定: 作りました(~/.config/task-hub/config.ini。task list で確かめました)")
@@ -616,8 +637,8 @@ class InstallTest(unittest.TestCase):
         lines = self.install()
         stages = self.stage_lines(lines)
         self.assertEqual([line.split(":")[0] for line in stages],
-                         ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. task-hub 本体", "6. GitHub のログイン",
-                          "6. kiro-cli のログイン", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"])
+                         ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. GitHub のログイン", "5. kiro-cli のログイン",
+                          "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"])
         self.assertTrue(all(line.split(": ", 1)[1].startswith("済み") for line in stages[:-1]), stages)
         self.assertIn("すべて済みです。変えたものはありません。", lines)
         self.assertEqual(lines[-1], "次にすること: Kiro の新しいチャットで /task を試してください")
@@ -633,19 +654,19 @@ class InstallTest(unittest.TestCase):
         self.change_origin("bin/task", FAKE_TASK + "# after v1\n")
         lines = self.install()
         self.assertEqual(self.lib_at(), "branch main")
-        self.assertIn(f"clone(main {self.short()})", self.line5(lines))
-        self.assertEqual(self.doctor5(self.doctor(0)),
-                         [f"○ 5. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH"])
+        self.assertIn(f"clone(main {self.short()})", self.line6(lines))
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH"])
         # main moves on: the installer's clone follows it while there is no release
         before = self.short()
         self.change_origin("bin/task", FAKE_TASK + "# more\n")
         lines = self.install()
-        self.assertEqual(self.line5(lines), f"5. task-hub 本体: 入れました(main {before} → main {self.short()})")
+        self.assertEqual(self.line6(lines), f"6. task-hub 本体: 入れました(main {before} → main {self.short()})")
         self.assertEqual(self.lib_at(), "branch main")
         # the first release: the installer's clone (in the manifest) moves from main to it
         self.release("kiro-v1")
         lines = self.install()
-        self.assertEqual(self.line5(lines), f"5. task-hub 本体: 入れました(main {self.short('main~1')} → kiro-v1)")
+        self.assertEqual(self.line6(lines), f"6. task-hub 本体: 入れました(main {self.short('main~1')} → kiro-v1)")
         self.assertEqual(self.lib_at(), "tag kiro-v1")
 
     def test_a_new_clone_is_on_the_newest_kiro_tag_and_moves_to_a_newer_one(self):
@@ -656,26 +677,26 @@ class InstallTest(unittest.TestCase):
         self.change_origin("bin/task", FAKE_TASK + "# main, after the releases\n")
         lines = self.install()
         self.assertEqual(self.lib_at(), "tag kiro-v10")
-        self.assertIn("clone(kiro-v10)", self.line5(lines))
+        self.assertIn("clone(kiro-v10)", self.line6(lines))
         self.assertIn("# kiro-v10", (self.home / ".local/lib/task-hub/bin/task").read_text())
-        self.assertEqual(self.doctor5(self.doctor(0)),
-                         ["○ 5. task-hub 本体: ~/.local/lib/task-hub(kiro-v10、最新)、~/.local/bin/task、~/.zprofile に PATH"])
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         ["○ 6. task-hub 本体: ~/.local/lib/task-hub(kiro-v10、最新)、~/.local/bin/task、~/.zprofile に PATH"])
         # main moves on, with no new release: it stays
         self.change_origin("bin/task", FAKE_TASK + "# main, later\n")
         lines = self.install()
-        self.assertEqual(self.line5(lines), "5. task-hub 本体: 済み(~/.local/lib/task-hub(kiro-v10)、~/.local/bin/task)")
+        self.assertEqual(self.line6(lines), "6. task-hub 本体: 済み(~/.local/lib/task-hub(kiro-v10)、~/.local/bin/task)")
         self.assertEqual(self.lib_at(), "tag kiro-v10")
         # a new release: the diagnosis says so and changes nothing; the next install moves to it
         self.release("kiro-v12")
         before = self.snapshot()
-        self.assertEqual(self.doctor5(self.doctor(0)),
-                         ["○ 5. task-hub 本体: ~/.local/lib/task-hub(kiro-v10)、~/.local/bin/task、~/.zprofile に PATH",
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         ["○ 6. task-hub 本体: ~/.local/lib/task-hub(kiro-v10)、~/.local/bin/task、~/.zprofile に PATH",
                           "    (新しい版 kiro-v12 があります。sh kiro/install.sh を実行してください(Kiro のチャットなら"
                           "「セットアップして」))"])
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.lib_at(), "tag kiro-v10")
         lines = self.install()
-        self.assertEqual(self.line5(lines), "5. task-hub 本体: 入れました(kiro-v10 → kiro-v12)")
+        self.assertEqual(self.line6(lines), "6. task-hub 本体: 入れました(kiro-v10 → kiro-v12)")
         self.assertEqual(self.lib_at(), "tag kiro-v12")
         self.assertIn("# kiro-v12", (self.home / ".local/lib/task-hub/bin/task").read_text())
 
@@ -689,12 +710,12 @@ class InstallTest(unittest.TestCase):
         self.release("kiro-v2")
         before = self.short("main~2")
         lines = self.install()
-        self.assertEqual(self.line5(lines)[:len("5. task-hub 本体: 入れました(")], "5. task-hub 本体: 入れました(")
-        self.assertIn(f"main {before} → main {self.short()}", self.line5(lines))
+        self.assertEqual(self.line6(lines)[:len("6. task-hub 本体: 入れました(")], "6. task-hub 本体: 入れました(")
+        self.assertIn(f"main {before} → main {self.short()}", self.line6(lines))
         self.assertEqual(self.lib_at(), "branch main")
         self.assertNotIn("task-hub", self.manifest()["installed"], "the installer did not make it")
-        self.assertEqual(self.doctor5(self.doctor(0)),
-                         [f"○ 5. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH",
+        self.assertEqual(self.doctor6(self.doctor(0)),
+                         [f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task、~/.zprofile に PATH",
                           "    (ブランチ main の上の clone です。インストーラはタグに切り替えず、pull だけします)"])
         self.change_origin("bin/task", FAKE_TASK + "# main, later\n")
         self.install()
@@ -706,20 +727,20 @@ class InstallTest(unittest.TestCase):
         self.release("kiro-v2")
         self.change_origin("bin/task", FAKE_TASK + "# main, after the releases\n")
         lines = self.install(args=["--ref", "main"])
-        self.assertIn(f"clone(main {self.short()})", self.line5(lines))
+        self.assertIn(f"clone(main {self.short()})", self.line6(lines))
         self.assertEqual(self.lib_at(), "branch main")
         self.assertEqual(self.manifest()["installed"]["task-hub"], str(self.home / ".local/lib/task-hub"))
         lines = self.install(args=["--ref=kiro-v1"])
-        self.assertEqual(self.line5(lines), f"5. task-hub 本体: 入れました(main {self.short()} → kiro-v1)")
+        self.assertEqual(self.line6(lines), f"6. task-hub 本体: 入れました(main {self.short()} → kiro-v1)")
         self.assertEqual(self.lib_at(), "tag kiro-v1")
         self.install(args=["--ref", "main"])
         self.assertEqual(self.lib_at(), "branch main")
         # --ref is for that run only: without it, the installer's clone goes back to the newest release
         lines = self.install()
-        self.assertEqual(self.line5(lines), f"5. task-hub 本体: 入れました(main {self.short()} → kiro-v2)")
+        self.assertEqual(self.line6(lines), f"6. task-hub 本体: 入れました(main {self.short()} → kiro-v2)")
         self.assertEqual(self.lib_at(), "tag kiro-v2")
         lines = self.install(1, ["--ref", "kiro-v99"])
-        self.assertEqual(lines[-2:], ["5. task-hub 本体: 止まりました。kiro-v99 という版(ブランチかタグ)がありません",
+        self.assertEqual(lines[-2:], ["6. task-hub 本体: 止まりました。kiro-v99 という版(ブランチかタグ)がありません",
                                       "次にすること: --ref の名前を確かめて、もう一度実行してください"])
         self.assertEqual(self.lib_at(), "tag kiro-v2")
         lines = self.install(1, ["--ref"])
@@ -727,11 +748,11 @@ class InstallTest(unittest.TestCase):
         # a new clone of a tag
         shutil.rmtree(self.home / ".local/lib/task-hub")
         lines = self.install(args=["--ref", "kiro-v1"])
-        self.assertIn("clone(kiro-v1)", self.line5(lines))
+        self.assertIn("clone(kiro-v1)", self.line6(lines))
         self.assertEqual(self.lib_at(), "tag kiro-v1")
         shutil.rmtree(self.home / ".local/lib/task-hub")
         lines = self.install(1, ["--ref", "kiro-v99"])
-        self.assertTrue(lines[-2].startswith(f"5. task-hub 本体: 止まりました。file://{self.root}/origin.git の kiro-v99 を "
+        self.assertTrue(lines[-2].startswith(f"6. task-hub 本体: 止まりました。file://{self.root}/origin.git の kiro-v99 を "
                                              "clone できませんでした("), lines)
 
     def test_uses_a_python3_of_3_10_or_later_on_path(self):
@@ -813,7 +834,7 @@ class InstallTest(unittest.TestCase):
         bindir.mkdir(parents=True)
         (bindir / "task").write_text("#!/bin/sh\necho mine\n")
         lines = self.install(code=1)
-        self.assertTrue(lines[-2].startswith("5. task-hub 本体: 止まりました。~/.local/bin/task が既にあります"), lines)
+        self.assertTrue(lines[-2].startswith("6. task-hub 本体: 止まりました。~/.local/bin/task が既にあります"), lines)
         self.assertEqual((bindir / "task").read_text(), "#!/bin/sh\necho mine\n")
         # docs/setup.md's `ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task`
         (bindir / "task").unlink()
@@ -878,7 +899,7 @@ class InstallTest(unittest.TestCase):
         self.use_python3()
         self.change_github(lambda db: db.update(auth=None))
         lines = self.install(code=1)
-        self.assertEqual(lines[-2], "6. GitHub のログイン: 止まりました。GitHub にログインしていません。ブラウザで "
+        self.assertEqual(lines[-2], "5. GitHub のログイン: 止まりました。GitHub にログインしていません。ブラウザで "
                                     "https://github.com/login/device を開きました。コード ABCD-1234 を入れて承認してください")
         self.assertEqual(lines[-1], "次にすること: 承認が終わったら、もう一度実行してください")
         self.assertEqual(self.opened.read_text(), "https://github.com/login/device\n")
@@ -896,10 +917,43 @@ class InstallTest(unittest.TestCase):
         self.change_github(lambda db: db.update(approve="alice"))
         self.wait_gone(pid)
         lines = self.install()
-        self.assertIn("6. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
+        self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
         self.assertIn("alice/tasks", self.github()["repos"])
         self.assertIsNone(self.login_pid())
         self.assertFalse((self.home / ".local/state/task-hub/gh-login.log").exists())
+
+    def test_clones_the_private_repo_only_after_the_github_login(self):
+        """task-hub's repo is private: git can read it only with gh's login (gh auth setup-git), as on github.com."""
+        self.use_python3()
+        self.env["GIT_CONFIG_NOSYSTEM"] = "1"  # not the Mac's osxkeychain helper: no test password in the keychain
+        subprocess.run(["git", "-C", str(self.root / "origin.git"), "update-server-info"], check=True)
+        self.server.git_root = self.root
+        url = self.env["TASK_INSTALL_REPO"] = f"{self.server.url}/git/origin.git"
+        git_asked = lambda: [p for p in self.server.log if p.startswith("/git/")]
+        # without the login, git cannot clone it (what stopped stage 5 when it came before the login)
+        r = subprocess.run(["git", "clone", "-q", url, str(self.root / "no-login")], capture_output=True, text=True,
+                           env={**self.env, "GIT_TERMINAL_PROMPT": "0"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not read Username", r.stderr)
+        self.server.log[:] = []
+        # not logged in: it stops at the login, and does not try to clone
+        self.change_github(lambda db: db.update(auth=None))
+        lines = self.install(code=1)
+        self.assertTrue(lines[-2].startswith("5. GitHub のログイン: 止まりました。GitHub にログインしていません。"), lines)
+        self.assertFalse(any(line.startswith("6. ") for line in lines), lines)
+        self.assertEqual(git_asked(), [], "no clone before the login")
+        self.assertFalse((self.home / ".local/lib/task-hub").exists())
+        # logged in: git uses gh's login, and the clone goes through
+        self.change_github(lambda db: db.update(approve="alice"))
+        self.wait_gone(self.login_pid())
+        lines = self.install()
+        self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
+        self.assertIn(f"clone(main {self.short()})", self.line6(lines))
+        self.assertEqual(self.lib_at(), "branch main")
+        self.assertIn(["auth", "git-credential", "get"], self.gh_calls())
+        self.assertTrue(git_asked())
+        lines = self.install()  # a second run fetches with the same login
+        self.assertEqual(self.line6(lines), f"6. task-hub 本体: 済み(~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task)")
 
     def test_adds_the_project_scope_when_gh_lacks_it(self):
         self.use_python3()
@@ -920,7 +974,7 @@ class InstallTest(unittest.TestCase):
         os.kill(pid, 9)  # as if it was stopped with the command that ran the installer
         self.wait_gone(pid)
         lines = self.install(code=1)
-        self.assertEqual(lines[-2], "6. GitHub のログイン: 止まりました。GitHub にログインしていません。"
+        self.assertEqual(lines[-2], "5. GitHub のログイン: 止まりました。GitHub にログインしていません。"
                                     "開いたターミナルで、案内に沿ってブラウザで承認してください")
         command = self.home / ".local/state/task-hub/gh-login.command"
         self.assertEqual(self.opened.read_text().splitlines()[-1], str(command))
@@ -952,7 +1006,7 @@ class InstallTest(unittest.TestCase):
         self.use_python3()
         self.kiro_logged_in.unlink()
         lines = self.install(code=1)
-        self.assertEqual(lines[-2], "6. kiro-cli のログイン: 止まりました。kiro-cli にログインしていません。"
+        self.assertEqual(lines[-2], "5. kiro-cli のログイン: 止まりました。kiro-cli にログインしていません。"
                                     "開いたターミナルで、ログインの方法を選んでブラウザで承認してください")
         command = self.home / ".local/state/task-hub/kiro-login.command"
         self.assertEqual(self.opened.read_text(), f"{command}\n")
@@ -960,7 +1014,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.github()["projects"], [], "later stages do not run")
         self.kiro_logged_in.touch()
         lines = self.install()
-        self.assertIn("6. kiro-cli のログイン: 済み", lines)
+        self.assertIn("5. kiro-cli のログイン: 済み", lines)
         self.assertFalse(command.exists())
 
     def test_keeps_an_existing_board_and_config_ini_and_only_adds_what_is_missing(self):
@@ -1089,7 +1143,7 @@ class InstallTest(unittest.TestCase):
         self.assertFalse((self.home / "Applications/.Kiro CLI.app.tmp").exists())
         self.assertEqual(self.manifest()["installed"]["kiro-cli-app"], str(app))
         self.assertEqual(self.manifest()["installed"]["kiro-cli"], str(self.home / ".local/bin/kiro-cli"))
-        self.assertIn("6. kiro-cli のログイン: 済み", lines)
+        self.assertIn("5. kiro-cli のログイン: 済み", lines)
         # again: nothing downloaded
         self.server.log[:] = []
         lines = self.install()
@@ -1304,8 +1358,8 @@ class InstallTest(unittest.TestCase):
         """{stage: "○" or "×"} of the diagnosis's list"""
         return {line[2:].split(":")[0]: line[0] for line in lines if line[:2] in ("○ ", "× ")}
 
-    STAGE_NAMES = ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. task-hub 本体", "6. GitHub のログイン",
-                   "6. kiro-cli のログイン", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"]
+    STAGE_NAMES = ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. GitHub のログイン", "5. kiro-cli のログイン",
+                   "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"]
 
     def test_doctor_on_a_mac_with_nothing_installed(self):
         (self.fakebin / "kiro-cli").unlink()
@@ -1361,7 +1415,7 @@ class InstallTest(unittest.TestCase):
         self.change_github(item_closed_off)
         lines = self.doctor(1)
         marks = self.marks(lines)
-        self.assertEqual([n for n, m in marks.items() if m == "×"], ["6. kiro-cli のログイン", "7. ボード", "9. Kiro との連携"])
+        self.assertEqual([n for n, m in marks.items() if m == "×"], ["5. kiro-cli のログイン", "7. ボード", "9. Kiro との連携"])
         i = lines.index("× 7. ボード: https://github.com/users/alice/projects/1 のワークフローが task-hub に合っていません")
         self.assertEqual(lines[i + 1], "    → https://github.com/users/alice/projects/1/workflows を開き、「Item closed」を"
                                        "有効にしてください")

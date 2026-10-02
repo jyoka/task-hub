@@ -28,8 +28,8 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 2. Python | 3.10 以上が無ければ uv を入れ、uv で Python 3.12 を取る | 1 章 |
 | 3. gh | 無ければ GitHub Releases の zip をチェックサムで確かめて `~/.local/bin` に置く | 1 章 |
 | 4. kiro-cli | あるものを `~/.local/bin/kiro-cli` にリンク。無ければ公式の DMG を `~/Applications` に展開する(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます) | 1 章 |
-| 5. task-hub 本体 | `~/.local/lib/task-hub` に clone し(配布する版、つまり一番新しい `kiro-v*` のタグ。2 回目からは新しいタグがあれば切り替える)、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章、9 章 |
-| 6. ログイン | gh(ブラウザでコードを入れる)と kiro-cli(開いたターミナルで)。ここで止まり、本人がログインしてからもう一度実行する | 1 章 |
+| 5. ログイン | gh(ブラウザでコードを入れる。git にも gh のログインを使わせる)と kiro-cli(開いたターミナルで)。ここで止まり、本人がログインしてからもう一度実行する。task-hub は private なので、clone より前に行う | 1 章 |
+| 6. task-hub 本体 | `~/.local/lib/task-hub` に clone し(配布する版、つまり一番新しい `kiro-v*` のタグ。2 回目からは新しいタグがあれば切り替える)、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章、9 章 |
 | 7. ボード | `<you>/tasks`(private)と Project「task-hub」を作り、Status と欄をそろえる | [setup.md](setup.md#github-側の準備1-回だけ) |
 | 8. 設定 | config.ini に足りない項目だけを足し、`task list` で確かめる | 2 章 |
 | 9. Kiro との連携 | スキルと steering はリンク、フックとワークフローはコピー、Workflows を有効に | 3〜5 章 |
@@ -375,18 +375,18 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 ## 9. 配布する版を出す
 
 同僚に配るのは、開発中の main ではなく、`kiro-v<数字>` のタグを付けた版です(計画は
-[prd-kiro-installer.md](prd-kiro-installer.md) の 3 章)。インストーラ(段階 5)は、次のように版を選びます。
+[prd-kiro-installer.md](prd-kiro-installer.md) の 3 章)。インストーラ(段階 6)は、次のように版を選びます。
 
 - **新しく clone するとき**: origin にある `kiro-v<数字>` のうち、数字が一番大きいもの(`kiro-v10` は `kiro-v9` より
   新しい)を checkout します。タグが 1 つもなければ、既定のブランチ(main)です。
 - **2 回目から**: インストーラが入れた clone(manifest の `task-hub` に記録がある、またはタグの上にある)は、
-  `git fetch --tags` して、もっと新しい `kiro-v*` があれば切り替えます。結果は「5. task-hub 本体」の行に出ます
+  `git fetch --tags` して、もっと新しい `kiro-v*` があれば切り替えます。結果は「6. task-hub 本体」の行に出ます
   (例: `入れました(kiro-v1 → kiro-v2)`)。
 - **ブランチの上の clone を手で入れたとき**(開発用。main を追う clone): 今までどおり `git pull --ff-only` だけで、
   タグには切り替えません。
 - **開発者が版を選ぶとき**: `sh kiro/install.sh --ref main` や `--ref kiro-v1`(ブランチかタグ)。その回だけです。
   次に `--ref` なしで実行すると、インストーラが入れた clone は一番新しい `kiro-v*` に戻ります。
-- 今の版と、もっと新しい版があるかは、`sh kiro/doctor.sh` の「5. task-hub 本体」の行に出ます(何も変えません)。
+- 今の版と、もっと新しい版があるかは、`sh kiro/doctor.sh` の「6. task-hub 本体」の行に出ます(何も変えません)。
 
 版を出す手順:
 
