@@ -110,16 +110,46 @@ elif [ -L "$wrapper" ] || ! grep -q '^# task-hub: made by kiro/install.sh' "$wra
 elif ! "$wrapper" --version >/dev/null 2>&1; then
   ng "$(tilde "$wrapper") が動きません" "$INSTALL"
 else
+  # the version, and whether there is a newer kiro-v* (as kiro/install.sh decides: its clone, in the manifest or not
+  # on a branch, follows the newest kiro-v*; a clone on a branch made by hand is only pulled). ls-remote: no fetch
+  lib=$(tilde "$LIB_DIR") note=
+  if [ -n "$GIT" ]; then
+    g() { GIT_TERMINAL_PROMPT=0 "$GIT" -C "$LIB_DIR" "$@"; }
+    kiro_newest() { grep -E '^kiro-v[0-9]+$' | sort -t v -k 2,2n | tail -n 1; }
+    M_task_hub=$(plutil -extract installed.task-hub raw -o - "$MANIFEST" 2>/dev/null) || M_task_hub=
+    current=
+    if branch=$(g symbolic-ref -q --short HEAD 2>/dev/null); then
+      ver="$branch $(g rev-parse --short HEAD 2>/dev/null)"
+    else
+      branch= current=$(g tag --points-at HEAD 2>/dev/null | kiro_newest)
+      ver=$current
+      [ -n "$ver" ] || ver=$(g describe --tags --exact-match HEAD 2>/dev/null) || ver=$(g rev-parse --short HEAD 2>/dev/null)
+    fi
+    if [ -z "$M_task_hub" ] && [ -n "$branch" ]; then
+      note="ブランチ $branch の上の clone です。インストーラはタグに切り替えず、pull だけします"
+    elif ! remote=$(g ls-remote --tags --refs origin 'kiro-v*' 2>/dev/null); then
+      note="新しい版があるかは確かめられませんでした(origin に届きません)"
+    else
+      newest=$(printf '%s\n' "$remote" | sed 's|.*refs/tags/||' | kiro_newest)
+      if [ -n "$newest" ] && { [ -z "$current" ] || [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; }; then
+        note="新しい版 $newest があります。$INSTALL"
+      elif [ -n "$newest" ]; then
+        ver="${ver}、最新"
+      fi
+    fi
+    lib="$lib($ver)"
+  fi
   case ":$orig_path:" in
-    *":$BIN_DIR:"*|*":$BIN_DIR/:"*) ok "$(tilde "$LIB_DIR")、$(tilde "$wrapper")" ;;
+    *":$BIN_DIR:"*|*":$BIN_DIR/:"*) ok "${lib}、$(tilde "$wrapper")" ;;
     *)
       if grep -qxF "$ZPROFILE_LINE" "$HOME/.zprofile" 2>/dev/null; then
-        ok "$(tilde "$LIB_DIR")、$(tilde "$wrapper")、~/.zprofile に PATH"
+        ok "${lib}、$(tilde "$wrapper")、~/.zprofile に PATH"
       else
         ng "$(tilde "$BIN_DIR") が PATH にありません" "$INSTALL"
       fi
       ;;
   esac
+  [ -z "$note" ] || printf '    (%s)\n' "$note"
 fi
 
 # 6. logins
