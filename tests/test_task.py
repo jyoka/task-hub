@@ -774,6 +774,8 @@ class TaskTest(unittest.TestCase):
         self.assertIn("split it into smaller runs", call["prompt"])  # a tool may background a long test run
         self.assertIn("while a command is still running", call["prompt"])
         self.assertIn("which parts you ran", call["prompt"])
+        self.assertIn("Skip the parts written for a person", call["prompt"])  # e.g. a setup steering file
+        self.assertIn("do not run installers and do not sign in", call["prompt"])
         self.assertIn("Task 1: Add hello", call["prompt"])
         self.assertIn("Branch: task/1", call["prompt"])
         self.assertIn("Say hello. MODE:ok", call["prompt"])
