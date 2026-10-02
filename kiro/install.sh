@@ -1,8 +1,11 @@
 #!/bin/sh
 # kiro/install.sh: sets up task-hub on a Mac without admin rights (docs/prd-kiro-installer.md, section 5).
-#   sh kiro/install.sh [--with-launchd] [--start-launchd]
+#   sh kiro/install.sh [--with-launchd] [--start-launchd] [--ref <branch or tag>]
 # --with-launchd: also put the launchd plist that keeps `task watch` running (stage 10). It is only started with
 # --start-launchd (which implies --with-launchd), after the user said yes.
+# --ref: for developers, the version of task-hub to put in ~/.local/lib/task-hub (say main or kiro-v1), this run only.
+# Without it, a new clone is on the newest tag kiro-v<number> (the released version; docs/kiro-ide.md,
+# 「配布する版を出す」), else on the default branch (stage 5).
 # Each stage checks whether it is already done and skips it, so running this again is always safe.
 # Everything goes under $HOME. What this script put there is recorded in
 # ~/.local/state/task-hub/install-manifest.json, for the uninstaller (kiro/uninstall.sh). At the end it runs
@@ -312,29 +315,74 @@ print(urllib.parse.quote(p["download"]), p["sha256"], sep="\n")' "$work/kiro-man
   fi
 }
 
+g() { "$GIT" -C "$LIB_DIR" "$@"; }  # git in the clone
+kiro_newest() { grep -E '^kiro-v[0-9]+$' | sort -t v -k 2,2n | tail -n 1; }  # of tag names, numbers compared as numbers
+clone_version() {  # the kiro-v* tag the clone is on, else its branch and commit (or tag, or commit)
+  if b=$(g symbolic-ref -q --short HEAD); then printf '%s %s' "$b" "$(g rev-parse --short HEAD)"; return; fi
+  t=$(g tag --points-at HEAD | kiro_newest)
+  [ -n "$t" ] || t=$(g describe --tags --exact-match HEAD 2>/dev/null) || t=$(g rev-parse --short HEAD)
+  printf '%s' "$t"
+}
+switch_to() {  # $1: a tag or a branch of origin, already fetched. The copy there still works if it fails
+  if g rev-parse -q --verify "refs/tags/$1" >/dev/null; then
+    g checkout -q --detach "refs/tags/$1" >"$work/git.log" 2>&1
+  elif g rev-parse -q --verify "refs/remotes/origin/$1" >/dev/null; then
+    g checkout -q "$1" >"$work/git.log" 2>&1 && g pull --ff-only -q >"$work/git.log" 2>&1
+  else
+    die "$1 という版(ブランチかタグ)がありません" "--ref の名前を確かめて、もう一度実行してください"
+  fi || say "$label: $1 に切り替えられませんでした($(tail -n 1 "$work/git.log"))。今の版のまま進めます"
+}
+
 stage_task_hub() {
   label="5. task-hub 本体"
   did=
   export GIT_TERMINAL_PROMPT=0  # fail instead of waiting for a password nobody can type
   if [ -d "$LIB_DIR/.git" ]; then
-    before=$("$GIT" -C "$LIB_DIR" rev-parse HEAD 2>/dev/null)
-    if "$GIT" -C "$LIB_DIR" pull --ff-only -q >"$work/git.log" 2>&1; then
-      [ "$before" = "$("$GIT" -C "$LIB_DIR" rev-parse HEAD 2>/dev/null)" ] || did="${did}更新、"
-    else  # the copy there still works: go on with it
+    before=$(clone_version)
+    branch=$(g symbolic-ref -q --short HEAD) || branch=
+    # The installer's clone (in the manifest, or not on a branch) follows the newest kiro-v*. A clone on a branch
+    # that someone made by hand (a developer's, following main) is only pulled, as before.
+    if [ -z "$ref" ] && [ -z "$M_task_hub" ] && [ -n "$branch" ]; then
+      g pull --ff-only -q >"$work/git.log" 2>&1 \
+        || say "$label: $(tilde "$LIB_DIR") を更新できませんでした($(tail -n 1 "$work/git.log"))。今の版のまま進めます"
+    elif ! g fetch -q --tags >"$work/git.log" 2>&1; then  # the copy there still works: go on with it
       say "$label: $(tilde "$LIB_DIR") を更新できませんでした($(tail -n 1 "$work/git.log"))。今の版のまま進めます"
+    elif [ -n "$ref" ]; then
+      switch_to "$ref"
+    else
+      newest=$(g tag -l 'kiro-v*' | kiro_newest)
+      current=
+      [ -n "$branch" ] || current=$(g tag --points-at HEAD | kiro_newest)
+      if [ -n "$newest" ] && { [ -z "$current" ] || [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; }; then
+        switch_to "$newest"
+      elif [ -n "$branch" ]; then  # no release yet: the branch, as before
+        g pull --ff-only -q >"$work/git.log" 2>&1 \
+          || say "$label: $(tilde "$LIB_DIR") を更新できませんでした($(tail -n 1 "$work/git.log"))。今の版のまま進めます"
+      fi
     fi
+    after=$(clone_version)
+    [ "$before" = "$after" ] || did="${did}${before} → ${after}、"
   elif [ -e "$LIB_DIR" ]; then
     die "$(tilde "$LIB_DIR") がありますが、git の clone ではありません" "中身を確かめて別の場所に移してから、もう一度実行してください"
   else
     url=${TASK_INSTALL_REPO:-$("$GIT" -C "$here" remote get-url origin 2>/dev/null)}
     url=${url:-https://github.com/dip-ka-jo/task-hub.git}
     mkdir -p "$(dirname "$LIB_DIR")"
-    "$GIT" clone -q "$url" "$LIB_DIR" >"$work/git.log" 2>&1 \
-      || die "$url を clone できませんでした($(tail -n 1 "$work/git.log"))" \
-        "GitHub でこのリポジトリを読めるか確かめて、もう一度実行してください"
+    if [ -n "$ref" ]; then
+      "$GIT" clone -q -b "$ref" "$url" "$LIB_DIR" >"$work/git.log" 2>&1 \
+        || die "$url の $ref を clone できませんでした($(tail -n 1 "$work/git.log"))" \
+          "--ref の名前と、GitHub でこのリポジトリを読めるかを確かめて、もう一度実行してください"
+    else
+      "$GIT" clone -q "$url" "$LIB_DIR" >"$work/git.log" 2>&1 \
+        || die "$url を clone できませんでした($(tail -n 1 "$work/git.log"))" \
+          "GitHub でこのリポジトリを読めるか確かめて、もう一度実行してください"
+      newest=$(g tag -l 'kiro-v*' | kiro_newest)
+      [ -z "$newest" ] || g checkout -q --detach "refs/tags/$newest" >"$work/git.log" 2>&1 \
+        || die "$newest に切り替えられませんでした($(tail -n 1 "$work/git.log"))" "もう一度実行してください"
+    fi
     M_task_hub=$LIB_DIR
     write_manifest
-    did="${did}clone、"
+    did="${did}clone($(clone_version))、"
   fi
 
   # ~/.local/bin/task is a wrapper, not a link: bin/task's "#!/usr/bin/env python3" could find /usr/bin/python3.
@@ -375,7 +423,7 @@ exec $(shquote "$PY") $(shquote "$LIB_DIR/bin/task") \"\$@\""
     changed=1
     ok 入れました "${did%、}"
   else
-    ok 済み "$(tilde "$LIB_DIR")、$(tilde "$wrapper")"
+    ok 済み "$(tilde "$LIB_DIR")($(clone_version))、$(tilde "$wrapper")"
   fi
 }
 
@@ -688,13 +736,18 @@ $args
 # --- main ---
 
 label="準備"
-with_launchd= start_launchd=
-for a in "$@"; do
-  case $a in
+with_launchd= start_launchd= ref=
+while [ $# -gt 0 ]; do
+  case $1 in
     --with-launchd) with_launchd=1 ;;
     --start-launchd) with_launchd=1 start_launchd=1 ;;
-    *) die "知らない引数です: $a" "sh kiro/install.sh(常駐も入れるなら --with-launchd を付けて)で実行してください" ;;
+    --ref|--ref=*)
+      if [ "$1" = --ref ]; then ref=${2:-}; [ $# -lt 2 ] || shift; else ref=${1#--ref=}; fi
+      case $ref in ""|-*) die "--ref に版の名前(ブランチかタグ)がありません" "sh kiro/install.sh --ref kiro-v1 のように実行してください" ;; esac
+      ;;
+    *) die "知らない引数です: $1" "sh kiro/install.sh(常駐も入れるなら --with-launchd を付けて)で実行してください" ;;
   esac
+  shift
 done
 say "task-hub をセットアップします(管理者権限は使いません)"
 mkdir -p "$STATE_DIR" || die "$(tilde "$STATE_DIR") を作れませんでした" "ホームの権限を確かめてください"
