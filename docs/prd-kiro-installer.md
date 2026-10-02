@@ -62,8 +62,8 @@
 | 2. Python | `task` 本体は Python 3.10 以上が必要 | 既存の `python3` が 3.10 以上ならそれを使う。なければ **uv**(単体のバイナリ)を `~/.local/bin` に入れ、uv で Python を取る | — |
 | 3. gh | GitHub CLI | GitHub Releases の macOS 用 zip を curl で取り、`checksums.txt` で確かめてから `~/.local/bin` に置く | — |
 | 4. kiro-cli | worker の実行に使う | **要調査**(PBI 1)。今あるのは `/Applications/Kiro CLI.app` 版 | — |
-| 5. task-hub 本体 | `~/.local/lib/task-hub` に clone し、`~/.local/bin/task` にリンクする。PATH を `~/.zprofile` に足す | git clone | — |
-| 6. ログイン | `gh auth login`(`project` スコープ込み)と kiro-cli のログイン | — | **ブラウザで承認** |
+| 5. ログイン | `gh auth login`(`project` スコープ込み)と kiro-cli のログイン。task-hub は private なので clone より前(`gh auth setup-git` で git にも使わせる) | — | **ブラウザで承認** |
+| 6. task-hub 本体 | `~/.local/lib/task-hub` に clone し、`~/.local/bin/task` にリンクする。PATH を `~/.zprofile` に足す | git clone | — |
 | 7. ボード | `<user>/tasks`(private)と GitHub Project を作る。欄(Status の選択肢、Target repo / Agent / Base branch)と「Item closed」を用意する | gh と GraphQL。テンプレートの Project を `gh project copy` で写す案と、API で組み立てる案がある(PBI 1 で決める) | — |
 | 8. 設定 | `~/.config/task-hub/config.ini` を書く(`[board]`、`[runner] agent = kiro`、`[check] kiro`、`[ide] open`) | ファイルを書くだけ | — |
 | 9. Kiro との連携 | スキルとsteering はリンクで入れる。フックとワークフローは **コピー** で入れる(リンクでは Kiro が読まない、2026-10-02 に確認)。`kiroAgent.workflows.enabled` を有効にする | ファイルの操作と、Kiro の settings.json の書き換え | Kiro の再起動 |

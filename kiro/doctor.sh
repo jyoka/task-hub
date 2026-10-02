@@ -100,8 +100,40 @@ if gh=$(command -v gh 2>/dev/null) && "$gh" --version >/dev/null 2>&1; then ok "
 label="4. kiro-cli"
 if runs "$BIN_DIR/kiro-cli"; then ok "$(tilde "$BIN_DIR/kiro-cli")"; else ng "$(tilde "$BIN_DIR/kiro-cli") がないか、動きません" "$INSTALL"; fi
 
-# 5. task-hub itself
-label="5. task-hub 本体"
+# 5. logins
+label="5. GitHub のログイン"
+gh_ok=
+if [ -z "$gh" ]; then
+  ng "gh がないので確かめていません" "$INSTALL"
+elif ! r=$(gh api -i user 2>/dev/null); then
+  ng "GitHub にログインしていません" "sh kiro/install.sh を実行し、案内どおりにブラウザでログインしてください"
+else
+  scopes=$(printf '%s\n' "$r" | tr -d '\r' | grep -i '^x-oauth-scopes:' | sed 's/^[^:]*: *//' | head -n 1)
+  user=$(printf '%s\n' "$r" | sed -n 's/^{"login":"\([^"]*\)".*/\1/p' | head -n 1)
+  case ", $scopes," in
+    *", project,"*)
+      if [ -n "$GIT" ] && "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null \
+        | grep -q 'auth git-credential'; then
+        gh_ok=1
+        ok "$user"
+      else
+        ng "${user}。git が gh のログインを使っていません" "$INSTALL"
+      fi
+      ;;
+    *) ng "${user}。Projects の権限(project)がありません" "sh kiro/install.sh を実行し、案内どおりにブラウザで承認してください" ;;
+  esac
+fi
+label="5. kiro-cli のログイン"
+if ! kiro=$(command -v kiro-cli 2>/dev/null); then
+  ng "kiro-cli がないので確かめていません" "$INSTALL"
+elif "$kiro" whoami </dev/null >/dev/null 2>&1; then
+  ok "ログイン済み"
+else
+  ng "kiro-cli にログインしていません" "sh kiro/install.sh を実行し、開いたターミナルでログインしてください"
+fi
+
+# 6. task-hub itself
+label="6. task-hub 本体"
 wrapper=$BIN_DIR/task
 if [ ! -d "$LIB_DIR/.git" ]; then
   ng "$(tilde "$LIB_DIR") がありません" "$INSTALL"
@@ -150,38 +182,6 @@ else
       ;;
   esac
   [ -z "$note" ] || printf '    (%s)\n' "$note"
-fi
-
-# 6. logins
-label="6. GitHub のログイン"
-gh_ok=
-if [ -z "$gh" ]; then
-  ng "gh がないので確かめていません" "$INSTALL"
-elif ! r=$(gh api -i user 2>/dev/null); then
-  ng "GitHub にログインしていません" "sh kiro/install.sh を実行し、案内どおりにブラウザでログインしてください"
-else
-  scopes=$(printf '%s\n' "$r" | tr -d '\r' | grep -i '^x-oauth-scopes:' | sed 's/^[^:]*: *//' | head -n 1)
-  user=$(printf '%s\n' "$r" | sed -n 's/^{"login":"\([^"]*\)".*/\1/p' | head -n 1)
-  case ", $scopes," in
-    *", project,"*)
-      if [ -n "$GIT" ] && "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null \
-        | grep -q 'auth git-credential'; then
-        gh_ok=1
-        ok "$user"
-      else
-        ng "${user}。git が gh のログインを使っていません" "$INSTALL"
-      fi
-      ;;
-    *) ng "${user}。Projects の権限(project)がありません" "sh kiro/install.sh を実行し、案内どおりにブラウザで承認してください" ;;
-  esac
-fi
-label="6. kiro-cli のログイン"
-if ! kiro=$(command -v kiro-cli 2>/dev/null); then
-  ng "kiro-cli がないので確かめていません" "$INSTALL"
-elif "$kiro" whoami </dev/null >/dev/null 2>&1; then
-  ok "ログイン済み"
-else
-  ng "kiro-cli にログインしていません" "sh kiro/install.sh を実行し、開いたターミナルでログインしてください"
 fi
 
 # 7, 8. the board and config.ini (kiro/install-board check: read-only)
