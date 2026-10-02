@@ -14,6 +14,8 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
 
 1. Read the task below. The Goal is your whole brief. Also follow the repository's own agent
    instructions if it has any (AGENTS.md, CLAUDE.md, .kiro/steering, and so on).
+   Skip the parts written for a person chatting with an agent (setup or install steps, sign-in
+   guidance, and the like): do not run installers and do not sign in to anything.
    If the Goal has a "Ready conditions" section, check each condition first. If one does not hold
    (a file, function, or decision it needs is not there, a key is missing), stop at once without
    changing files and report it as Blocked (below), naming the condition.
