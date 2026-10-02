@@ -1428,6 +1428,91 @@ class InstallTest(unittest.TestCase):
         i = lines.index("× 9. Kiro との連携: Workflows が有効になっていません")
         self.assertIn("「Enable Workflows」", lines[i + 1])
 
+    def by_hand(self):
+        """What docs/setup.md's manual steps leave (the board and config.ini as the installer makes them):
+        ~/.local/bin/task a link to the clone's bin/task, kiro-cli only on PATH, no manifest, ~/.local/bin on PATH
+        from the shell, git logged in with another helper (a git whose ls-remote reaches the test's GitHub while the
+        file git-reaches exists), and a hook copied from an older version that differs only in its description."""
+        self.use_python3()
+        self.install()
+        local = self.home / ".local"
+        (local / "bin/task").unlink()
+        (local / "bin/task").symlink_to(local / "lib/task-hub/bin/task")
+        (local / "bin/kiro-cli").unlink()
+        (local / "state/task-hub/install-manifest.json").unlink()
+        (self.home / ".zprofile").unlink()
+        self.env["PATH"] = f"{local}/bin:{self.env['PATH']}"
+        (self.home / ".gitconfig").write_text("[credential]\n\thelper = osxkeychain\n")
+        self.git_reaches = self.root / "git-reaches"
+        self.git_reaches.touch()
+        git = self.dev / "usr/bin/git"
+        git.unlink()
+        git.write_text(f'#!/bin/sh\ncase " $* " in\n  *" ls-remote "*" {self.server.url}/"*)\n'
+                       f'    [ -e "{self.git_reaches}" ] && exit 0\n'
+                       '    echo "fatal: Authentication failed" >&2; exit 128 ;;\nesac\n'
+                       f'exec "{shutil.which("git")}" "$@"\n')
+        git.chmod(0o755)
+        hook = self.home / ".kiro" / KIRO_COPIES[0][1]
+        data = json.loads(hook.read_text())
+        data["hooks"][0]["description"] = "an older description"
+        hook.write_text(json.dumps(data, indent=2))
+        self.by_hand_hook = json.loads(json.dumps(data))
+        return hook, data
+
+    def test_doctor_on_a_manual_install_that_works_says_so_with_notes(self):
+        self.by_hand()
+        lines = self.doctor(0)
+        self.assertEqual(set(self.marks(lines).values()), {"○"}, lines)
+        def at(line):
+            i = lines.index(line)
+            return lines[i:i + 3]
+        self.assertEqual(at(f"○ 4. kiro-cli: {self.fakebin}/kiro-cli")[1],
+                         "    (手で入れた構成です。~/.local/bin/kiro-cli はなく、PATH にあるものを使います)")
+        self.assertEqual(at("○ 5. GitHub のログイン: alice")[1],
+                         "    (手で入れた構成です。git は gh 以外のログインで alice/tasks に届きます)")
+        self.assertEqual(at(f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task"), [
+            f"○ 6. task-hub 本体: ~/.local/lib/task-hub(main {self.short()})、~/.local/bin/task",
+            "    (手で入れた構成です。~/.local/bin/task は clone の bin/task へのリンクで、インストーラの wrapper ではありません)",
+            "    (ブランチ main の上の clone です。インストーラはタグに切り替えず、pull だけします)"])
+        self.assertIn("○ 7. ボード: https://github.com/users/alice/projects/1、alice/tasks", lines)
+        self.assertEqual(at("○ 9. Kiro との連携: スキル、steering、フック、ワークフロー、Workflows は有効")[1],
+                         "    (~/.kiro/hooks/task-hub-events.json は task-hub の今の版と説明(description)か名前だけが違います。"
+                         "動作は同じです)")
+        self.assertEqual(lines[-2:], ["すべて揃っています。", "次にすること: Kiro の新しいチャットで /task を試してください"])
+
+    def test_doctor_on_a_manual_install_still_marks_what_is_broken(self):
+        hook, data = self.by_hand()
+        with self.subTest("no kiro-cli"):
+            (self.fakebin / "kiro-cli").rename(self.root / "kiro-cli")
+            marks = self.marks(self.doctor(1))
+            self.assertEqual([n for n, m in marks.items() if m == "×"], ["4. kiro-cli", "5. kiro-cli のログイン"])
+            (self.root / "kiro-cli").rename(self.fakebin / "kiro-cli")
+        with self.subTest("git does not reach GitHub"):
+            self.git_reaches.unlink()
+            lines = self.doctor(1)
+            marks = self.marks(lines)
+            self.assertEqual([n for n, m in marks.items() if m == "×"], ["5. GitHub のログイン"])
+            self.assertIn("× 5. GitHub のログイン: alice。git が gh のログインを使っておらず、alice/tasks に届きません", lines)
+            self.assertEqual(marks["7. ボード"], "○", "the board needs gh only: it is still checked")
+            self.git_reaches.touch()
+        with self.subTest("a Python older than 3.10"):
+            python3 = self.fakebin / "python3"
+            python3.unlink()
+            python3.write_text(f'#!/bin/sh\ncase "$*" in *version_info*) exit 1 ;; esac\nexec "{sys.executable}" "$@"\n')
+            python3.chmod(0o755)
+            lines = self.doctor(1)
+            self.assertIn(f"× 6. task-hub 本体: ~/.local/bin/task の Python({python3})が 3.10 以上ではありません", lines)
+            python3.unlink()
+            python3.symlink_to(sys.executable)
+        with self.subTest("the hook runs another command"):
+            data["hooks"][0]["action"]["command"] = "$HOME/elsewhere/task-events-since"
+            hook.write_text(json.dumps(data, indent=2))
+            lines = self.doctor(1)
+            self.assertEqual([n for n, m in self.marks(lines).items() if m == "×"], ["9. Kiro との連携"])
+            self.assertIn("× 9. Kiro との連携: ~/.kiro/hooks/task-hub-events.json が task-hub の今の版と違います", lines)
+        hook.write_text(json.dumps(self.by_hand_hook, indent=2))
+        self.doctor(0)  # each was put back
+
     def test_uninstall_removes_only_what_the_manifest_lists(self):
         mine = {".zprofile": "export EDITOR=vi\n", ".local/bin/mytool": "#!/bin/sh\n", ".kiro/skills/other/SKILL.md": "x\n",
                 ".local/state/task-hub/events.jsonl": "{}\n"}
