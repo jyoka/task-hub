@@ -3,7 +3,7 @@
   "hooks": [
     {
       "name": "task-hub events",
-      "description": "Adds what task-hub did since the last prompt (In review, Blocked, replan, Done) to the context. Install: copy it to ~/.kiro/hooks/ (Kiro does not read a link there); kiro/install.sh does",
+      "description": "Adds what task-hub did since the last prompt (In review, Blocked, replan, Done, slow) to the context. Install: copy it to ~/.kiro/hooks/ (Kiro does not read a link there); kiro/install.sh does",
       "trigger": "UserPromptSubmit",
       "action": {"type": "command", "command": "$HOME/.local/lib/task-hub/kiro/task-events-since"}
     }

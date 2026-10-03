@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Kiro Workflows `watch` handler (`handler: command`, kiro/workflows/task-hub-events.workflow.json): wakes /chief
-when task-hub writes an event it should tell (In review, Blocked, replan, Done), without a model turn while waiting.
+when task-hub writes an event it should tell (In review, Blocked, replan, Done, slow), without a model turn while waiting.
 
 Kiro runs it once per poll with {"cursor": ..., "config": ...} on stdin and reads one JSON object from stdout:
 {"outcome": "idle" | "new-activity" | "terminal-state", "cursor": <line number of the events file>,
@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import sys
 
-WANTED = "In review,Blocked,replan,Done"
+WANTED = "In review,Blocked,replan,Done,slow"
 TOKEN_FILE = os.path.expanduser("~/.local/state/task-hub/kiro-chief-token")
 # The tell-chief step still runs once after terminal-state, and reads this instead of the last events again
 REPLACED = "replaced: a newer /chief started its own task-hub-events workflow, so this one ends now."

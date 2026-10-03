@@ -45,7 +45,10 @@ REPLAN_MARK = "<!-- task-hub replan -->"
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
-NOTIFY_EVENTS = "In review, Blocked, replan, Done"  # [notify] events: which events show a notification; empty = none
+NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow"  # [notify] events: which events show a notification; empty = none
+# a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
+# with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
+SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
 DEFAULT_AGENTS = {
     "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
               " claude -p --dangerously-skip-permissions {prompt}",
@@ -547,7 +550,7 @@ def notify(e):
         return
     title, body = notification(e)
     if herdr_available():
-        sound = "request" if e["event"] in (BLOCKED, "replan") else "done"
+        sound = "request" if e["event"] in (BLOCKED, "replan", "slow") else "done"
         cmd = ["herdr", "notification", "show", title, "--body", body, "--sound", sound]
     elif shutil.which("osascript"):  # arguments, not a script built from the text: no quoting to get wrong
         cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
@@ -629,15 +632,71 @@ def append_jsonl(path, record, say=None):
             say(f"== could not write {home(path)}: {e}")
 
 
+def seconds_since(stamp):
+    started = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    return (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
+
+
 def alive(t):
     if not t.get("pid"):
         if not t.get("started"):
             return False  # no run of this task on this machine
         # launched but `_run` has not recorded itself yet; give it two minutes
-        started = datetime.datetime.strptime(t["started"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-        return (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds() < 120
+        return seconds_since(t["started"]) < 120
     r = run("ps", "-p", t["pid"], "-o", "command=")
     return r.returncode == 0 and "_run" in r.stdout
+
+
+def slow_threshold(agent):
+    """How long a run of this agent may take before it counts as slow, and its usual time (None: too few runs)."""
+    seconds = []
+    # errors="replace": sync runs every minute and may read a line that is still being written
+    for line in (METRICS.read_text(errors="replace").splitlines() if METRICS.exists() else []):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("agent") == agent and r.get("blocked_by") not in ("start", "setup"):  # the agent never ran
+            seconds.append(r.get("seconds") or 0)
+    usual = median(seconds) if len(seconds) >= SLOW_MIN_RUNS else None
+    limit = SLOW_DEFAULT if usual is None else max(SLOW_TIMES * usual, SLOW_FLOOR)
+    if os.environ.get("TASK_SLOW_SECONDS"):  # tests: a live run can be slow within seconds
+        limit = int(os.environ["TASK_SLOW_SECONDS"])
+    return limit, usual
+
+
+def slow_events():
+    events = []
+    for line in (EVENTS.read_text(errors="replace").splitlines() if EVENTS.exists() else []):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("event") == "slow":
+            events.append(e)
+    return events
+
+
+def check_slow(t):
+    """Emit `slow` once per run for a live run that takes longer than usual; the human decides whether to stop it.
+
+    "Once" is read from EVENTS, never written to RUNS: the run's own `_run` process writes that file.
+    Returns the reason when it emitted one.
+    """
+    if not t.get("started"):
+        return ""
+    agent = load_run(t["id"]).get("agent") or t.get("agent") or config()["runner"]["agent"]
+    elapsed = seconds_since(t["started"])
+    limit, usual = slow_threshold(agent)
+    if elapsed < limit:
+        return ""
+    if any(e.get("id") == t["id"] and e.get("time", "") >= t["started"] for e in slow_events()):
+        return ""
+    reason = f"running {round(elapsed / 60)} min, " + (f"usually {round(usual / 60)} min for {agent}" if usual is not None
+                                                       else f"no usual time for {agent} yet (under {SLOW_MIN_RUNS} "
+                                                            f"finished runs, so {SLOW_DEFAULT // 60} min)")
+    emit(t, "slow", reason=reason)
+    return reason
 
 
 # ---------- herdr ----------
@@ -1596,6 +1655,10 @@ def sync(started_here=False):
                                report=report.strip())
                 kept.unlink(missing_ok=True)
                 set_status(t, BLOCKED, reason="the run stopped unexpectedly" if t.get("started") else "no run here")
+            elif before == IN_PROGRESS:  # alive: tell once if it runs much longer than usual
+                slow = check_slow(t)
+                if slow:
+                    lines.append(f"slow: task {t['id']} {slow} (stop it with Ctrl-C in its tab)")
             elif StatusLifecycle.needs_merge_watch(t) and pr_merged(t):
                 # GitHub documents "Closes ..." as working only for PRs into the default branch
                 gh("issue", "close", t["id"], "--repo", board()["issues"])
@@ -1902,6 +1965,7 @@ def cmd_stats(_):
         *(counts("first_verdicts", "verdict", [r["reviews"][0] for r in reviewed]) if reviewed else []),
         *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
+        f"slow: {len(slow_events())} run(s) got a `slow` event (ran much longer than usual for their agent)",
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
            *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
