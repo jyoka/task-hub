@@ -1,5 +1,5 @@
 #!/bin/sh
-# kiro/install.sh: sets up task-hub on a Mac without admin rights (docs/prd-kiro-installer.md, section 5).
+# kiro/install.sh: sets up task-hub on a Mac without admin rights (docs/kiro-ide.md, "インストーラが行うこと").
 #   sh kiro/install.sh [--with-launchd] [--start-launchd] [--ref <branch or tag>]
 # --with-launchd: also put the launchd plist that keeps `task watch` running (stage 10). It is only started with
 # --start-launchd (which implies --with-launchd), after the user said yes.
@@ -469,7 +469,7 @@ stage_task_hub() {
     die "$(tilde "$LIB_DIR") がありますが、git の clone ではありません" "中身を確かめて別の場所に移してから、もう一度実行してください"
   else
     url=${TASK_INSTALL_REPO:-$("$GIT" -C "$here" remote get-url origin 2>/dev/null)}
-    url=${url:-https://github.com/dip-ka-jo/task-hub.git}
+    url=${url:-https://github.com/jyoka/task-hub.git}
     # The repo is private: without gh's login, git would only fail asking for a user name (stage 5 sets it up)
     git_uses_gh || die "git が GitHub のログインを使えないので、$url を clone していません" \
       "もう一度実行して、5. GitHub のログインの案内どおりにログインしてください"

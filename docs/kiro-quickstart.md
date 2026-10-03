@@ -13,20 +13,12 @@ Kiro IDE の画面とチャットだけで、task-hub を入れて最初のタ�
 管理者のパスワードは一度も聞かれません。入れるものはすべて、自分のホームフォルダの中に置かれます。
 インストーラが何をしているかは [kiro-ide.md](kiro-ide.md) にあります(読まなくても使えます)。
 
-## 配る人へ: 配る前に確かめること
-
-1. **同僚の Mac に git(Xcode の Command Line Tools)が入っているか。** Kiro IDE の「Clone Repository」とインストーラは、
-   どちらも git を使います。git が無いと手順 1 で止まり、インストーラでは入れられません(管理者権限が要ることがあるため)。
-   入っていなければ、情シスに配ってもらいます。
-2. **同僚を dip-ka-jo/task-hub に招待しておく。** GitHub の collaborator として招待し、同僚が招待を受け入れると
-   「Clone Repository」で開けるようになります。個人のリポジトリなので、招待した人には書き込みの権限も付きます。
-
 ## 前提
 
 - **Kiro IDE**(1.2 以上)。版はメニューの「Kiro」→「About Kiro」で見られます。入れるのは情シスの配布に任せます。
 - **git**(Xcode の Command Line Tools)。Kiro IDE の「Clone Repository」自体が git を使うので、git が無いと
   手順 1 で止まります。インストーラでは入れられません(管理者権限が要ることがあるため)。
-- **GitHub のアカウント** で、dip-ka-jo/task-hub を読めること。
+- **GitHub のアカウント**。
 - 時間の目安: 30 分(ダウンロードの待ち時間を含みます)。
 
 ## 1. Kiro IDE でリポジトリを開く
@@ -36,8 +28,8 @@ Kiro IDE の画面とチャットだけで、task-hub を入れて最初のタ�
 2. 上に入力欄が出ます。「**Clone from GitHub**」を選びます。
    - GitHub へのログインを求められたら「Allow」を押します。ブラウザが開くので、GitHub にログインし、
      「Authorize」を押します。「Kiro を開きますか」と聞かれたら開きます。
-3. リポジトリの一覧から `dip-ka-jo/task-hub` を選びます(出てこなければ、入力欄に
-   `https://github.com/dip-ka-jo/task-hub` を貼り付けます)。
+3. リポジトリの一覧から `jyoka/task-hub` を選びます(出てこなければ、入力欄に
+   `https://github.com/jyoka/task-hub` を貼り付けます)。
 4. 保存先のフォルダを聞かれます。書類フォルダなど、分かりやすい場所を選びます。
 5. 「Would you like to open the cloned repository?」と出たら「**Open**」を押します。
 6. 「Do you trust the authors of the files in this folder?」と出たら「**Yes, I trust the authors**」を押します。
