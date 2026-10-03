@@ -115,8 +115,45 @@ for k in $KEYS; do
       case $v in *.app) mine "$v" && [ -d "$v" ] ;; *) false ;; esac || continue
       remove "$(tilde "$v")" rm -rf "$v"
       ;;
-    kiro-cli|kiro-skill-task|kiro-skill-chief|kiro-steering)  # links
+    kiro-skill-task|kiro-skill-chief|kiro-steering)  # only the link the installer created, not a repointed one
       mine "$v" && [ -L "$v" ] || continue
+      case $k in
+        kiro-skill-task) target=$HOME/.local/lib/task-hub/skills/task ;;
+        kiro-skill-chief) target=$HOME/.local/lib/task-hub/skills/chief ;;
+        kiro-steering) target=$HOME/.local/lib/task-hub/kiro/steering/task-hub.md ;;
+      esac
+      if [ "$(readlink "$v")" != "$target" ]; then
+        echo "残しました: $(tilde "$v")(リンク先が変わっています)"
+        continue
+      fi
+      remove "$(tilde "$v")(リンク)" rm -f "$v"
+      ;;
+    kiro-hook|kiro-workflow)  # a copy may have been edited or replaced since install
+      mine "$v" && [ -f "$v" ] && [ ! -L "$v" ] || continue
+      hash=$(get "sha256.$k") || hash=
+      if [ -n "$hash" ]; then
+        same=$(shasum -a 256 "$v" | awk '{ print $1 }')
+        [ "$same" = "$hash" ] && same=yes || same=no
+      else  # legacy records: only an exact packaged copy can be identified safely
+        case $k in
+          kiro-hook) source=$HOME/.local/lib/task-hub/kiro/hooks/task-hub-events.json ;;
+          kiro-workflow) source=$HOME/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ;;
+        esac
+        cmp -s "$v" "$source" && same=yes || same=no
+      fi
+      if [ "$same" != yes ]; then
+        echo "残しました: $(tilde "$v")(インストーラが入れた内容と確認できません)"
+        continue
+      fi
+      remove "$(tilde "$v")" rm -f "$v"
+      ;;
+    kiro-cli)
+      mine "$v" && [ -L "$v" ] || continue
+      target=$(get kiro-cli-target) || target=
+      if [ -z "$target" ] || [ "$(readlink "$v")" != "$target" ]; then
+        echo "残しました: $(tilde "$v")(インストーラが作ったリンク先と確認できません)"
+        continue
+      fi
       remove "$(tilde "$v")(リンク)" rm -f "$v"
       ;;
     *)  # files: uv, gh, the copies of the hook and the workflow, config.ini

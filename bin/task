@@ -16,6 +16,7 @@ whose PR is approved but not merged yet; the merged PR moves them to Done as usu
 """
 import configparser
 import datetime
+from functools import cache
 import json
 import os
 import re
@@ -281,6 +282,7 @@ def digest_lines(d, skip=()):
 
 # ---------- config ----------
 
+@cache
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
@@ -598,7 +600,12 @@ def load_run(tid):
 
 def save_run(t):
     RUNS.mkdir(parents=True, exist_ok=True)
-    (RUNS / f"{t['id']}.json").write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+    temp = RUNS / f".{t['id']}.{os.getpid()}.tmp"  # the runner and watcher write from different processes
+    try:
+        temp.write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+        temp.replace(RUNS / f"{t['id']}.json")  # readers see a complete old or new record
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def set_stage(t, stage):
@@ -825,9 +832,21 @@ def run_setup(t, wt, say):
 
 def ensure_worktree(t):
     """The task's worktree on branch task/<number>; a re-run continues where the last run pushed."""
-    repo_dir = ensure_clone(t["repo"])
-    wt = DATA / "worktrees" / t["id"]
     first = load_run(t["id"])
+    if first.get("repo") and first["repo"].lower() != t["repo"].lower():
+        raise RuntimeError(f"Target repo was changed after the first run (was {first['repo']}); "
+                           "set it back, or create a new task for the other repository")
+    repo_dir = clone_dir(t["repo"])
+    wt = DATA / "worktrees" / t["id"]
+    if (wt / ".git").exists():
+        common = run("git", "-C", wt, "rev-parse", "--git-common-dir", check=True).stdout.strip()
+        if not (repo_dir / ".git").exists() or not (wt / common).samefile(repo_dir / ".git"):
+            raise RuntimeError("existing worktree belongs to another repository; restore its Target repo, "
+                               "or create a new task for the other repository")
+        if not first:  # recover legacy ownership before fetch, base checks, or env setup can fail
+            t["worktree"] = str(wt)
+            save_run(t)
+    repo_dir = ensure_clone(t["repo"])
     if first.get("branch") and first.get("base", "") != t.get("base", ""):
         if run("git", "-C", repo_dir, "rev-parse", "--verify", "-q", f"origin/task/{t['id']}").returncode == 0:
             # the pushed task branch and its PR were made from the first base: continuing on another would mix them up
@@ -855,6 +874,8 @@ def ensure_worktree(t):
     else:
         base = base_ref(t, repo_dir)
     run("git", "-C", repo_dir, "worktree", "add", "-q", "-B", branch, wt, base, check=True)
+    t["worktree"] = str(wt)
+    save_run(t)  # env files, Issue reads, or herdr may fail next: keep ownership for retries and cleanup
     ensure_internal_excludes(wt)
     return wt
 
@@ -880,8 +901,9 @@ def launch(t):
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
     t["stage"] = "preparing"
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
-    t["research"] = "yes" if issue(t)["research"] else ""
-    prompt_file(t).write_text(build_prompt(t))  # kept, so you can always see what the agent was told
+    i = issue(t)
+    t["research"] = "yes" if i["research"] else ""
+    prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
     if herdr_available():
@@ -933,9 +955,8 @@ def prompt_file(t):
     return DATA / "prompts" / f"{t['id']}.md"
 
 
-def build_prompt(t):
+def build_prompt(t, i):
     instructions = WORKER_PROMPT.read_text().split("\n---\n", 1)[-1].strip()
-    i = issue(t)
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
@@ -1526,6 +1547,7 @@ def cleanup(t):
     The branch on GitHub stays: it is the PR's. The local one would only pile up in task-hub's clone.
     Returns "" when done, else what is left: the run record then stays, so the next check tries again.
     """
+    t = {**t, **load_run(t["id"])}  # remove the saved run's resources, even if the card's settings changed
     close_herdr(t)
     wt = Path(t.get("worktree") or "")
     repo = clone_dir(t["repo"]) if t.get("repo") else None
@@ -1616,14 +1638,13 @@ def sync(started_here=False):
                         f"herdr workspace {t['workspace']}" if t["workspace"] else home(t["log"])})
     if started:
         lines += table("started", started, ["id", "agent", "where"])
-    return lines
+    return lines, board_
 
 
 # ---------- commands ----------
 
 def cmd_home(_):
-    lines = sync(started_here=True)
-    board_ = tasks()
+    lines, board_ = sync(started_here=True)
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}  # Done is not fetched
     active = board_
     out(f"bin: {home(BIN)}",
@@ -1742,8 +1763,9 @@ def cmd_watch(_):
     board()  # fail fast on a bad config
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     while True:
+        config.cache_clear()  # pick up edits between checks, while each check uses one configuration
         try:
-            lines = sync()
+            lines, _ = sync()
         except RuntimeError as e:  # a GitHub hiccup must not end the watch
             lines = [f"error: {e}"]
         if lines:
@@ -1990,8 +2012,8 @@ def cmd_start(a):
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
     set_status(t, READY)
-    lines = sync(started_here=True)
-    t = get(t["id"])
+    lines, board_ = sync(started_here=True)
+    t = next((card for card in board_ if card["id"] == t["id"]), t)
     out("task:", f"  id: {t['id']}", f"  title: {q(t['title'])}", f"  status: {t['status']}",
         *([f"  waits_for: {t['waits_for']} (it starts by itself once they are done)"] if t["waits_for"] else []), *lines)
 
