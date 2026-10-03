@@ -536,6 +536,8 @@ def notification(e):
     d = {**{k: e[k] for k in ("reason", "decision", "pr") if e.get(k)}, **(e.get("digest") or {})}
     body = [f"{k}: {v}" for k in DIGEST_KEYS if k != "pr" for v in (d.get(k) if isinstance(d.get(k), list) else [d.get(k)])
             if v]
+    if e["event"] == "slow":  # the notification may be all the human sees of it
+        body.append("stop it with Ctrl-C in its tab, if you want; task-hub never does")
     return f"#{e['id']} {e['event']}: {e.get('title', '')}", "\n".join(body + ([d["pr"]] if d.get("pr") else []))
 
 
@@ -1917,8 +1919,9 @@ def cmd_stats(_):
             runs.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    if not runs:
-        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)")
+    slow = f"slow: {len(slow_events())} run(s) got a `slow` event (ran much longer than usual for their agent)"
+    if not runs:  # the first run can be slow before any run has finished
+        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow)
         return
 
     def counts(name, key, values):
@@ -1965,7 +1968,7 @@ def cmd_stats(_):
         *(counts("first_verdicts", "verdict", [r["reviews"][0] for r in reviewed]) if reviewed else []),
         *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
-        f"slow: {len(slow_events())} run(s) got a `slow` event (ran much longer than usual for their agent)",
+        slow,
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
            *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
