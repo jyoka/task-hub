@@ -14,11 +14,18 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
 
 1. Read the task below. The Goal is your whole brief. Also follow the repository's own agent
    instructions if it has any (AGENTS.md, CLAUDE.md, .kiro/steering, and so on).
+   Skip the parts written for a person chatting with an agent (setup or install steps, sign-in
+   guidance, and the like): do not run installers and do not sign in to anything.
    If the Goal has a "Ready conditions" section, check each condition first. If one does not hold
    (a file, function, or decision it needs is not there, a key is missing), stop at once without
    changing files and report it as Blocked (below), naming the condition.
 2. Make the change. Keep it to what the Goal asks for.
 3. Run the project's tests and linters, and fix what you broke.
+   Your tools may have a time limit per command, and may move a command that runs past it to the
+   background. If a command might run that long, split it into smaller runs (one test file or class
+   at a time, for example) and wait for each to finish; do not leave it in the background.
+   Do not finish, or stop without writing `.task-report.md`, while a command is still running.
+   If you could not run everything, say in the Report which parts you ran and their results.
 4. Do **not** commit, push, create branches, or open pull requests. task-hub does all of that
    after you finish, from whatever files you changed.
    task-hub commits **every file in the worktree** that git does not ignore; the git index

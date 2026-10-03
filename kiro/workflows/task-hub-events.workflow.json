@@ -1,0 +1,35 @@
+{
+  "name": "task-hub-events",
+  "description": "task-hub /chief: wait for In review, Blocked, replan, and Done without model turns, then tell the parent chat",
+  "inputs": {
+    "chief_token": "string"
+  },
+  "steps": [
+    {
+      "type": "repeat",
+      "id": "events-loop",
+      "maxIterations": 500,
+      "onMaxIterations": "pause",
+      "stopWhen": "events.terminal",
+      "steps": [
+        {
+          "type": "watch",
+          "id": "events",
+          "handler": "command",
+          "config": {
+            "command": "$HOME/.local/lib/task-hub/kiro/task-events-watch",
+            "chief_token": "{{chief_token}}",
+            "pollIntervalSec": 60,
+            "commandTimeoutSec": 30
+          }
+        },
+        {
+          "type": "step",
+          "id": "tell-chief",
+          "agent": "wf-planner",
+          "prompt": "You pass task-hub events on to the user's /chief chat. Do not run commands or edit files. The events are below: each is a line `event: #<id> <status> | <title> | <owner/repo> | ...`, followed by indented `key: value` digest lines (verdict, review, reason, question, report, pr).\n\nWrite one short message in the language of the task titles, most urgent first:\n- In review: the title, the `verdict`, the `review` items to check, and the PR link (no more than five lines). With no PR (a research task), its `report` in a few lines.\n- Blocked: the `reason` in one line and what would unblock it.\n- replan: the `decision` and its `question`, `answer`, or `goal_change`, folded into the Blocked message for the same task.\n- Done: one line.\nIf a digest is missing, say `task show <id> --digest` has the details. If the only line below starts with `replaced:`, the message is instead one line saying that watching moved to the newer /chief chat. Then call `send_message` once with severity `success` and that message as its text.\n\n{{events.output}}"
+        }
+      ]
+    }
+  ]
+}

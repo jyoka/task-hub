@@ -3,6 +3,9 @@
 ボードはマシン(アカウント)ごとに 1 つです。個人用 Mac は個人の GitHub Project、仕事用 Mac は仕事用の
 GitHub Project を使います。手順はどちらも同じです。
 
+Kiro しか使えない Mac で、Kiro IDE からターミナルを開かずに使うときは、このページに加えて
+[kiro-ide.md](kiro-ide.md) の手順(設定、steering、フック、ワークフロー、launchd の違い)を使います。
+
 ## 必要なもの
 
 - Python 3.10 以上(`python3 --version`)と git が入った macOS
@@ -44,6 +47,14 @@ task --version
 
 ```
 git -C ~/.local/lib/task-hub pull --ff-only
+```
+
+Kiro IDE を使っているなら、pull のあとにフックとワークフローの定義をコピーし直します(リンクではなくコピーで
+入れているため、pull だけでは変わりません。[kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る)):
+
+```
+rm -f ~/.kiro/hooks/task-hub-events.json && cp ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
+rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
 ```
 
 task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 -m unittest discover -s tests -v`)。
@@ -126,8 +137,39 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    events = In review, Blocked   ; 既定は In review, Blocked, replan, Done。空にすると通知しない
    ```
 
+   IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの
+   worktree(`~/.local/share/task-hub/worktrees/<番号>`)を、このコマンドで開きます。`{path}` はシェルを通さず、
+   worktree のパスを 1 つの引数として置き換えます(`[agents]` の `{prompt}` と同じ扱い):
+
+   ```ini
+   [ide]
+   open = code {path}         ; VS Code。kiro {path}、cursor {path}、idea {path} なども可
+   ```
+
+   `[ide] open` を空にするか省略すると、`task open` は何も起動せず、worktree のパスを表示するだけです。worktree が
+   ない(このマシンで実行していない、または後片付け済み)ときは、理由を出して失敗します。
+
    たとえば、Kiro しかない仕事用 Mac では `agent = kiro` にして、`kiro-cli whoami` でログイン済みか確認します
-   (実行中にエージェントが自分でログインすることはできません)。
+   (実行中にエージェントが自分でログインすることはできません)。無人で動かす(launchd の `task watch`)なら、
+   Pro 以上のプランの API キー(`ksk_` で始まる)を `KIRO_API_KEY` に入れ、herdr のペインの実行にも渡します:
+
+   ```ini
+   [runner]
+   agent = kiro
+   pass_env = KIRO_API_KEY    ; herdr のペインで動く実行にも渡す環境変数の名前(カンマか空白区切り)
+
+   [check]
+   kiro = kiro-cli whoami     ; 例。始める前に実行し、失敗したらエージェントを起動せずに Blocked
+   ```
+
+   task-hub は各タスクを始める前に `[check]` のコマンドを実行し、失敗したらクレジットを使う前に、そのコマンドと
+   出力の最後の数行を理由にしてカードを Blocked にします。`[check]` に書いたエージェントだけを確認します(組み込みの
+   既定はありません)。`KIRO_API_KEY` だけのときに `kiro-cli whoami` が成功するかは未確認です。**API キーだけで使う
+   場合は、先に手で `kiro-cli whoami; echo $?` が 0 になるか確かめてから** `[check]` に書いてください。詳しくは
+   [agents.md](agents.md#始める前の確認と実行に渡す環境変数) を参照してください。launchd から動かすときは、
+   キーを平文でファイルに残さないよう、macOS のキーチェーンに入れて起動時に読み出します。手順は
+   [kiro-ide.md](kiro-ide.md#kiro_api_key-は-plist-に書かずキーチェーンから読む) にあります。キーチェーンを使えないときの
+   代わりとして plist の `EnvironmentVariables` に入れることもできますが、その plist はほかの人が読めない権限にしてください。
 
 ## /task と /chief スキルのインストール
 
@@ -162,12 +204,29 @@ done
   ln -sfn ~/.local/lib/task-hub/pi/task-events.ts ~/.pi/agent/extensions/task-events.ts
   ```
 
-- **Codex、Kiro**: 確かめていません。起こせない場合、`/chief` は返答のたびに `task events` で新しい出来事を確かめます
+- **Kiro IDE**: Workflows(IDE 1.2 から。設定の `kiroAgent.workflows.enabled` で有効にします)の `watch` を使います。
+  ワークフローの定義 `kiro/workflows/task-hub-events.workflow.json` を入れると、`/chief` が始めるときにそれを動かし、
+  `kiro/task-events-watch` が 60 秒ごとに `task events --after` で新しい出来事を確かめます(待っている間はモデルを
+  使わず、クレジットを使いません)。出来事があれば、次のステップが要点を `/chief` のチャットに届けます。
+  ワークフローが動いていなければ、`/chief` は今までどおり返答のたびに確かめます。Kiro IDE 1.2.4 で、コピーで
+  入れたときに出来事が `/chief` に届くことを確かめました(2026-10-01)。詳しい手順は
+  [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る) にあります。
+
+  ワークフローの定義は、リンクではなく **コピー** で入れます。Kiro は実体のパスで許可された場所の中にあるかを
+  判定するので、リンクでは Recipes に出ず、`run_workflow` も拒否されます。task-hub を更新したらコピーし直します。
+
+  ```
+  mkdir -p ~/.kiro/workflows && rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
+  ```
+
+- **Codex**: 確かめていません。起こせない場合、`/chief` は返答のたびに `task events` で新しい出来事を確かめます
   (あなたが話しかけるまで気づきません)。
 
 `/chief` は総指揮のエージェントです。作業している herdr の workspace のペインで、エージェントを起動して `/chief` と
 打つと、ボードの状況を伝え、何かが起きるたびに知らせ(出来事を裏で見張る)、話した作業を
-タスクに分けて提案します。登録と開始は、あなたが「うん」と答えたときだけです。マージはしません。
+タスクに分けて提案します。登録と開始は、あなたが「うん」と答えたときだけです。マージ・`task done` は自分からはせず、
+あなたが対象を名指しして頼んだとき(「PR #12 をマージして」「#49 を done にして」)だけ実行します。マージの前に競合や
+draft でないかを確かめ、マージできなければ理由を伝えます。
 頼んだタスクはその workspace のタブで動き、In review になると自分で閉じます。起きたことを自分から知らせるには、
 裏で監視を続けられるエージェントが要ります(上記)。
 
@@ -194,15 +253,121 @@ task-hub が開始を待たせるので、前後関係を無視して並行に�
 
 ## Ready のカードを自動で始める
 
+`task watch` を動かしておくと、1 分ごとにボードを確認し、Ready のカードを(同時 5 つまで)始めます。外出先で
+スマホからカードを Ready に移すだけで、Mac が起きていれば作業が始まります。`task watch` を動かしていないときは、
+`task` を実行したタイミングで始まります。
+
+動かし方は 2 通りあります。どちらか一方を選びます。
+
+### herdr のペインで動かす
+
 herdr のペインを 1 つ用意して、次を動かしたままにします:
 
 ```
 task watch
 ```
 
-1 分ごとにボードを確認し、Ready のカードを(同時 5 つまで)始めます。外出先でスマホからカードを Ready に
-移すだけで、Mac が起きていれば作業が始まります。`task watch` を動かしていないときは、`task` を実行した
-タイミングで始まります。
+出力をそのまま目で追えるのが利点です。ターミナルやペインを閉じると止まるので、IDE 中心で作業していて
+ターミナルを開いたままにしないなら、次の launchd での常駐を選びます。
+
+### launchd で常駐させる(ターミナルを開いておかない)
+
+macOS のユーザーエージェント(launchd)に登録すると、ログインしている間はずっと `task watch` が動き、落ちても
+自動で立ち上がり直します。ターミナルや herdr のペインを開いておく必要はありません。
+
+`~/Library/LaunchAgents/com.task-hub.watch.plist` を次の内容で作ります(`youruser` は自分のユーザー名に、
+パスは自分の環境に合わせて置き換えます):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.task-hub.watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/youruser/.local/bin/task</string>
+    <string>watch</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/youruser/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/youruser</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/youruser/.local/state/task-hub/watch.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/youruser/.local/state/task-hub/watch.err.log</string>
+</dict>
+</plist>
+```
+
+- **`RunAtLoad`** は登録した瞬間とログインのたびに起動し、**`KeepAlive`** は落ちても立ち上げ直します。
+- **`StandardOutPath` / `StandardErrorPath`** に `task watch` の出力とエラーを書き出します。上の例では
+  実行ログと同じ `~/.local/state/task-hub/` に置いています(このディレクトリは `task` が使うので通常はすでに
+  あります。なければ `mkdir -p ~/.local/state/task-hub` で作ります)。個々のタスクのエージェント出力はこれとは別に
+  `~/.local/state/task-hub/logs/<番号>.log`(`task log`)に残ります。
+- **`EnvironmentVariables` の `PATH`** が要です。launchd から起動したプロセスの PATH は最小限で、ログインシェルの
+  `.zshrc` などは読まれません。`task` 自身に加えて、それが呼び出す `git`、`gh`、エージェントの CLI(`claude`、
+  `kiro-cli` など)、Homebrew で入れたコマンドが見えるように、それらの置き場所をすべて `PATH` に並べます。
+  上の例は Apple Silicon の Homebrew(`/opt/homebrew/bin`)を含めています。Intel Mac なら `/usr/local/bin`、
+  エージェントの CLI を別の場所(`~/.local/bin` や `/opt/homebrew/bin` 以外)に入れているならそのディレクトリも
+  足します。自分の対話シェルでの `echo $PATH` を参考にすると確実です。`gh` がログイン情報を読めるよう `HOME` も
+  渡しています。
+
+登録・停止・再起動は `launchctl` で行います(`gui/$(id -u)` は自分のログインセッションを指します):
+
+```
+# 登録して起動する
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.task-hub.watch.plist
+
+# 動いているか確認する
+launchctl print gui/$(id -u)/com.task-hub.watch
+
+# 止めて登録も外す
+launchctl bootout gui/$(id -u)/com.task-hub.watch
+
+# その場で再起動する(plist を書き換えたあとや、更新後に効かせるとき)
+launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
+```
+
+plist を書き換えたら、`bootout` してから `bootstrap` し直すと確実です(`kickstart -k` はプロセスを入れ替える
+だけで、plist の変更を読み直したいときは登録し直します)。
+
+**task-hub を更新したとき。** 動かす用の clone を pull したら(`git -C ~/.local/lib/task-hub pull --ff-only`)、
+常駐している `task watch` を再起動して新しいコードを読ませます(Kiro IDE の Workflows を使っているなら、
+[インストール](#インストール) のとおりワークフローの定義もコピーし直します)。herdr のペインで動かしているときに
+止めてから起動し直すのと同じで、launchd では次のどちらかです(実行中のタスクは、始めたときのコードのまま最後まで
+動きます)。
+
+```
+launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
+# または
+launchctl bootout   gui/$(id -u)/com.task-hub.watch
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.task-hub.watch.plist
+```
+
+**herdr のタブと通知はどうなるか。** launchd から動かした `task watch` が始めたタスクは、watch のペインが
+ないので、そのタスクの置き場所は「登録時に記録された workspace」→「そのリポジトリの checkout を開いている
+ペインがある workspace」→「タスク専用の workspace を新しく作る」の順で決まります(herdr のペインで動かした
+場合も、`task watch` が始めたタスクは watch の場所には置かないので、扱いは同じです。README の
+「見え方と、手元に残るもの」と [operations.md](operations.md#実行の様子を見る) を参照)。通知は、実行が
+終わったプロセス自身が出します。herdr が動いていれば herdr の通知、動いていなければ macOS の通知
+(`osascript`)になるので、launchd から動かしていても In review や Blocked は届きます([operations.md](operations.md#通知llm-なし))。
 
 ## 初回の実行
 

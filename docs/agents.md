@@ -12,7 +12,7 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 
 | 名前 | task-hub が実行するコマンド | 補足 |
 |---|---|---|
-| `claude` | `claude -p --dangerously-skip-permissions {prompt}` | Claude Code の print モード、権限の確認なし |
+| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています |
 | `codex` | `codex exec -s workspace-write {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません |
 | `pi` | `pi -p {prompt}` | Pi の print モード |
 | `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`) |
@@ -69,16 +69,19 @@ task-hub 自身が付けた Blocked(開始の失敗、レポートなし、自�
 ## 使用量の記録
 
 task-hub は、エージェントを起動するたびに秒数を `metrics.jsonl` に残します。エージェントの CLI が手元に残す記録を
-読めるときは、トークン数、API 呼び出しの数、サブエージェントの呼び出しの数、使ったモデルも残します(エージェントに
-申告させるのではなく、task-hub が外から読みます)。
+読めるときは、その記録にある使用量も残します(エージェントに申告させるのではなく、task-hub が外から読みます)。
+どの記録をどの起動でも試し、エージェントの名前では分けません。
 
 | エージェント | 読む記録 | 残るもの |
 |---|---|---|
 | `claude` | `~/.claude/projects/**/*.jsonl`(`CLAUDE_CONFIG_DIR` があればその下の `projects`) | 秒数、トークン数、呼び出し数、サブエージェント、モデル |
-| `codex`、`pi`、`kiro`、追加したもの | まだ読みません | 秒数だけ |
+| `kiro` | v1: `~/Library/Application Support/kiro-cli/data.sqlite3`(macOS。ほかは `~/.local/share/kiro-cli/`)の `conversations_v2`<br>v2: `~/.kiro/sessions/cli/<id>.json` | 秒数、クレジット(小数 2 桁)、リクエスト数、モデル。トークン数は kiro-cli が残さないので欄がありません |
+| `codex`、`pi`、追加したもの | まだ読みません | 秒数だけ |
 
-Claude Code の記録は、その worktree の中で、その起動の間に書かれた行だけを数えます。`[agents]` で `claude` のコマンドを
-変えても、Claude Code が記録を残す限り同じように測れます。集計は `task stats` で見られます
+どちらも、その worktree の中で、その起動の間に書かれた記録だけを数えます。kiro-cli は版によって保存先が違い
+(2.2.0 の `--no-interactive` は v1 に書きました。新しい版は v2 に書くとされますが、確かめていません)、両方を読みます。
+v1 のデータベースは読み取り専用で開き、ロックされている、形式が違う、などで読めなければ秒数だけを残します。
+`[agents]` でコマンドを変えても、CLI が記録を残す限り同じように測れます。集計は `task stats` で見られます
 ([operations.md](operations.md#エージェントの使用量))。上限や停止はまだしません。
 
 ## エージェントの変更と追加
@@ -89,10 +92,14 @@ Claude Code の記録は、その worktree の中で、その起動の間に書�
 ```ini
 [agents]
 ; stricter Claude: allow only edits and test commands
-claude = claude -p --allowedTools Edit,Write,Bash(npm test:*) {prompt}
+claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --allowedTools 'Edit,Write,Bash(npm test:*)' {prompt}
 ; a new agent
 aider = aider --yes-always --message {prompt}
 ```
+
+`{prompt}` 以外の、自分で書く引数に空白が含まれるときは、`'Edit,Write,Bash(npm test:*)'` のように引用符で囲んでください。コマンドは `shlex` の規則で引数に分けます。
+
+`claude` を上書きするときも、組み込みと同じ `env ...` の 3 つの環境変数を付けてください。付けないと、長いテストが Bash ツールの時間の上限(既定 2 分、最大 10 分)を超えたときにバックグラウンドへ回され、`claude -p` はその終わりを待たずにレポートなしで終わります。
 
 コマンドが動くための条件:
 
@@ -101,6 +108,36 @@ aider = aider --yes-always --message {prompt}
 - 実装エージェントは `.task-report.md` を書けること。task-hub が結果を知る方法はこれだけです。
   レポートがなければ、タスクはブロックとして扱われます
 - reviewer として使う場合は `.task-review.md` を書けること。reviewer はそれ以外のファイルを変更してはいけません
+
+## 始める前の確認と、実行に渡す環境変数
+
+無人で動かすとき(launchd の `task watch` など)は、エージェントのログインが切れていても誰も気づきません。
+`[check]` にエージェントごとの確認コマンドを書くと、task-hub はタスクを始める前(worktree を作る前、
+エージェントを起動してクレジットを使う前)にそれを実行します。終了コードが 0 以外なら、そのコマンドと出力の最後の
+数行を理由にしてカードを Blocked にします(「could not start: agent "kiro" is not ready: ...」)。実装エージェントに
+加えて、`[runner] reviewer` と `replanner` のエージェントも同じときに確かめます。
+
+```ini
+[runner]
+agent = kiro
+pass_env = KIRO_API_KEY         ; herdr のペインで動く実行にも渡す変数の名前(カンマか空白区切り)
+
+[check]
+kiro = kiro-cli whoami          ; 例。書いたエージェントだけ確認します(組み込みの既定はありません)
+```
+
+- `[check]` に書いていないエージェントは確認しません(組み込みの確認はありません)。Kiro の公式ドキュメントは、
+  どの認証方法が有効かを `kiro-cli whoami` で確かめると書いています。ただし `KIRO_API_KEY` だけ(ブラウザでのログインなし)
+  のときに終了コード 0 になるかは確かめていません。**API キーだけで使う場合は、先に手で
+  `kiro-cli whoami; echo $?` が 0 になるか確かめてから**この設定を入れてください
+- 確認は `task watch` / `task start` を動かしている環境で、シェルを通さずに実行します(60 秒で打ち切り)
+- `pass_env` は、herdr のペインで動く実行のためのものです。ペインのシェルは herdr サーバーの環境で始まるので、
+  task-hub は小さな起動スクリプト(`~/.local/share/task-hub/run/<番号>.sh`、本人だけが読める 0600)で
+  `HOME`、`PATH`、`TASK_*`、`GIT_AUTHOR_*`、`GIT_COMMITTER_*` と、ここに書いた変数を渡します。起動スクリプトは
+  始まった直後に自分自身を消すので、キーの値はファイルに残りません。herdr を使わない
+  バックグラウンドの実行は、もともと環境をすべて引き継ぎます
+- `pass_env` に書いた変数の値は、確認の出力に現れても `***` に置き換えてからコメントと出来事に書きます。
+  ログやコメントに値を出さないでください(エージェント自身の出力は task-hub には消せません)
 
 ## 安全性
 
