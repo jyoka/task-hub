@@ -13,7 +13,6 @@
 # For tests: TASK_INSTALL_GITHUB replaces https://github.com (release downloads, the reachability check),
 # TASK_INSTALL_REPO the URL that task-hub is cloned from, TASK_INSTALL_KIRO_CLI https://prod.download.cli.kiro.dev,
 # TASK_INSTALL_APPLICATIONS /Applications (where an installed Kiro CLI.app is looked for).
-# TASK_INSTALL_GH_LOGIN=terminal: log in to GitHub in a Terminal window from the start (see stage_gh_login).
 set -u
 
 GITHUB=${TASK_INSTALL_GITHUB:-https://github.com}
@@ -23,7 +22,6 @@ STATE_DIR=$HOME/.local/state/task-hub
 MANIFEST=$STATE_DIR/install-manifest.json
 ZPROFILE_LINE='export PATH="$HOME/.local/bin:$PATH"'
 CONFIG=$HOME/.config/task-hub/config.ini
-DEVICE_URL=https://github.com/login/device
 KIRO_CLI_DOWNLOAD=${TASK_INSTALL_KIRO_CLI:-https://prod.download.cli.kiro.dev}
 KIRO_CLI_APP="$HOME/Applications/Kiro CLI.app"  # where this script puts Kiro CLI when there is none
 KIRO_CLI_BIN="Contents/MacOS/kiro-cli"  # in the app
@@ -40,6 +38,7 @@ STAGES="prereq python gh kiro_cli gh_login kiro_login task_hub board config kiro
 # put there (only that: an existing gh or Python is used, not recorded). Shell variable M_<key>, "_" for "-".
 MANIFEST_KEYS="uv uv_python gh kiro_cli kiro_cli_app task_hub task zprofile config kiro_skill_task kiro_skill_chief
   kiro_steering kiro_hook kiro_workflow kiro_settings launchd"
+COPY_KEYS="kiro_hook kiro_workflow"  # fingerprints of copies this installer owns, before updating or removing them
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 orig_path=$PATH
@@ -62,13 +61,19 @@ json() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 load_manifest() {
-  M_python=
+  M_python= M_kiro_cli_target=
   for k in $MANIFEST_KEYS; do eval "M_$k="; done
+  for k in $COPY_KEYS; do eval "H_$k="; done
   [ -f "$MANIFEST" ] || return 0
   M_python=$(plutil -extract python raw -o - "$MANIFEST" 2>/dev/null) || M_python=
+  M_kiro_cli_target=$(plutil -extract kiro-cli-target raw -o - "$MANIFEST" 2>/dev/null) || M_kiro_cli_target=
   for k in $MANIFEST_KEYS; do
     v=$(plutil -extract "installed.$(printf %s "$k" | tr _ -)" raw -o - "$MANIFEST" 2>/dev/null) || v=
     eval "M_$k=\$v"
+  done
+  for k in $COPY_KEYS; do
+    v=$(plutil -extract "sha256.$(printf %s "$k" | tr _ -)" raw -o - "$MANIFEST" 2>/dev/null) || v=
+    eval "H_$k=\$v"
   done
 }
 
@@ -76,12 +81,21 @@ write_manifest() {
   {
     printf '{\n  "version": 1,\n'
     [ -n "$M_python" ] && printf '  "python": "%s",\n' "$(json "$M_python")"
+    [ -n "$M_kiro_cli_target" ] && printf '  "kiro-cli-target": "%s",\n' "$(json "$M_kiro_cli_target")"
     printf '  "installed": {'
     sep=
     for k in $MANIFEST_KEYS; do
       eval "v=\$M_$k"
       [ -n "$v" ] || continue
       printf '%s\n    "%s": "%s"' "$sep" "$(printf %s "$k" | tr _ -)" "$(json "$v")"
+      sep=,
+    done
+    printf '\n  },\n  "sha256": {'
+    sep=
+    for k in $COPY_KEYS; do
+      eval "v=\$H_$k"
+      [ -n "$v" ] || continue
+      printf '%s\n    "%s": "%s"' "$sep" "$(printf %s "$k" | tr _ -)" "$v"
       sep=,
     done
     printf '\n  }\n}\n'
@@ -255,6 +269,11 @@ stage_kiro_cli() {
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     die "$(tilde "$link") がありますが、動きません" "それを消すか移してから、もう一度実行してください"
   fi
+  if [ -L "$link" ] && { [ "$M_kiro_cli" != "$link" ] || [ -z "$M_kiro_cli_target" ] \
+    || [ "$(readlink "$link")" != "$M_kiro_cli_target" ]; }; then
+    die "$(tilde "$link") のリンク先をこのインストーラのものと確認できないので書き換えていません" \
+      "リンク先を確かめて別の場所に移してから、もう一度実行してください"
+  fi
   # One there already (a link left in ~/.local/bin that no longer works is skipped by command -v, or replaced)
   found=
   for k in "$(command -v kiro-cli 2>/dev/null)" "${TASK_INSTALL_APPLICATIONS:-/Applications}/Kiro CLI.app/$KIRO_CLI_BIN" \
@@ -306,7 +325,7 @@ print(urllib.parse.quote(p["download"]), p["sha256"], sep="\n")' "$work/kiro-man
   fi
   mkdir -p "$BIN_DIR" && ln -sfn "$found" "$link" \
     || die "$(tilde "$link") を作れませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
-  M_kiro_cli=$link
+  M_kiro_cli=$link M_kiro_cli_target=$found
   write_manifest
   changed=1
   if [ "$how" = 入れました ]; then
@@ -326,25 +345,36 @@ gh_user() {  # sets GH_USER and GH_SCOPES from the token gh uses; fails when gh 
 # gh is git's credential helper for GitHub (`gh auth setup-git`): git can read the private repos the login can
 git_uses_gh() { "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -q 'auth git-credential'; }
 
-device_code() { sed -n 's/.*\([A-Z0-9]\{4\}-[A-Z0-9]\{4\}\).*/\1/p' "$1" 2>/dev/null | head -n 1; }
-
 open_terminal() {  # $1: file name, rest: the command. Writes it to a .command file and opens that in Terminal
   file=$STATE_DIR/$1
   shift
-  { printf '#!/bin/sh\n# task-hub: made by kiro/install.sh. Runs this in a Terminal window, where it can ask its questions.\n'
+  command_tmp=$(mktemp "$STATE_DIR/.login.XXXXXX") \
+    || die "ログイン用の一時ファイルを作れませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+  (
+    umask 077
+    { printf '#!/bin/sh\n# task-hub: made by kiro/install.sh. Runs this in a Terminal window, where it can ask its questions.\n'
+    printf '/bin/rm -f "$0"\n'
+    # Terminal has its own environment. Preserve network/config settings, including the proxy from scutil.
+    # Values may contain credentials: the temporary file is private, and the command removes itself on start.
+    for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy NO_PROXY no_proxy \
+      GH_CONFIG_DIR SSL_CERT_FILE SSL_CERT_DIR; do
+      eval "present=\${$name+x} value=\${$name-}"
+      [ -z "$present" ] || printf 'export %s=%s\n' "$name" "$(shquote "$value")"
+    done
     sep=
     for a in "$@"; do printf '%s%s' "$sep" "$(shquote "$a")"; sep=' '; done
     printf '\necho\necho "終わったら、このウィンドウを閉じて、もう一度 kiro/install.sh を実行してください"\n'
-  } > "$file" && chmod 755 "$file" || die "$(tilde "$file") を書けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+    } > "$command_tmp" && chmod 700 "$command_tmp" && mv -f "$command_tmp" "$file"
+  ) \
+    || die "$(tilde "$file") を書けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
   open "$file" >/dev/null 2>&1 || die "ターミナルを開けませんでした" "Finder で $(tilde "$file") をダブルクリックして進め、終わったらもう一度実行してください"
 }
 
 stage_gh_login() {
   label="5. GitHub のログイン"
-  pidfile=$STATE_DIR/gh-login.pid log=$STATE_DIR/gh-login.log
   GH_USER= GH_SCOPES=
   if gh_user && case ", $GH_SCOPES," in *", project,"*) true ;; *) false ;; esac; then
-    rm -f "$pidfile" "$log" "$STATE_DIR/gh-login.command"
+    rm -f "$STATE_DIR/gh-login.command"
     # git (task-hub's clones and pushes) uses the same login; non-interactive `gh auth login` does not set that up
     if git_uses_gh; then
       ok 済み "$GH_USER"
@@ -367,38 +397,9 @@ stage_gh_login() {
     die "${need}。環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません" \
       "その環境変数を外すか、project の権限があるトークンにしてから、もう一度実行してください"
   fi
-  pid=$(cat "$pidfile" 2>/dev/null) || pid=
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then  # the login an earlier run started is still waiting
-    die "${need}。ブラウザでの承認を待っています" "$DEVICE_URL でコード $(device_code "$log") を入れて承認してから、もう一度実行してください"
-  fi
   gh=$(command -v gh)
-  if [ -n "$pid" ] || [ "${TASK_INSTALL_GH_LOGIN:-}" = terminal ]; then
-    # The login an earlier run left waiting in the background is gone without logging in: it timed out, or it was
-    # stopped when the command that ran this script ended. Log in in a Terminal window instead.
-    open_terminal gh-login.command "$gh" "$@"
-    die "${need}。開いたターミナルで、案内に沿ってブラウザで承認してください" "承認が終わったら、もう一度実行してください"
-  fi
-  # Without a terminal, gh prints a one-time code, then waits (up to 15 minutes) until it is entered in the browser.
-  # It runs in a session of its own so that it outlives this script, and the next run checks whether it got through.
-  TMPDIR=$STATE_DIR/ "$PY" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$gh" "$@" \
-    </dev/null >"$log" 2>&1 &
-  pid=$!
-  printf '%s\n' "$pid" > "$pidfile"
-  i=0 code=
-  while [ "$i" -lt 60 ]; do
-    code=$(device_code "$log")
-    [ -n "$code" ] && break
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.5
-    i=$((i + 1))
-  done
-  if [ -z "$code" ]; then
-    kill "$pid" 2>/dev/null
-    rm -f "$pidfile"
-    die "gh のログインを始められませんでした($(tail -n 1 "$log"))" "ネットワーク(VPN、プロキシ)を確かめて、もう一度実行してください"
-  fi
-  open "$DEVICE_URL" >/dev/null 2>&1
-  die "${need}。ブラウザで $DEVICE_URL を開きました。コード $code を入れて承認してください" "承認が終わったら、もう一度実行してください"
+  open_terminal gh-login.command "$gh" "$@"
+  die "${need}。開いたターミナルで、案内に沿ってブラウザで承認してください" "承認が終わったら、もう一度実行してください"
 }
 
 stage_kiro_login() {
@@ -412,7 +413,7 @@ stage_kiro_login() {
     ok 済み
     return
   fi
-  # Not in the background as gh's: kiro-cli login first asks how to log in, in a menu that needs a terminal.
+  # kiro-cli login first asks how to log in, in a menu that needs a terminal.
   open_terminal kiro-login.command "$kiro" login
   die "kiro-cli にログインしていません。開いたターミナルで、ログインの方法を選んでブラウザで承認してください" \
     "ログインが終わったら、もう一度実行してください"
@@ -436,11 +437,29 @@ switch_to() {  # $1: a tag or a branch of origin, already fetched. The copy ther
   fi || say "$label: $1 に切り替えられませんでした($(tail -n 1 "$work/git.log"))。今の版のまま進めます"
 }
 
+remember_legacy_copies() {  # identify old manifest-owned copies against the old clone, before its update
+  saved=
+  for k in $COPY_KEYS; do
+    eval "owned=\$M_$k hash=\$H_$k"
+    [ -n "$owned" ] && [ -z "$hash" ] && [ -f "$owned" ] && [ ! -L "$owned" ] || continue
+    case $k in
+      kiro_hook) source=$LIB_DIR/kiro/hooks/task-hub-events.json ;;
+      kiro_workflow) source=$LIB_DIR/kiro/workflows/task-hub-events.workflow.json ;;
+    esac
+    cmp -s "$owned" "$source" || continue
+    hash=$(shasum -a 256 "$owned" | awk '{ print $1 }')
+    eval "H_$k=\$hash"
+    saved=1
+  done
+  [ -z "$saved" ] || write_manifest
+}
+
 stage_task_hub() {
   label="6. task-hub 本体"
   did=
   export GIT_TERMINAL_PROMPT=0  # fail instead of waiting for a password nobody can type
   if [ -d "$LIB_DIR/.git" ]; then
+    remember_legacy_copies
     before=$(clone_version)
     branch=$(g symbolic-ref -q --short HEAD) || branch=
     # The installer's clone (in the manifest, or not on a branch) follows the newest kiro-v*. A clone on a branch
@@ -565,9 +584,9 @@ real() { "$PY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 link_into() {  # $1: in the clone, $2: the link Kiro reads, $3: manifest key. Adds to $did, or to $kept
   [ -e "$1" ] || die "$(tilde "$1") がありません" "task-hub を更新できているか確かめて、もう一度実行してください"
-  if [ -e "$2" ]; then
+  if [ -e "$2" ] || [ -L "$2" ]; then
     if [ "$(real "$2")" = "$(real "$1")" ]; then  # also through another link (docs/setup.md's ~/.agents/skills)
-      eval "M_$3=\$2"
+      :  # an existing manual link is the user's; only newly created links are recorded
     else  # someone's own (another checkout of task-hub, say)
       kept="${kept}$(tilde "$2")、"
     fi
@@ -576,18 +595,39 @@ link_into() {  # $1: in the clone, $2: the link Kiro reads, $3: manifest key. Ad
   mkdir -p "$(dirname "$2")" && ln -sfn "$1" "$2" \
     || die "$(tilde "$2") を作れませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
   eval "M_$3=\$2"
+  write_manifest  # a later resource can fail: newly created links must still be uninstallable
   did="${did}$(tilde "$2")(リンク)、"
 }
 
 copy_into() {  # $1: in the clone, $2: the copy Kiro reads, $3: manifest key. Adds to $did
   [ -f "$1" ] || die "$(tilde "$1") がありません" "task-hub を更新できているか確かめて、もう一度実行してください"
-  eval "M_$3=\$2"
-  [ ! -L "$2" ] && [ -f "$2" ] && cmp -s "$1" "$2" && return 0
+  eval "owned=\$M_$3 hash=\$H_$3"
+  if [ -e "$2" ] || [ -L "$2" ]; then
+    if [ -L "$2" ] && [ "$(real "$2")" = "$(real "$1")" ]; then
+      :  # migrate the manual link to a copy, as Kiro requires
+    elif [ ! -L "$2" ] && [ -f "$2" ] && cmp -s "$1" "$2"; then
+      # A legacy manifest without fingerprints can be upgraded when the copy still matches the packaged file.
+      if [ "$owned" = "$2" ]; then
+        hash=$(shasum -a 256 "$2" | awk '{ print $1 }')
+        eval "H_$3=\$hash"
+        write_manifest
+      fi
+      return 0
+    elif [ "$owned" != "$2" ] || [ -z "$hash" ] || [ -L "$2" ] || [ ! -f "$2" ] \
+      || [ "$(shasum -a 256 "$2" | awk '{ print $1 }')" != "$hash" ]; then
+      die "$(tilde "$2") は、このインストーラが入れた内容と確認できないので書き換えていません" \
+        "中身を確かめて別の場所に移してから、もう一度実行してください(旧版の記録には内容の識別情報がありません)"
+    fi
+  fi
   how=コピー
   [ -e "$2" ] || [ -L "$2" ] && how=コピーし直し  # changed by a pull, or the link of an earlier manual install
   tmp=$(dirname "$2")/.${2##*/}.tmp
   mkdir -p "$(dirname "$2")" && cp "$1" "$tmp" && mv -f "$tmp" "$2" \
     || die "$(tilde "$2") に置けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+  eval "M_$3=\$2"
+  hash=$(shasum -a 256 "$2" | awk '{ print $1 }')
+  eval "H_$3=\$hash"
+  write_manifest
   did="${did}$(tilde "$2")(${how})、"
 }
 

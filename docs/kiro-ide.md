@@ -28,7 +28,7 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 2. Python | 3.10 以上が無ければ uv を入れ、uv で Python 3.12 を取る | 1 章 |
 | 3. gh | 無ければ GitHub Releases の zip をチェックサムで確かめて `~/.local/bin` に置く | 1 章 |
 | 4. kiro-cli | あるものを `~/.local/bin/kiro-cli` にリンク。無ければ公式の DMG を `~/Applications` に展開する(**公式の手順ではありません**。公式のスクリプトは管理者権限の要る `/Applications` に入れます) | 1 章 |
-| 5. ログイン | gh(ブラウザでコードを入れる。git にも gh のログインを使わせる)と kiro-cli(開いたターミナルで)。ここで止まり、本人がログインしてからもう一度実行する。task-hub は private なので、clone より前に行う | 1 章 |
+| 5. ログイン | gh と kiro-cli(開いたターミナルの案内に沿ってブラウザで承認。git にも gh のログインを使わせる)。ここで止まり、本人がログインしてからもう一度実行する。task-hub は private なので、clone より前に行う | 1 章 |
 | 6. task-hub 本体 | `~/.local/lib/task-hub` に clone し(配布する版、つまり一番新しい `kiro-v*` のタグ。2 回目からは新しいタグがあれば切り替える)、`~/.local/bin/task`(その Python で動かす wrapper)と `~/.zprofile` の PATH | 1 章、9 章 |
 | 7. ボード | `<you>/tasks`(private)と Project「task-hub」を作り、Status と欄をそろえる | [setup.md](setup.md#github-側の準備1-回だけ) |
 | 8. 設定 | config.ini に足りない項目だけを足し、`task list` で確かめる | 2 章 |
@@ -36,6 +36,9 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 10. 常駐(任意) | `--with-launchd` で plist を置き、`--start-launchd` で始める | 6 章 |
 | 11. 診断 | `sh kiro/doctor.sh` を呼び、全段階を ○ / × の一覧で出す(何も変えない) | — |
 
+- GitHub と kiro-cli のログインは同じ Terminal の起動経路を使います。システム設定から取得したプロキシと、
+  明示したプロキシ・証明書・`GH_CONFIG_DIR` の設定をログインにも渡します。ログイン用ファイルは本人だけが読める
+  権限で作り、開始時に自分自身を消します。
 - **診断** `sh kiro/doctor.sh` は、いつでも単独で実行できます。× の行の下に、次にすることが出ます。
   判定するのは「インストーラの形か」ではなく「task-hub が動くか」です。[setup.md](setup.md) の手順で手で入れた構成
   (`~/.local/bin/task` が clone の `bin/task` へのリンク、PATH にある kiro-cli、gh 以外のログインで GitHub に届く git、
@@ -43,6 +46,12 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 - **アンインストール** `sh kiro/uninstall.sh` は、消すものの一覧を出すだけで、`--yes` を付けると消します。消すのは、
   インストーラが `~/.local/state/task-hub/install-manifest.json` に記録したものだけです。GitHub のボード、ログイン、
   Kiro の settings.json、task-hub のデータ(worktree、ログ)は消しません(ボードの消し方は出力に出ます)。
+  Kiro のスキルや steering のリンク先を変えた場合、フックやワークフローのコピーを編集・置換した場合も残します。
+  コピーの内容は SHA-256 で記録し、再インストールによる更新にも同じ確認を使います。手動で作ったスキルのリンクは
+  新たな削除対象にしません。旧版の記録に SHA-256 がないコピーは、更新前の配布ファイルと完全に同じときに
+  識別情報を補ってから更新します。異なるコピーは自動で更新・削除できないため、内容を確認して別の場所に移してから
+  再実行してください。kiro-cli のリンクも作成時のリンク先を記録し、付け替えられたものは残します。旧版の記録に
+  リンク先がない kiro-cli のリンクは、自動削除せず残します。
 - Kiro のチャットで「セットアップして」と言ったときにこれらを実行させる約束は、リポジトリの
   `.kiro/steering/setup.md` にあります(`inclusion: auto`。セットアップの話のときだけ読み込まれます)。
 

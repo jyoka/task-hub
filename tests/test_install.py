@@ -23,7 +23,6 @@ import sys
 import tarfile
 import tempfile
 import threading
-import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -53,7 +52,7 @@ NEW_WORKFLOWS = ["Auto-add sub-issues to project", "Auto-close issue", "Item add
 STATUS_WORKFLOWS = ["Item added to project", "Pull request linked to issue", "Pull request merged"]
 
 FAKE_GH = r'''#!@PYTHON@
-import fcntl, json, os, sys, time
+import fcntl, json, os, sys
 a = sys.argv[1:]
 if a == ["--version"]:
     print("gh version @VERSION@ (fake)")
@@ -86,27 +85,24 @@ def project(db, owner=None, number=None, pid=None):
     raise Fail(f"Could not resolve to a ProjectV2 with the number {number}.")
 
 if a[:2] in (["auth", "login"], ["auth", "refresh"]):
-    # like gh without a terminal: the code on stderr, then wait for the approval (the test sets "approve")
+    # The test runs the Terminal .command with an explicit fake browser approval. Never opens a real GUI.
     with lock():
         db = load()
         db["calls"].append(a)
+        if any(os.environ.get(k) != v for k, v in db.get("required_login_env", {}).items()):
+            print("Required login environment is missing", file=sys.stderr)
+            sys.exit(1)
+        if not db.get("approve"):
+            print("Browser approval is required", file=sys.stderr)
+            sys.exit(1)
+        scopes = (db["auth"] or {}).get("scopes", "repo")
+        db["auth"] = {"login": db["approve"], "scopes": scopes if "project" in scopes.split(", ")
+                      else scopes + ", project"}
+        db["approve"] = None
         save(db)
     print(f"! One-time code ({db['code']}) copied to clipboard", file=sys.stderr)
     print("Open this URL to continue in your web browser: https://github.com/login/device", file=sys.stderr, flush=True)
-    for _ in range(300):
-        time.sleep(0.1)
-        if not os.path.exists(DB):
-            sys.exit(1)
-        with lock():
-            db = load()
-            if db.get("approve"):
-                scopes = (db["auth"] or {}).get("scopes", "repo")
-                db["auth"] = {"login": db["approve"], "scopes": scopes if "project" in scopes.split(", ")
-                              else scopes + ", project"}
-                db["approve"] = None
-                save(db)
-                sys.exit(0)
-    sys.exit(1)
+    sys.exit(0)
 
 def handle(db):
     auth = db["auth"]
@@ -348,7 +344,6 @@ class InstallTest(unittest.TestCase):
         self.gh_db.write_text(json.dumps({"auth": {"login": "alice", "scopes": "gist, project, read:org, repo"},
                                           "code": "ABCD-1234", "approve": None, "repos": {}, "projects": [],
                                           "calls": []}))
-        self.addCleanup(self.stop_gh_login)
         self.uv_calls = root / "uv-calls.txt"
         self.server = Releases()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -363,7 +358,7 @@ class InstallTest(unittest.TestCase):
         self.make_origin()
         self.env = {k: v for k, v in os.environ.items()
                     if k.lower() not in ("https_proxy", "http_proxy", "all_proxy", "no_proxy", "gh_token",
-                                         "github_token", "task_install_gh_login")}
+                                         "github_token")}
         self.env.update(git_id, HOME=str(self.home), PATH=f"{self.fakebin}:{SYSTEM_PATH}",
                         TASK_INSTALL_GITHUB=self.server.url, TASK_INSTALL_REPO=f"file://{root}/origin.git",
                         TASK_INSTALL_KIRO_CLI=self.server.url + "/kiro", TASK_INSTALL_APPLICATIONS=str(self.applications),
@@ -554,27 +549,17 @@ class InstallTest(unittest.TestCase):
     def config(self):
         return (self.home / ".config/task-hub/config.ini").read_text()
 
-    def login_pid(self):
-        f = self.home / ".local/state/task-hub/gh-login.pid"
-        return int(f.read_text()) if f.exists() else None
-
-    def stop_gh_login(self):
-        """The fake `gh auth login` an install left in the background (it would end by itself after 30 s)."""
-        pid = self.login_pid()
-        if pid:
-            try:
-                os.kill(pid, 9)
-            except ProcessLookupError:
-                pass
-
-    def wait_gone(self, pid):
-        for _ in range(100):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.1)
-        self.fail(f"process {pid} is still running")
+    def finish_github_login(self):
+        """Complete the Terminal command using the fake gh and fake browser approval, no real Terminal."""
+        command = self.home / ".local/state/task-hub/gh-login.command"
+        self.assertTrue(command.exists())
+        self.change_github(lambda db: db.update(approve="alice"))
+        terminal_env = {k: self.env[k] for k in ("HOME", "PATH", "TASK_TEST_GH_DB")}
+        r = subprocess.run(["sh", str(command)], env=terminal_env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNotNone(self.github()["auth"], "Terminal login must receive its required environment")
+        self.assertEqual(self.github()["auth"]["login"], "alice")
 
     # --- tests ---
 
@@ -617,6 +602,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual((self.home / ".zprofile").read_text().count(ZPROFILE_LINE), 1)
         self.assertEqual(self.manifest(), {
             "version": 1, "python": python,
+            "kiro-cli-target": str(self.fakebin / "kiro-cli"),
             "installed": {"uv": str(local / "bin/uv"), "uv-python": "3.12", "gh": str(local / "bin/gh"),
                           "kiro-cli": str(local / "bin/kiro-cli"),
                           "task-hub": str(local / "lib/task-hub"), "task": str(wrapper), "zprofile": ZPROFILE_LINE,
@@ -626,7 +612,9 @@ class InstallTest(unittest.TestCase):
                           "kiro-steering": str(self.home / ".kiro/steering/task-hub.md"),
                           "kiro-hook": str(self.home / ".kiro/hooks/task-hub-events.json"),
                           "kiro-workflow": str(self.home / ".kiro/workflows/task-hub-events.workflow.json"),
-                          "kiro-settings": str(self.home / KIRO_SETTINGS)}})
+                          "kiro-settings": str(self.home / KIRO_SETTINGS)},
+            "sha256": {"kiro-hook": hashlib.sha256((REPO / KIRO_COPIES[0][0]).read_bytes()).hexdigest(),
+                       "kiro-workflow": hashlib.sha256((REPO / KIRO_COPIES[1][0]).read_bytes()).hexdigest()}})
         self.assertEqual([p for p in (self.home / ".local/state/task-hub").iterdir() if p.name.startswith("install.")],
                          [], "the work folder is removed")
 
@@ -935,28 +923,26 @@ class InstallTest(unittest.TestCase):
         self.use_python3()
         self.change_github(lambda db: db.update(auth=None))
         lines = self.install(code=1)
-        self.assertEqual(lines[-2], "5. GitHub のログイン: 止まりました。GitHub にログインしていません。ブラウザで "
-                                    "https://github.com/login/device を開きました。コード ABCD-1234 を入れて承認してください")
+        self.assertEqual(lines[-2], "5. GitHub のログイン: 止まりました。GitHub にログインしていません。"
+                                    "開いたターミナルで、案内に沿ってブラウザで承認してください")
         self.assertEqual(lines[-1], "次にすること: 承認が終わったら、もう一度実行してください")
-        self.assertEqual(self.opened.read_text(), "https://github.com/login/device\n")
-        self.assertIn(["auth", "login", "--web", "-s", "project", "-h", "github.com", "-p", "https"], self.gh_calls())
+        command = self.home / ".local/state/task-hub/gh-login.command"
+        self.assertEqual(self.opened.read_text(), f"{command}\n")
+        self.assertIn("'auth' 'login' '--web' '-s' 'project' '-h' 'github.com' '-p' 'https'", command.read_text())
+        self.assertFalse(any(c[:2] == ["auth", "login"] for c in self.gh_calls()))
         self.assertEqual(self.github()["repos"], {}, "later stages do not run")
-        pid = self.login_pid()
-        os.kill(pid, 0)  # still waiting, after the install ended
-        # run again before the approval: no second login, the same code
+        # Re-running before approval leaves authentication in Terminal, with no background login process.
         lines = self.install(code=1)
-        self.assertEqual(lines[-1], "次にすること: https://github.com/login/device でコード ABCD-1234 を入れて承認してから、"
-                                    "もう一度実行してください")
-        self.assertEqual(self.login_pid(), pid)
-        self.assertEqual(sum(c[:2] == ["auth", "login"] for c in self.gh_calls()), 1)
-        # approved in the browser: gh gets the token and ends; the next run goes on
-        self.change_github(lambda db: db.update(approve="alice"))
-        self.wait_gone(pid)
+        self.assertEqual(lines[-1], "次にすること: 承認が終わったら、もう一度実行してください")
+        self.assertFalse((command.parent / "gh-login.pid").exists())
+        self.assertFalse((command.parent / "gh-login.log").exists())
+        self.assertFalse(any(c[:2] == ["auth", "login"] for c in self.gh_calls()))
+        self.finish_github_login()
+        self.assertIn(["auth", "login", "--web", "-s", "project", "-h", "github.com", "-p", "https"], self.gh_calls())
         lines = self.install()
         self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
         self.assertIn("alice/tasks", self.github()["repos"])
-        self.assertIsNone(self.login_pid())
-        self.assertFalse((self.home / ".local/state/task-hub/gh-login.log").exists())
+        self.assertFalse(command.exists())
 
     def test_clones_the_private_repo_only_after_the_github_login(self):
         """task-hub's repo is private: git can read it only with gh's login (gh auth setup-git), as on github.com."""
@@ -980,8 +966,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(git_asked(), [], "no clone before the login")
         self.assertFalse((self.home / ".local/lib/task-hub").exists())
         # logged in: git uses gh's login, and the clone goes through
-        self.change_github(lambda db: db.update(approve="alice"))
-        self.wait_gone(self.login_pid())
+        self.finish_github_login()
         lines = self.install()
         self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", lines)
         self.assertIn(f"clone(main {self.short()})", self.line6(lines))
@@ -996,19 +981,16 @@ class InstallTest(unittest.TestCase):
         self.change_github(lambda db: db["auth"].update(scopes="gist, read:project, repo"))
         lines = self.install(code=1)
         self.assertIn("Projects の権限(project)が要ります", lines[-2])
+        command = self.home / ".local/state/task-hub/gh-login.command"
+        self.assertIn("'auth' 'refresh' '-h' 'github.com' '-s' 'project'", command.read_text())
+        self.finish_github_login()
         self.assertIn(["auth", "refresh", "-h", "github.com", "-s", "project"], self.gh_calls())
-        self.change_github(lambda db: db.update(approve="alice"))
-        self.wait_gone(self.login_pid())
         self.install()
         self.assertEqual(self.github()["auth"]["scopes"], "gist, read:project, repo, project")
 
-    def test_logs_in_in_a_terminal_when_the_background_login_is_gone(self):
+    def test_github_login_opens_an_executable_terminal_command(self):
         self.use_python3()
         self.change_github(lambda db: db.update(auth=None))
-        self.install(code=1)
-        pid = self.login_pid()
-        os.kill(pid, 9)  # as if it was stopped with the command that ran the installer
-        self.wait_gone(pid)
         lines = self.install(code=1)
         self.assertEqual(lines[-2], "5. GitHub のログイン: 止まりました。GitHub にログインしていません。"
                                     "開いたターミナルで、案内に沿ってブラウザで承認してください")
@@ -1017,17 +999,56 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(os.access(command, os.X_OK))
         self.assertIn(f"'{self.home}/.local/bin/gh' 'auth' 'login' '--web' '-s' 'project' '-h' 'github.com' '-p' 'https'",
                       command.read_text())
-        self.assertEqual(sum(c[:2] == ["auth", "login"] for c in self.gh_calls()), 1, "no second background login")
+        self.assertEqual(sum(c[:2] == ["auth", "login"] for c in self.gh_calls()), 0, "the installer delegates to Terminal")
         # logged in there: the next run goes on and tidies up
-        self.change_github(lambda db: db.update(auth={"login": "alice", "scopes": "project, repo"}))
+        self.finish_github_login()
         self.install()
         self.assertFalse(command.exists())
-        # TASK_INSTALL_GH_LOGIN=terminal: in a terminal from the start
-        self.change_github(lambda db: db.update(auth=None))
-        self.env["TASK_INSTALL_GH_LOGIN"] = "terminal"
+
+    def test_terminal_github_login_keeps_the_system_proxy(self):
+        self.use_python3()
+        self.set_scutil("<dictionary> {\n  HTTPSEnable : 1\n  HTTPSPort : 8080\n  HTTPSProxy : proxy.example\n}\n")
+        required = {"HTTPS_PROXY": "http://proxy.example:8080"}
+        self.change_github(lambda db: db.update(auth=None, required_login_env=required))
         self.install(code=1)
-        self.assertTrue(command.exists())
-        self.assertIsNone(self.login_pid())
+        self.finish_github_login()
+
+    def test_terminal_login_keeps_private_network_and_config_environment(self):
+        self.use_python3()
+        required = {"https_proxy": "http://user:p'ass@proxy.example:8080", "NO_PROXY": "localhost,127.0.0.1",
+                    "ALL_PROXY": "socks5://proxy.example:1080", "GH_CONFIG_DIR": str(self.home / "gh-config"),
+                    "SSL_CERT_FILE": str(self.home / "corp-ca.pem"), "SSL_CERT_DIR": str(self.home / "corp-certs")}
+        self.env.update(required)
+        self.change_github(lambda db: db.update(auth=None, required_login_env=required))
+        lines = self.install(code=1)
+        command = self.home / ".local/state/task-hub/gh-login.command"
+        self.assertEqual(command.stat().st_mode & 0o777, 0o700, "a proxy can contain credentials")
+        self.assertNotIn(required["https_proxy"], "\n".join(lines))
+        self.finish_github_login()
+        self.assertFalse(command.exists(), "login must remove the environment-bearing command when it starts")
+
+    def test_terminal_kiro_login_keeps_network_environment_and_removes_its_command(self):
+        self.use_python3()
+        required = {"https_proxy": "http://user:p'ass@proxy.example:8080",
+                    "SSL_CERT_FILE": str(self.home / "corp-ca.pem")}
+        self.env.update(required)
+        self.kiro_logged_in.unlink()
+        self.script("kiro-cli", f'#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n'
+                               f'marker = Path({str(self.kiro_logged_in)!r})\n'
+                               'if sys.argv[1] == "--version": print("kiro-cli fake")\n'
+                               'elif sys.argv[1] == "whoami": sys.exit(0 if marker.exists() else 1)\n'
+                               'elif sys.argv[1] == "login":\n'
+                               f'    if any(os.environ.get(k) != v for k, v in {required!r}.items()): sys.exit(1)\n'
+                               '    marker.touch()\n'
+                               'else: sys.exit(2)\n')
+        self.install(code=1)
+        command = self.home / ".local/state/task-hub/kiro-login.command"
+        self.assertEqual(command.stat().st_mode & 0o777, 0o700)
+        r = subprocess.run(["sh", str(command)], env={k: self.env[k] for k in ("HOME", "PATH")},
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.kiro_logged_in.exists(), "kiro's Terminal login needs the same network settings")
+        self.assertFalse(command.exists())
 
     def test_stops_when_a_gh_token_is_set_and_gh_cannot_log_in(self):
         self.use_python3()
@@ -1612,6 +1633,113 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(outside.exists())
         self.assertFalse((self.home / ".local/lib/task-hub").exists())
         self.assertFalse(os.path.lexists(self.home / ".kiro/skills/task"))
+
+    def test_uninstall_keeps_repointed_kiro_link_and_replaced_hook(self):
+        self.use_python3()
+        self.install()
+        link = self.home / ".kiro/skills/task"
+        mine = self.home / "my-skills/task"
+        mine.mkdir(parents=True)
+        link.unlink()
+        link.symlink_to(mine)
+        hook = self.home / ".kiro/hooks/task-hub-events.json"
+        custom = '{"hooks": [{"name": "my hook", "command": "echo mine"}]}\n'
+        hook.write_text(custom)
+        self.uninstall(yes=True)
+        with self.subTest("repointed link"):
+            self.assertTrue(link.is_symlink(), "uninstall must preserve a link the user repointed")
+            self.assertEqual(os.readlink(link), str(mine))
+        with self.subTest("replaced hook"):
+            self.assertTrue(hook.exists(), "uninstall must preserve the user's replacement hook")
+            self.assertEqual(hook.read_text(), custom)
+
+    def test_uninstall_keeps_a_repointed_kiro_cli_link(self):
+        self.use_python3()
+        self.install()
+        link = self.home / ".local/bin/kiro-cli"
+        mine = self.home / "my-kiro-cli"
+        mine.write_text("#!/bin/sh\necho mine\n")
+        link.unlink()
+        link.symlink_to(mine)
+        self.uninstall(yes=True)
+        self.assertTrue(link.is_symlink(), "uninstall must preserve a repointed kiro-cli link")
+        self.assertEqual(os.readlink(link), str(mine))
+
+    def test_install_does_not_adopt_a_matching_manual_skill_link(self):
+        self.use_python3()
+        link = self.home / ".kiro/skills/task"
+        link.parent.mkdir(parents=True)
+        source = self.home / ".local/lib/task-hub/skills/task"
+        link.symlink_to(source)
+        self.install()
+        self.assertNotIn("kiro-skill-task", self.manifest()["installed"])
+        self.uninstall(yes=True)
+        self.assertTrue(link.is_symlink(), "a manual link remains the user's even when it matches the package")
+        self.assertEqual(os.readlink(link), str(source))
+
+    def test_uninstall_keeps_a_legacy_kiro_cli_link_with_no_recorded_target(self):
+        self.use_python3()
+        self.install()
+        manifest = self.home / ".local/state/task-hub/install-manifest.json"
+        data = self.manifest()
+        data.pop("kiro-cli-target")
+        manifest.write_text(json.dumps(data))
+        link = self.home / ".local/bin/kiro-cli"
+        target = os.readlink(link)
+        self.uninstall(yes=True)
+        self.assertTrue(link.is_symlink(), "legacy records cannot prove the current link is still owned")
+        self.assertEqual(os.readlink(link), target)
+
+    def test_install_keeps_an_existing_custom_hook(self):
+        self.use_python3()
+        hook = self.home / ".kiro/hooks/task-hub-events.json"
+        hook.parent.mkdir(parents=True)
+        custom = '{"hooks": [{"name": "my hook", "command": "echo mine"}]}\n'
+        hook.write_text(custom)
+        r = subprocess.run(["sh", str(INSTALL)], env=self.env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(hook.read_text(), custom, "install must not overwrite an unowned hook")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("次にすること:", r.stdout)
+
+    def test_reinstall_keeps_a_modified_hook(self):
+        self.use_python3()
+        self.install()
+        hook = self.home / ".kiro/hooks/task-hub-events.json"
+        custom = '{"hooks": [{"name": "my hook", "command": "echo mine"}]}\n'
+        hook.write_text(custom)
+        r = subprocess.run(["sh", str(INSTALL)], env=self.env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(hook.read_text(), custom, "reinstall must not overwrite an edited hook")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("次にすること:", r.stdout)
+
+    def test_legacy_owned_copy_updates_after_a_new_package_is_pulled(self):
+        self.use_python3()
+        self.install()
+        manifest = self.home / ".local/state/task-hub/install-manifest.json"
+        data = self.manifest()
+        data.pop("sha256")  # the previous installer recorded only paths
+        manifest.write_text(json.dumps(data))
+        source = KIRO_COPIES[0][0]
+        new_hook = (REPO / source).read_text().replace("task-hub events", "task-hub events v2")
+        self.change_origin(source, new_hook)
+        self.install()
+        self.assertEqual((self.home / ".kiro" / KIRO_COPIES[0][1]).read_text(), new_hook)
+        self.assertEqual(self.manifest()["sha256"]["kiro-hook"], hashlib.sha256(new_hook.encode()).hexdigest())
+
+    def test_uninstall_cleans_owned_links_after_an_install_stops_on_a_custom_hook(self):
+        self.use_python3()
+        hook = self.home / ".kiro/hooks/task-hub-events.json"
+        hook.parent.mkdir(parents=True)
+        custom = '{"hooks": [{"name": "my hook", "command": "echo mine"}]}\n'
+        hook.write_text(custom)
+        self.install(code=1)
+        link = self.home / ".kiro/skills/task"
+        self.assertTrue(link.is_symlink())
+        self.uninstall(yes=True)
+        self.assertFalse(os.path.lexists(link), "created links must remain uninstallable after a later stage fails")
+        self.assertEqual(hook.read_text(), custom)
 
 
 class SteeringTest(unittest.TestCase):
