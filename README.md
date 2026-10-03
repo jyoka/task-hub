@@ -115,7 +115,7 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
 
-In review、Blocked、replanner の仕分け、Done は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
+In review、Blocked、replanner の仕分け、Done、長引いている実行(`slow`)は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
 通知、なければ macOS の通知)。文面はタイトル、判定か理由、見てほしいこと、PR の URL で、LLM は使わないので
 費用はかかりません。知らせを受けるためだけに `/chief` を開いておく必要はなく、相談したいときに開けば足ります。
 
@@ -174,8 +174,8 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート、replanner の仕分け。`--digest` は判断用の要点だけ |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | そのタスクの worktree を IDE で開く(`[ide] open`)。未設定ならパスを表示する |
-| `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す |
-| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ、トークン数) |
+| `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す。列の移動のほか、いつもより長引いている実行の `slow`(経過時間といつもの時間付き、1 回だけ)も出る |
+| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、`slow` が出た実行の数、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
 
 ## 設定
@@ -197,7 +197,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow   ; 通知を出す出来事(これが既定)。空にすると出さない
 ```
 
 | 設定 | 有効にすると | 人が決めること |
