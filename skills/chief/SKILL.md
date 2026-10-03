@@ -34,6 +34,17 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      Each batch of events arrives as one notification: the events with their digest, then a
      `next: ... --after <n>` line. Keep that `<n>` as the new cursor. If `task` fails, the loop prints
      one `watch stopped: <error>` line and exits with code 1.
+   - Kiro IDE with Workflows turned on and the `task-hub-events` recipe installed
+     (`~/.kiro/workflows/task-hub-events.workflow.json`): first run
+     `t=$(date +%Y%m%d%H%M%S)-$$-$RANDOM; mkdir -p ~/.local/state/task-hub && printf '%s\n' "$t" > ~/.local/state/task-hub/kiro-chief-token && echo "$t"`
+     and keep the token it prints. Then launch the workflow once with `run_workflow`, with the input
+     `chief_token` set to that token. A workflow an earlier /chief launched sees the new token and ends itself at
+     its next poll, so only this chat gets the events. The workflow's `watch` polls
+     `task events` without using the model, and each batch of events reaches this chat as a `send_message` from its
+     `tell-chief` step. Do not run `task events --next` yourself, and do not tell again events the workflow already
+     brought (task-hub's prompt hook may add them to your context too). If the recipe is missing, the launch fails,
+     or the run stops, tell the user in one line and check at each reply instead (below). But if its last message
+     says watching moved to a newer /chief chat, say so in one line and do not watch in this chat any more.
    - A background command that wakes you when it exits: run
      `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
      the next event, prints it with its digest, and exits.
@@ -41,6 +52,8 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 ## Keep watching
 
 With `task_events_watch`, skip this section.
+
+With the Kiro workflow running, skip this section too: it keeps its own cursor and goes on after each event.
 
 With the Monitor, leave it running; do not restart it after an event. When it expires (the tool stopped it at
 its timeout), start the same command again at once with `n=` set to your latest cursor (the last `next:` number,
@@ -68,7 +81,7 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
 
 - **In review**: tell the user the title, the automated review `verdict`, the `review` items they must check,
   and the PR link. No more than five lines. A research task has no PR: give its `report` in a few lines
-  instead, and say they can close it with `task done <id>`.
+  instead, and say they can close it with `task done <id>`, or ask you to.
 - **Blocked**: give the `reason` in one line and say what would unblock it.
 - **replan**: give the `decision` and its `question`, `answer`, or `goal_change`. Fold it into the Blocked
   message for the same task if you have not sent that yet.
@@ -127,9 +140,24 @@ If the user gives you the answer and asks you to pass it on, append it to the ta
 `### Answer (<date>)` heading (`gh issue view` then `gh issue edit --body-file`, keeping everything
 that was there), then run `task start <id>`. Use the user's words; do not add facts of your own.
 
+## When the user asks you to start, close, or merge
+
+Whether work goes in stays the user's decision, so carry out only what they explicitly ask for, naming the target
+(for example "mark #49 done", "merge PR #12", "start #46"):
+
+- `task start <id>`, `task done <id>`, or `gh pr merge <url> --merge`. Nothing else, and never `task` without
+  arguments.
+- Before merging, run `gh pr view <url> --json mergeable,mergeStateStatus,isDraft`. If it has conflicts, is a
+  draft, or is otherwise not mergeable, do not merge: tell the user why in one line.
+- If the target is unclear (for example "put that in" while several tasks are In review), ask once which one.
+- When it is done, say the result in one line. A merge closes the Issue; the card moves to Done through the
+  Project's "Item closed" workflow or `task done`.
+
 ## Never
 
-- Merge, close, or approve pull requests, or run `task done`. Merging stays with the user.
+- Approve pull requests.
+- Merge or close pull requests, or run `task done`, on your own judgment, including after a "yes" to something you
+  suggested. Do these only when the user asks for them by name (above).
 - Start or register anything the user did not approve in this conversation.
 - Change a task's Goal except to append an answer the user gave you and asked you to pass on.
 - Do the task work yourself, in this repository or any other. Hand it to the board.

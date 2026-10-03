@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Kiro Workflows `watch` handler (`handler: command`, kiro/workflows/task-hub-events.workflow.json): wakes /chief
+when task-hub writes an event it should tell (In review, Blocked, replan, Done), without a model turn while waiting.
+
+Kiro runs it once per poll with {"cursor": ..., "config": ...} on stdin and reads one JSON object from stdout:
+{"outcome": "idle" | "new-activity" | "terminal-state", "cursor": <line number of the events file>,
+"payload": <event lines>}.
+See https://kiro.dev/docs/workflows/authoring/#watch-anything-else-with-command
+The first poll (cursor null) starts from now: the past is not news. It always exits 0 with a valid result: when `task`
+fails, the poll is idle with the old cursor (so nothing is skipped) and one note goes to stderr.
+
+Each /chief writes a new token to ~/.local/state/task-hub/kiro-chief-token and launches the workflow with it (input
+`chief_token`, passed here as config `chief_token`). Kiro has no tool to stop another chat's workflow, so a run whose
+token is no longer the file's ends itself: terminal-state, which the repeat's `stopWhen` turns into the end of the run.
+With no token file, or no token in config (an older recipe, or a launch without the input), it goes on as before.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+WANTED = "In review,Blocked,replan,Done"
+TOKEN_FILE = os.path.expanduser("~/.local/state/task-hub/kiro-chief-token")
+# The tell-chief step still runs once after terminal-state, and reads this instead of the last events again
+REPLACED = "replaced: a newer /chief started its own task-hub-events workflow, so this one ends now."
+
+
+def result(outcome, cursor, payload=None):
+    print(json.dumps({"outcome": outcome, "cursor": cursor, **({"payload": payload} if payload else {})},
+                     ensure_ascii=False))
+
+
+def replaced(poll):
+    """True when this run's token is not the newest /chief's. False when either is missing: an older recipe (no
+    `chief_token` in config, or the template left as is because the launch gave no input) or no token file yet."""
+    config = poll.get("config")
+    mine = config.get("chief_token") if isinstance(config, dict) else None
+    if not isinstance(mine, str) or not mine.strip() or "{{" in mine:
+        return False
+    try:
+        with open(TOKEN_FILE) as f:
+            newest = f.read().strip()
+    except OSError:
+        return False
+    return bool(newest) and newest != mine.strip()
+
+
+def main():
+    try:
+        poll = json.loads(sys.stdin.read() or "null")
+        cursor = poll.get("cursor")
+    except (ValueError, AttributeError):
+        poll, cursor = {}, None
+    if replaced(poll):
+        return result("terminal-state", cursor, REPLACED)
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+        cursor = None  # first poll (or a broken cursor)
+    task = shutil.which("task") or os.path.expanduser("~/.local/lib/task-hub/bin/task")
+    try:
+        r = subprocess.run([task, "events", "--after", str(cursor or 0), "--digest", "--only", WANTED],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        r = subprocess.CompletedProcess(e.filename, 127, "", str(e))
+    lines = r.stdout.splitlines()
+    nexts = [m.group(1) for m in (re.match(r"next: task events.* --after (\d+)", line) for line in lines) if m]
+    if r.returncode or not nexts:
+        why = "failed" if r.returncode else "printed no `next:` line"
+        print(f"task-hub: could not read events (`{task} events` {why})", file=sys.stderr)
+        return result("idle", cursor)
+    events = "\n".join(line for line in lines if not line.startswith("next: "))
+    if cursor is None or not events.strip():
+        return result("idle", int(nexts[-1]))
+    result("new-activity", int(nexts[-1]), events)
+
+
+main()

@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -45,7 +46,8 @@ MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for t
 WATCH_SECONDS = 60
 NOTIFY_EVENTS = "In review, Blocked, replan, Done"  # [notify] events: which events show a notification; empty = none
 DEFAULT_AGENTS = {
-    "claude": "claude -p --dangerously-skip-permissions {prompt}",
+    "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
+              " claude -p --dangerously-skip-permissions {prompt}",
     "codex": "codex exec -s workspace-write {prompt}",
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
@@ -64,7 +66,7 @@ METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, 
 EVENTS = STATE / "events.jsonl"  # one line per status change task-hub makes, for whatever watches (see docs/operations.md)
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
-            "research"]
+            "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
 
 
@@ -124,6 +126,21 @@ class StatusLifecycle:
     startable_explicitly = {BACKLOG, BLOCKED, READY}
     watched_for_merge = {IN_REVIEW, WAIT_FOR_MERGE}
     needs_user = {BACKLOG, IN_REVIEW, BLOCKED}
+    # (from, to) of every move task-hub itself makes; None = not on the board yet. A human's drag on GitHub and
+    # GitHub's workflows are not in it: task-hub never makes them. docs/design.md draws it; keep the two in step.
+    transitions = {
+        (None, BACKLOG),  # cmd_new
+        *{(s, READY) for s in startable_explicitly},  # cmd_start; Ready -> Ready changes only the Agent field
+        (READY, IN_PROGRESS),  # launch
+        (READY, BLOCKED), (IN_PROGRESS, BLOCKED),  # sync: launch failed; cmd_run: setup failed, finish raised; pid gone
+        (IN_PROGRESS, IN_REVIEW),  # finish
+        *{(s, DONE) for s in watched_for_merge},  # sync: the PR was merged
+        *{(s, DONE) for s in all if s != DONE},  # cmd_done
+    }
+
+    @classmethod
+    def expected(cls, before, after):
+        return (before, after) in cls.transitions
 
     @classmethod
     def required(cls):
@@ -266,8 +283,9 @@ def digest_lines(d, skip=()):
 
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": ""}, "agents": DEFAULT_AGENTS, "board": {},
-                 "notify": {"events": NOTIFY_EVENTS}})
+    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
+                 "agents": DEFAULT_AGENTS, "check": {}, "board": {},
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     c.read(CONFIG)
     return c
 
@@ -293,6 +311,30 @@ def helper_agent(t, key):
     """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
     name = config()["runner"].get(key, "").strip()
     return t["agent"] if name == "agent" else name
+
+
+def pass_env():
+    """[runner] pass_env: names of variables (API keys and the like) a run in a herdr pane gets too."""
+    return [n for n in re.split(r"[\s,]+", config()["runner"].get("pass_env", "")) if n]
+
+
+def check_ready(name):
+    """Run [check] <name>, if set (exit 0 = ready); raise with its last lines when the agent cannot be used now."""
+    cmd = config()["check"].get(name, "").strip()
+    if not cmd:
+        return
+    try:
+        r = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        result, output = f"exited {r.returncode}", r.stdout + r.stderr
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        r, result, output = None, "failed", str(e)
+    if r and r.returncode == 0:
+        return
+    for k in pass_env():  # a key the check prints never reaches the comment or the events
+        if os.environ.get(k):
+            output = output.replace(os.environ[k], "***")
+    tail = " | ".join(line.strip() for line in output.strip().splitlines()[-3:])
+    raise RuntimeError(f'agent "{name}" is not ready: `{cmd}` {result}: {tail[-200:]}')
 
 
 def check_agent(name):
@@ -399,13 +441,18 @@ def tasks(include_done=False):
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
     for t in result:
+        t["running"] = alive(t)
+        # its own run is still going whatever the Status says (a replanner after Blocked, a late herdr start):
+        # never start a second run in the same worktree
+        own = [f"its last run, still running ({t.get('stage') or 'starting'})"] \
+            if t["running"] and t["status"] != IN_PROGRESS else []
         linked = {x["number"] for x in t["blockers"] if x["ref"].startswith("#")}
         # written in the body but never linked (the Issue was made with `gh issue create` or another skill):
         # never enough to start, so an open one holds the task back like a link until someone links it
         unlinked = [n for n in t.pop("mentioned") if n not in linked and n != t["id"] and n in statuses]
         t["waits_for"] = ", ".join([f"{x['ref']} ({why})" for x, why in
                                     ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why]
-                                   + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked])
+                                   + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked] + own)
     return sorted(result, key=lambda t: int(t["id"]))
 
 
@@ -434,6 +481,11 @@ def waiting_reason(blocker, statuses):
     return "open"
 
 
+def shown_status(t):
+    """The Status, with the stage of the run that is still going: "In progress › review"."""
+    return f"{t['status']} › {t['stage']}" if t.get("running") and t.get("stage") else t["status"]
+
+
 def canonical(status):
     """The board's column name in our spelling ("In Progress" on GitHub is IN_PROGRESS here)."""
     return StatusLifecycle.canonical(status)
@@ -451,6 +503,11 @@ def set_status(t, status, reason="", digest_=None):
     """digest_: the event's digest; a Blocked without one gets its reason as the digest."""
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
+    # a t without "status" came from somewhere that does not know it: unchecked, rather than another GitHub call
+    if "status" in t and not StatusLifecycle.expected(t["status"], status):
+        # stderr, never EVENTS: an event wakes /chief, and that costs tokens
+        print(f"warning: task {t['id']} moved {t['status'] or '(new)'} -> {status}, "
+              "not in StatusLifecycle.transitions", file=sys.stderr, flush=True)
     b = board()
     gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
        "--single-select-option-id", b["status_options"][status.lower()])
@@ -542,6 +599,11 @@ def load_run(tid):
 def save_run(t):
     RUNS.mkdir(parents=True, exist_ok=True)
     (RUNS / f"{t['id']}.json").write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+
+
+def set_stage(t, stage):
+    t["stage"] = stage
+    save_run(t)
 
 
 def record_run(record, say=None):
@@ -744,6 +806,7 @@ def run_setup(t, wt, say):
     cmd = setup_command(t["repo"])
     if not cmd:
         return ""
+    set_stage(t, "setup")
     say(f"== setup: {cmd}")
     before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
     proc = subprocess.Popen(["sh", "-c", "set -e\n" + cmd], cwd=wt, stdin=subprocess.DEVNULL,
@@ -808,10 +871,14 @@ def launch(t):
         name = helper_agent(t, key)
         if name and not config().has_option("agents", name):
             raise RuntimeError(f'unknown {key} "{name}" in the config')
+    for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
+        if name:  # before the worktree and before any credit is spent
+            check_ready(name)
     wt = ensure_worktree(t)
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
+    t["stage"] = "preparing"
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     t["research"] = "yes" if issue(t)["research"] else ""
     prompt_file(t).write_text(build_prompt(t))  # kept, so you can always see what the agent was told
@@ -835,12 +902,16 @@ def launch(t):
     set_status(t, IN_PROGRESS)
     if t["workspace"]:
         # the pane's shell starts with the herdr server's environment, not ours: a small launcher
-        # carries over what the run depends on (config/data under HOME, agents on PATH, settings)
+        # carries over what the run depends on (config/data under HOME, agents on PATH, settings, [runner] pass_env)
+        names = ("HOME", "PATH", *pass_env())
         keep = {k: v for k, v in os.environ.items()
-                if k in ("HOME", "PATH") or k.startswith(("TASK_", "GIT_AUTHOR_", "GIT_COMMITTER_"))}
+                if k in names or k.startswith(("TASK_", "GIT_AUTHOR_", "GIT_COMMITTER_"))}
         launcher = DATA / "run" / f"{t['id']}.sh"
         launcher.parent.mkdir(parents=True, exist_ok=True)
-        launcher.write_text("#!/bin/sh\nexec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
+        launcher.touch(mode=0o600)
+        launcher.chmod(0o600)  # it may hold API keys
+        launcher.write_text("#!/bin/sh\nrm -f " + shlex.quote(str(launcher)) + "  # it may hold API keys: gone once read\n"
+                            "exec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
         pane = res["root_pane"]["pane_id"]
         herdr("pane", "run", pane, shlex.join(["sh", str(launcher)]))
         # a brand-new shell can swallow the Enter while it is still starting up: confirm the run began
@@ -850,6 +921,7 @@ def launch(t):
             if herdr("pane", "wait-output", pane, "--match", f"== task {t['id']}:", "--timeout", "8000").returncode == 0:
                 break
         else:
+            launcher.unlink(missing_ok=True)  # never ran, so never removed itself
             raise RuntimeError(f"the run did not start in herdr {'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
         with open(t["log"], "ab") as log:
@@ -962,16 +1034,29 @@ def transcript_call(line, dirs, began, ended):
 
 
 def agent_usage(wt, began, ended):
-    """What the agent CLI's own records say one launch in `wt` used, or None when there are none.
+    """What the agent CLIs' own records say one launch in `wt` used, or None when there are none.
 
-    Read from outside, never asked of the agent. Only Claude Code's transcripts can be read for now; other agents
-    simply have none. A line counts if its cwd is the worktree and its timestamp falls within the launch: the agent,
-    the reviewer, and the replanner run one after another in the same worktree, so the time tells them apart.
-    One API call is written as one line per content block, so calls are counted by message.id.
+    Read from outside, never asked of the agent. Every reader is tried on every launch, whatever the agent's name:
+    Claude Code's transcripts (tokens) and kiro-cli's two session stores (credits); other agents simply have none.
+    A record counts if its directory is the worktree and its time falls within the launch: the agent, the reviewer,
+    and the replanner run one after another in the same worktree, so the time tells them apart.
+    """
+    dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
+    used = {}
+    for found in (read(dirs, began, ended) for read in (claude_usage, kiro_db_usage, kiro_session_usage)):
+        for k, v in (found or {}).items():
+            used[k] = sorted(set(used.get(k, [])) | set(v)) if k == "models" else used.get(k, 0) + v
+    if "credits" in used:
+        used["credits"] = round(used["credits"], 2)  # Kiro meters to the second decimal point
+    return used or None
+
+
+def claude_usage(dirs, began, ended):
+    """Claude Code's calls: one API call is written as one line per content block, so they are counted by message.id.
+
     Files not written since the launch began are never opened, and lines without the worktree's path never parsed:
     the user's own long conversations are in the same folders.
     """
-    dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
     needles = dirs | {json.dumps(w)[1:-1] for w in dirs}
     calls, root = {}, claude_projects()
     for folder, _, names in os.walk(root):
@@ -997,6 +1082,94 @@ def agent_usage(wt, began, ended):
             "models": sorted({c["model"] for c in calls.values() if c["model"]})}
 
 
+def kiro_db():
+    """kiro-cli's v1 session store: a SQLite database, one row per (directory, conversation)."""
+    base = Path.home() / "Library/Application Support" if sys.platform == "darwin" \
+        else Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    return base / "kiro-cli" / "data.sqlite3"
+
+
+def kiro_sessions():
+    """kiro-cli's v2 session store: one <uuid>.json per session, next to its conversation (<uuid>.jsonl)."""
+    return Path.home() / ".kiro" / "sessions" / "cli"
+
+
+def credits(usage):
+    """The credits in kiro-cli's [{"value": 0.12, "unit": "credit"}, ...]; kiro-cli keeps no token counts."""
+    return sum(float(u["value"]) for u in usage or [] if u.get("unit") == "credit")
+
+
+def kiro_db_usage(dirs, began, ended):
+    """Conversations kiro-cli 2.2.0's --no-interactive wrote in the worktree during the launch (v1, checked on it).
+
+    Opened read-only; missing, locked, or of another shape, it simply has nothing to say.
+    """
+    path = kiro_db()
+    if not path.is_file():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = db.execute(f"SELECT value FROM conversations_v2 WHERE key IN ({','.join('?' * len(dirs))}) "
+                              "AND created_at <= ? AND updated_at >= ?",
+                              (*dirs, int(ended * 1000), int(began * 1000))).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    used = {"calls": 0, "credits": 0.0, "models": set()}
+    for (value,) in rows:
+        try:
+            d = json.loads(value)
+            turn = d["user_turn_metadata"]
+            requests = turn.get("requests") or []
+            spent = credits(turn.get("usage_info"))
+            models = {r.get("model_id") for r in requests} | {(d.get("model_info") or {}).get("model_id")}
+        except (ValueError, KeyError, TypeError, AttributeError):  # a value of a format we do not know
+            continue
+        used["calls"] += len(requests)
+        used["credits"] += spent
+        used["models"] |= {m for m in models if m and isinstance(m, str)}
+    return {**used, "models": sorted(used["models"])} if used["calls"] or used["credits"] else None
+
+
+def kiro_session_usage(dirs, began, ended):
+    """User turns kiro-cli's v2 sessions (newer versions) ended in the worktree during the launch.
+
+    Their input/output token counts are always 0, so only the credits are read. Files not written since the launch
+    began are never opened.
+    """
+    used = {"calls": 0, "credits": 0.0, "models": set()}
+    for path in kiro_sessions().glob("*.json"):
+        try:
+            if path.stat().st_mtime < began:
+                continue
+            d = json.loads(path.read_text(errors="replace"))
+            cwd = d.get("cwd") or ""
+            if not any(cwd == w or cwd.startswith(w.rstrip("/") + "/") for w in dirs):
+                continue
+            state = d["session_state"]
+            turns = [t for t in state["conversation_metadata"]["user_turn_metadatas"]
+                     if began <= epoch(t.get("end_timestamp") or d.get("updated_at")) <= ended]
+            spent = sum(credits(t.get("metering_usage")) for t in turns)
+            calls = sum(int(t.get("total_request_count") or 0) for t in turns)
+            model = ((state.get("rts_model_state") or {}).get("model_info") or {}).get("model_id")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):  # gone, or another format
+            continue
+        if turns:
+            used["calls"] += calls
+            used["credits"] += spent
+            used["models"] |= {model} if model and isinstance(model, str) else set()
+    return {**used, "models": sorted(used["models"])} if used["calls"] or used["credits"] else None
+
+
+def epoch(at):
+    """Seconds since 1970 from an ISO 8601 time or a number (milliseconds when that large)."""
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        return at / 1000 if at > 1e11 else at
+    return datetime.datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()
+
+
 def tokens(u):
     return sum(u.get(k) or 0 for k in USAGE_KEYS)
 
@@ -1020,8 +1193,12 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None):
             used = None
         if used:
             entry.update(used)
-            say(f"== {label} used {used['calls']} calls, {short(tokens(used))} tokens ({short(used['output'])} out), "
-                f"{used['subagent_calls']} subagent calls, models {', '.join(used['models']) or 'unknown'}")
+            said = [f"{used['calls']} calls"]
+            if "output" in used:
+                said += [f"{short(tokens(used))} tokens ({short(used['output'])} out)", f"{used['subagent_calls']} subagent calls"]
+            if "credits" in used:
+                said.append(f"{used['credits']:.2f} credits")
+            say(f"== {label} used {', '.join(said)}, models {', '.join(used['models']) or 'unknown'}")
         usage.append(entry)
     return code
 
@@ -1071,6 +1248,7 @@ def run_review(t, report, say, usage=None):
             return None  # finish() blocks it as "changed no files"
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     (wt / REVIEW_FILE).unlink(missing_ok=True)
+    set_stage(t, "review")
     snap = snapshot(wt)
     code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage)
     if restore(wt, snap):
@@ -1103,6 +1281,7 @@ def review_loop(t, report, code, say, record):
         feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
                               review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
         record["retried"] = True
+        set_stage(t, "retry")
         (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
         code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"])
         report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
@@ -1152,6 +1331,7 @@ def run_replan(t, report, say, usage=None):
         return "skipped"
     wt = Path(t["worktree"])
     (wt / REPLAN_FILE).unlink(missing_ok=True)
+    set_stage(t, "replanning")
     snap = snapshot(wt)
     code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner", usage)
     if restore(wt, snap):
@@ -1216,17 +1396,17 @@ def cmd_run(a):
     if stop:  # the agent never starts: nothing of this run can be trusted without its environment
         say(f"== {stop}")
         try:
-            item = next((x for x in tasks() if x["id"] == t["id"]), None)
-            t["item"] = item["item"] if item else ""
+            take_card(t)
             report_comment(t, blocked=stop)
             set_status(t, BLOCKED, reason=stop)
         except RuntimeError as e:
             say(f"== could not report it: {e}")
-        save_run(t)
+        set_stage(t, "")
         record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": BLOCKED,
                     "blocked_by": "setup"}, say)
         say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
         return
+    set_stage(t, "agent")
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"])
     say(f"== agent exited with code {code}")
 
@@ -1234,8 +1414,8 @@ def cmd_run(a):
     review, review_blocked = "", ""
     try:
         report, code, review, review_blocked = review_loop(t, report, code, say, record)
-        item = next((x for x in tasks() if x["id"] == t["id"]), None)
-        t["item"] = item["item"] if item else ""
+        set_stage(t, "finishing")
+        take_card(t)
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
         record.update(pr_size(t, wt))
         (wt / REPORT_FILE).unlink(missing_ok=True)  # only once it is safely on GitHub
@@ -1258,7 +1438,7 @@ def cmd_run(a):
             set_status(t, BLOCKED, reason=f"task-hub could not finish the run: {str(e)[:300]}")
         except RuntimeError:  # GitHub unreachable too: the next sync sees the dead run and blocks the card
             say(f"== the agent's report is kept in {home(wt / REPORT_FILE)}")
-    save_run(t)  # the pid stays: once this process is gone, `alive` knows the run has ended
+    set_stage(t, "")  # the pid stays: once this process is gone, `alive` knows the run has ended
     record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": status}, say)
     if status == IN_REVIEW and (t.get("tab") or t.get("workspace")):  # nothing more to see here: `task log` keeps it
         say(f"== task {t['id']} is now {status}. Closing this tab; `task log {t['id']}` has the output.")
@@ -1268,6 +1448,14 @@ def cmd_run(a):
         close_herdr(closing)  # this process ends with its tab
         return
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
+
+
+def take_card(t):
+    """The card's item and Status, from the one board read the run makes anyway: the run file has neither."""
+    item = next((x for x in tasks() if x["id"] == t["id"]), None)
+    t["item"] = item["item"] if item else ""
+    if item:
+        t["status"] = item["status"]
 
 
 def finish(t, report, code, say, auto_review="", blocked_override=""):
@@ -1455,7 +1643,9 @@ def cmd_list(_):
     board_ = tasks()
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
     out("counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
-        *(table("tasks", board_, ["id", "title", "status", "repo", "agent", "waits_for"]) if board_ else ["tasks: 0 open tasks"]),
+        *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], ["id", "title", "status", "repo", "agent",
+                                                                               "waits_for"])
+          if board_ else ["tasks: 0 open tasks"]),
         f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)")
 
 
@@ -1482,10 +1672,12 @@ def cmd_events(a):
     --next waits for the next wanted events, prints them and the command that continues from there, and exits:
     for a harness that wakes its agent when a background command ends (the /chief skill uses it). The cursor is a
     line number in the append-only EVENTS file, so nothing that happens between two runs is missed.
+    --after N alone does not wait: the wanted events after line N, if any, and the `next:` line, for a hook that
+    must return at once (kiro/task-events-since).
     """
     only = {e.strip().lower() for e in (a["only"] or "").split(",") if e.strip()}
     wanted = lambda e: not only or e.get("event", "").lower() in only
-    if a["next"]:
+    if a["next"] or (a["after"] is not None and not a["follow"]):  # --follow keeps ignoring --after
         return events_next(a, wanted)
     if not a["follow"]:
         recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
@@ -1534,10 +1726,11 @@ def events_next(a, wanted):
                     continue
                 if wanted(e):
                     found += event_lines(e, a["digest"])
-            if found:
+            if found or not a["next"]:  # --after alone: what is there now, even nothing
                 only = f' --only "{a["only"]}"' if a["only"] else ""
                 more = " --digest" if a["digest"] else ""
-                out(*found, f"next: task events --next --after {len(lines)}{only}{more}")
+                wait = " --next" if a["next"] else ""
+                out(*found, f"next: task events{wait} --after {len(lines)}{only}{more}")
                 return
             cursor = max(cursor, len(lines))
             time.sleep(1)
@@ -1570,8 +1763,9 @@ def cmd_show(a):
     i = issue(t)
     if a["digest"]:
         return show_digest(t, i)
-    lines = ["task:"] + [f"  {k}: {q(t.get(k))}" for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr")
-                         if t.get(k)]
+    lines = ["task:"] + [f"  {k}: {q(shown_status(t) if k == 'status' else t.get(k))}"
+                         for k in ("id", "title", "status", "repo", "base", "agent", "url", "pr") if t.get(k)] \
+        + ([f"  waits_for: {q(t['waits_for'])}"] if t.get("waits_for") else [])
     body = i["body"].strip() + ("\n\n" + i["report"].replace(REPORT_MARK, "").strip() if i["report"] else "") \
         + ("\n\n" + i["replans"][-1].replace(REPLAN_MARK, "").strip() if i["replans"] else "")
     if len(body) > 1500 and not a["full"]:
@@ -1606,6 +1800,29 @@ def cmd_log(a):
         *([f"help: Run `task log {t['id']} --full` for all lines"] if len(lines) > len(shown) else []))
 
 
+def cmd_open(a):
+    """Open this task's worktree in the IDE named by [ide] open, or, if none is set, print its path."""
+    t = {"id": a["id"], **load_run(a["id"])}
+    wt = t.get("worktree")
+    if not wt:
+        fail(f"task {t['id']} has no worktree on this machine (it has not run here)",
+             f"run it here with `task start {t['id']}`, or open it on the machine that ran it")
+    if not Path(wt).exists():
+        fail(f"the worktree for task {t['id']} is gone: {home(wt)}",
+             "it was cleaned up after the task finished; re-run the task to recreate it")
+    template = config()["ide"].get("open", "").strip()
+    if not template:
+        out(home(wt), f"help: set  [ide]  open = code {{path}}  in {home(CONFIG)} to open it in your IDE")
+        return
+    cmd = [wt if part == "{path}" else part for part in shlex.split(template)]
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError as e:
+        fail(f"could not run [ide] open ({cmd[0]}): {e}", f"check  [ide]  open  in {home(CONFIG)}")
+    out(f"opening {home(wt)} with: {template}")
+
+
 def cmd_stats(_):
     """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions,
     and what each agent launch used."""
@@ -1637,21 +1854,24 @@ def cmd_stats(_):
     largest = [{"id": r["id"], "title": r["title"], "lines": r["added"] + r["removed"], "files": r["files"]}
                for r in sized[:3]]
     sizes = sorted(r["added"] + r["removed"] for r in sized)
-    # usage: one entry per agent launch; token fields only where the agent CLI's records could be read
+    # usage: one entry per agent launch; token fields only where the agent CLI's records have them (Claude Code's),
+    # credits only where they have those (Kiro's): a Kiro launch is not a launch of 0 tokens
     measured = [{"id": r["id"], "title": r["title"], "tokens": sum(tokens(u) for u in r["usage"]),
-                 "calls": sum(u.get("calls", 0) for u in r["usage"]),
+                 "calls": sum(u.get("calls", 0) for u in r["usage"] if "output" in u),
                  "subagent_calls": sum(u.get("subagent_calls", 0) for u in r["usage"])}
-                for r in runs if any("calls" in u for u in r.get("usage") or [])]
+                for r in runs if any("output" in u for u in r.get("usage") or [])]
+    credited = [round(sum(u["credits"] for u in r["usage"] if "credits" in u), 2)
+                for r in runs if any("credits" in u for u in r.get("usage") or [])]
     by_role = {}
     for u in (u for r in runs for u in r.get("usage") or []):
         by_role.setdefault(u.get("role") or "?", []).append(u)
-    roles = [{"role": role, "launches": len(us), "measured": sum("calls" in u for u in us),
+    roles = [{"role": role, "launches": len(us), "measured": sum("output" in u for u in us),
               "median_seconds": median(u.get("seconds", 0) for u in us),
-              "median_tokens": median(tokens(u) for u in us if "calls" in u)}
+              "median_tokens": median(tokens(u) for u in us if "output" in u)}
              for role, us in sorted(by_role.items(), key=lambda kv: -len(kv[1]))]
     heaviest = sorted(measured, key=lambda r: -r["tokens"])[:3]
-    unmeasured = f"{len(runs) - len(measured)} runs without usage: recorded before it was, or by an agent " \
-                 f"whose records task-hub cannot read (only Claude Code's for now)"
+    unmeasured = f"{len(runs) - len(measured)} runs without usage in tokens: recorded before it was, or by an " \
+                 f"agent whose records have none (only Claude Code's have them; Kiro's have credits)"
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
@@ -1666,6 +1886,8 @@ def cmd_stats(_):
         f"tokens: {len(measured)} of {len(runs)} runs measured"
         + (f", median {median(r['tokens'] for r in measured)} tokens and {median(r['calls'] for r in measured)} "
            f"calls per run" if measured else "") + (f" ({unmeasured})" if len(runs) > len(measured) else ""),
+        *([f"credits: {len(credited)} of {len(runs)} runs measured, median {median(credited):.2f} credits per run"]
+          if credited else []),
         *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
         *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
 
@@ -1710,7 +1932,8 @@ def cmd_new(a):
              *labels).strip().splitlines()[-1]
     f.unlink(missing_ok=True)
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
-    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"]}
+    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"],
+         "status": None}
     remember_where_asked(t)
     if blocker_ids:
         this = gh_json("issue", "view", t["id"], "--repo", b["issues"], "--json", "id")["id"]
@@ -1778,8 +2001,9 @@ def cmd_done(a):
     if t["status"] == DONE:
         out(f"task: #{t['id']} already Done (no-op)")
         return
-    if t["status"] == IN_PROGRESS and alive(t):
-        fail(f"task {t['id']} is still running", "stop the agent in its herdr workspace first, then retry")
+    if t["running"]:  # whatever the Status: a replanner runs after the card is Blocked
+        fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
+             "stop the agent in its herdr workspace first, then retry")
     left = cleanup(t)
     if issue(t)["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
@@ -1796,6 +2020,8 @@ COMMANDS = {
     "show": (cmd_show, ["id"], {"full": False, "digest": False},
              "task show <id> [--full | --digest]  # the Issue and its latest report; --digest: only what to decide from"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
+    "open": (cmd_open, ["id"], {},
+             "task open <id>  # open the task's worktree in your IDE ([ide] open), or print its path"),
     "new": (cmd_new, [], {"title": True, "repo": True, "base": True, "agent": True, "goal": True, "goal-file": True,
                           "research": False, "blocked-by": True},
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
@@ -1803,8 +2029,9 @@ COMMANDS = {
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
     "list": (cmd_list, [], {}, "task list  # the open cards, read only: starts nothing (use `task` to start Ready cards)"),
     "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True, "digest": False},
-               "task events [--follow | --next [--after N]] [--only \"In review,Blocked\"] [--digest]  # what task-hub "
-               "did lately; --follow prints each new event as it happens, --next waits for the next ones and exits, "
+               "task events [--follow | --next [--after N] | --after N] [--only \"In review,Blocked\"] [--digest]  # what "
+               "task-hub did lately; --follow prints each new event as it happens, --next waits for the next ones and "
+               "exits, --after N alone prints those after line N without waiting, "
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),

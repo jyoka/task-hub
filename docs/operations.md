@@ -18,6 +18,16 @@
   何が起きたかを見られるように残し、`task done <番号>` か PR のマージで閉じます。task-hub が閉じるのは、自分が
   作ったタブだけです(herdr が同じ id を別のタブに使い回していないか、名前で確かめてから閉じます)。
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
+- **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
+  `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
+  `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です
+  (詳しくは [design.md](design.md) の「In progress の段階」)。`Blocked › replanning` は、カードはもう Blocked でも
+  replanner がまだ動いているという意味です。段階は手元の `runs/<番号>.json` の `stage` にだけあり、GitHub のボードと
+  `events.jsonl` には出ません。実行が終わると何も付かなくなります。
+- **生きている実行があるタスクは始まりません**: replanner が動いている間などに Ready に戻したカードは、`task` と
+  `task list` の `waits_for` に `its last run, still running (replanning)` と出て待ち、その実行が終わったあとの確認
+  (`task watch` なら 1 分以内)で始まります。同じ worktree で 2 つの実行が動かないようにするためです。`task done` も
+  `still running` で断るので、急ぐときはそのタブで Ctrl-C してから実行します。
 - エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
 
 ## 起きたことを受け取る(events.jsonl)
@@ -34,6 +44,12 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 (PATH にない、`--after` の値が不正など)は、ループが `watch stopped: <エラー>` の行を出してコード 1 で終わり、
 `/chief` は張り直さずに人に 1 行で知らせます。Monitor のないハーネスでは `--next --digest` を裏で動かし、終わって
 起こされるたびに `next:` のコマンドで動かし直します。Pi では拡張機能が同じ `--next --digest` のループを回します。
+
+待てない呼び出し側には、`--next` を付けない `task events --after <n>` があります。`<n>` 行目より後の出来事を出し、
+最後に `next: task events --after <m> ...` の行を出して、**待たずに** 終わります(出来事がなくても `next:` の行は出し、
+コード 0 で終わります)。`--only` と `--digest` もそのまま使えます。Kiro IDE の Prompt Submit フック
+(`kiro/task-events-since`)はこれを使い、話しかけるたびに前回からの In review、Blocked、replan、Done を文脈に足します。
+Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを使い、`next:` の番号を Workflows のカーソルにします。
 
 ```json
 {"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
@@ -121,19 +137,23 @@ Blocked の理由は次のどれかです。
 ### エージェントの使用量
 
 実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
-`reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入り、エージェントの CLI の記録を読めたときだけ
-`calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、`output`(トークン数)、
-`subagent_calls`、`models` が入ります。今読めるのは Claude Code の記録(`~/.claude/projects`)だけで、ほかのエージェントでは
-トークンの欄がありません。読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
+`reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入ります。エージェントの CLI の記録を読めたときだけ、
+Claude Code なら `calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、
+`output`(トークン数)、`subagent_calls`、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
+が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェントでは秒数だけです。
+読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
 
 ```
 == agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+== agent used 64 calls, 19.21 credits, models auto
 ```
 
-`task stats` の `tokens:` の行は、使用量を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
+`task stats` の `tokens:` の行は、トークン数を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
 cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
-出します。`roles` は役割ごとの起動回数、測れた回数、秒数とトークン数の中央値、`heaviest` はトークン数の多い 3 実行です。
-起動の間にその worktree で動いた Claude Code の呼び出しは、すべてその起動の分として数えます(エージェント自身が
+出します。Kiro の実行はトークン 0 としては数えず、`credits:` の行に、クレジットを測れた実行の数と 1 実行あたりの
+クレジットの中央値を出します。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
+`heaviest` はトークン数の多い 3 実行です。
+起動の間にその worktree で動いた Claude Code の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
 起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
 この数字を見て決めます。
 

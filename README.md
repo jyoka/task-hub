@@ -10,6 +10,9 @@ GitHub Project をかんばんボードにして、そのタスクをコーデ�
 
 その間の実装、レビュー、PR の作成、止まったときの仕分け、順番待ちは、task-hub とエージェントが進めます。
 
+> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** Kiro IDE でこのリポジトリを開き、
+> チャットに「セットアップして」と言うだけで入ります(ターミナルも管理者権限も要りません)。
+
 ## 全体構成
 
 ```
@@ -51,7 +54,7 @@ task-hub が定義している役割は 5 つです。どれも Claude Code の 
 | **reviewer**(任意) | task-hub が起動(worker の後、PR の前) | Goal の受け入れ条件を 1 つずつ、PR 全体と照らし合わせる | `.task-review.md` だけ | [worker/REVIEW.md](worker/REVIEW.md) |
 | **replanner**(任意) | task-hub が起動(worker が自分で Blocked と書いたとき) | 止まった理由を「リポジトリから答えられる / 人に聞く / Goal が矛盾」に仕分ける | 何も書けない(コメントの本文を返すだけ) | [worker/REPLAN.md](worker/REPLAN.md) |
 | **/task** | あなたのエージェントの会話 | 今の会話を Backlog のタスクとして登録する | ボードへの登録だけ | [skills/task](skills/task/SKILL.md) |
-| **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する | 登録と開始だけ(マージはしない) | [skills/chief](skills/chief/SKILL.md) |
+| **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する。名指しで頼まれたら開始・`task done`・マージを実行する | 登録・開始・`task done`・マージ(どれもあなたが頼んだときだけ。自分からはしない) | [skills/chief](skills/chief/SKILL.md) |
 
 ### 分担
 
@@ -170,6 +173,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート、replanner の仕分け。`--digest` は判断用の要点だけ |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
+| `task open <番号>` | そのタスクの worktree を IDE で開く(`[ide] open`)。未設定ならパスを表示する |
 | `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す |
 | `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
@@ -236,16 +240,21 @@ worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict�
 skills/task/SKILL.md   /task スキル
 skills/chief/SKILL.md  /chief スキル
 pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
+kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
+.kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 docs/                  セットアップ、エージェント、設計、形式、運用、教訓
 ```
 
 `task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。PR をマージしたら
-`git -C ~/.local/lib/task-hub pull --ff-only` で更新します。
+`git -C ~/.local/lib/task-hub pull --ff-only` で更新します(Kiro IDE の Workflows を使っているなら、ワークフローの
+定義もコピーし直します。[docs/setup.md](docs/setup.md#インストール))。
 
 ## ドキュメント
 
 - [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
+- [docs/kiro-quickstart.md](docs/kiro-quickstart.md): Kiro IDE で「セットアップして」と言って使いはじめる手順(画面の操作だけ)
+- [docs/kiro-ide.md](docs/kiro-ide.md): Kiro IDE 版のセットアップの中身(インストーラが行うこと)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加
 - [docs/task-format.md](docs/task-format.md): Issue、Blocked by と Ready conditions、レポートファイル、コメント、PR の形式
 - [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順

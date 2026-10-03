@@ -132,10 +132,90 @@
    `cwd` がその worktree で、時刻がその起動の間の行を数えます。reviewer と replanner は同じ worktree で順番に動くので、
    時間の窓で分けられます。ディレクトリ名の符号化の規則には頼りません。今読めるのは Claude Code だけです。headless の
    `claude -p` が対話と同じ場所と形式で書くことは 2.1.283 で確かめました(サブエージェントは `<session>/subagents/` の
-   別ファイルで、`isSidechain: true`)。Codex、Pi、Kiro は記録の形式を実物で確かめてから足します。それまでは秒数だけを
-   残し、トークンの欄は 0 ではなく「なし」にします。処理の流れにエージェント名の分岐はなく、どの起動でも同じ読み取りを
+   別ファイルで、`isSidechain: true`)。Kiro(kiro-cli)はトークン数を残さず、リクエストごとのクレジットを残すので、
+   クレジット、リクエスト数、モデルを読みます(tasks#43)。保存先は版で違い、v1 の SQLite(2.2.0 の
+   `--no-interactive` で実物を確認。`conversations_v2` の行の `key` と `created_at` / `updated_at`)と、v2 の
+   `~/.kiro/sessions/cli/<id>.json`(新しい版。`cwd` とユーザーのターンの `end_timestamp`)の両方を読みます。SQLite は
+   読み取り専用で開きます。stream-json は公式のスキーマがなく組み込みのコマンドを変えることになるので使いません。
+   Codex、Pi は記録の形式を実物で確かめてから足します。それまでは秒数だけを残します。記録にない欄(Kiro のトークン、
+   Claude Code のクレジット)は 0 ではなく「なし」にし、`task stats` はトークンを測れた実行とクレジットを測れた実行を
+   分けて数えます。処理の流れにエージェント名の分岐はなく、どの起動でも同じ読み取りを
    試します(決定事項 4)。上限、警告、停止はまだしません。どこに線を引くかは `task stats` の実績を見て決めます。
-   読み取りの失敗(壊れた行、読めないファイル、形式の変化)は、`metrics.jsonl` への書き込みと同じく実行を止めません。
+   読み取りの失敗(壊れた行、読めないファイル、ロックされたデータベース、形式の変化)は、`metrics.jsonl` への書き込みと同じく実行を止めません。
+
+## Status の遷移
+
+task-hub 自身がカードを動かす遷移は、`StatusLifecycle.transitions` の表にあるものだけです(0.6)。`set_status` は
+今の Status からの遷移を表と照らし合わせ、表にない遷移では stderr に 1 行の警告を出します。カードは止めずに動かし、
+警告は `events.jsonl` に書きません(`/chief` を起こして費用が増えるため)。今の Status は、ボードを読んだときの値を
+使います。`task _run` は実行の記録しか持たないので、すでに取っているカードの一覧の値を使い、GitHub の呼び出しは
+増やしません(決定事項 10)。それでも分からないときは照らし合わせません。人が GitHub の画面で動かす遷移と、
+GitHub のワークフローによる遷移は、task-hub が書かないので表にありません。下の図は表と同じもので、テストで
+一致を確かめています。
+
+```mermaid
+stateDiagram-v2
+    state "In progress" as InProgress
+    state "In review" as InReview
+    state "wait for merge" as WaitForMerge
+    [*] --> Backlog: task new
+    Backlog --> Ready: task start
+    Blocked --> Ready: task start
+    Ready --> Ready: task start --agent
+    Ready --> InProgress: launch
+    Ready --> Blocked: launch failed
+    InProgress --> Blocked: setup failed, finish, run stopped
+    InProgress --> InReview: finish
+    InReview --> Done: PR merged, task done
+    WaitForMerge --> Done: PR merged, task done
+    Backlog --> Done: task done
+    Ready --> Done: task done
+    InProgress --> Done: task done
+    Blocked --> Done: task done
+```
+
+### In progress の段階と、生きている実行のガード
+
+In progress の中には段階があります(0.6)。ステートチャートの階層(状態の中の状態)の考え方で、今どこにいるかを
+実行の記録(`~/.local/state/task-hub/runs/<番号>.json` の `stage`)に書きます。GitHub には書かず、段階の変化は
+`events.jsonl` にも書きません(`/chief` を起こす回数が増えて費用が上がるため)。`task list` と `task show` は、
+実行がまだ生きているときだけ `In progress › review` のように出します。実行が終わると `stage` は空に戻ります。
+
+| 段階 | 中身 | 書くところ |
+|---|---|---|
+| `preparing` | worktree、`[env]`、プロンプト、herdr のタブ、実行の開始を確かめる | `launch` |
+| `setup` | `[setup]`(設定があるときだけ) | `run_setup` |
+| `agent` | 実装エージェント | `cmd_run` |
+| `review` | reviewer(設定があるときだけ。差し戻しのあとにもう一度) | `run_review` |
+| `retry` | 差し戻しを受けた実装エージェント(1 回まで) | `review_loop` |
+| `finishing` | commit、push、PR、Issue へのコメント、カードを動かす | `cmd_run` |
+| `replanning` | エージェント自身の Blocked を replanner が仕分ける(カードはもう Blocked) | `run_replan` |
+
+```mermaid
+stateDiagram-v2
+    state "In progress" as InProgress {
+        [*] --> preparing
+        preparing --> setup: setup の設定あり
+        preparing --> agent
+        setup --> agent
+        agent --> review: reviewer あり
+        agent --> finishing
+        review --> retry: needs changes(1 回目)
+        retry --> review
+        review --> finishing
+    }
+    finishing --> replanning: エージェント自身の Blocked
+    note right of replanning: Status は Blocked、プロセスは生きている
+```
+
+Status と実行中のプロセスは、2 つの期間でずれます。`launch` は herdr で実行が始まったことを確かめる前に
+In progress にし、始まらなければ Blocked にしますが、ペインではあとから実行が始まることがあります。replanner は
+`finish` がカードを Blocked にした **あと** に走ります。どちらの間にも人が Ready に戻せるので、0.6.0 では同じ
+worktree で 2 つ目の実行が始まりえました(replanner の場合はテストで再現)。そこで、プロセスが生きている
+(`alive`: 記録した pid が `task _run` のまま、または pid を書く前で開始から 2 分以内)タスクは、Status が何であっても
+開始しません。`task list` と `task` の `waits_for` に `its last run, still running (replanning)` と出し、Ready の
+カードはプロセスが終わったあとの確認で始まります。`task done` も In progress のときと同じく断ります。
+判定はボードを読むたびに `ps` を呼ぶだけで、GitHub の呼び出しは増えません。
 
 ## CLI の形
 
@@ -163,7 +243,8 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
 「推測」はまだ確かめていないものです。
 
 - herdr の起動待ちがタイムアウトしても、ペインではあとから実行が始まることがあります(推測)。カードは Blocked
-  なのに実行が進み、その間に再実行すると 2 つの実行が同じ worktree を使います。
+  なのに実行が進みます。その間の再実行は、生きている実行のガード(「In progress の段階と、生きている実行の
+  ガード」)で始まらなくなりました(0.6)。
 - 起動の失敗を GitHub に書く途中でさらに GitHub エラーが起きると、その回の確認の残り(ほかの Ready のカードの開始など)が
   止まります(確認済み)。次の回には再開します。
 - 小さなクラッシュ経路(確認済み): エージェント起動の直前に Ctrl-C するとトレースバックが出る。`gh` が JSON でない
