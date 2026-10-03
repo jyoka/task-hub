@@ -30,7 +30,7 @@ Every script ends with one line `次にすること: …`. When the installer sa
 
 - Reply in Japanese, in 2 or 3 short lines: what got done (or where it stopped), then the `次にすること` line as it is.
   Do not paste the whole output; keep a URL, a one-time code (like `ABCD-1234`), or a 情シス request text exactly.
-- When it stopped for a login (GitHub in the browser, or kiro-cli in a Terminal window that it opened), tell the user
+- When it stopped for a login (GitHub or kiro-cli in a Terminal window that it opened), tell the user
   to finish it there and then say 「続けて」.
 - When it ends with "Kiro を再起動", tell the user to restart Kiro (menu Kiro → Quit Kiro, then open it again) and
   to try `/task` in a new chat.

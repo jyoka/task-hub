@@ -105,6 +105,7 @@ elif cmd == ["issue", "create"]:
 elif cmd == ["issue", "comment"]:
     db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read()})
 elif cmd == ["issue", "view"]:
+    db["issue_view_calls"] = db.get("issue_view_calls", 0) + 1
     if a[2] not in db["issues"]:
         fail(f"GraphQL: Could not resolve to an issue or pull request with the number of {a[2]}. (repository.issue)")
     i = db["issues"][a[2]]
@@ -578,12 +579,17 @@ class TaskTest(unittest.TestCase):
         """Stop what the runs left in their own sessions: notify() starts the notifier detached and never waits,
         so the fake osascript/herdr can still be writing notifications.jsonl while the folder is being removed.
         They run from fakebin through their #! line, so their command line names this test's folder."""
+        quiet = 0
         for _ in range(100):
             ps = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True).stdout
             pids = [int(line.split(None, 1)[0]) for line in ps.splitlines()
                     if str(self.root) in line and int(line.split(None, 1)[0]) != os.getpid()]
             if not pids:
-                return
+                quiet += 1
+                if quiet >= 3:  # a newly forked child may not name the test directory on the first scan
+                    return
+            else:
+                quiet = 0
             for pid in pids:
                 try:
                     os.kill(pid, signal.SIGKILL)
@@ -2400,6 +2406,170 @@ class TaskTest(unittest.TestCase):
         self.task()
         self.assertEqual(self.status(tid), "wait for merge")
 
+    def test_rerun_after_early_launch_failure_and_target_repo_changed_is_blocked(self):
+        self.origin("jyoka/other")
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/missing/.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("is missing", self.comments(tid)[-1])
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        self.assertTrue(wt.exists())
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
+        self.save_db(db)
+        self.write_config()
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked", "a failed launch must still bind the worktree to its original repo")
+        self.assertIn("Target repo was changed", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+        self.assertFalse((self.root / ".local/share/task-hub/repos/jyoka/other").exists())
+        self.assertTrue(wt.exists())
+
+    def test_done_after_early_launch_failure_and_target_repo_changed_cleans_original_resources(self):
+        self.origin("jyoka/other")
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/missing/.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        self.assertTrue(wt.exists())
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
+        self.save_db(db)
+        self.task("done", tid)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertFalse(wt.exists(), "task done must clean up a worktree left by a failed launch")
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        result = subprocess.run(["git", "-C", str(clone), "rev-parse", "--verify", f"refs/heads/task/{tid}"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_done_after_legacy_worktree_retry_with_early_launch_failure_cleans_original_resources(self):
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/missing/.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        self.assertTrue(wt.exists())
+        self.run_file(tid).unlink()  # emulate a worktree an older version left without ownership information
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("is missing", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+        self.task("done", tid)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertFalse(wt.exists(), "retrying a legacy worktree must restore ownership before another failure")
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        result = subprocess.run(["git", "-C", str(clone), "rev-parse", "--verify", f"refs/heads/task/{tid}"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_done_after_legacy_worktree_retry_fails_before_initialization_cleans_original_resources(self):
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/missing/.env\n")
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        for failure, reason in (("base", "not a valid branch name"), ("fetch", "failed")):
+            with self.subTest(failure=failure):
+                tid = self.new("ok")
+                self.task("start", tid)
+                self.assertEqual(self.status(tid), "Blocked")
+                wt = self.root / ".local/share/task-hub/worktrees" / tid
+                self.assertTrue(wt.exists())
+                self.run_file(tid).unlink()  # emulate a worktree an older version left without ownership information
+                if failure == "base":
+                    db = self.gh()
+                    db["items"][f"PVTI_{tid}"]["values"]["base branch"] = "bad branch"
+                    self.save_db(db)
+                elif failure == "fetch":
+                    subprocess.run(["git", "-C", str(clone), "remote", "set-url", "origin", str(self.root / "missing.git")],
+                                   check=True, capture_output=True)
+                self.task("start", tid)
+                self.assertEqual(self.status(tid), "Blocked")
+                self.assertIn(reason, self.comments(tid)[-1])
+                self.assertEqual(self.agent_calls(), [])
+                self.task("done", tid)
+                self.assertEqual(self.status(tid), "Done")
+                self.assertFalse(wt.exists(), "retrying a legacy worktree must restore ownership before another failure")
+                result = subprocess.run(["git", "-C", str(clone), "rev-parse", "--verify", f"refs/heads/task/{tid}"],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_rerun_after_target_repo_case_changed_uses_the_same_worktree(self):
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        clone = self.root / ".local/share/task-hub/repos/JYOKA/APP"
+        if not (clone / ".git").exists():
+            self.skipTest("case-only paths require a case-insensitive filesystem")
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "JYOKA/APP"
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review", "Target repo casing does not change its repository")
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_rerun_with_an_unrecorded_worktree_from_another_repository_is_blocked(self):
+        self.origin("jyoka/other")
+        self.write_config(f"\n[env]\njyoka/app = {self.root}/missing/.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.run_file(tid).unlink(missing_ok=True)  # older launches could leave a worktree without this record
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
+        self.save_db(db)
+        self.write_config()
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked", "the physical worktree must agree with Target repo")
+        self.assertIn("worktree belongs to another repository", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+        self.assertFalse((self.root / ".local/share/task-hub/repos/jyoka/other").exists())
+
+    def test_rerun_after_target_repo_changed_does_not_touch_either_repository(self):
+        self.origin("jyoka/other")
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        old_run = json.loads(self.run_file(tid).read_text())
+        def original_head():
+            return subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "rev-parse", f"task/{tid}"],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        old_head = original_head()
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("Target repo was changed", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertEqual(json.loads(self.run_file(tid).read_text())["repo"], "jyoka/app")
+        self.assertEqual(original_head(), old_head)
+        self.assertNotIn(f"jyoka/other task/{tid}", self.gh()["prs"])
+        self.assertFalse((self.root / ".local/share/task-hub/repos/jyoka/other").exists())
+        self.assertTrue(Path(old_run["worktree"]).exists())
+
+    def test_done_after_target_repo_changed_cleans_the_original_run(self):
+        self.origin("jyoka/other")
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        old_run = json.loads(self.run_file(tid).read_text())
+        db = self.gh()
+        db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
+        self.save_db(db)
+        self.task("done", tid)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertFalse(Path(old_run["worktree"]).exists())
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        result = subprocess.run(["git", "-C", str(clone), "rev-parse", "--verify", f"refs/heads/task/{tid}"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
     def test_rerun_after_base_branch_changed_or_deleted_is_blocked_with_reason(self):
         self.push_branch("feat/x", "feat.txt")
         self.push_branch("feat/y", "y.txt")
@@ -2542,6 +2712,74 @@ class TaskTest(unittest.TestCase):
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("watch")
         self.assertEqual(self.gh()["item_list_calls"], 1)
+
+    def test_home_reuses_the_board_snapshot_when_nothing_changes(self):
+        tid = self.new(title="waiting for approval")
+        db = self.gh()
+        db["item_list_calls"] = 0
+        self.save_db(db)
+        out = self.task()
+        self.assertIn("Backlog=1", out)
+        self.assertIn("waiting for approval", out)
+        self.assertEqual(self.status(tid), "Backlog")
+        self.assertEqual(self.gh()["item_list_calls"], 1)
+
+    def test_list_can_read_a_run_while_its_stage_record_is_being_written(self):
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        saved = {"id": tid, **json.loads(self.run_file(tid).read_text())}
+        saved["stage"] = "finishing"
+        results = []
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_writer", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_writer", loader))
+            loader.exec_module(task)
+
+        def interrupted_write(path, data, *args, **kwargs):
+            # Pause after truncation, the same window a polling CLI can hit during a stage update.
+            with path.open("w") as stream:
+                results.append(subprocess.run([str(BIN), "list"], env=self.env,
+                                              capture_output=True, text=True, timeout=10))
+                return stream.write(data)
+
+        with unittest.mock.patch.object(Path, "write_text", interrupted_write):
+            task.save_run(saved)
+        self.assertTrue(results)
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Blocked", result.stdout)
+        self.assertEqual(json.loads(self.run_file(tid).read_text())["stage"], "finishing")
+        self.assertEqual(list(self.run_file(tid).parent.glob(".*.tmp")), [])
+
+    def test_cleanup_waits_for_a_notifier_that_has_just_been_forked(self):
+        notifier = self.root / "late-notifier"
+        notifier.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
+        notifier.chmod(0o755)
+        # A freshly forked launcher need not name the test directory until it execs the notifier.
+        proc = subprocess.Popen(["sh", "-c", 'sleep 0.05; exec "$TASK_LATE_NOTIFIER"'],
+                                env={**self.env, "TASK_LATE_NOTIFIER": str(notifier)},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            self.stop_notifiers()
+            self.assertIsNotNone(proc.poll(), "cleanup returned before the late notifier was stopped")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_start_fetches_the_issue_once_and_shows_the_started_card(self):
+        tid = self.new("slow")
+        db = self.gh()
+        db["issue_view_calls"] = db["item_list_calls"] = 0
+        self.save_db(db)
+        out = self.task("start", tid)
+        self.wait_for(lambda: len(self.agent_calls()) == 1)
+        self.assertIn("status: In progress", out)
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual(self.gh()["issue_view_calls"], 1)
+        self.assertEqual(self.gh()["item_list_calls"], 2)
 
     # --- status transitions ---
 
