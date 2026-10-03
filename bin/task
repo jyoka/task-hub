@@ -157,8 +157,9 @@ class StatusLifecycle:
 
     @classmethod
     def needs_merge_watch(cls, t):
-        return t.get("status") in cls.watched_for_merge and (t.get("base") or load_run(t["id"]).get("base")) \
-            and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or "")
+        # every card, not only Base branch ones: GitHub's "Closes ..." left a merged default-branch PR's Issue open
+        # (jyoka/tasks#81), and nothing else would have moved that card to Done
+        return t.get("status") in cls.watched_for_merge and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or "")
 
     @classmethod
     def needs_user_count(cls, counts):
@@ -1597,7 +1598,7 @@ def sync(started_here=False):
                 kept.unlink(missing_ok=True)
                 set_status(t, BLOCKED, reason="the run stopped unexpectedly" if t.get("started") else "no run here")
             elif StatusLifecycle.needs_merge_watch(t) and pr_merged(t):
-                # GitHub documents "Closes ..." as working only for PRs into the default branch
+                # GitHub's "Closes ..." works only for PRs into the default branch, and can miss even those
                 gh("issue", "close", t["id"], "--repo", board()["issues"])
                 set_status(t, DONE)
                 cleanup(t)

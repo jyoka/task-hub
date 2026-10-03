@@ -132,6 +132,8 @@ elif cmd == ["pr", "edit"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["body"] = open(opt("--body-file")).read()
 elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<number>
     repo, number = a[1].split("/", 1)[1].rsplit("/pulls/", 1)
+    if repo in db.get("broken_repos", []):
+        fail("HTTP 404: Not Found")
     pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
     out = {"merged": pr.get("merged", False)}
 elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=closed
@@ -2391,20 +2393,36 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(tid), "Done")
         self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
 
-    def test_wait_for_merge_without_base_branch_is_not_rest_polled(self):
-        db = self.gh()
-        field = next(f for f in db["fields"] if f["name"] == "Status")
-        field["options"].append({"id": "O_wait", "name": "wait for merge"})
-        self.save_db(db)
+    def test_pr_merged_into_default_branch_moves_the_card_to_done_when_github_leaves_the_issue_open(self):
+        # GitHub's "Closes ..." missed one in practice (jyoka/tasks#81): the Issue stayed open and the card In review
         tid = self.new("ok")
         self.task("start", tid)
         self.wait(tid)
-        self.move(tid, "wait for merge")
+        self.task()
+        self.assertEqual(self.status(tid), "In review")  # not merged yet
+        worktree = Path(self.run_state(tid)["worktree"])
         db = self.gh()
-        db["broken_repos"] = ["jyoka/app"]  # REST/PR calls would fail if the watcher ran
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
+        self.save_db(db)
+        self.assertIn("Done", self.task())
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        self.assertFalse(self.run_file(tid).exists())
+        self.assertFalse(worktree.exists())
+
+    def test_an_unreachable_pr_check_keeps_the_card_and_the_others_go_on(self):
+        tid, other = self.new("ok"), self.new("ok", "Add hello", "jyoka/other")
+        self.origin("jyoka/other")
+        for t in (tid, other):
+            self.task("start", t)
+            self.wait(t)
+        db = self.gh()
+        db["broken_repos"] = ["jyoka/app"]  # its PR check fails
+        db["prs"][f"jyoka/other task/{other}"].update(state="MERGED", merged=True)
         self.save_db(db)
         self.task()
-        self.assertEqual(self.status(tid), "wait for merge")
+        self.assertEqual(self.status(tid), "In review")
+        self.assertEqual(self.status(other), "Done")
 
     def test_rerun_after_early_launch_failure_and_target_repo_changed_is_blocked(self):
         self.origin("jyoka/other")
