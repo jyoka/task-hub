@@ -119,6 +119,20 @@ def section(body, name):
     return m.group(1).strip() if m else ""
 
 
+def format_duration(seconds):
+    """Format a duration in seconds as a human-readable string (e.g. '2h 5m', '45s')."""
+    seconds = int(seconds)
+    if seconds < 0:
+        raise ValueError("seconds must be non-negative")
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
 class StatusLifecycle:
     """Status policy for the task board lifecycle."""
     all = [BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE]
