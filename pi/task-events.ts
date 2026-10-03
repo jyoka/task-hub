@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 
-const DEFAULT_ONLY = "In review,Blocked,replan,Done";
+const DEFAULT_ONLY = "In review,Blocked,replan,Done,slow";
 
 // `task` on PATH, else the usual install (the same rule the skills follow)
 function taskBin(): string {
@@ -66,7 +66,7 @@ export default function (pi: ExtensionAPI) {
       name: "task_events_watch",
       label: "task-hub events",
       description:
-        "Start watching the task-hub board for the chief skill. Each new event (In review, Blocked, replan, Done) " +
+        "Start watching the task-hub board for the chief skill. Each new event (In review, Blocked, replan, Done, slow) " +
         "arrives later as a message that wakes you. Call it once per session; do not poll or call it again unless " +
         "a message says watching stopped.",
       promptSnippet: "Watch task-hub events; they arrive as messages",

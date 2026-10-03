@@ -1,6 +1,6 @@
 {
   "name": "task-hub-events",
-  "description": "task-hub /chief: wait for In review, Blocked, replan, and Done without model turns, then tell the parent chat",
+  "description": "task-hub /chief: wait for In review, Blocked, replan, Done, and slow without model turns, then tell the parent chat",
   "inputs": {
     "chief_token": "string"
   },
@@ -27,7 +27,7 @@
           "type": "step",
           "id": "tell-chief",
           "agent": "wf-planner",
-          "prompt": "You pass task-hub events on to the user's /chief chat. Do not run commands or edit files. The events are below: each is a line `event: #<id> <status> | <title> | <owner/repo> | ...`, followed by indented `key: value` digest lines (verdict, review, reason, question, report, pr).\n\nWrite one short message in the language of the task titles, most urgent first:\n- In review: the title, the `verdict`, the `review` items to check, and the PR link (no more than five lines). With no PR (a research task), its `report` in a few lines.\n- Blocked: the `reason` in one line and what would unblock it.\n- replan: the `decision` and its `question`, `answer`, or `goal_change`, folded into the Blocked message for the same task.\n- Done: one line.\nIf a digest is missing, say `task show <id> --digest` has the details. If the only line below starts with `replaced:`, the message is instead one line saying that watching moved to the newer /chief chat. Then call `send_message` once with severity `success` and that message as its text.\n\n{{events.output}}"
+          "prompt": "You pass task-hub events on to the user's /chief chat. Do not run commands or edit files. The events are below: each is a line `event: #<id> <status> | <title> | <owner/repo> | ...`, followed by indented `key: value` digest lines (verdict, review, reason, question, report, pr).\n\nWrite one short message in the language of the task titles, most urgent first:\n- In review: the title, the `verdict`, the `review` items to check, and the PR link (no more than five lines). With no PR (a research task), its `report` in a few lines.\n- Blocked: the `reason` in one line and what would unblock it.\n- replan: the `decision` and its `question`, `answer`, or `goal_change`, folded into the Blocked message for the same task.\n- Done: one line.\n- slow: one line with the task, how long it has run and how long it usually takes (its `reason`), and that if they want to stop it, Ctrl-C in that task's herdr tab. Never stop it yourself.\nIf a digest is missing (except for slow, which has none), say `task show <id> --digest` has the details. If the only line below starts with `replaced:`, the message is instead one line saying that watching moved to the newer /chief chat. Then call `send_message` once with severity `success` and that message as its text.\n\n{{events.output}}"
         }
       ]
     }

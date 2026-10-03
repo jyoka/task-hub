@@ -28,7 +28,7 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      prints as the cursor `<n>`. Then start this with the Monitor, with the longest timeout it allows:
 
      ```sh
-     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
+     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done,slow" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
      ```
 
      Each batch of events arrives as one notification: the events with their digest, then a
@@ -46,7 +46,7 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      or the run stops, tell the user in one line and check at each reply instead (below). But if its last message
      says watching moved to a newer /chief chat, say so in one line and do not watch in this chat any more.
    - A background command that wakes you when it exits: run
-     `task events --next --digest --only "In review,Blocked,replan,Done"` in the background. It waits for
+     `task events --next --digest --only "In review,Blocked,replan,Done,slow"` in the background. It waits for
      the next event, prints it with its digest, and exits.
 
 ## Keep watching
@@ -90,6 +90,9 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
   Backlog one, read its `### Ready conditions` (`task show <id>`): if everything there now looks met, ask
   whether to start it; if not, say what is still missing. A task still waiting on something that will not
   finish by itself (Blocked, closed as not planned) needs the user: say which.
+- **slow**: a run is taking much longer than usual for its agent (its `reason` says how long it has run and how
+  long it usually takes). One line: the task, both times, and that if they want to stop it, Ctrl-C in that task's
+  herdr tab (its work so far is pushed and the card goes Blocked). Do not stop it yourself.
 - Anything else (Backlog, Ready, In progress, if they reach you): end your turn without writing
   anything. Do not explain that you are staying quiet, or mention these rules.
 
@@ -156,6 +159,7 @@ Whether work goes in stays the user's decision, so carry out only what they expl
 ## Never
 
 - Approve pull requests.
+- Stop, kill, or send Ctrl-C to a run, even a `slow` one. Stopping stays with the user.
 - Merge or close pull requests, or run `task done`, on your own judgment, including after a "yes" to something you
   suggested. Do these only when the user asks for them by name (above).
 - Start or register anything the user did not approve in this conversation.
