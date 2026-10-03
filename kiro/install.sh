@@ -1,5 +1,5 @@
 #!/bin/sh
-# kiro/install.sh: sets up task-hub on a Mac without admin rights (docs/prd-kiro-installer.md, section 5).
+# kiro/install.sh: sets up task-hub on a Mac without admin rights (docs/kiro-ide.md, "インストーラが行うこと").
 #   sh kiro/install.sh [--with-launchd] [--start-launchd] [--ref <branch or tag>]
 # --with-launchd: also put the launchd plist that keeps `task watch` running (stage 10). It is only started with
 # --start-launchd (which implies --with-launchd), after the user said yes.

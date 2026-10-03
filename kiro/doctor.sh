@@ -1,6 +1,6 @@
 #!/bin/sh
 # kiro/doctor.sh: checks every stage of kiro/install.sh and lists what is missing, with what to do next
-# (docs/prd-kiro-installer.md, section 5, stage 11). It changes nothing: no file, no login, nothing on GitHub.
+# (docs/kiro-ide.md, "インストーラが行うこと", stage 11). It changes nothing: no file, no login, nothing on GitHub.
 #   sh kiro/doctor.sh [--in-install]
 # --in-install: kiro/install.sh runs it at its end; then only the list, the installer says the one next step.
 # It judges whether task-hub works, not whether it has the installer's form: a manual install (docs/setup.md: the

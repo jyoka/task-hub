@@ -1,6 +1,6 @@
 #!/bin/sh
 # kiro/uninstall.sh: removes what kiro/install.sh put on this Mac, and only that: what it recorded under "installed" in
-# ~/.local/state/task-hub/install-manifest.json (docs/prd-kiro-installer.md, section 5).
+# ~/.local/state/task-hub/install-manifest.json (docs/kiro-ide.md, "インストーラが行うこと").
 #   sh kiro/uninstall.sh          lists what it would remove, and removes nothing
 #   sh kiro/uninstall.sh --yes    removes it
 # Never removed: the board on GitHub (the tasks repository and the Project; it only says how), the GitHub and kiro-cli

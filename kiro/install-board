@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kiro/install-board: stages 7 (board) and 8 (config.ini) of kiro/install.sh (docs/prd-kiro-installer.md, section 5),
+"""kiro/install-board: stages 7 (board) and 8 (config.ini) of kiro/install.sh (docs/kiro-ide.md, "インストーラが行うこと"),
 and the settings.json part of stage 9 (Kiro).
 
   install-board board <label> <GitHub login> <work folder>
