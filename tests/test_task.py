@@ -2084,7 +2084,9 @@ class TaskTest(unittest.TestCase):
                                "no usual time for fake yet (under 3 finished runs, so 30 min)")
         self.wait_for(lambda: self.notifications())  # shown by default: the human learns of it without /chief
         self.assertEqual(self.notifications()[-1][-2:], [f"#{tid} slow: Add hello", "reason: running 0 min, no usual "
-                                                         "time for fake yet (under 3 finished runs, so 30 min)"])
+                                                         "time for fake yet (under 3 finished runs, so 30 min)\n"
+                                                         "stop it with Ctrl-C in its tab, if you want; task-hub never does"])
+        self.assertIn("slow: 1 run(s) got a `slow` event", self.task("stats"))  # before any run has finished
         self.assertNotIn("slow:", self.task())  # the next check: already told
         self.assertEqual(len(self.slow_events()), 1)
         os.kill(int(self.run_state(tid)["pid"]), signal.SIGINT)  # the human stops it
