@@ -2,23 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board } from '../types'
-import { parseList, summary } from './parse'
+import { base, byColumn, failure, parseList, summary } from './parse'
 
 const PANE = 'task-board'
-const ORDER = ['Blocked', 'In review', 'wait for merge', 'In progress', 'Ready', 'Backlog']
-// A running card shows as "In progress › review": rank it by the column, and put unknown columns last.
-const base = (status: string): string => status.split(' › ')[0] ?? status
-const rank = (status: string): number => {
-  const i = ORDER.indexOf(base(status))
-  return i === -1 ? ORDER.length : i
-}
 const board = atom({ plugin: 'task-board', key: 'board' } as const, null as Board | null)
-
-// `bin/task` fail() prints "error: ..." to stdout and leaves stderr empty.
-const failure = (exitCode: number, stdout: string, stderr: string): string =>
-  stderr.split('\n').map(l => l.trim()).filter(l => l !== '').pop()
-  || stdout.split('\n').find(l => l.startsWith('error:'))?.slice('error:'.length).trim()
-  || `exit ${exitCode}`
 
 // `task list` is read only (it never starts a card); bare `task` would start Ready cards.
 async function refresh($: EngineInterface): Promise<void> {
@@ -55,7 +42,7 @@ export const register: Register = on => {
     const b = await read($, board)
     const refreshButton = <Button key="refresh" label="今すぐ更新" onPress={() => refresh($)} />
     if (!b) return <Box><Text dimColor>読み込み中... </Text>{refreshButton}</Box>
-    const cards = [...b.cards].sort((x, y) => rank(x.status) - rank(y.status))
+    const cards = byColumn(b.cards)
     const width = Math.max(20, (e.viewport?.columns ?? 60) - 12)
 
     return (

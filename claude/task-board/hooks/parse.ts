@@ -40,6 +40,21 @@ export const parseList = (text: string, checkedAt: string): Board => {
   return { counts, cards, checkedAt, error: '' }
 }
 
+// Board order. A running card shows as "In progress › review": rank it by the column, and put unknown columns last.
+const ORDER = ['Blocked', 'In review', 'wait for merge', 'In progress', 'Ready', 'Backlog']
+export const base = (status: string): string => status.split(' › ')[0] ?? status
+const rank = (status: string): number => {
+  const i = ORDER.indexOf(base(status))
+  return i === -1 ? ORDER.length : i
+}
+export const byColumn = (cards: Card[]): Card[] => [...cards].sort((x, y) => rank(x.status) - rank(y.status))
+
+// Why `task list` failed: `bin/task` fail() prints "error: ..." to stdout and leaves stderr empty.
+export const failure = (exitCode: number, stdout: string, stderr: string): string =>
+  stderr.split('\n').map(l => l.trim()).filter(l => l !== '').pop()
+  || stdout.split('\n').find(l => l.startsWith('error:'))?.slice('error:'.length).trim()
+  || `exit ${exitCode}`
+
 // The status line entry: only what needs the user, plus what is running.
 export const summary = (board: Board): string | undefined => {
   if (board.error) return 'task: 読めない'
