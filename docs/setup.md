@@ -6,6 +6,8 @@ GitHub Project を使います。手順はどちらも同じです。
 Kiro しか使えない Mac で、Kiro IDE からターミナルを開かずに使うときは、このページに加えて
 [kiro-ide.md](kiro-ide.md) の手順(設定、steering、フック、ワークフロー、launchd の違い)を使います。
 
+Windows では、このページに加えて [windows.md](windows.md) の違い(インストーラ、タスク スケジューラでの常駐)を使います。
+
 ## 必要なもの
 
 - Python 3.10 以上(`python3 --version`)と git が入った macOS
