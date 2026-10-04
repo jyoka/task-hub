@@ -101,6 +101,7 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 ## はじめる
 
 セットアップは [docs/setup.md](docs/setup.md) にあります(GitHub Project の準備、動かす用の clone、設定、スキルのリンク)。
+Windows では [docs/windows.md](docs/windows.md) の違いも使います。
 使い方は 3 通りで、混ぜても構いません。
 
 | 使い方 | やること |
@@ -244,7 +245,9 @@ claude/task-board/     Claude Code の mod: ボードをステータスライン
 kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
 kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
+windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
+tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 docs/                  セットアップ、エージェント、設計、形式、運用、教訓
 ```
 
@@ -255,6 +258,7 @@ docs/                  セットアップ、エージェント、設計、形式
 ## ドキュメント
 
 - [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
+- [docs/windows.md](docs/windows.md): Windows でのセットアップ(mac との違い、タスク スケジューラでの常駐)
 - [docs/kiro-quickstart.md](docs/kiro-quickstart.md): Kiro IDE で「セットアップして」と言って使いはじめる手順(画面の操作だけ)
 - [docs/kiro-ide.md](docs/kiro-ide.md): Kiro IDE 版のセットアップの中身(インストーラが行うこと)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加
