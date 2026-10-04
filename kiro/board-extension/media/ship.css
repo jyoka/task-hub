@@ -1,0 +1,21 @@
+body { padding: 4px 8px; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
+[hidden] { display: none !important; }
+#stage { position: relative; }
+#ship { display: block; image-rendering: pixelated; }
+#tip {
+  position: absolute; z-index: 1; padding: 2px 6px; white-space: nowrap; pointer-events: none;
+  color: var(--vscode-editorHoverWidget-foreground); background: var(--vscode-editorHoverWidget-background);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+}
+#aboard, #badges { display: flex; flex-wrap: wrap; gap: 0 12px; margin-top: 4px; }
+.dim { color: var(--vscode-descriptionForeground); }
+.crew { color: var(--vscode-terminal-ansiCyan); }
+.cargo { color: var(--vscode-charts-yellow); }
+.stuck { color: var(--vscode-charts-red); }
+.pier { color: var(--vscode-descriptionForeground); }
+.badge { color: var(--vscode-charts-yellow); }
+#toggle {
+  margin-top: 6px; padding: 2px 8px; border: none; cursor: pointer;
+  color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+}
+#toggle:hover { background: var(--vscode-button-secondaryHoverBackground); }
