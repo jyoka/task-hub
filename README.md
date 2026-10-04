@@ -240,6 +240,7 @@ worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict�
 skills/task/SKILL.md   /task スキル
 skills/chief/SKILL.md  /chief スキル
 pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
+claude/task-board/     Claude Code の mod: ボードをステータスラインとペインに出す(task list を読むだけで、LLM は使わない)
 kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
