@@ -29,6 +29,7 @@ const CONTENT_TYPES = `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\
 <Default Extension=".json" ContentType="application/json"/>\
 <Default Extension=".js" ContentType="application/javascript"/>\
+<Default Extension=".css" ContentType="text/css"/>\
 <Default Extension=".svg" ContentType="image/svg+xml"/>\
 <Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>
 `

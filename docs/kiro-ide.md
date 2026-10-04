@@ -382,7 +382,8 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
   2026-10-01 の試験では、`kiro -n` も `task open` も未確認
 - [ ] **ボード表示の拡張が動くか**: 10 章の VSIX を入れ、アクティビティバーに task-hub が出るか。カードの並びと
   ステータスバーの数が `task list` と合うか。Dock から起動した Kiro でも「読めない」にならないか。
-  1 回目の起動で出ないときは、ウィンドウの再読み込みで出るか(tasks#129 の試作では、1 回目に起動しなかった)
+  1 回目の起動で出ないときは、ウィンドウの再読み込みで出るか(tasks#129 の試作では、1 回目に起動しなかった)。
+  一覧の上に船の絵が出て、乗組員や木箱にマウスを乗せると `#番号 タイトル` が出るか
 - [ ] **launchd からの無人実行が続くか**: IDE を閉じ、ターミナルも開かずに、スマホからカードを Ready に移して
   In review まで進むか。翌日(ログインし直したあと)も同じように動くか。`kiro-cli whoami` が API キーだけで
   0 になるか、キーチェーンの読み出しで確認のダイアログが出ないか(`~/.local/state/task-hub/watch.err.log` と
@@ -438,7 +439,7 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 
 `kiro/board-extension/` は、task-hub のボードを Kiro IDE のサイドバーとステータスバーに出す拡張です。
 Claude Code の mod(`claude/task-board/`)と同じ役割で、`task list` と `events.jsonl`・`metrics.jsonl` の読み方
-(`claude/task-board/hooks/parse.ts`、`panel.ts`)も共有しています。インストーラ(`sh kiro/install.sh`)は入れないので、
+(`claude/task-board/hooks/parse.ts`、`panel.ts`)と、船の場面と実績の判定(`ship.ts`、`badges.ts`)も共有しています。インストーラ(`sh kiro/install.sh`)は入れないので、
 手で入れます。
 
 - アクティビティバーの「task-hub」に、カードを「要対応 N」(Blocked、In review、wait for merge)、「実行中 N」、
@@ -460,6 +461,15 @@ Claude Code の mod(`claude/task-board/`)と同じ役割で、`task list` と `e
   「task: 読めない (理由)」と出します。
 - LLM を使いません。実行するのは `~/.local/bin/task list`(ホームを展開した絶対パス)だけです。
   素の `task` は Ready のカードを開始するので呼びません。
+- 一覧の上の「船」ビューに、mod と同じ船の絵を出します(人間が船長、エージェントが乗組員)。実行中のカードは
+  乗組員で、段階で姿が変わります。In review と wait for merge は甲板の木箱で、2 個から船が傾き、4 個で大きく傾きます。
+  Blocked があるとマストに SOS が上がり、Ready のカードは桟橋で待ちます。乗組員や木箱にマウスを乗せると
+  `#番号 タイトル` が出ます。絵は毎秒 3 コマほど動き、ビューが見えていないときは描き直しません。
+- 「船を隠す」ボタンで絵を隠せます。隠したことは Kiro が覚えていて、次に開いても隠れたままです。
+- 実績のバッジは mod と同じ判定で、`metrics.jsonl` だけから決めます。解除したときに 1 回だけ通知が出て、
+  解除済みのバッジは船の下に並びます。同じバッジを二度知らせることはありません。mod の実績とは別に覚えるので、
+  mod で知らされたバッジも Kiro で 1 回知らせます。
+- 船のビューのスクリプトは拡張に同梱したものだけを読みます(CSP で外のものを読まない)。
 - 使うのは VS Code の拡張 API だけです。VS Code でも動くはずですが、確かめていません。
 
 ### VSIX を作る
