@@ -45,7 +45,8 @@ task --version
 ```
 
 更新は、PR をマージしたあとにこの clone で pull するだけです。`task watch` を動かしているなら、止めてから
-起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。
+起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。何が変わったか、更新で何が要るかは
+[リリースノート](https://github.com/jyoka/task-hub/releases)に書いています([release.md](release.md))。
 
 ```
 git -C ~/.local/lib/task-hub pull --ff-only
@@ -242,7 +243,9 @@ draft でないかを確かめ、マージできなければ理由を伝えま�
 
 `claude/task-board/` は、ボードをステータスライン(「task: 実行中1 レビュー待ち3 止まり1」)とペインに出す
 Claude Code の mod です。`/task-board` でペインを開くと、「要対応」(Blocked → In review → wait for merge)と
-「実行中」を枠で囲んで列ごとの色で出し、Ready と Backlog は件数の 1 行に畳みます。各カードには repo のタグと待ち先
+「実行中」、「待ち」(Ready)、「Backlog」を枠で囲んで、列ごとの色で出します。見出しの ▸ / ▾ で、どのグループも番号だけの
+1 行に畳んだり開いたりでき、次のセッションでも覚えています(初めは Kiro 版と同じく、Backlog と知らない status の
+「その他」だけ畳んでいます)。各カードには repo のタグと待ち先
 (`waits_for`)が付き、実行中のカードには段階(`review` など)と経過時間 / 普段の時間、In review には判定と PR のリンク、
 Blocked には理由が 1 行出ます。
 
