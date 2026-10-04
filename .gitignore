@@ -1,7 +1,8 @@
 __pycache__/
 
-# Types Claude Code writes when it loads the mod
+# Types and the tsconfig.json that points at them, which Claude Code writes when it loads the mod
 claude/task-board/.claude-plugin/types/
+claude/task-board/tsconfig.json
 
 # What `npm run package` in kiro/board-extension builds
 kiro/board-extension/out/
