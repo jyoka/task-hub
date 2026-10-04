@@ -67,7 +67,9 @@ STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
-EVENTS = STATE / "events.jsonl"  # one line per status change task-hub makes, for whatever watches (see docs/operations.md)
+# one line per status change task-hub makes, and per Done GitHub makes on a card this machine ran,
+# for whatever watches (see docs/operations.md)
+EVENTS = STATE / "events.jsonl"
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
@@ -673,14 +675,15 @@ def slow_threshold(agent):
     return limit, usual
 
 
-def slow_events():
+def events_named(name):
+    """The events called `name` in EVENTS, oldest first."""
     events = []
     for line in (EVENTS.read_text(errors="replace").splitlines() if EVENTS.exists() else []):
         try:
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("event") == "slow":
+        if e.get("event") == name:
             events.append(e)
     return events
 
@@ -698,7 +701,7 @@ def check_slow(t):
     limit, usual = slow_threshold(agent)
     if elapsed < limit:
         return ""
-    if any(e.get("id") == t["id"] and e.get("time", "") >= t["started"] for e in slow_events()):
+    if any(e.get("id") == t["id"] and e.get("time", "") >= t["started"] for e in events_named("slow")):
         return ""
     reason = f"running {round(elapsed / 60)} min, " + (f"usually {round(usual / 60)} min for {agent}" if usual is not None
                                                        else f"no usual time for {agent} yet (under {SLOW_MIN_RUNS} "
@@ -1648,9 +1651,25 @@ def sync(started_here=False):
     open_ = tasks()
     # a card that left the open columns (GitHub moves it to Done when its Issue closes, e.g. the PR
     # was merged) no longer needs its worktree or herdr workspace: clean up from local state only
+    all_ = None  # every card, Done ones too: read once, and only when a run's card left the open columns
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         t = {"id": f.stem, **load_run(f.stem)}
         if t["id"] not in {x["id"] for x in open_} and not alive(t):
+            if all_ is None:
+                try:
+                    all_ = {x["id"]: x for x in tasks(include_done=True)}
+                except RuntimeError as e:  # keep the run files: the next check reads again and may still owe the Done
+                    errors.append({"id": t["id"], "error": str(e)})
+                    all_ = False
+            if all_ is False:
+                continue
+            card = all_.get(t["id"])
+            # GitHub moved it to Done (its "Item closed" workflow, about a second after the Issue closed), so no
+            # set_status wrote the event. Once per run, as check_slow does: `task done` or the merge watch may have
+            # written it already
+            if card and card["status"] == DONE and not any(
+                    e.get("id") == t["id"] and e.get("time", "") >= t.get("started", "") for e in events_named(DONE)):
+                emit(t, DONE, pr=t.get("pr", ""))
             left = cleanup(t)
             if left:
                 lines.append(f"cleanup: task {t['id']}: {left}; trying again at the next check")
@@ -1969,7 +1988,7 @@ def cmd_stats(_):
             runs.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    slow = f"slow: {len(slow_events())} run(s) got a `slow` event (ran much longer than usual for their agent)"
+    slow = f"slow: {len(events_named('slow'))} run(s) got a `slow` event (ran much longer than usual for their agent)"
     if not runs:  # the first run can be slow before any run has finished
         out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow)
         return
