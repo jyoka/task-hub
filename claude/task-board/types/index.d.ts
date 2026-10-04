@@ -10,7 +10,8 @@ export type Details = Record<string, Detail>
 declare module 'claude-code' {
   interface PluginState {
     // shipHidden: the ship above the list is hidden (kept in $.store too); badges: the ids of the achievements
-    // unlocked so far (hooks/badges.ts BADGES), kept in $.store so a toast is never shown twice
-    'task-board': { board: Board | null; details: Details; shipHidden: boolean; badges: string[] }
+    // unlocked so far (hooks/badges.ts BADGES), kept in $.store so a toast is never shown twice; folded: the keys of the
+    // groups folded (kept in $.store too), or null before the person pressed a heading (hooks/panel.ts GROUPS defaults)
+    'task-board': { board: Board | null; details: Details; shipHidden: boolean; badges: string[]; folded: string[] | null }
   }
 }
