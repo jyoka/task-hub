@@ -1,7 +1,7 @@
 {
   "name": "task-hub-board",
   "displayName": "task-hub board",
-  "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す(LLM を使わない)",
+  "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す。船の絵と実績バッジつき(LLM を使わない)",
   "version": "0.1.0",
   "publisher": "jyoka",
   "private": true,
@@ -14,7 +14,7 @@
       "activitybar": [{ "id": "taskHub", "title": "task-hub", "icon": "media/board.svg" }]
     },
     "views": {
-      "taskHub": [{ "id": "taskHub.board", "name": "ボード" }]
+      "taskHub": [{ "type": "webview", "id": "taskHub.ship", "name": "船" }, { "id": "taskHub.board", "name": "ボード" }]
     },
     "commands": [
       { "command": "taskHub.board.refresh", "title": "更新", "category": "task-hub", "icon": "$(refresh)" }

@@ -244,13 +244,13 @@ skills/chief/SKILL.md  /chief スキル
 pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
 claude/task-board/     Claude Code の mod: ボードをステータスラインとペインに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
-kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
+kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
-docs/                  セットアップ、エージェント、設計、形式、運用、教訓
+docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
 
 `task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。PR をマージしたら
@@ -280,6 +280,7 @@ task feedback --feature    # 機能の要望のフォームを開く
 - [docs/task-format.md](docs/task-format.md): Issue、Blocked by と Ready conditions、レポートファイル、コメント、PR の形式
 - [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順
 - [docs/operations.md](docs/operations.md): 実行の見守り、herdr のタブ、events と stats、トラブルシューティング、後片付け
+- [docs/release.md](docs/release.md): 版の付け方(semver とタグ `v<VERSION>`)、リリースの手順、リリースノートの型
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
 - [docs/lessons.md](docs/lessons.md): 作って試してわかったこと、まだ確かめていないこと
 - [CONTRIBUTING.md](CONTRIBUTING.md): バグ報告と要望の送り先、PR の出し方、テスト、README と docs の書き方

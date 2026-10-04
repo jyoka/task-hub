@@ -4,9 +4,11 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, w
 import Module, { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, test } from 'node:test'
+import { afterEach, mock, test } from 'node:test'
 
+import { NONE, pixels, scene } from '../../../claude/task-board/hooks/ship.ts'
 import { ROOT, build } from '../scripts/build.mjs'
+import { parseList } from '../../../claude/task-board/hooks/parse.ts'
 import { CONFIG, EVENTS, LIST, METRICS, NOW } from './fixtures.ts'
 
 const temps: string[] = []
@@ -22,7 +24,7 @@ afterEach(() => {
 // Just what the extension uses of the VS Code API, recording what it was given.
 const fakeVscode = () => {
   const seen = { trees: [] as any[], bars: [] as any[], commands: new Map<string, (...args: any[]) => unknown>(),
-    opened: [] as string[] }
+    opened: [] as string[], webviews: new Map<string, any>(), messages: [] as string[] }
   class EventEmitter {
     listeners: Array<() => void> = []
     event = (l: () => void) => (this.listeners.push(l), { dispose() {} })
@@ -50,7 +52,10 @@ const fakeVscode = () => {
   const vscode = {
     EventEmitter, TreeItem, ThemeIcon, ThemeColor, MarkdownString, StatusBarAlignment: { Left: 1, Right: 2 },
     TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
-    Uri: { parse: (url: string) => ({ url }) },
+    Uri: {
+      parse: (url: string) => ({ url }),
+      joinPath: (base: { path: string }, ...parts: string[]) => ({ path: [base.path, ...parts].join('/') }),
+    },
     env: { openExternal: async (uri: { url: string }) => (seen.opened.push(uri.url), true) },
     window: {
       createTreeView: (id: string, { treeDataProvider }: any) => {
@@ -64,12 +69,46 @@ const fakeVscode = () => {
         seen.bars.push(bar)
         return bar
       },
+      registerWebviewViewProvider: (id: string, provider: unknown) => (seen.webviews.set(id, provider), { dispose() {} }),
+      showInformationMessage: async (text: string) => (seen.messages.push(text), undefined),
     },
     commands: {
       registerCommand: (id: string, fn: (...args: any[]) => unknown) => (seen.commands.set(id, fn), { dispose() {} }),
     },
   }
   return { vscode, seen }
+}
+
+// context.globalState, kept in `kept` (shared between activations to stand for the next window), recording each write.
+const memento = (kept = new Map<string, unknown>()) => {
+  const writes: [string, unknown][] = []
+  return { kept, writes, fail: false, keys: () => [...kept.keys()], get: (key: string) => kept.get(key),
+    async update(key: string, value: unknown) {
+      if (this.fail) throw new Error('cannot write')
+      writes.push([key, value])
+      kept.set(key, value)
+    } }
+}
+const fakeContext = (globalState = memento()) =>
+  ({ subscriptions: [] as Array<{ dispose(): void }>, extensionUri: { path: '/ext' }, globalState })
+
+// A WebviewView as Kiro hands it to resolveWebviewView: what the extension posts is kept in `posted`.
+const fakeWebviewView = () => {
+  const posted: any[] = []
+  const on = { message: (_: unknown) => {}, visibility: () => {}, dispose: () => {} }
+  const view = {
+    visible: true,
+    webview: {
+      options: {} as any, html: '', cspSource: 'vscode-webview://x',
+      asWebviewUri: (uri: { path: string }) => ({ toString: () => `vscode-webview://x${uri.path}` }),
+      postMessage: async (m: unknown) => (posted.push(m), true),
+      onDidReceiveMessage: (l: (m: unknown) => void) => (on.message = l, { dispose() {} }),
+    },
+    onDidChangeVisibility: (l: () => void) => (on.visibility = l, { dispose() {} }),
+    onDidDispose: (l: () => void) => (on.dispose = l, { dispose() {} }),
+  }
+  return { view, posted, send: (m: unknown) => on.message(m),
+    setVisible: (v: boolean) => { view.visible = v; on.visibility() }, dispose: () => on.dispose() }
 }
 
 // A fresh build each time, so each test gets its own module.
@@ -94,10 +133,10 @@ const eventsNow = (): string => {
 const FILES = async () => ({ events: eventsNow(), metrics: METRICS, ini: CONFIG })
 const NO_FILES = async () => ({ events: '', metrics: '', ini: '' })
 
-const start = (run: () => Promise<unknown>, read: () => Promise<unknown> = NO_FILES) => {
+const start = (run: () => Promise<unknown>, read: () => Promise<unknown> = NO_FILES, globalState = memento()) => {
   const { vscode, seen } = fakeVscode()
   const ext = load(vscode)
-  const context = { subscriptions: [] as Array<{ dispose(): void }> }
+  const context = fakeContext(globalState)
   ext.activate(context, run, read)
   const provider = () => seen.trees[0].provider
   // The top level, or the children of the node `path` names (labels, from the top).
@@ -109,7 +148,14 @@ const start = (run: () => Promise<unknown>, read: () => Promise<unknown> = NO_FI
     return nodes.map((n: unknown) => provider().getTreeItem(n))
   }
   const stop = () => { for (const d of context.subscriptions) d.dispose() }
-  return { seen, view, stop, refresh: () => seen.commands.get('taskHub.board.refresh')!() as Promise<void> }
+  // The ship view, opened as Kiro opens it, and told its width as media/ship.js tells it.
+  const ship = (columns = 40) => {
+    const w = fakeWebviewView()
+    seen.webviews.get('taskHub.ship').resolveWebviewView(w.view)
+    if (columns > 0) w.send({ type: 'size', columns })
+    return w
+  }
+  return { seen, view, stop, ship, globalState, refresh: () => seen.commands.get('taskHub.board.refresh')!() as Promise<void> }
 }
 
 test('ビューに並べ、ステータスバーに数を出し、更新ボタンで task list を読み直す', async () => {
@@ -276,7 +322,7 @@ test('ステータスバーは位置を変えず(左、優先度 100)いつも�
   const create = vscode.window.createStatusBarItem
   vscode.window.createStatusBarItem = (...args: unknown[]) => (made.push(args), create())
   const ext = load(vscode)
-  const context = { subscriptions: [] as Array<{ dispose(): void }> }
+  const context = fakeContext()
   const blocked = 'counts: Backlog=0, Ready=0, In progress=0, In review=0, wait for merge=0, Blocked=1\n' +
     'tasks[1]{id,title,status,repo,agent,waits_for}:\n  "109",計測,Blocked,jyoka/aica,"",""\n'
   ext.activate(context, async () => ({ exitCode: 0, stdout: blocked, stderr: '' }), NO_FILES)
@@ -312,4 +358,142 @@ test('package.json: 信頼していないワークスペースでも動く、eng
   assert.equal(p.main, './out/extension.js')
   assert.deepEqual(p.dependencies ?? {}, {})
   assert.ok(p.contributes.menus['view/title'].some((m: any) => m.command === 'taskHub.board.refresh' && m.when === 'view == taskHub.board'))
+})
+
+const settle = () => new Promise(resolve => setImmediate(resolve))
+
+test('船のビュー: ボードの上の Webview、CSP つきで同梱のスクリプトだけ、場面は mod の ship.ts から', async () => {
+  const p = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  assert.deepEqual(p.contributes.views.taskHub.map((v: any) => [v.id, v.type]), [['taskHub.ship', 'webview'], ['taskHub.board', undefined]])
+  const { stop, ship, refresh } = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }))
+  try {
+    await refresh()
+    const w = ship(0)
+    assert.deepEqual(w.posted, []) // nothing until the script tells the width
+    assert.equal(w.view.webview.options.enableScripts, true)
+    assert.deepEqual(w.view.webview.options.localResourceRoots, [{ path: '/ext/media' }])
+    const html = w.view.webview.html
+    const nonce = html.match(/script-src 'nonce-([0-9a-f]{32})'/)?.[1]
+    assert.ok(nonce)
+    assert.deepEqual(html.match(/<script[^>]*>/g), [`<script nonce="${nonce}" src="vscode-webview://x/ext/media/ship.js">`])
+    assert.match(html, /<link rel="stylesheet" href="vscode-webview:\/\/x\/ext\/media\/ship.css">/)
+    assert.doesNotMatch(html, /https?:/)
+
+    w.send({ type: 'size', columns: 48 })
+    assert.equal(w.posted.length, 1)
+    const state = w.posted[0]
+    const c = pixels(scene(parseList(LIST, '11:00').cards), 48, 0)
+    assert.equal(state.picture.columns, 48)
+    assert.deepEqual(state.picture.px, Array.from(c.px, v => v === NONE ? -1 : v))
+    assert.deepEqual(state.aboard.map((a: any) => a.label), ['乗組員', '荷', 'SOS', '桟橋'])
+    assert.equal(state.hidden, false)
+    // the files and messages the script and page need ship in the VSIX's media/
+    for (const f of ['ship.js', 'ship.css']) assert.ok(readdirSync(join(ROOT, 'media')).includes(f))
+  } finally {
+    stop()
+  }
+})
+
+test('船は毎秒数コマ動き、ビューが見えていないときは描き直さず、見えたら最新を送る', async () => {
+  mock.timers.enable({ apis: ['setInterval'] })
+  const { stop, ship, refresh } = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }))
+  try {
+    await refresh()
+    const w = ship()
+    assert.equal(w.posted.length, 1)
+    mock.timers.tick(300)
+    mock.timers.tick(300)
+    assert.equal(w.posted.length, 3)
+    assert.notDeepEqual(w.posted[1].picture.px, w.posted[0].picture.px)
+    w.setVisible(false)
+    mock.timers.tick(3000)
+    await refresh()
+    w.send({ type: 'size', columns: 50 })
+    assert.equal(w.posted.length, 3)
+    w.setVisible(true)
+    assert.equal(w.posted.length, 4)
+    assert.equal(w.posted[3].picture.columns, 50)
+    // the view goes away: nothing more is posted to it
+    w.dispose()
+    mock.timers.tick(3000)
+    assert.equal(w.posted.length, 4)
+  } finally {
+    stop()
+    mock.timers.reset()
+  }
+})
+
+test('船を隠すボタン: globalState に覚え、隠している間は絵を送らず、次に開いても隠れたまま', async () => {
+  mock.timers.enable({ apis: ['setInterval'] })
+  const kept = new Map<string, unknown>()
+  const first = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }), NO_FILES, memento(kept))
+  try {
+    await first.refresh()
+    const w = first.ship()
+    w.send({ type: 'toggle' })
+    await settle()
+    assert.deepEqual(first.globalState.writes, [['taskHub.shipHidden', true]])
+    const last = w.posted.at(-1)
+    assert.deepEqual([last.hidden, last.picture, last.aboard], [true, null, []])
+    const n = w.posted.length
+    mock.timers.tick(3000) // no frames while hidden
+    assert.equal(w.posted.length, n)
+  } finally {
+    first.stop()
+  }
+  const next = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }), NO_FILES, memento(kept))
+  try {
+    await next.refresh()
+    const w = next.ship()
+    assert.deepEqual([w.posted[0].hidden, w.posted[0].picture], [true, null])
+    w.send({ type: 'toggle' })
+    await settle()
+    assert.equal(kept.get('taskHub.shipHidden'), false)
+    assert.equal(w.posted.at(-1).picture.columns, 40)
+  } finally {
+    next.stop()
+    mock.timers.reset()
+  }
+})
+
+test('実績: 解除したら showInformationMessage で 1 回だけ知らせ、globalState に覚え、船の下に並べる', async () => {
+  const kept = new Map<string, unknown>()
+  const metrics = async () => ({ events: '', metrics: METRICS, ini: '' })
+  const first = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }), metrics, memento(kept))
+  try {
+    await first.refresh()
+    const w = first.ship()
+    await first.refresh()
+    await first.refresh()
+    assert.deepEqual(first.seen.messages, ['実績解除: 初航海 claude、初航海 kiro'])
+    assert.deepEqual(first.globalState.writes, [['taskHub.badges', ['first-claude', 'first-kiro']]])
+    assert.deepEqual(w.posted.at(-1).badges.map((b: any) => b.name), ['初航海 claude', '初航海 kiro'])
+  } finally {
+    first.stop()
+  }
+  // the next window: already told, so not again
+  const next = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }), metrics, memento(kept))
+  try {
+    await next.refresh()
+    assert.deepEqual(next.seen.messages, [])
+    assert.deepEqual(next.globalState.writes, [])
+  } finally {
+    next.stop()
+  }
+})
+
+test('実績を globalState に覚えられないときは知らせない(次の更新でまた試す)', async () => {
+  const state = memento()
+  state.fail = true
+  const { seen, stop, refresh } = start(async () => ({ exitCode: 0, stdout: LIST, stderr: '' }),
+    async () => ({ events: '', metrics: METRICS, ini: '' }), state)
+  try {
+    await refresh()
+    assert.deepEqual(seen.messages, [])
+    state.fail = false
+    await refresh()
+    assert.deepEqual(seen.messages, ['実績解除: 初航海 claude、初航海 kiro'])
+  } finally {
+    stop()
+  }
 })
