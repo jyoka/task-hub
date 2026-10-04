@@ -247,7 +247,8 @@ In progress → Ready → Backlog の順に並び、待ち先(`waits_for`)も出
 claude --plugin-dir ~/.local/lib/task-hub/claude/task-board
 ```
 
-- Claude Code 専用です(`claude-code` の API を使います)。Kiro、Codex、Pi では動きません。
+- Claude Code 専用です(`claude-code` の API を使います)。Kiro、Codex、Pi では動きません。Kiro IDE では、同じ表示の拡張
+  ([kiro-ide.md](kiro-ide.md#10-ボードをサイドバーとステータスバーに出す拡張))を使えます。
 - LLM を使いません。1 分ごとに `task list` を実行して表示するだけなので、費用はかかりません。
 - 実行するのは `$HOME/.local/bin/task list` だけです。素の `task` は Ready のカードを開始するので呼びません。
 
