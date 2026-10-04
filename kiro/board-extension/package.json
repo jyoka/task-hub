@@ -1,0 +1,31 @@
+{
+  "name": "task-hub-board",
+  "displayName": "task-hub board",
+  "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す(LLM を使わない)",
+  "version": "0.1.0",
+  "publisher": "jyoka",
+  "private": true,
+  "engines": { "vscode": "^1.90.0" },
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": { "untrustedWorkspaces": { "supported": true } },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{ "id": "taskHub", "title": "task-hub", "icon": "media/board.svg" }]
+    },
+    "views": {
+      "taskHub": [{ "id": "taskHub.board", "name": "ボード" }]
+    },
+    "commands": [
+      { "command": "taskHub.board.refresh", "title": "更新", "category": "task-hub", "icon": "$(refresh)" }
+    ],
+    "menus": {
+      "view/title": [{ "command": "taskHub.board.refresh", "when": "view == taskHub.board", "group": "navigation" }]
+    }
+  },
+  "scripts": {
+    "build": "node --disable-warning=ExperimentalWarning scripts/build.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "package": "node --disable-warning=ExperimentalWarning scripts/package.mjs"
+  }
+}

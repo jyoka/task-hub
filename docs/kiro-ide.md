@@ -16,6 +16,7 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | `kiro/steering/task-hub.md` | `/task` と `/chief` を頼まれたときだけ使う、という約束(steering) |
 | `kiro/hooks/task-hub-events.json` と `kiro/task-events-since` | 話しかけたときに、前回からの出来事をチャットの文脈に足すフック |
 | `kiro/workflows/task-hub-events.workflow.json` と `kiro/task-events-watch` | 話しかけていないときに出来事を待ち、`/chief` のチャットに届けるワークフロー |
+| `kiro/board-extension/` | ボードをサイドバーとステータスバーに出す拡張(VSIX。インストーラは入れません。[10 章](#10-ボードをサイドバーとステータスバーに出す拡張)) |
 
 ### インストーラが行うこと
 
@@ -379,6 +380,9 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 - [ ] **`kiro -n` で新しいウィンドウが開くか**: `kiro -n ~/.local/share/task-hub/worktrees/<番号>` で、今のウィンドウを
   置き換えずに新しいウィンドウで開くか。開くなら `[ide] open = kiro -n {path}` にして、`task open <番号>` で確かめる。
   2026-10-01 の試験では、`kiro -n` も `task open` も未確認
+- [ ] **ボード表示の拡張が動くか**: 10 章の VSIX を入れ、アクティビティバーに task-hub が出るか。カードの並びと
+  ステータスバーの数が `task list` と合うか。Dock から起動した Kiro でも「読めない」にならないか。
+  1 回目の起動で出ないときは、ウィンドウの再読み込みで出るか(tasks#129 の試作では、1 回目に起動しなかった)
 - [ ] **launchd からの無人実行が続くか**: IDE を閉じ、ターミナルも開かずに、スマホからカードを Ready に移して
   In review まで進むか。翌日(ログインし直したあと)も同じように動くか。`kiro-cli whoami` が API キーだけで
   0 になるか、キーチェーンの読み出しで確認のダイアログが出ないか(`~/.local/state/task-hub/watch.err.log` と
@@ -429,3 +433,56 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 **タグは消したり、付け替えたりしません。** 同僚の clone は、手元にあるタグを信じています。付け替えると
 `git fetch --tags` が失敗し(古い版のまま進みます)、同じ名前で中身の違う版が出回ります。直したいときは、
 直したコミットに次の番号のタグを付けます。
+
+## 10. ボードをサイドバーとステータスバーに出す(拡張)
+
+`kiro/board-extension/` は、task-hub のボードを Kiro IDE のサイドバーとステータスバーに出す拡張です。
+Claude Code の mod(`claude/task-board/`)と同じ役割で、`task list` の読み方(`claude/task-board/hooks/parse.ts`)も
+共有しています。インストーラ(`sh kiro/install.sh`)は入れないので、手で入れます。
+
+- アクティビティバーの「task-hub」に、カードを Blocked → In review → wait for merge → In progress → Ready → Backlog
+  の順に並べます。知らない status は末尾です。実行中のカード(`In progress › review` など)は In progress の位置です。
+- 各行に `#番号`、タイトル、status、待ち先(`waits_for`)が出ます。
+- ステータスバーに、0 でない数だけ「task: 実行中1 レビュー待ち3 止まり1」のように出します。押すとボードが開きます。
+- 1 分ごとに読み直します。ビューの上の更新ボタンで、すぐに読み直せます。
+- `task list` が失敗したら、空のボードには見せません。ビューに「読めませんでした: 理由」、ステータスバーに
+  「task: 読めない (理由)」と出します。
+- LLM を使いません。実行するのは `~/.local/bin/task list`(ホームを展開した絶対パス)だけです。
+  素の `task` は Ready のカードを開始するので呼びません。
+- 使うのは VS Code の拡張 API だけです。VS Code でも動くはずですが、確かめていません。
+
+### VSIX を作る
+
+Node.js 22.18 以上か 23.6 以上が要ります。TypeScript の型を外すのを Node に任せているためです。
+依存がないので、`npm install` は要りません。
+
+```
+cd ~/.local/lib/task-hub/kiro/board-extension
+npm test
+npm run package
+```
+
+インストーラが入れた clone は `kiro-v*` のタグの版です(9 章)。そのタグに `kiro/board-extension/` がまだなければ、
+main を追う開発用の clone で作ります。
+
+`npm run package` は、`out/` にビルドしてから `task-hub-board-<版>.vsix` を `package.json` の隣に書き出します。
+`vsce` は使わず、`zip` で固めます(macOS には `/usr/bin/zip` があります)。Node のない Mac では、ほかの Mac で
+作った `.vsix` を使えます。
+
+### 入れる
+
+会社の Mac では、入れる前に tasks#129 の「本人が確かめること」(Kiro の版、構成プロファイルの `AllowedExtensions` /
+`ExtensionGalleryServiceUrl`、社内規程)を済ませてください。
+
+次のどちらかで入れます。管理者権限は要りません。
+
+- Kiro の拡張ビュー(Extensions)の上にある「…」メニューから「Install from VSIX...」を選び、作った `.vsix` を選ぶ
+- ターミナルで `--install-extension` を使う:
+
+  ```
+  kiro --install-extension ~/.local/lib/task-hub/kiro/board-extension/task-hub-board-0.1.0.vsix
+  ```
+
+入れたあと、アクティビティバーに task-hub が出なければ、コマンド「Developer: Reload Window」で再読み込みします。
+task-hub を更新したら、作り直して入れ直します(同じ版なら `kiro --install-extension <vsix> --force`)。
+外すときは、拡張ビューでアンインストールするか、`kiro --uninstall-extension jyoka.task-hub-board` を実行します。
