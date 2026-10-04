@@ -30,6 +30,23 @@
   `still running` で断るので、急ぐときはそのタブで Ctrl-C してから実行します。
 - エージェントに伝えた内容: `~/.local/share/task-hub/prompts/<番号>.md`。
 
+### ボードを隣のペインに出し続ける(`task list --watch`)
+
+`task list --watch` は、`task list` と同じ一覧を 1 分ごとに描き直し続けます。エージェントの隣のペイン(herdr、tmux、
+ターミナルの別の窓)で動かしておけば、Claude Code でも kiro-cli でも、どのエージェントの横でも同じようにボードが見えます。
+herdr なら、エージェントのペインを右に分けて(`herdr pane split --current --direction right` でも分けられます)、
+新しいペインで次を実行します。
+
+```sh
+task list --watch
+```
+
+- 読み取り専用です。`task list` と同じく、カードの開始・移動・同期はしません。Ready のカードを自動で始めるのは
+  `task watch` です
+- 端末では画面を消して描き直し、見出しに最終更新の時刻を出します。前の回から status 列が変わった行は太字の黄色で出ます
+- パイプやファイルに流すと、ANSI の色や画面の消去を使わず、`== <時刻>` の行と `task list` と同じ行を毎回追記します
+- GitHub のエラーでは止まりません。`error:` の行を出して、次の回にまた読みます。止めるときは Ctrl-C です
+
 ## 起きたことを受け取る(events.jsonl)
 
 task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
