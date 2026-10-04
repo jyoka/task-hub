@@ -1,0 +1,1 @@
+{ "name": "task-board", "version": "0.1.0", "description": "task-hub のボードを task list から読んで、ステータスラインとペインに出す(LLM を使わない)", "types": "./types/index.d.ts" }
