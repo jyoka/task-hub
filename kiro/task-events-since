@@ -1,5 +1,5 @@
 #!/bin/sh
-# Kiro IDE Prompt Submit hook: adds what task-hub did since the last prompt (In review, Blocked, replan, Done)
+# Kiro IDE Prompt Submit hook: adds what task-hub did since the last prompt (In review, Blocked, replan, Done, slow)
 # to the agent's context. Install: mkdir -p ~/.kiro/hooks &&
 #   ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
 # It always exits 0: a failing Prompt Submit hook would block the prompt. On failure it prints one note at most.
@@ -13,7 +13,7 @@ case "$cursor" in
   *) first= ;;
 esac
 
-if ! out=$("$task" events --after "$cursor" --digest --only "In review,Blocked,replan,Done" 2>/dev/null); then
+if ! out=$("$task" events --after "$cursor" --digest --only "In review,Blocked,replan,Done,slow" 2>/dev/null); then
   echo "task-hub: could not read events (\`$task events\` failed)"
   exit 0
 fi

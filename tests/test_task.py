@@ -2070,6 +2070,84 @@ class TaskTest(unittest.TestCase):
         self.assertIn('heaviest[2]{id,title,tokens,calls,subagent_calls}:\n'
                       '  "1",Claude,10000,10,0\n  "5",Both,10000,10,0', out)
 
+    # --- runs that take longer than usual ---
+
+    def slow_events(self):
+        path = self.root / ".local/state/task-hub/events.jsonl"
+        return [e for e in map(json.loads, path.read_text().splitlines()) if e["event"] == "slow"] \
+            if path.exists() else []
+
+    def test_a_long_run_gets_one_slow_event_and_a_rerun_can_get_another(self):
+        self.env["TASK_SLOW_SECONDS"] = "1"
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.wait_for(lambda: "waiting" in self.task("log", tid))
+        time.sleep(1.5)
+        self.assertIn(f"slow: task {tid} running 0 min", self.task())
+        self.assertEqual(len(self.slow_events()), 1)
+        line = self.task("events", "--only", "slow").strip()
+        self.assertEqual(line, f"event: #{tid} slow | Add hello | jyoka/app | reason running 0 min, "
+                               "no usual time for fake yet (under 3 finished runs, so 30 min)")
+        self.wait_for(lambda: self.notifications())  # shown by default: the human learns of it without /chief
+        self.assertEqual(self.notifications()[-1][-2:], [f"#{tid} slow: Add hello", "reason: running 0 min, no usual "
+                                                         "time for fake yet (under 3 finished runs, so 30 min)\n"
+                                                         "stop it with Ctrl-C in its tab, if you want; task-hub never does"])
+        self.assertIn("slow: 1 run(s) got a `slow` event", self.task("stats"))  # before any run has finished
+        self.assertNotIn("slow:", self.task())  # the next check: already told
+        self.assertEqual(len(self.slow_events()), 1)
+        os.kill(int(self.run_state(tid)["pid"]), signal.SIGINT)  # the human stops it
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.task()
+        self.assertEqual(len(self.slow_events()), 1)  # no longer In progress
+        time.sleep(1.1)  # the re-run starts in a later second than the first slow event
+        self.task("start", tid)
+        time.sleep(1.5)
+        self.assertIn(f"slow: task {tid}", self.task())  # a re-run is a new run
+        self.assertEqual(len(self.slow_events()), 2)
+        self.assertIn("slow: 2 run(s) got a `slow` event", self.task("stats"))
+
+    def test_slow_is_only_for_live_in_progress_runs_and_never_writes_the_run_file(self):
+        live, dead, review = self.new(), self.new(), self.new()
+        self.fake_running(live)  # started months ago: far past the 30 min of an agent without history
+        proc = self.fake_running(dead)
+        proc.kill()
+        proc.wait()
+        self.fake_running(review)
+        self.move(review, "In review")
+        before = self.run_file(live).read_text()
+        self.task()
+        self.assertEqual([e["id"] for e in self.slow_events()], [live])
+        self.assertEqual(self.status(dead), "Blocked")
+        self.assertEqual(self.run_file(live).read_text(), before)  # the run's own process writes that file
+
+    def test_slow_threshold_is_three_times_the_agents_median_at_least_15_min_else_30_min(self):
+        tid = self.new()
+        self.fake_running(tid)
+        metrics = self.root / ".local/state/task-hub/metrics.jsonl"
+        events = self.root / ".local/state/task-hub/events.jsonl"
+
+        def slow_after(minutes, runs):
+            """The slow reason for a run started `minutes` ago, with these finished runs on record, or None."""
+            metrics.write_text("".join(json.dumps(r) + "\n" for r in runs))
+            events.unlink(missing_ok=True)
+            started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - minutes * 60))
+            self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "started": started}))
+            self.task()
+            found = self.slow_events()
+            return found[0]["reason"] if found else None
+
+        fake = lambda *minutes: [{"agent": "fake", "seconds": m * 60, "status": "In review"} for m in minutes]
+        noise = [{"agent": "kiro", "seconds": 60, "status": "In review"}] * 3 + \
+                [{"agent": "fake", "seconds": 0, "status": "Blocked", "blocked_by": "start"}] * 3 + \
+                [{"agent": "fake", "seconds": 5, "status": "Blocked", "blocked_by": "setup"}] * 3
+        self.assertIsNone(slow_after(25, fake(1, 1) + noise))  # two runs of its own (start and setup failures never ran it)
+        self.assertEqual(slow_after(35, fake(1, 1) + noise),
+                         "running 35 min, no usual time for fake yet (under 3 finished runs, so 30 min)")
+        self.assertIsNone(slow_after(12, fake(1, 2, 3)))  # 3 x 2 min is under the 15 min floor
+        self.assertEqual(slow_after(18, fake(1, 2, 3)), "running 18 min, usually 2 min for fake")
+        self.assertIsNone(slow_after(28, fake(5, 10, 40)))  # 3 x the median 10 min
+        self.assertEqual(slow_after(32, fake(5, 10, 40) + noise), "running 32 min, usually 10 min for fake")
+
     def test_research_task_report_without_changes_goes_to_in_review_without_a_pr(self):
         tid = self.new("nochange", "Compare search libraries", "jyoka/app", "--research")
         self.assertEqual(self.gh()["issues"][tid]["labels"], [{"name": "research"}])

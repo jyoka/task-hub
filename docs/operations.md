@@ -48,7 +48,7 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 待てない呼び出し側には、`--next` を付けない `task events --after <n>` があります。`<n>` 行目より後の出来事を出し、
 最後に `next: task events --after <m> ...` の行を出して、**待たずに** 終わります(出来事がなくても `next:` の行は出し、
 コード 0 で終わります)。`--only` と `--digest` もそのまま使えます。Kiro IDE の Prompt Submit フック
-(`kiro/task-events-since`)はこれを使い、話しかけるたびに前回からの In review、Blocked、replan、Done を文脈に足します。
+(`kiro/task-events-since`)はこれを使い、話しかけるたびに前回からの In review、Blocked、replan、Done、slow を文脈に足します。
 Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを使い、`next:` の番号を Workflows のカーソルにします。
 
 ```json
@@ -58,8 +58,14 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan` です。`reason`(Blocked の 1 行)、`pr`、`decision`、`digest` は、あるときだけ入ります。マシンごとのファイルで、
-そのマシンの task-hub が動かしたものだけが書かれます。
+`replan`、実行がいつもより長引いているときの `slow` です。`reason`(Blocked の 1 行、`slow` では
+`running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
+入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
+
+`slow` は、`task` の同期(`task watch` なら 1 分ごと)が、このマシンで生きている In progress の実行に 1 回だけ出します。
+しきい値は、そのエージェントの終わった実行の所要時間の中央値の 3 倍で、最低 15 分、終わった実行が 3 件未満なら
+30 分です。設定はありません。task-hub は実行を止めません。止めるなら herdr のそのタスクのタブで Ctrl-C です
+(途中までの変更は push され、カードは Blocked になります)。
 
 ### 判断用の要点(digest)
 
@@ -109,7 +115,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done   ; 既定。列の名前か replan をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow   ; 既定。列の名前か replan、slow をカンマ区切りで。空にすると通知しない
 ```
 
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
@@ -120,7 +126,7 @@ events = In review, Blocked, replan, Done   ; 既定。列の名前か replan �
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
 件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定、
-PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
+`slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
 

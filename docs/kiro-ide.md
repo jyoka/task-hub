@@ -195,7 +195,7 @@ mkdir -p ~/.kiro/steering && ln -sfn ~/.local/lib/task-hub/kiro/steering/task-hu
 
 ## 5. フックとワークフロー(出来事をチャットで知る)
 
-In review、Blocked、replan、Done は、何もしなくても macOS の通知で届きます([operations.md](operations.md#通知llm-なし))。
+In review、Blocked、replan、Done、slow は、何もしなくても macOS の通知で届きます([operations.md](operations.md#通知llm-なし))。
 次の 2 つを入れると、IDE のチャットでも知れます。どちらも `task events --after <番号>` を読むだけで、`task` が
 PATH になければ `~/.local/lib/task-hub/bin/task` を使います。
 
