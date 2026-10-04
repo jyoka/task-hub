@@ -243,7 +243,9 @@ draft でないかを確かめ、マージできなければ理由を伝えま�
 
 `claude/task-board/` は、ボードをステータスライン(「task: 実行中1 レビュー待ち3 止まり1」)とペインに出す
 Claude Code の mod です。`/task-board` でペインを開くと、「要対応」(Blocked → In review → wait for merge)と
-「実行中」を枠で囲んで列ごとの色で出し、Ready と Backlog は件数の 1 行に畳みます。各カードには repo のタグと待ち先
+「実行中」、「待ち」(Ready)、「Backlog」を枠で囲んで、列ごとの色で出します。見出しの ▸ / ▾ で、どのグループも番号だけの
+1 行に畳んだり開いたりでき、次のセッションでも覚えています(初めは Kiro 版と同じく、Backlog と知らない status の
+「その他」だけ畳んでいます)。各カードには repo のタグと待ち先
 (`waits_for`)が付き、実行中のカードには段階(`review` など)と経過時間 / 普段の時間、In review には判定と PR のリンク、
 Blocked には理由が 1 行出ます。
 
