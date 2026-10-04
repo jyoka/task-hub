@@ -190,7 +190,7 @@ done
 
 | エージェント | 呼び方 | 補足 |
 |---|---|---|
-| Claude Code | `/task`、`/chief` | |
+| Claude Code | `/task`、`/chief` | 会話で「タスクにして」と頼んでも `/task` が動きます。`/chief` は打ったときだけです |
 | Pi | `/skill:task`、`/skill:chief` | Pi はスキルを `/skill:<名前>` で呼びます。入れたばかりなら `/reload` |
 | Codex | `$task`、`$chief`(または `/skills` から選ぶ) | スキルの `agents/openai.yaml` で、頼まれたときだけ使うようにしています |
 | Kiro | `/task`、`/chief` | 既定のエージェントでは自動で読み込まれます。カスタムエージェントでは `resources` に `skill://` で足す必要があります |
