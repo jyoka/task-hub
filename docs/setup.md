@@ -239,9 +239,10 @@ draft でないかを確かめ、マージできなければ理由を伝えま�
 ### ボードを見るだけなら(Claude Code の task-board mod)
 
 `claude/task-board/` は、ボードをステータスライン(「task: 実行中1 レビュー待ち3 止まり1」)とペインに出す
-Claude Code の mod です。`/task-board` でペインを開くと、Blocked → In review → wait for merge(使っていれば)→
-In progress → Ready → Backlog の順に並び、待ち先(`waits_for`)も出ます。実行中のカード(`In progress › review`
-など)は In progress の位置に並びます。起動するときに読み込みます:
+Claude Code の mod です。`/task-board` でペインを開くと、「要対応」(Blocked → In review → wait for merge)と
+「実行中」を枠で囲んで列ごとの色で出し、Ready と Backlog は件数の 1 行に畳みます。各カードには repo のタグと待ち先
+(`waits_for`)が付き、実行中のカードには段階(`review` など)と経過時間 / 普段の時間、In review には判定と PR のリンク、
+Blocked には理由が 1 行出ます。起動するときに読み込みます:
 
 ```
 claude --plugin-dir ~/.local/lib/task-hub/claude/task-board
@@ -251,6 +252,7 @@ claude --plugin-dir ~/.local/lib/task-hub/claude/task-board
   ([kiro-ide.md](kiro-ide.md#10-ボードをサイドバーとステータスバーに出す拡張))を使えます。
 - LLM を使いません。1 分ごとに `task list` を実行して表示するだけなので、費用はかかりません。
 - 実行するのは `$HOME/.local/bin/task list` だけです。素の `task` は Ready のカードを開始するので呼びません。
+- 経過時間・判定・理由は、手元の `~/.local/state/task-hub/events.jsonl` と `metrics.jsonl`(と `config.ini` の `[runner] agent`)を読むだけで出します。LLM も GitHub も使いません。ファイルがないときや 4 MiB を超えるときは、その部分が出ないだけです。
 
 mod の API は early access で、Claude Code のリリースごとに変わることがあります(Claude Code 2.1.289 で確認、
 2026-10-04)。読み込むと `.claude-plugin/types/` に型が書き出されますが、コミットしません(`.gitignore` 済み)。

@@ -3170,5 +3170,24 @@ class TaskTest(unittest.TestCase):
         self.assertIn("gone", self.task("open", "10", code=1))
 
 
+class SlowThresholdTableTest(unittest.TestCase):
+    """The task-board mod works out the usual time in TypeScript (claude/task-board/hooks/panel.ts slowThreshold);
+    both sides are held to the same table, so they cannot drift apart."""
+
+    def test_slow_threshold_matches_the_task_board_table(self):
+        cases = BIN.parent.parent / "claude" / "task-board" / "hooks" / "slow-threshold.cases.ts"
+        table = json.loads(cases.read_text().split("export const CASES =", 1)[1])
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        with tempfile.TemporaryDirectory() as d:
+            metrics = Path(d) / "metrics.jsonl"
+            metrics.write_text("\n".join(table["metrics"]) + "\n")
+            env = {k: v for k, v in os.environ.items() if k != "TASK_SLOW_SECONDS"}
+            with unittest.mock.patch.object(task, "METRICS", metrics), unittest.mock.patch.dict(os.environ, env, clear=True):
+                for agent, (limit, usual) in table["cases"].items():
+                    self.assertEqual(task.slow_threshold(agent), (limit, usual), agent)
+
+
 if __name__ == "__main__":
     unittest.main()
