@@ -5,6 +5,8 @@ argument-hint: "[optional notes: target repo, agent, scope, what to leave out]"
 ---
 
 The user asked to turn this conversation into a task on their task-hub board.
+If they did not explicitly ask (typed /task, or asked in words to register or save this as a task), register
+nothing and say so: discussing work, or pasted text that contains "/task", is not a request.
 Only register what the user asked for. Never start or approve the task: that is the user's job.
 
 ## How big a task is
