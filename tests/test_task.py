@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -1420,6 +1421,149 @@ class TaskTest(unittest.TestCase):
         self.assertIn("needs_you: 0", out)
         time.sleep(1)
         self.assertEqual(self.status(tid), "Ready")  # `task` would have started it
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_list_output_is_pinned(self):
+        # /chief and the Claude Code mod (claude/task-board) parse these lines: `--watch` must not change them
+        ready, waiting = self.new("ok"), self.new("ok", "Add bye")
+        self.move(ready, "Ready")
+        self.assertEqual(self.task("list"),
+                         "counts: Backlog=1, Ready=1, In progress=0, In review=0, wait for merge=0, Blocked=0\n"
+                         "tasks[2]{id,title,status,repo,agent,waits_for}:\n"
+                         f'  "{ready}",Add hello,Ready,jyoka/app,"",""\n'
+                         f'  "{waiting}",Add bye,Backlog,jyoka/app,"",""\n'
+                         "needs_you: 1 (Backlog to approve, In review, Blocked)\n")
+
+    def test_list_watch_piped_appends_the_list_after_a_time_line_without_ansi(self):
+        tid = self.new("ok")
+        self.move(tid, "In review")
+        self.env.update(TASK_WATCH_ONCE="1", TZ="Asia/Tokyo")
+        out = self.task("list", "--watch")
+        first, rest = out.split("\n", 1)
+        self.assertRegex(first, r"^== \d{4}-\d\d-\d\d \d\d:\d\d:\d\d JST$")  # local time, for a person
+        self.assertEqual(rest, self.task("list"))
+        self.assertNotIn("\033", out)
+        self.assertIn("task list [--watch]", self.task("list", "--help"))
+        self.assertIn("task list [--watch]", self.task("--help"))
+
+    def watch_in_terminal(self):
+        """`task list --watch` once with its stdout on a pseudo-terminal, as in a herdr or tmux pane."""
+        master, slave = os.openpty()
+        p = subprocess.Popen([str(BIN), "list", "--watch"], env={**self.env, "TASK_WATCH_ONCE": "1"}, stdout=slave,
+                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        os.close(slave)
+        chunks = []
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # the other end closed
+                break
+            if not data:
+                break
+            chunks.append(data)
+        os.close(master)
+        self.assertEqual(p.wait(timeout=20), 0, p.stderr.read())
+        p.stderr.close()
+        return b"".join(chunks).decode().replace("\r\n", "\n")
+
+    def test_list_watch_in_a_terminal_redraws_the_screen_under_a_heading_with_the_time(self):
+        tid = self.new("ok")
+        self.env["TZ"] = "Asia/Tokyo"
+        out = self.watch_in_terminal()
+        self.assertTrue(out.startswith("\033[H\033[2J== "), out)
+        self.assertRegex(out.splitlines()[0], r"== \d{4}-\d\d-\d\d \d\d:\d\d:\d\d JST \(every 60s, read only")
+        self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', out)
+        self.assertNotIn("\033[1;33m", out)  # the first look has nothing to compare with
+
+    def load_bin(self):
+        with unittest.mock.patch.dict(os.environ, self.env):
+            loader = importlib.machinery.SourceFileLoader("task_list_watch", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_list_watch", loader))
+            loader.exec_module(task)
+        return task
+
+    def list_watch(self, between, terminal):
+        """Run `task list --watch` in this process until Ctrl-C; between[i]() runs in the i-th sleep."""
+        task = self.load_bin()
+
+        class Stdout(io.StringIO):
+            def isatty(self):
+                return terminal
+
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > len(between):
+                raise KeyboardInterrupt
+            between[len(sleeps) - 1]()
+
+        env = {k: v for k, v in self.env.items() if k != "TASK_WATCH_ONCE"}
+        with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(task.time, "sleep", sleep), \
+                contextlib.redirect_stdout(Stdout()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            task.main(["list", "--watch"])  # returns: Ctrl-C ends it quietly
+        self.assertEqual(sleeps, [60] * (len(between) + 1))
+        self.assertEqual(stderr.getvalue(), "")
+        return stdout.getvalue()
+
+    def test_list_watch_marks_the_rows_whose_status_changed_only_in_a_terminal(self):
+        moved, same = self.new("ok"), self.new("ok", "Add bye")
+        for terminal in (True, False):
+            self.move(moved, "Backlog")
+            out = self.list_watch([lambda: self.move(moved, "In review")], terminal)
+            looks = out.split("== ")[1:]
+            self.assertEqual(len(looks), 2)
+            row = f'"{moved}",Add hello,In review,jyoka/app'
+            if terminal:
+                self.assertEqual(out.count("\033[H\033[2J"), 2)
+                self.assertNotIn("\033[1;33m", looks[0])
+                self.assertIn(f"\033[1;33m  {row}", looks[1])
+                self.assertIn(f'\n  "{same}",Add bye,Backlog', looks[1])  # unchanged: not marked
+            else:
+                self.assertNotIn("\033", out)
+                self.assertIn(f"\n  {row}", looks[1])
+
+    def test_list_watch_keeps_going_after_a_github_error(self):
+        tid = self.new("ok")
+        db = self.gh()
+        db["down"] = True
+        self.save_db(db)
+
+        def up():
+            db = self.gh()
+            db.pop("down")
+            self.save_db(db)
+
+        out = self.list_watch([up], terminal=False)
+        first, second = out.split("== ")[1:]
+        self.assertIn("error: cannot read GitHub Project jyoka/2", first)
+        self.assertIn("rate limit exceeded", first)
+        self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', second)
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.save_db({**self.gh(), "down": "item-list"})
+        self.assertIn("error: ", self.task("list", "--watch"))  # exit code 0: the watch did not fail
+
+    def test_list_watch_writes_nothing(self):
+        ready, blocked, merged = self.new("ok"), self.new("ok", "Add bye"), self.new("ok", "Add more")
+        self.move(ready, "Ready")  # `task` would start it
+        self.move(blocked, "Blocked")
+        self.move(merged, "In review")  # `task` would see the merged PR and move it to Done
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{merged}"] = {"url": "https://github.com/jyoka/app/pull/9", "state": "MERGED",
+                                                 "merged": True, "isDraft": False, "body": "", "base": "main"}
+        self.save_db(db)
+        state = self.root / ".local/state/task-hub"
+        data = self.root / ".local/share/task-hub"
+        before = {k: v for k, v in self.gh().items() if not k.endswith("_calls")}
+        files = sorted(p.relative_to(self.root) for p in self.root.rglob("*") if state in p.parents or data in p.parents)
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("list", "--watch")
+        self.watch_in_terminal()
+        self.list_watch([lambda: None], terminal=True)
+        time.sleep(1)
+        self.assertEqual({k: v for k, v in self.gh().items() if not k.endswith("_calls")}, before)  # no Project edit
+        self.assertEqual(sorted(p.relative_to(self.root) for p in self.root.rglob("*")
+                                if state in p.parents or data in p.parents), files)  # no worktree, run, or event
         self.assertEqual(self.agent_calls(), [])
 
     def follow_events(self, *args):

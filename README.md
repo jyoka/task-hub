@@ -167,7 +167,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | コマンド | すること |
 |---|---|
 | `task` | ボードと同期し、Ready のカードを始め、あなたの対応が必要なものを出す |
-| `task list` | 開いているカードの一覧(読むだけで、何も始めない) |
+| `task list [--watch]` | 開いているカードの一覧(読むだけで、何も始めない)。`--watch` は 1 分ごとに描き直し続ける(エージェントの隣のペイン向け。[docs/operations.md](docs/operations.md)) |
 | `task new --title ... --repo owner/name (--goal ... \| --goal-file ...)` | タスクを登録する。`--base`、`--agent`、`--research`、`--blocked-by 12,14` |
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、または Blocked を再実行する。番号なしなら一覧から選ぶ |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
