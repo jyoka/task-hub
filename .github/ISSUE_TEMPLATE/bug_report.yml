@@ -1,0 +1,66 @@
+# `task feedback` opens this form with version and os filled in from the URL (bin/task cmd_feedback):
+# keep those ids as they are
+name: バグ報告
+description: task-hub が思ったとおりに動かない
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `task feedback` で開くと、版と OS が入った状態でこのフォームが開きます。
+        使い方の質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ。
+        脆弱性はここに書かず、[SECURITY.md](https://github.com/jyoka/task-hub/blob/main/SECURITY.md) の手順で知らせてください。
+  - type: input
+    id: version
+    attributes:
+      label: 版
+      description: "`task --version` の出力"
+      placeholder: 0.6.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: OS とその版。Windows なら WSL か、そうでないかも
+      placeholder: macOS 26.0 arm64, Python 3.12.1
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: エージェント
+      description: "`[runner] agent` に書いているもの(claude、codex、pi、kiro など)と、その版"
+      placeholder: claude 2.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 実行したコマンドやボードの操作を、順番に
+      placeholder: |
+        1. `task new --title "..." --repo owner/app --goal "..."`
+        2. カードを Ready に移す
+        3. `task watch` で始まる
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した動き
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動き
+      description: エラーの文面や、カードがどの列で止まったか
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: task log の出力(任意)
+      description: "`task log <番号>`(全部なら `--full`)の出力。トークン、社内のリポジトリ名やパスなど、公開したくないものは消してから貼ってください"
+      render: text
