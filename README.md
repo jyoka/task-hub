@@ -178,6 +178,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す。列の移動のほか、いつもより長引いている実行の `slow`(経過時間といつもの時間付き、1 回だけ)も出る |
 | `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、`slow` が出た実行の数、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
+| `task update` | task-hub を最新のリリースに更新する(launchd の `task watch` の再起動、Kiro IDE の定義のコピーし直しも)。新しい版は `task list` と `task watch` が 1 行で知らせる |
 
 ## 設定
 
@@ -230,6 +231,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 | 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
 | 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
+| task-hub の新しい版を確かめた結果(1 日 1 回まで) | `~/.local/state/task-hub/update.json` |
 
 ## リポジトリの中身
 
@@ -251,9 +253,9 @@ tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windo
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
 
-`task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。PR をマージしたら
-`git -C ~/.local/lib/task-hub pull --ff-only` で更新します(Kiro IDE の Workflows を使っているなら、ワークフローの
-定義もコピーし直します。[docs/setup.md](docs/setup.md#インストール))。
+`task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。新しい版が出ると `task list` と
+`task watch` が 1 行で知らせるので、`task update` で更新します(clone を最新のリリースまで進め、launchd の
+`task watch` の再起動と Kiro IDE の定義のコピーし直しもまとめて行います。[docs/setup.md](docs/setup.md#インストール))。
 
 ## ドキュメント
 
