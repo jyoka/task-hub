@@ -1,12 +1,13 @@
 import type { Card, Detail, Details } from '../types'
 import { base, byColumn } from './parse'
 
-// The pane's groups, in board order. Ready, Backlog and columns the mod does not know fold into one line each.
+// The pane's groups, in board order. Each folds to one line when its heading is pressed; Backlog and columns the mod
+// does not know start folded, as in the Kiro view (kiro/board-extension/src/board.ts FOLDED).
 export type Group = { key: string; label: string; cards: Card[]; folded: boolean }
 const GROUPS: { key: string; label: string; columns: string[]; folded: boolean }[] = [
   { key: 'needs-you', label: '要対応', columns: ['Blocked', 'In review', 'wait for merge'], folded: false },
   { key: 'running', label: '実行中', columns: ['In progress'], folded: false },
-  { key: 'ready', label: '待ち', columns: ['Ready'], folded: true },
+  { key: 'ready', label: '待ち', columns: ['Ready'], folded: false },
   { key: 'backlog', label: 'Backlog', columns: ['Backlog'], folded: true },
 ]
 export const groups = (cards: Card[]): Group[] => {
@@ -18,6 +19,8 @@ export const groups = (cards: Card[]): Group[] => {
     { key: 'other', label: 'その他', folded: true, cards: sorted.filter(c => !known.includes(base(c.status))) },
   ].filter(g => g.cards.length > 0)
 }
+// Which groups are folded: the keys the person left folded, once they pressed a heading; until then, the defaults.
+export const isFolded = (g: Group, chosen: string[] | null): boolean => chosen === null ? g.folded : chosen.includes(g.key)
 
 // Colors by column; a running card's stage (`In progress › review`) is its own small label.
 export const STATUS_COLORS: Record<string, string> = {

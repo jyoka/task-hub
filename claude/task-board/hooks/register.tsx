@@ -5,7 +5,7 @@ import type { Board, Card, Details } from '../types'
 import { BADGES, earned, fresh } from './badges'
 import { base, failure, parseList, summary } from './parse'
 import {
-  STATUS_COLORS, cells, clip, details, elapsedText, groups, prLabel, repoTag, stage, verdictColor,
+  STATUS_COLORS, cells, clip, details, elapsedText, groups, isFolded, prLabel, repoTag, stage, verdictColor,
 } from './panel'
 import type { Figure, Scene } from './ship'
 import { ROWS, TILT_WORDS, cells as shipCells, deck, drop, scene } from './ship'
@@ -15,6 +15,7 @@ const board = atom({ plugin: 'task-board', key: 'board' } as const, null as Boar
 const extra = atom({ plugin: 'task-board', key: 'details' } as const, {} as Details)
 const shipHidden = atom({ plugin: 'task-board', key: 'shipHidden' } as const, false)
 const badges = atom({ plugin: 'task-board', key: 'badges' } as const, [] as string[])
+const folded = atom({ plugin: 'task-board', key: 'folded' } as const, null as string[] | null)
 
 // $.store: what the person chose and what they unlocked, kept across sessions. A choice that cannot be read is unset.
 const stored = ($: EngineInterface, key: string): Promise<unknown> => $.store.get(key).catch(() => undefined)
@@ -86,6 +87,9 @@ async function refresh($: EngineInterface): Promise<void> {
   $.ui.status(summary(next))
   const hidden = (await stored($, 'shipHidden')) === true
   if (hidden !== await read($, shipHidden)) await update($, shipHidden, () => hidden)
+  const chosen = await stored($, 'folded')
+  const keys = Array.isArray(chosen) ? ids(chosen) : null
+  if (JSON.stringify(keys) !== JSON.stringify(await read($, folded))) await update($, folded, () => keys)
   await judge($, metrics)
 }
 
@@ -116,6 +120,7 @@ export const register: Register = on => {
     const more = await read($, extra)
     const hidden = await read($, shipHidden)
     const unlocked = await read($, badges)
+    const chosen = await read($, folded)
     const refreshButton = <Button key="refresh" label="今すぐ更新" onPress={() => refresh($)} />
     if (!b) return <Box><Text dimColor>読み込み中... </Text>{refreshButton}</Box>
     const columns = Math.max(24, e.props.bodyColumns ?? e.viewport?.columns ?? 60)
@@ -238,22 +243,42 @@ export const register: Register = on => {
         {!hidden && b.error === '' && shipView()}
         {b.error !== '' && <Text color="red">読めませんでした: {b.error}</Text>}
         {b.cards.length === 0 && b.error === '' && <Text dimColor>開いているカードはありません。</Text>}
-        {groups(b.cards).map(g => {
-          const head = <Text bold>{g.label} <Text dimColor>{g.cards.length}</Text></Text>
-          if (g.folded) {
+        {groups(b.cards).map((g, _, all) => {
+          // The heading folds and unfolds its group; the choice is kept for the next session.
+          const shut = isFolded(g, chosen)
+          const fold = async () => {
+            const next = await update($, folded, keys => {
+              const now = all.filter(x => isFolded(x, keys)).map(x => x.key)
+              return now.includes(g.key) ? now.filter(k => k !== g.key) : [...now, g.key]
+            })
+            await $.store.set('folded', next).catch(() => {})
+          }
+          const head = (
+            <Box key={`head-${g.key}`} flexDirection="row">
+              <Button key={`fold-${g.key}`} plain dimColor label={shut ? '▸' : '▾'} onPress={fold} />
+              <Text> </Text>
+              <Text bold>{g.label} <Text dimColor>{g.cards.length}</Text></Text>
+            </Box>
+          )
+          if (shut) {
             const ids = g.cards.map(c => `#${c.id}`).join(' ')
             return (
-              <Box key={g.key} paddingX={2}>
-                <Text wrap="truncate-end">{head}{'  '}<Text dimColor>{clip(ids, Math.max(8, columns - 4 - cells(g.label) - 6))}</Text></Text>
+              <Box key={g.key} flexDirection="row" paddingX={2}>
+                {head}
+                <Text dimColor wrap="truncate-end">{'  '}{clip(ids, Math.max(8, columns - 4 - cells(g.label) - 8))}</Text>
               </Box>
             )
           }
           const running = g.key === 'running'
+          // Backlog and Ready need no column label: the heading says it. A running card shows its stage instead.
           const pad = running
             ? Math.max(0, ...g.cards.map(c => stage(c.status) === '' ? 0 : cells(stage(c.status)) + 2))
+            : g.key === 'backlog' || g.key === 'ready' ? 0
             : Math.max(...g.cards.map(c => cells(base(c.status))))
+          const border = running ? 'cyan' : g.cards.some(c => c.status === 'Blocked') ? 'red'
+            : g.key === 'needs-you' ? 'yellow' : 'gray'
           return (
-            <Box key={g.key} flexDirection="column" borderStyle="round" borderColor={running ? 'cyan' : g.cards.some(c => c.status === 'Blocked') ? 'red' : 'yellow'} paddingX={1}>
+            <Box key={g.key} flexDirection="column" borderStyle="round" borderColor={border} paddingX={1}>
               {head}
               {g.cards.map(c => card(c, pad))}
             </Box>
