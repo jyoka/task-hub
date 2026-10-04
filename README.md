@@ -248,7 +248,7 @@ kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステ�
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
-docs/                  セットアップ、エージェント、設計、形式、運用、教訓
+docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
 
 `task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。PR をマージしたら
@@ -265,5 +265,6 @@ docs/                  セットアップ、エージェント、設計、形式
 - [docs/task-format.md](docs/task-format.md): Issue、Blocked by と Ready conditions、レポートファイル、コメント、PR の形式
 - [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順
 - [docs/operations.md](docs/operations.md): 実行の見守り、herdr のタブ、events と stats、トラブルシューティング、後片付け
+- [docs/release.md](docs/release.md): 版の付け方(semver とタグ `v<VERSION>`)、リリースの手順、リリースノートの型
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
 - [docs/lessons.md](docs/lessons.md): 作って試してわかったこと、まだ確かめていないこと
