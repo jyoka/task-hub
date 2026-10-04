@@ -53,7 +53,7 @@ export const clip = (s: string, width: number): string => {
 }
 
 // One JSON object per line; a line that is not one (cut off mid-write, hand-edited) is skipped.
-const jsonLines = (text: string): Record<string, unknown>[] =>
+export const jsonLines = (text: string): Record<string, unknown>[] =>
   text.split('\n').flatMap(line => {
     try {
       const v: unknown = JSON.parse(line)

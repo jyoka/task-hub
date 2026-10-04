@@ -242,7 +242,19 @@ draft でないかを確かめ、マージできなければ理由を伝えま�
 Claude Code の mod です。`/task-board` でペインを開くと、「要対応」(Blocked → In review → wait for merge)と
 「実行中」を枠で囲んで列ごとの色で出し、Ready と Backlog は件数の 1 行に畳みます。各カードには repo のタグと待ち先
 (`waits_for`)が付き、実行中のカードには段階(`review` など)と経過時間 / 普段の時間、In review には判定と PR のリンク、
-Blocked には理由が 1 行出ます。起動するときに読み込みます:
+Blocked には理由が 1 行出ます。
+
+一覧の上には船の絵が出ます(人間が船長、エージェントが乗組員)。実行中のカードは甲板の乗組員で、段階で姿が変わります
+(`agent` はハンマー、`review` は虫眼鏡、`retry` は汗)。In review と wait for merge は甲板の木箱で、2 個から船が傾き、
+4 個以上で大きく傾きます。Blocked があるとマストに SOS の旗が立ち、乗組員が「?」を出して座り込みます。Ready は桟橋で
+待ちます。terminal ではドット絵(波と手が小さく動きます)、desktop では文字の絵です。絵の下の `#番号` にポインタを
+乗せると、カードのタイトルが出ます。下の「船を隠す」ボタンで隠せて、次のセッションでも覚えています。
+
+一覧の下には実績のバッジが並びます(retry なしの pass が続いた、1 日に何件 In review にした、エージェントごとの初タスク、
+調べものの件数、普段の半分以下の時間で In review など)。解除した瞬間にトーストが 1 回だけ出ます。判定に使うのは
+`metrics.jsonl` だけです。
+
+起動するときに読み込みます:
 
 ```
 claude --plugin-dir ~/.local/lib/task-hub/claude/task-board
