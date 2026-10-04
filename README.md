@@ -101,7 +101,7 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 ## はじめる
 
 セットアップは [docs/setup.md](docs/setup.md) にあります(GitHub Project の準備、動かす用の clone、設定、スキルのリンク)。
-Windows では [docs/windows.md](docs/windows.md) の違いも使います。
+Windows では [docs/windows.md](docs/windows.md) だけで進められます(はじめての人向け)。
 使い方は 3 通りで、混ぜても構いません。
 
 | 使い方 | やること |
@@ -258,7 +258,7 @@ docs/                  セットアップ、エージェント、設計、形式
 ## ドキュメント
 
 - [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
-- [docs/windows.md](docs/windows.md): Windows でのセットアップ(mac との違い、タスク スケジューラでの常駐)
+- [docs/windows.md](docs/windows.md): Windows でのセットアップ(はじめての人向け。常駐、エラーと対処、実機で確かめること)
 - [docs/kiro-quickstart.md](docs/kiro-quickstart.md): Kiro IDE で「セットアップして」と言って使いはじめる手順(画面の操作だけ)
 - [docs/kiro-ide.md](docs/kiro-ide.md): Kiro IDE 版のセットアップの中身(インストーラが行うこと)
 - [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加

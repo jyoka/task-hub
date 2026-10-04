@@ -175,6 +175,13 @@ class WindowsTest(unittest.TestCase):
         self.assertEqual(self.status(tid), "Blocked")
         self.assertIn("the run stopped unexpectedly", self.gh()["issues"][tid]["comments"][-1]["body"])
 
+    def test_a_config_from_notepad_or_powershell(self):
+        cfg = self.root / ".config" / "task-hub" / "config.ini"
+        cfg.write_text("; メモ帳で保存\n" + cfg.read_text(encoding="utf-8"), encoding="utf-8-sig")  # with a BOM
+        self.new()
+        cfg.write_text(cfg.read_text(encoding="utf-8-sig"), encoding="utf-16")  # what `>` writes in PowerShell 5.1
+        self.assertIn("is not saved as UTF-8", self.task("list", code=1))
+
     def test_a_leading_env_sets_variables(self):
         # the built-in claude starts with `env NAME=value ...`; Windows has no env program
         self.write_config(agent=f"env FAKE_AGENT_KEY=k1 {(self.root / 'agent.exe').as_posix()} {{prompt}}")
