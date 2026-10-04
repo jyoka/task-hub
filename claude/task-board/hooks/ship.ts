@@ -34,7 +34,7 @@ export const TILT_WORDS = ['まっすぐ', '少し傾いている', '大きく�
 
 export const ROWS = 10
 const H = ROWS * 2
-const NONE = 0x01000000 // the terminal's default color: a see-through pixel
+export const NONE = 0x01000000 // the terminal's default color: a see-through pixel
 const C = {
   sea: 0x1f6feb, deep: 0x174ea6, crest: 0x9ecbff, hull: 0x8b5a2b, keel: 0x5c3a1a, deck: 0xc08a4a,
   mast: 0x6b4423, sail: 0xf0f0e8, skin: 0xf2c79b, legs: 0x30363d, crew: 0x56b6c2, stuck: 0xe5534b,
@@ -45,11 +45,19 @@ const SEA_Y = 16 // the water line, in pixels
 const DECK_Y = 12
 
 // `at`: the column the glyph lists with, so the letters of one flag keep to one row
-type Glyph = { x: number; y: number; ch: string; fg: number; bg: number; at?: number }
+export type Glyph = { x: number; y: number; ch: string; fg: number; bg: number; at?: number }
+// Where a figure is drawn, in pixels, for surfaces that show `#id title` under the pointer (the Kiro extension)
+export type Spot = { x: number; y: number; w: number; h: number; figure: Figure }
+// `w` is set in the constructor, not as a parameter property: Node's type stripping (the Kiro extension's build) has none
 class Canvas {
+  readonly w: number
   px: Uint32Array
   glyphs: Glyph[] = []
-  constructor(readonly w: number) { this.px = new Uint32Array(w * H).fill(NONE) }
+  spots: Spot[] = []
+  constructor(w: number) {
+    this.w = w
+    this.px = new Uint32Array(w * H).fill(NONE)
+  }
   set(x: number, y: number, color: number) {
     if (x >= 0 && x < this.w && y >= 0 && y < H) this.px[y * this.w + x] = color
   }
@@ -99,11 +107,13 @@ const drawShip = (c: Canvas, s: Scene, f: Fit, x0: number, frame: number) => {
   let x = x0 + 2
   for (let k = 0; k < f.stuck; k++, x += 4) {
     person(c, x, feet, C.stuck, true)
+    c.spots.push({ x, y: feet - 4, w: 3, h: 5, figure: s.stuck[k]! })
     c.glyphs.push({ x, y: feet - 4, ch: '?', fg: C.question, bg: NONE })
   }
   for (let k = 0; k < f.crew; k++, x += 4) {
     const p = s.crew[k]!.pose ?? 'idle'
     person(c, x, feet, C.crew)
+    c.spots.push({ x, y: feet - 4, w: 3, h: 5, figure: s.crew[k]! })
     const up = frame % 2 === 0
     if (p === 'work') { c.set(x + 2, feet - (up ? 3 : 2), C.steel); c.set(x + 2, feet - (up ? 2 : 1), C.mast) }
     if (p === 'review') { c.set(x + 2, feet - 3 + (frame % 4 === 3 ? 1 : 0), C.lens); c.set(x + 2, feet - 1, C.mast) }
@@ -121,6 +131,7 @@ const drawShip = (c: Canvas, s: Scene, f: Fit, x0: number, frame: number) => {
     const cy = k % 2 === 0 ? feet - 1 : feet - 3
     c.rect(cx, cy, 2, 2, C.crate)
     c.set(cx + 1, cy + 1, C.edge)
+    c.spots.push({ x: cx, y: cy, w: 2, h: 2, figure: s.cargo[k]! })
   }
 }
 
@@ -136,6 +147,11 @@ const list = (layer: Canvas, tilt: Tilt, cx: number): Canvas => {
     if (v !== NONE) out.set(x, y + shift(x), v)
   }
   out.glyphs = layer.glyphs.map(g => ({ ...g, y: g.y + shift(g.at ?? g.x) }))
+  // a spot's columns shift by different amounts: it grows to hold all of them
+  out.spots = layer.spots.map(p => {
+    const [a, b] = [shift(p.x), shift(p.x + p.w - 1)]
+    return { ...p, y: p.y + Math.min(a, b), h: p.h + Math.abs(b - a) }
+  })
   return out
 }
 
@@ -155,10 +171,14 @@ export const pixels = (s: Scene, columns: number, frame: number): Canvas => {
   }
   // the bow lifts the SOS flag above the picture as she lists hard: it stays on the top row instead
   c.glyphs = turned.glyphs.map(g => ({ ...g, y: Math.max(0, g.y + bob) }))
+  c.spots = turned.spots.map(p => ({ ...p, y: p.y + bob }))
   // the pier and who waits on it
   if (pw > 0) {
     for (let i = 0; i < pw; i++) c.set(i, SEA_Y - 1, C.pier)
-    for (let k = 0; k < f.pier; k++) person(c, 1 + 3 * k, SEA_Y - 2, C.waiting)
+    for (let k = 0; k < f.pier; k++) {
+      person(c, 1 + 3 * k, SEA_Y - 2, C.waiting)
+      c.spots.push({ x: 1 + 3 * k, y: SEA_Y - 5, w: 2, h: 4, figure: s.pier[k]! })
+    }
   }
   // the sea over the bottom of the hull, its crests drifting with the frame
   for (let y = SEA_Y; y < H; y++) for (let x = 0; x < columns; x++) {

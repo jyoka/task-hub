@@ -243,7 +243,7 @@ skills/chief/SKILL.md  /chief スキル
 pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
 claude/task-board/     Claude Code の mod: ボードをステータスラインとペインに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
-kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
+kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
