@@ -1437,10 +1437,10 @@ class TaskTest(unittest.TestCase):
     def test_list_watch_piped_appends_the_list_after_a_time_line_without_ansi(self):
         tid = self.new("ok")
         self.move(tid, "In review")
-        self.env["TASK_WATCH_ONCE"] = "1"
+        self.env.update(TASK_WATCH_ONCE="1", TZ="Asia/Tokyo")
         out = self.task("list", "--watch")
         first, rest = out.split("\n", 1)
-        self.assertRegex(first, r"^== \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertRegex(first, r"^== \d{4}-\d\d-\d\d \d\d:\d\d:\d\d JST$")  # local time, for a person
         self.assertEqual(rest, self.task("list"))
         self.assertNotIn("\033", out)
         self.assertIn("task list [--watch]", self.task("list", "--help"))
@@ -1468,9 +1468,10 @@ class TaskTest(unittest.TestCase):
 
     def test_list_watch_in_a_terminal_redraws_the_screen_under_a_heading_with_the_time(self):
         tid = self.new("ok")
+        self.env["TZ"] = "Asia/Tokyo"
         out = self.watch_in_terminal()
         self.assertTrue(out.startswith("\033[H\033[2J== "), out)
-        self.assertRegex(out.splitlines()[0], r"== \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(every 60s, read only")
+        self.assertRegex(out.splitlines()[0], r"== \d{4}-\d\d-\d\d \d\d:\d\d:\d\d JST \(every 60s, read only")
         self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', out)
         self.assertNotIn("\033[1;33m", out)  # the first look has nothing to compare with
 

@@ -116,6 +116,11 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def local_now():
+    """The time in the machine's own zone, for a person reading a pane (`task list --watch`)."""
+    return datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def section(body, name):
     """Text under '## name' up to the next '## ' heading, or ''."""
     m = re.search(rf"(?m)^## {re.escape(name)}[ \t]*\n(.*?)(?=^## |\Z)", body, re.S)
@@ -1770,9 +1775,9 @@ def list_watch():
             except RuntimeError as e:  # a GitHub hiccup must not end the watch
                 lines = [f"error: {e}"]
             if terminal:
-                out(f"{CLEAR_SCREEN}== {now()} (every {WATCH_SECONDS}s, read only; Ctrl-C to stop)", *lines)
+                out(f"{CLEAR_SCREEN}== {local_now()} (every {WATCH_SECONDS}s, read only; Ctrl-C to stop)", *lines)
             else:
-                out(f"== {now()}", *lines)
+                out(f"== {local_now()}", *lines)
             if os.environ.get("TASK_WATCH_ONCE"):  # tests
                 return
             time.sleep(WATCH_SECONDS)
