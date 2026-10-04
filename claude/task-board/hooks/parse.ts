@@ -1,18 +1,24 @@
 import type { Board, Card } from '../types'
 
-// One row of `task list`: comma-separated, a field quoted when it holds a comma or quote.
+// One row of `task list`: comma-separated; a quoted field is a JSON string (`bin/task` q() uses json.dumps).
 const fields = (line: string): string[] => {
   const out: string[] = []
-  let cur = ''
-  let isQuoted = false
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]
-    if (isQuoted && c === '"' && line[i + 1] === '"') { cur += '"'; i++ }
-    else if (c === '"') isQuoted = !isQuoted
-    else if (c === ',' && !isQuoted) { out.push(cur); cur = '' }
-    else cur += c
+  let i = 0
+  while (i <= line.length) {
+    if (line[i] === '"') {
+      let end = i + 1
+      while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1
+      const raw = line.slice(i, end + 1)
+      try { out.push(JSON.parse(raw)) } catch { out.push(raw) }
+      i = end + 1
+    } else {
+      const end = line.indexOf(',', i)
+      out.push(line.slice(i, end === -1 ? line.length : end))
+      i = end === -1 ? line.length : end
+    }
+    if (line[i] !== ',') break
+    i++
   }
-  out.push(cur)
   return out
 }
 

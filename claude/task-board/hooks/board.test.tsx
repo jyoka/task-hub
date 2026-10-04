@@ -28,6 +28,12 @@ test('task list の出力を読む', () => {
   expect(summary(parseList('counts: Backlog=2, In progress=0\n', '11:00'))).toBeUndefined()
 })
 
+test('引用された値は JSON 文字列として読む(bin/task の q() は json.dumps)', () => {
+  const title = 'say "hi", C:\\path'
+  const b = parseList(`counts: Blocked=1\n  "1",${JSON.stringify(title)},Blocked,jyoka/x,"",""\n`, '11:00')
+  expect(b.cards).toEqual([{ id: '1', title, status: 'Blocked', repo: 'jyoka/x', waitsFor: '' }])
+})
+
 test('ペインは Blocked を先頭に出し、更新ボタンで task list を読み直す', async ($, on) => {
   mock.env(on, { HOME: '/home/me' })
   mock.clock(on, { now: 0 })
@@ -49,4 +55,19 @@ test('ペインは Blocked を先頭に出し、更新ボタンで task list を
   }
   expect(ran[0]).toEqual(['/home/me/.local/bin/task', 'list'])
   expect(JSON.stringify(statuses.at(-1))).toContain('task: 実行中2 レビュー待ち1 止まり1')
+})
+
+test('task list が失敗したら、stdout の error: 行を理由として出す', async ($, on) => {
+  mock.env(on, { HOME: '/home/me' })
+  mock.clock(on, { now: 0 })
+  const stdout = 'error: the board is not configured in ~/.config/task-hub/config.ini\nhelp: add:  [board]  project = <owner>/<project number>\n'
+  on('process.run', async () => ({ value: { exitCode: 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const statuses: unknown[] = []
+  on('ui.status', async ($, e) => (statuses.push(e), { value: undefined }))
+  const ui = await $.ui.mount({ plugin: 'task-board', surface: 'terminal', component: 'Pane', requestId: 'task-board', props: PANE })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ text: '読めませんでした: the board is not configured in ~/.config/task-hub/config.ini' })).toBeDefined()
+  expect(await ui.findAll({ text: /開いているカードはありません/ })).toEqual([])
+  await ui.unmount()
+  expect(JSON.stringify(statuses.at(-1))).toContain('task: 読めない')
 })

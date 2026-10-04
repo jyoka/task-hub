@@ -14,6 +14,12 @@ const rank = (status: string): number => {
 }
 const board = atom({ plugin: 'task-board', key: 'board' } as const, null as Board | null)
 
+// `bin/task` fail() prints "error: ..." to stdout and leaves stderr empty.
+const failure = (exitCode: number, stdout: string, stderr: string): string =>
+  stderr.split('\n').map(l => l.trim()).filter(l => l !== '').pop()
+  || stdout.split('\n').find(l => l.startsWith('error:'))?.slice('error:'.length).trim()
+  || `exit ${exitCode}`
+
 // `task list` is read only (it never starts a card); bare `task` would start Ready cards.
 async function refresh($: EngineInterface): Promise<void> {
   const home = (await $.env.get('HOME')) ?? ''
@@ -22,7 +28,7 @@ async function refresh($: EngineInterface): Promise<void> {
   try {
     const { exitCode, stdout, stderr } = await $.process.run([`${home}/.local/bin/task`, 'list'], { timeoutMs: 60_000 })
     next = exitCode === 0 ? parseList(stdout, checkedAt)
-      : { counts: {}, cards: [], checkedAt, error: stderr.trim().split('\n').pop() ?? `exit ${exitCode}` }
+      : { counts: {}, cards: [], checkedAt, error: failure(exitCode, stdout, stderr) }
   } catch (err) {
     next = { counts: {}, cards: [], checkedAt, error: String(err) }
   }
