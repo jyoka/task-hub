@@ -28,6 +28,8 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    If you could not run everything, say in the Report which parts you ran and their results.
 4. Do **not** commit, push, create branches, or open pull requests. task-hub does all of that
    after you finish, from whatever files you changed.
+   Do not register, start, or change tasks on the board either (`task new`, `/task`, `task start`), even
+   when the Goal mentions follow-up work: put it in the Report, and the human registers it.
    task-hub commits **every file in the worktree** that git does not ignore; the git index
    (`git add`, `git rm --cached`) makes no difference. So delete anything you do not want in the
    pull request, such as files your test run generated (coverage output and the like; Python
