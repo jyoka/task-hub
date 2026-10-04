@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { CASES as cases } from './slow-threshold.cases'
 import { parseList, summary } from './parse'
-import { clip, defaultAgent, minutes, repoTag, slowThreshold } from './panel'
+import { FOLDED, clip, defaultAgent, isFolded, minutes, repoTag, slowThreshold, toggleFold } from './panel'
 
 const PANE = {
   title: 'task-hub', isFocused: false, bodyColumns: 80, placement: 'dock' as const,
@@ -243,13 +243,13 @@ test('見出しを押すとグループを開け閉めし、$.store に覚える
     const row = await ui.find({ type: 'Text', text: / #64 / })
     expect(row?.text).toBe(' aica  #64 aica v1: Render 公開とデプロイ smoke(HITL)')
     expect((await ui.findAll({ type: 'Box' })).find(x => x.key === 'backlog')?.props.borderColor).toBe('gray')
-    expect(writes.filter(w => w[0] === 'folded')).toEqual([['folded', []]])
+    expect(writes.filter(w => w[0] === 'folded')).toEqual([['folded', ['other']]])
 
     // needs-you folds to its ids
     await ui.press({ key: 'fold-needs-you' })
     expect(await cardIds(ui)).toEqual(['109', '128', '64'])
     expect(await ui.find({ type: 'Text', text: /^ {2}#110 #75 #90$/ })).toBeDefined()
-    expect(writes.at(-1)).toEqual(['folded', ['needs-you']])
+    expect(writes.at(-1)).toEqual(['folded', ['other', 'needs-you']])
     await ui.unmount()
 
     // the next session reads the choice back from the store
@@ -258,4 +258,39 @@ test('見出しを押すとグループを開け閉めし、$.store に覚える
     expect(await cardIds(ui)).toEqual(['109', '128', '64'])
     await ui.unmount()
   }
+})
+
+test('最初は Backlog とその他だけ閉じ、待ちは列の名前なしで 1 枚ずつ出す', async ($, on) => {
+  mock.env(on, { HOME: '/home/me' })
+  mock.clock(on, { now: NOW })
+  const list = `counts: Backlog=1, Ready=1, Triage=1
+tasks[3]{id,title,status,repo,agent,waits_for}:
+  "64",Backlog のカード,Backlog,jyoka/aica,"",""
+  "70",待ちのカード,Ready,jyoka/aica,"","#64 (Backlog)"
+  "80",知らない列のカード,Triage,jyoka/aica,"",""
+`
+  on('process.run', async () => ({ value: { exitCode: 0, stdout: list, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  files(on, {})
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'task-board', surface, component: 'Pane', requestId: 'task-board', props: PANE })
+    await ui.press({ key: 'refresh' })
+    expect((await ui.findAll({ type: 'Button', text: /^[▾▸]$/ })).map(x => [x.key, x.text]))
+      .toEqual([['fold-ready', '▾'], ['fold-backlog', '▸'], ['fold-other', '▸']])
+    expect((await ui.findAll({ type: 'Box' })).flatMap(x => x.key?.match(/^card-(\d+)$/)?.[1] ?? [])).toEqual(['70'])
+    expect((await ui.find({ type: 'Text', text: / #70 / }))?.text).toBe(' aica  #70 待ちのカード (待ち: #64 (Backlog))')
+    expect(await ui.find({ type: 'Text', text: /^ {2}#80$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('閉じたグループは、カードがなくなっても閉じたまま覚える', () => {
+  expect(FOLDED).toEqual(['backlog', 'other'])
+  // pressing a heading for the first time starts from the defaults, even when Backlog has no cards now
+  const first = toggleFold('running', null)
+  expect(first).toEqual(['backlog', 'other', 'running'])
+  expect(isFolded('backlog', first)).toBe(true)
+  // Ready folded, then empty: pressing another heading keeps it folded for when it has cards again
+  const later = toggleFold('needs-you', toggleFold('ready', []))
+  expect(later).toEqual(['ready', 'needs-you'])
+  expect(toggleFold('ready', later)).toEqual(['needs-you'])
 })

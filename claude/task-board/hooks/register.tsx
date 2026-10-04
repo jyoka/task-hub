@@ -5,7 +5,7 @@ import type { Board, Card, Details } from '../types'
 import { BADGES, earned, fresh } from './badges'
 import { base, failure, parseList, summary } from './parse'
 import {
-  STATUS_COLORS, cells, clip, details, elapsedText, groups, isFolded, prLabel, repoTag, stage, verdictColor,
+  STATUS_COLORS, cells, clip, details, elapsedText, groups, isFolded, prLabel, repoTag, stage, toggleFold, verdictColor,
 } from './panel'
 import type { Figure, Scene } from './ship'
 import { ROWS, TILT_WORDS, cells as shipCells, deck, drop, scene } from './ship'
@@ -243,14 +243,11 @@ export const register: Register = on => {
         {!hidden && b.error === '' && shipView()}
         {b.error !== '' && <Text color="red">読めませんでした: {b.error}</Text>}
         {b.cards.length === 0 && b.error === '' && <Text dimColor>開いているカードはありません。</Text>}
-        {groups(b.cards).map((g, _, all) => {
+        {groups(b.cards).map(g => {
           // The heading folds and unfolds its group; the choice is kept for the next session.
-          const shut = isFolded(g, chosen)
+          const shut = isFolded(g.key, chosen)
           const fold = async () => {
-            const next = await update($, folded, keys => {
-              const now = all.filter(x => isFolded(x, keys)).map(x => x.key)
-              return now.includes(g.key) ? now.filter(k => k !== g.key) : [...now, g.key]
-            })
+            const next = await update($, folded, keys => toggleFold(g.key, keys))
             await $.store.set('folded', next).catch(() => {})
           }
           const head = (
