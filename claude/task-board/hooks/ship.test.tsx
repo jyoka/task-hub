@@ -89,6 +89,34 @@ test('絵は傾きと荷で変わり、文字の絵は船尾ほど下がる', ()
   expect(deck(scene([card('9', 'Blocked')]))[2]?.lines[0]).toBe('🆘')
 })
 
+// The code points of a Raster's cells, one string per row (RasterProps.cells: 12 bytes a cell, base64)
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const rows = (b64: string, columns: number): string[] => {
+  const bytes: number[] = []
+  for (let i = 0; i < b64.length; i += 4) {
+    const q = [...b64.slice(i, i + 4)].map(ch => ch === '=' ? 0 : B64.indexOf(ch))
+    const n = (q[0]! << 18) | (q[1]! << 12) | (q[2]! << 6) | q[3]!
+    bytes.push((n >> 16) & 255, (n >> 8) & 255, n & 255)
+  }
+  const view = new DataView(new Uint8Array(bytes).buffer)
+  return Array.from({ length: ROWS }, (_, r) => Array.from({ length: columns }, (_, x) =>
+    String.fromCodePoint(view.getUint32((r * columns + x) * 12, true))).join(''))
+}
+
+test('SOS の旗は、船が大きく傾いても、どのコマでも上の端で切れずに読める', () => {
+  const many = (n: number, status: string, from: number) =>
+    Array.from({ length: n }, (_, i) => card(String(from + i), status))
+  const cases = [
+    [1, 0, 4], [1, 0, 8], [2, 0, 8], [1, 1, 4], [1, 5, 8], [1, 0, 2], [1, 0, 0], [2, 5, 3],
+  ].map(([stuck, crew, cargo]) =>
+    [...many(stuck!, 'Blocked', 100), ...many(crew!, 'In progress › agent', 200), ...many(cargo!, 'In review', 300)])
+  for (const cards of cases) for (const columns of [24, 40, 64, 80]) for (let frame = 0; frame < 12; frame++) {
+    const drawn = rows(cells(scene(cards), columns, frame), columns)
+    const where = `${cards.map(c => c.status[0]).join('')} ${columns} 列 ${frame} コマ`
+    expect([where, drawn.some(row => row.includes('SOS'))]).toEqual([where, true])
+  }
+})
+
 test('船はパネルの上に、terminal では Raster、desktop では文字の絵で出て、ホバーで #番号 タイトル', async ($, on) => {
   mock.env(on, { HOME })
   mock.clock(on, { now: 0 })

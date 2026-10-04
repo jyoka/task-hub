@@ -44,7 +44,8 @@ const C = {
 const SEA_Y = 16 // the water line, in pixels
 const DECK_Y = 12
 
-type Glyph = { x: number; y: number; ch: string; fg: number; bg: number }
+// `at`: the column the glyph lists with, so the letters of one flag keep to one row
+type Glyph = { x: number; y: number; ch: string; fg: number; bg: number; at?: number }
 class Canvas {
   px: Uint32Array
   glyphs: Glyph[] = []
@@ -112,7 +113,7 @@ const drawShip = (c: Canvas, s: Scene, f: Fit, x0: number, frame: number) => {
   const mast = x + 1
   for (let y = 1; y <= feet; y++) c.set(mast, y, C.mast)
   for (let y = 2; y <= 7; y++) for (let i = 1; i <= Math.min(5, y - 1); i++) c.set(mast + i, y, C.sail)
-  if (s.sos) ['S', 'O', 'S'].forEach((ch, i) => c.glyphs.push({ x: mast - 3 + i, y: 0, ch, fg: C.white, bg: C.flag }))
+  if (s.sos) ['S', 'O', 'S'].forEach((ch, i) => c.glyphs.push({ x: mast - 3 + i, y: 0, ch, fg: C.white, bg: C.flag, at: mast }))
   // the crates, two to a stack, astern
   x += 4
   for (let k = 0; k < f.cargo; k++) {
@@ -134,7 +135,7 @@ const list = (layer: Canvas, tilt: Tilt, cx: number): Canvas => {
     const v = layer.get(x, y)
     if (v !== NONE) out.set(x, y + shift(x), v)
   }
-  out.glyphs = layer.glyphs.map(g => ({ ...g, y: g.y + shift(g.x) }))
+  out.glyphs = layer.glyphs.map(g => ({ ...g, y: g.y + shift(g.at ?? g.x) }))
   return out
 }
 
@@ -152,7 +153,8 @@ export const pixels = (s: Scene, columns: number, frame: number): Canvas => {
     const v = turned.get(x, y - bob)
     if (v !== NONE) c.set(x, y, v)
   }
-  c.glyphs = turned.glyphs.map(g => ({ ...g, y: g.y + bob }))
+  // the bow lifts the SOS flag above the picture as she lists hard: it stays on the top row instead
+  c.glyphs = turned.glyphs.map(g => ({ ...g, y: Math.max(0, g.y + bob) }))
   // the pier and who waits on it
   if (pw > 0) {
     for (let i = 0; i < pw; i++) c.set(i, SEA_Y - 1, C.pier)
