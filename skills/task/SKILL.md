@@ -2,7 +2,6 @@
 name: task
 description: Register the current conversation as a Backlog task (a GitHub Issue on the user's task-hub Project board). Use ONLY when the user explicitly invokes this skill (for example /task) or explicitly asks to register or save this as a task. Never use it on your own initiative.
 argument-hint: "[optional notes: target repo, agent, scope, what to leave out]"
-disable-model-invocation: true
 ---
 
 The user asked to turn this conversation into a task on their task-hub board.

@@ -172,8 +172,9 @@ for s in task chief; do ln -sfn ~/.local/lib/task-hub/skills/$s ~/.kiro/skills/$
 
 ## 4. steering(頼まれたときだけ使う約束)
 
-`skills/task/SKILL.md` と `skills/chief/SKILL.md` は、`disable-model-invocation: true` で「ユーザーが呼んだときだけ
-使う」ことにしています。Kiro のスキルにはこの項目が載っていないので、同じ約束を steering で入れます。
+`skills/task/SKILL.md` と `skills/chief/SKILL.md` は、「ユーザーが明示的に頼んだときだけ使う」ことにしています
+(Claude Code では、`/chief` は `disable-model-invocation: true` で、`/task` は skill の説明で)。Kiro のスキルには
+この項目が載っていないので、同じ約束を steering で入れます。
 `kiro/steering/task-hub.md` は、次のことを書いています:
 
 - `/task` と `/chief` は、ユーザーが明示的に頼んだとき(`/task`、`/chief` と打った、またはタスクにしてと言った)だけ使う
