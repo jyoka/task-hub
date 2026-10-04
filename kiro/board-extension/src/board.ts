@@ -30,7 +30,7 @@ const THEME: Record<string, string> = {
 // A running card past its usual time (elapsedText yellow), and past the time bin/task calls slow (red).
 const LATE: Record<string, string> = { yellow: 'list.warningForeground', red: 'list.errorForeground' }
 const VERDICT_ICONS: Record<string, string> = { 'pass': 'pass', 'needs changes': 'request-changes' }
-// Groups that start folded: the mod folds Ready too, but the view has room for it.
+// Groups that start folded; the mod starts with the same ones (claude/task-board/hooks/panel.ts FOLDED).
 const FOLDED = ['backlog', 'other']
 
 const clip = (s: string, n: number): string => s.length > n ? s.slice(0, n - 1) + '…' : s
