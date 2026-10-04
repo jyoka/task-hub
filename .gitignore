@@ -2,3 +2,7 @@ __pycache__/
 
 # Types Claude Code writes when it loads the mod
 claude/task-board/.claude-plugin/types/
+
+# What `npm run package` in kiro/board-extension builds
+kiro/board-extension/out/
+kiro/board-extension/*.vsix
