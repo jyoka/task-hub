@@ -62,8 +62,8 @@ task-hub が定義している役割は 5 つです。どれも Claude Code の 
 - **それ以外はコードが決めます**: いつ始めるか、git と PR、判定の読み取り、replanner の根拠(`path:行番号` と引用)が
   実物と合うかの照合、reviewer が勝手に書き換えた分の取り消し、前後関係の判定。エージェントとの約束は
   「ファイルを編集し、テストし、レポートを書く」だけなので、どのベンダーでも同じ動きになります。
-- **エージェントがタスクを勝手に作ったり始めたりすることはありません。** 登録は `/task`・`task new`・`/chief`
-  (あなたの「うん」のあと)だけ、開始は Ready に移したとき(または `task start`)だけです。
+- **エージェントがタスクを勝手に作ったり始めたりすることはありません。** 登録は `/task`(Claude Code では、会話で「タスクにして」と
+  頼んだときも)・`task new`・`/chief`(あなたの「うん」のあと)だけ、開始は Ready に移したとき(または `task start`)だけです。
 
 ## タスクの一生
 
@@ -179,6 +179,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、`slow` が出た実行の数、PR の大きさ、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
 | `task update` | task-hub を最新のリリースに更新する(launchd の `task watch` の再起動、Kiro IDE の定義のコピーし直しも)。新しい版は `task list` と `task watch` が 1 行で知らせる |
+| `task feedback [--feature]` | task-hub のバグ報告(`--feature` なら機能の要望)のフォームを、版と OS を入れてブラウザで開く。開けないときは URL を表示する([下](#バグ報告と要望)) |
 
 ## 設定
 
@@ -250,12 +251,26 @@ kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステ�
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
+.github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
 
 `task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。新しい版が出ると `task list` と
 `task watch` が 1 行で知らせるので、`task update` で更新します(clone を最新のリリースまで進め、launchd の
 `task watch` の再起動と Kiro IDE の定義のコピーし直しもまとめて行います。[docs/setup.md](docs/setup.md#インストール))。
+
+## バグ報告と要望
+
+task-hub のバグや欲しい機能は、このリポジトリの Issue で受けています。
+
+```
+task feedback              # バグ報告のフォームを、版と OS を入れて開く
+task feedback --feature    # 機能の要望のフォームを開く
+```
+
+- 使い方の質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ
+- 脆弱性は公開の Issue に書かず、[SECURITY.md](SECURITY.md) の手順で知らせてください
+- PR の出し方、テストの回し方、ドキュメントの書き方は [CONTRIBUTING.md](CONTRIBUTING.md) にあります
 
 ## ドキュメント
 
@@ -270,3 +285,5 @@ docs/                  セットアップ、エージェント、設計、形式
 - [docs/release.md](docs/release.md): 版の付け方(semver とタグ `v<VERSION>`)、リリースの手順、リリースノートの型
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
 - [docs/lessons.md](docs/lessons.md): 作って試してわかったこと、まだ確かめていないこと
+- [CONTRIBUTING.md](CONTRIBUTING.md): バグ報告と要望の送り先、PR の出し方、テスト、README と docs の書き方
+- [SECURITY.md](SECURITY.md): 脆弱性を非公開で知らせる手順

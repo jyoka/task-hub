@@ -21,6 +21,7 @@ from functools import cache
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 VERSION = "0.6.0"
 MAX_PARALLEL = 5
@@ -88,6 +90,9 @@ INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record o
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
+# task feedback: a new Issue on task-hub's own repository, from a form in .github/ISSUE_TEMPLATE (not the board)
+FEEDBACK_URL = "https://github.com/jyoka/task-hub/issues/new"
+FEEDBACK_FORMS = {"bug": "bug_report.yml", "feature": "feature_request.yml"}
 WINDOWS = os.name == "nt"  # docs/windows.md: no ps, env, sh or osascript, and batch files cut arguments at line breaks
 # a process that outlives the command starting it: its own session; on Windows its own process group and a console
 # without a window, which the programs it starts (git, the agent) share instead of each opening one
@@ -2328,6 +2333,46 @@ def cmd_open(a):
     out(f"opening {home(wt)} with: {template}")
 
 
+def os_description():
+    """This machine for a bug report: the OS, its version and CPU, and the Python that runs task."""
+    if sys.platform == "darwin":
+        name = f"macOS {platform.mac_ver()[0]}"
+    elif WINDOWS:
+        name = f"Windows {platform.release()} ({platform.version()})"
+    else:
+        name = f"{platform.system()} {platform.release()}"
+    return f"{name} {platform.machine()}, Python {platform.python_version()}"
+
+
+def open_in_browser(url):
+    """Open the URL in the default browser; False when this machine has nothing to open it with."""
+    try:
+        if WINDOWS:
+            os.startfile(url)  # not `cmd /c start`: cmd would cut the URL at its first &
+            return True
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        if not shutil.which(opener):
+            return False
+        subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **DETACHED)
+        return True
+    except OSError:
+        return False
+
+
+def cmd_feedback(a):
+    """Open the form for a bug report (or, with --feature, a feature request) on task-hub's own repository, with
+    the version and OS filled in. The URL is always printed: an opener can fail after it starts (no display)."""
+    kind = "feature" if a["feature"] else "bug"
+    fields = {"template": FEEDBACK_FORMS[kind]}
+    if kind == "bug":  # each name is an id in the form; GitHub fills those fields from the URL
+        fields.update(version=VERSION, os=os_description())
+    url = f"{FEEDBACK_URL}?{urlencode(fields, quote_via=quote)}"
+    opened = open_in_browser(url)
+    out("feedback:", f"  form: {kind}", f"  url: {url}", f"  opened: {'true' if opened else 'false'}",
+        *([] if opened else ["help: open the url in your browser to write the report"]))
+
+
 def cmd_stats(_):
     """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions,
     and what each agent launch used."""
@@ -2546,6 +2591,9 @@ COMMANDS = {
               "tokens"),
     "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release, restart the launchd "
                "`task watch`, copy Kiro's hook and workflow again"),
+    "feedback": (cmd_feedback, [], {"feature": False},
+                 "task feedback [--feature]  # report a bug (or ask for a feature) on task-hub's GitHub: opens the "
+                 "form with the version and OS filled in, or prints its URL"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
 }

@@ -1,0 +1,9 @@
+# Issues are for what to fix or build; questions and discussions go to Discussions
+blank_issues_enabled: false
+contact_links:
+  - name: 質問と相談
+    url: https://github.com/jyoka/task-hub/discussions
+    about: 使い方の質問、設定の相談、まだ形になっていないアイデアはこちらへ
+  - name: 脆弱性の報告
+    url: https://github.com/jyoka/task-hub/security/advisories/new
+    about: 公開の Issue には書かず、非公開で知らせてください(SECURITY.md)

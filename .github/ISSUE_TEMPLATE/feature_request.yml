@@ -1,0 +1,27 @@
+name: 機能の要望
+description: task-hub にこう動いてほしい
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        使い方の質問や、まだ形になっていない相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 何をしようとして、どこで困るのか
+    validations:
+      required: true
+  - type: textarea
+    id: wanted
+    attributes:
+      label: 欲しい動き
+      description: どう動けば困らなくなるか。コマンドや設定の形の案があれば、それも
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 今の回避策
+      description: 今はどうしのいでいるか。なければ「なし」

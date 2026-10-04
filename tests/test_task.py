@@ -20,11 +20,13 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 import unittest.mock
+import urllib.parse
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
@@ -3434,6 +3436,57 @@ class TaskTest(unittest.TestCase):
         self.lib_git(lib, "checkout", "-q", "--detach", "v0.6.0")
         self.assert_update_stops(lib, "is not on a branch")
         self.assertNotIn("update:", self.hub(lib, "list"))  # a notice `task update` could not act on
+
+    # --- feedback ---
+
+    def feedback_url(self, out):
+        url = re.search(r"url: (\S+)", out).group(1)
+        parts = urllib.parse.urlsplit(url)
+        self.assertEqual(f"{parts.scheme}://{parts.netloc}{parts.path}", "https://github.com/jyoka/task-hub/issues/new")
+        fields = {k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items()}
+        # every field the URL fills in is an id in that form: GitHub ignores the names it does not know
+        form = (BIN.parent.parent / ".github" / "ISSUE_TEMPLATE" / fields["template"]).read_text()
+        for name in fields.keys() - {"template"}:
+            self.assertRegex(form, rf"(?m)^\s+id: {name}$")
+        return url, fields
+
+    def no_browser(self):
+        """Only python3 on PATH: no open or xdg-open to start a browser with."""
+        pybin = self.root / "pybin"
+        pybin.mkdir()
+        (pybin / "python3").symlink_to(sys.executable)
+        self.env["PATH"] = str(pybin)
+
+    def test_feedback_opens_the_bug_form_with_the_version_and_os(self):
+        for opener in ("open", "xdg-open"):  # macOS's, and the one elsewhere
+            (self.root / "fakebin" / opener).write_text(FAKE_IDE)
+            (self.root / "fakebin" / opener).chmod(0o755)
+        out = self.task("feedback")
+        self.assertIn("opened: true", out)
+        url, fields = self.feedback_url(out)
+        self.assertEqual(fields["template"], "bug_report.yml")
+        self.assertEqual(fields["version"], self.task("--version").strip())
+        self.assertRegex(fields["os"], r"^(macOS|Linux|Windows) .*, Python 3\.")
+        end = time.time() + 5
+        while time.time() < end and not self.ide_calls():
+            time.sleep(0.05)
+        self.assertEqual(self.ide_calls(), [[url]])  # the whole URL as one argument, & and all
+
+    def test_feedback_prints_the_url_when_no_browser_can_open(self):
+        self.no_browser()
+        out = self.task("feedback")
+        self.assertIn("opened: false", out)
+        self.assertIn("help: open the url in your browser", out)
+        _, fields = self.feedback_url(out)
+        self.assertIn("version", fields)
+
+    def test_feedback_feature_opens_the_feature_form(self):
+        self.no_browser()
+        _, fields = self.feedback_url(self.task("feedback", "--feature"))
+        self.assertEqual(fields, {"template": "feature_request.yml"})
+
+    def test_help_lists_feedback(self):
+        self.assertIn("task feedback [--feature]", self.task("help"))
 
 
 class SlowThresholdTableTest(unittest.TestCase):

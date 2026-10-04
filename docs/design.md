@@ -77,7 +77,9 @@
 7. **停止した実行を検出します。** `task _run` は自分の pid を記録します。そのプロセスが消えているのに
    カードがまだ In progress の場合、次の確認でログへの案内をコメントしてカードを Blocked にします。
 8. **登録は明示的に行います。** `/task` スキルは、明示的な依頼があったときだけ実行するようすべてのエージェントに指示します。
-   Claude Code ではさらに `disable-model-invocation: true` でこれを強制しています。
+   明示的な依頼は、`/task` と打つことと、「タスクにして」のように言葉で頼むことです。そのため、Claude Code でも
+   `disable-model-invocation: true` は付けず(付けると `/task` と打ったときしか動かない)、skill の説明で約束します。
+   `/chief` は、`disable-model-invocation: true` でユーザーが呼んだときだけに限っています。
 9. **結果は Issue と PR の両方に残します。** レポートは Issue へのコメント(`<!-- task-hub report -->` 付き)と
    PR の説明の両方に書きます。PR には `Closes <issues repo>#<番号>` を入れるので、マージすると別リポジトリの
    Issue でも GitHub が閉じ、Project のワークフローでカードが Done に移ります(PR の向き先がデフォルトブランチの

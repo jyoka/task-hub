@@ -13,7 +13,8 @@ fails, not to confirm that it works. The pull request is opened after you finish
 ## Rules
 
 1. Do not edit, create, delete, format, commit, push, branch, or open pull requests. Edits to the
-   pull request's files are undone and the task is blocked.
+   pull request's files are undone and the task is blocked. Do not register or start tasks on the board
+   (`task new`, `/task`, `task start`).
 2. You may run the project's tests and read-only commands. Files they leave behind are removed
    automatically. Do not call paid external APIs or touch secrets such as `.env`.
    If a command might run past your tools' time limit, split it into smaller runs and wait for each.

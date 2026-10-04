@@ -1,22 +1,31 @@
 import type { Card, Detail, Details } from '../types'
 import { base, byColumn } from './parse'
 
-// The pane's groups, in board order. Ready, Backlog and columns the mod does not know fold into one line each.
-export type Group = { key: string; label: string; cards: Card[]; folded: boolean }
-const GROUPS: { key: string; label: string; columns: string[]; folded: boolean }[] = [
-  { key: 'needs-you', label: '要対応', columns: ['Blocked', 'In review', 'wait for merge'], folded: false },
-  { key: 'running', label: '実行中', columns: ['In progress'], folded: false },
-  { key: 'ready', label: '待ち', columns: ['Ready'], folded: true },
-  { key: 'backlog', label: 'Backlog', columns: ['Backlog'], folded: true },
+// The pane's groups, in board order.
+export type Group = { key: string; label: string; cards: Card[] }
+const GROUPS: { key: string; label: string; columns: string[] }[] = [
+  { key: 'needs-you', label: '要対応', columns: ['Blocked', 'In review', 'wait for merge'] },
+  { key: 'running', label: '実行中', columns: ['In progress'] },
+  { key: 'ready', label: '待ち', columns: ['Ready'] },
+  { key: 'backlog', label: 'Backlog', columns: ['Backlog'] },
 ]
 export const groups = (cards: Card[]): Group[] => {
   const sorted = byColumn(cards)
   const known = GROUPS.flatMap(g => g.columns)
   return [
-    ...GROUPS.map(g => ({ key: g.key, label: g.label, folded: g.folded,
-      cards: sorted.filter(c => g.columns.includes(base(c.status))) })),
-    { key: 'other', label: 'その他', folded: true, cards: sorted.filter(c => !known.includes(base(c.status))) },
+    ...GROUPS.map(g => ({ key: g.key, label: g.label, cards: sorted.filter(c => g.columns.includes(base(c.status))) })),
+    { key: 'other', label: 'その他', cards: sorted.filter(c => !known.includes(base(c.status))) },
   ].filter(g => g.cards.length > 0)
+}
+
+// Each group folds to one line when its heading is pressed. Until the person presses one, Backlog and columns the mod
+// does not know start folded, as in the Kiro view (kiro/board-extension/src/board.ts FOLDED); after that, the keys
+// they left folded, kept even for a group with no cards now, so it comes back as they left it.
+export const FOLDED = ['backlog', 'other']
+export const isFolded = (key: string, chosen: string[] | null): boolean => (chosen ?? FOLDED).includes(key)
+export const toggleFold = (key: string, chosen: string[] | null): string[] => {
+  const now = chosen ?? FOLDED
+  return now.includes(key) ? now.filter(k => k !== key) : [...now, key]
 }
 
 // Colors by column; a running card's stage (`In progress › review`) is its own small label.

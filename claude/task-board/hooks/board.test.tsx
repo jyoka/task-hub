@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { CASES as cases } from './slow-threshold.cases'
 import { parseList, summary } from './parse'
-import { clip, defaultAgent, minutes, repoTag, slowThreshold } from './panel'
+import { FOLDED, clip, defaultAgent, isFolded, minutes, repoTag, slowThreshold, toggleFold } from './panel'
 
 const PANE = {
   title: 'task-hub', isFocused: false, bodyColumns: 80, placement: 'dock' as const,
@@ -108,7 +108,7 @@ test('ペインは列ごとにまとめ、色・経過時間・判定・PR・理
     const ui = await $.ui.mount({ plugin: 'task-board', surface, component: 'Pane', requestId: 'task-board', props: PANE })
     await ui.press({ key: 'refresh' })
 
-    // A: needs-you and running are framed groups with a heading and a count; Ready and Backlog fold into one line
+    // A: needs-you and running are framed groups with a heading and a count; Backlog starts folded into one line
     const boxes = await ui.findAll({ type: 'Box' })
     const needs = boxes.find(x => x.key === 'needs-you')
     const running = boxes.find(x => x.key === 'running')
@@ -116,7 +116,10 @@ test('ペインは列ごとにまとめ、色・経過時間・判定・PR・理
     expect([running?.props.borderStyle, running?.props.borderColor]).toEqual(['round', 'cyan'])
     expect(await ui.find({ type: 'Text', text: /^要対応 3$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^実行中 2$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Backlog 1  #64$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Backlog 1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}#64$/ })).toBeDefined()
+    expect((await ui.findAll({ type: 'Button', text: /^[▾▸]$/ })).map(x => [x.key, x.text]))
+      .toEqual([['fold-needs-you', '▾'], ['fold-running', '▾'], ['fold-backlog', '▸']])
     expect(boxes.flatMap(x => x.key?.match(/^card-(\d+)$/)?.[1] ?? [])).toEqual(['110', '75', '90', '109', '128'])
     expect(await ui.find({ type: 'Text', text: /^Blocked +aica  #110 画面, 検索 \(待ち: #109\)$/ })).toBeDefined()
 
@@ -214,4 +217,80 @@ test('task list が失敗したら、stdout の error: 行を理由として出�
   expect(await ui.findAll({ text: /開いているカードはありません/ })).toEqual([])
   await ui.unmount()
   expect(JSON.stringify(statuses.at(-1))).toContain('task: 読めない')
+})
+
+test('見出しを押すとグループを開け閉めし、$.store に覚える: Backlog も 1 枚ずつ出せる', async ($, on) => {
+  mock.env(on, { HOME: '/home/me' })
+  mock.clock(on, { now: NOW })
+  taskList(on)
+  files(on, ALL)
+  const kept = new Map<string, unknown>()
+  const writes: [string, unknown][] = []
+  on('store.get', async ($, e) => ({ value: kept.get(e.key) }))
+  on('store.set', async ($, e) => (writes.push([e.key, e.value]), kept.set(e.key, e.value), { value: undefined }))
+  for (const surface of ['terminal', 'desktop'] as const) {
+    kept.clear()
+    writes.length = 0
+    const mount = () => $.ui.mount({ plugin: 'task-board', surface, component: 'Pane', requestId: 'task-board', props: PANE })
+    const cardIds = async (ui: Awaited<ReturnType<typeof mount>>) =>
+      (await ui.findAll({ type: 'Box' })).flatMap(x => x.key?.match(/^card-(\d+)$/)?.[1] ?? [])
+    let ui = await mount()
+    await ui.press({ key: 'refresh' })
+
+    // Backlog opens into cards: the repo tag, #id and title, with no "Backlog" label (the heading says it)
+    await ui.press({ key: 'fold-backlog' })
+    expect(await cardIds(ui)).toEqual(['110', '75', '90', '109', '128', '64'])
+    const row = await ui.find({ type: 'Text', text: / #64 / })
+    expect(row?.text).toBe(' aica  #64 aica v1: Render 公開とデプロイ smoke(HITL)')
+    expect((await ui.findAll({ type: 'Box' })).find(x => x.key === 'backlog')?.props.borderColor).toBe('gray')
+    expect(writes.filter(w => w[0] === 'folded')).toEqual([['folded', ['other']]])
+
+    // needs-you folds to its ids
+    await ui.press({ key: 'fold-needs-you' })
+    expect(await cardIds(ui)).toEqual(['109', '128', '64'])
+    expect(await ui.find({ type: 'Text', text: /^ {2}#110 #75 #90$/ })).toBeDefined()
+    expect(writes.at(-1)).toEqual(['folded', ['other', 'needs-you']])
+    await ui.unmount()
+
+    // the next session reads the choice back from the store
+    ui = await mount()
+    await ui.press({ key: 'refresh' })
+    expect(await cardIds(ui)).toEqual(['109', '128', '64'])
+    await ui.unmount()
+  }
+})
+
+test('最初は Backlog とその他だけ閉じ、待ちは列の名前なしで 1 枚ずつ出す', async ($, on) => {
+  mock.env(on, { HOME: '/home/me' })
+  mock.clock(on, { now: NOW })
+  const list = `counts: Backlog=1, Ready=1, Triage=1
+tasks[3]{id,title,status,repo,agent,waits_for}:
+  "64",Backlog のカード,Backlog,jyoka/aica,"",""
+  "70",待ちのカード,Ready,jyoka/aica,"","#64 (Backlog)"
+  "80",知らない列のカード,Triage,jyoka/aica,"",""
+`
+  on('process.run', async () => ({ value: { exitCode: 0, stdout: list, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  files(on, {})
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'task-board', surface, component: 'Pane', requestId: 'task-board', props: PANE })
+    await ui.press({ key: 'refresh' })
+    expect((await ui.findAll({ type: 'Button', text: /^[▾▸]$/ })).map(x => [x.key, x.text]))
+      .toEqual([['fold-ready', '▾'], ['fold-backlog', '▸'], ['fold-other', '▸']])
+    expect((await ui.findAll({ type: 'Box' })).flatMap(x => x.key?.match(/^card-(\d+)$/)?.[1] ?? [])).toEqual(['70'])
+    expect((await ui.find({ type: 'Text', text: / #70 / }))?.text).toBe(' aica  #70 待ちのカード (待ち: #64 (Backlog))')
+    expect(await ui.find({ type: 'Text', text: /^ {2}#80$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('閉じたグループは、カードがなくなっても閉じたまま覚える', () => {
+  expect(FOLDED).toEqual(['backlog', 'other'])
+  // pressing a heading for the first time starts from the defaults, even when Backlog has no cards now
+  const first = toggleFold('running', null)
+  expect(first).toEqual(['backlog', 'other', 'running'])
+  expect(isFolded('backlog', first)).toBe(true)
+  // Ready folded, then empty: pressing another heading keeps it folded for when it has cards again
+  const later = toggleFold('needs-you', toggleFold('ready', []))
+  expect(later).toEqual(['ready', 'needs-you'])
+  expect(toggleFold('ready', later)).toEqual(['needs-you'])
 })
