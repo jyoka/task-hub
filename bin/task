@@ -304,7 +304,11 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
-    c.read(CONFIG)
+    try:
+        c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
+    except UnicodeDecodeError:
+        fail(f"{home(CONFIG)} is not saved as UTF-8",
+             "open it in Notepad and save it with Encoding: UTF-8 (PowerShell's > and Out-File write UTF-16)")
     return c
 
 

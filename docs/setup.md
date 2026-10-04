@@ -6,7 +6,7 @@ GitHub Project を使います。手順はどちらも同じです。
 Kiro しか使えない Mac で、Kiro IDE からターミナルを開かずに使うときは、このページに加えて
 [kiro-ide.md](kiro-ide.md) の手順(設定、steering、フック、ワークフロー、launchd の違い)を使います。
 
-Windows では、このページに加えて [windows.md](windows.md) の違い(インストーラ、タスク スケジューラでの常駐)を使います。
+Windows では、[windows.md](windows.md) だけで進められます(インストーラ、タスク スケジューラでの常駐、エラーと対処)。
 
 ## 必要なもの
 
