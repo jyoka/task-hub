@@ -49,6 +49,8 @@ kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get
     if cmd == ["api", "graphql"] else None
 if db.get("down") and kind and (db["down"] is True or kind == db["down"]):
     fail("GraphQL: API rate limit exceeded for user ID 1.")
+if db.get("down") == "item-list-all" and kind == "item-list" and fields["q"] == "":  # only the read with Done cards
+    fail("GraphQL: API rate limit exceeded for user ID 1.")
 if cmd == ["project", "view"]:
     out = {"id": "PVT_1", "url": "https://github.com/users/jyoka/projects/2"}
 elif kind == "field-list":
@@ -771,6 +773,12 @@ class TaskTest(unittest.TestCase):
         self.assertIn("cleaned up", self.task())
         self.assertFalse((self.root / ".local/share/task-hub/worktrees" / tid).exists())
         self.assertFalse(self.run_file(tid).exists())
+        # GitHub moved it, not set_status: the sync still writes its Done, once, for /chief and the board mod
+        self.assertEqual([e.get("pr") for e in self.done_events(tid)], [pr["url"]])
+        self.wait_for(lambda: self.notifications_of(tid, "Done"))  # Done is in the default [notify] events
+        self.task()
+        self.assertEqual(len(self.done_events(tid)), 1)
+        self.assertEqual(len(self.notifications_of(tid, "Done")), 1)
 
     def test_start_command_also_works(self):
         tid = self.new()
@@ -1850,6 +1858,12 @@ class TaskTest(unittest.TestCase):
         path = self.root / ".local/state/task-hub/events.jsonl"
         return [e for e in map(json.loads, path.read_text().splitlines()) if e["id"] == tid]
 
+    def done_events(self, tid):
+        return [e for e in self.events_of(tid) if e["event"] == "Done"]
+
+    def notifications_of(self, tid, event):
+        return [n for n in self.notifications() if f"#{tid} {event}:" in " ".join(n)]
+
     def test_in_review_blocked_and_replan_events_carry_a_digest(self):
         self.write_config(reviewer=True, replanner="agent")
         ok, stuck = self.new("ok"), self.new("blocked REPLAN=human")
@@ -2356,6 +2370,67 @@ class TaskTest(unittest.TestCase):
         self.assertFalse(wt.exists())
         self.assertNotIn(f"task/{tid}", self.local_branches())
         self.assertIn("cleaned up", out)
+        self.assertEqual(len(self.done_events(tid)), 1)  # the one `task done` wrote
+
+    def test_done_by_github_with_a_failing_cleanup_is_written_once_and_cleaned_up_later(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        db = self.gh()
+        db["issues"][tid]["state"] = "CLOSED"  # merged or closed by hand on GitHub; "Item closed" moves the card
+        self.save_db(db)
+        self.move(tid, "Done")
+        wt.chmod(0o555)  # the worktree cannot be removed right now
+        try:
+            out = self.task()
+            self.assertIn("trying again at the next check", out)
+            self.assertTrue(self.run_file(tid).exists())
+            self.assertEqual(len(self.done_events(tid)), 1)
+        finally:
+            wt.chmod(0o755)
+        self.assertIn("cleaned up", self.task())
+        self.assertFalse(self.run_file(tid).exists())
+        self.assertFalse(wt.exists())
+        self.assertEqual(len(self.done_events(tid)), 1)
+
+    def test_card_removed_from_the_project_is_cleaned_up_without_a_done(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        db = self.gh()
+        del db["items"][f"PVTI_{tid}"]
+        self.save_db(db)
+        self.assertIn("cleaned up", self.task())
+        self.assertFalse(self.run_file(tid).exists())
+        self.assertEqual(self.done_events(tid), [])
+
+    def test_github_error_reading_done_cards_keeps_the_run_and_writes_done_next_time(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        wt = self.root / ".local/share/task-hub/worktrees" / tid
+        ready = self.new("ok", "Another")
+        self.move(ready, "Ready")
+        self.move(tid, "Done")
+        events = len(self.events_of(tid))
+        db = self.gh()
+        db["down"] = "item-list-all"
+        self.save_db(db)
+        out = self.task()
+        self.assertIn("github_errors", out)
+        self.assertIn("rate limit", out)
+        self.assertIn("started[1]", out)  # Ready cards still start
+        self.assertTrue(self.run_file(tid).exists())
+        self.assertTrue(wt.exists())
+        self.assertEqual(len(self.events_of(tid)), events)
+        self.wait(ready)
+        db = self.gh()
+        db["down"] = False
+        self.save_db(db)
+        self.assertIn("cleaned up", self.task())
+        self.assertFalse(self.run_file(tid).exists())
+        self.assertEqual(len(self.done_events(tid)), 1)
 
     def test_blocked_task_keeps_its_local_branch_for_the_rerun(self):
         tid = self.new("stuck")
@@ -2635,6 +2710,8 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
         self.assertFalse(self.run_file(tid).exists())
         self.assertFalse(worktree.exists())
+        self.task()
+        self.assertEqual(len(self.done_events(tid)), 1)  # set_status's, never a second from the run-file sweep
 
     def test_an_older_merged_pr_of_the_same_branch_never_closes_the_card(self):
         old = {"state": "MERGED", "merged": True, "url": "https://github.com/jyoka/app/pull/90"}
