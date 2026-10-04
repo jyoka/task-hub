@@ -33,8 +33,8 @@ export const parseList = (text: string, checkedAt: string): Board => {
         if (name && n) counts[name.trim()] = Number(n)
       }
     } else if (line.startsWith('  ')) {
-      const [id = '', title = '', status = '', repo = '', , waitsFor = ''] = fields(line.trim())
-      cards.push({ id, title, status, repo, waitsFor })
+      const [id = '', title = '', status = '', repo = '', agent = '', waitsFor = ''] = fields(line.trim())
+      cards.push({ id, title, status, repo, agent, waitsFor })
     }
   }
   return { counts, cards, checkedAt, error: '' }
