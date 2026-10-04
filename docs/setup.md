@@ -45,7 +45,8 @@ task --version
 ```
 
 更新は、PR をマージしたあとにこの clone で pull するだけです。`task watch` を動かしているなら、止めてから
-起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。
+起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。何が変わったか、更新で何が要るかは
+[リリースノート](https://github.com/jyoka/task-hub/releases)に書いています([release.md](release.md))。
 
 ```
 git -C ~/.local/lib/task-hub pull --ff-only
