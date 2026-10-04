@@ -78,7 +78,8 @@ class WindowsTest(unittest.TestCase):
         self.env = {**os.environ, **git_id, "HOME": str(root), "USERPROFILE": str(root), "TASK_HERDR": "0",
                     "TASK_GH": str(root / "gh.exe"), "TASK_TEST_GH_DB": str(self.db),
                     "TASK_TEST_AGENT_CALLS": str(self.calls), "PYTHONPATH": str(fakes),
-                    "TASK_CLONE_URL": (root / "origins").as_uri() + "/{repo}.git"}
+                    "TASK_CLONE_URL": (root / "origins").as_uri() + "/{repo}.git",
+                    "TASK_NO_UPDATE_NOTIFIER": "1"}  # the checkout's origin is GitHub: no update check in the tests
         self.env.pop("PYTHONUTF8", None)  # bin/task must turn UTF-8 mode on itself
         self.write_config()
         self.origin("jyoka/app")

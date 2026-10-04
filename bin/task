@@ -15,13 +15,16 @@ An optional "wait for merge" column between In review and Done holds reviewed ca
 whose PR is approved but not merged yet; the merged PR moves them to Done as usual.
 """
 import configparser
+import contextlib
 import datetime
 from functools import cache
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -45,7 +48,8 @@ REPLAN_MARK = "<!-- task-hub replan -->"
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
-NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow"  # [notify] events: which events show a notification; empty = none
+# [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`)
+NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update"
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
@@ -71,6 +75,16 @@ METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, 
 # for whatever watches (see docs/operations.md)
 EVENTS = STATE / "events.jsonl"
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
+LIB = BIN.parent.parent  # the clone `task` runs from (~/.local/lib/task-hub, docs/setup.md)
+UPDATE = STATE / "update.json"  # the newest v* tag seen on origin, when origin was asked, and which one was notified
+# origin is asked at most once a day (again after an hour when it could not be reached), for at most UPDATE_TIMEOUT
+UPDATE_EVERY, UPDATE_RETRY, UPDATE_TIMEOUT = 24 * 3600, 3600, 5
+WATCH_LABEL = "com.task-hub.watch"  # the launchd job of docs/setup.md
+# Kiro reads these only as copies, never links (docs/kiro-ide.md): `task update` copies them again
+KIRO_COPIES = {"kiro-hook": ("kiro/hooks/task-hub-events.json", ".kiro/hooks/task-hub-events.json"),
+               "kiro-workflow": ("kiro/workflows/task-hub-events.workflow.json",
+                                 ".kiro/workflows/task-hub-events.workflow.json")}
+INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
@@ -583,6 +597,8 @@ def emit(t, event, **extra):
 
 def notification(e):
     """An event's notification (title, body), built from the event and its digest: no LLM, no GitHub."""
+    if e["event"] == "update":  # task-hub's own new release, not a task's event
+        return f"task-hub {e['version']}", e["reason"]
     d = {**{k: e[k] for k in ("reason", "decision", "pr") if e.get(k)}, **(e.get("digest") or {})}
     body = [f"{k}: {v}" for k in DIGEST_KEYS if k != "pr" for v in (d.get(k) if isinstance(d.get(k), list) else [d.get(k)])
             if v]
@@ -1847,6 +1863,174 @@ def sync(started_here=False):
     return lines, board_
 
 
+# ---------- updates: this clone and the releases on its origin (docs/release.md) ----------
+
+def version_key(name):
+    """(major, minor, patch) of "v1.2.3" or "1.2.3", or None for any other name (kiro-v2, v1.2)."""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", name or "")
+    return tuple(map(int, m.groups())) if m else None
+
+
+def newest_release(names):
+    """The newest v<MAJOR>.<MINOR>.<PATCH> tag among names, or ""."""
+    return max((n for n in names if n.startswith("v") and version_key(n)), key=version_key, default="")
+
+
+def quiet_git_env():
+    """git that fails instead of asking for a password: nobody may be there to type it."""
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def lib_branch():
+    """The branch LIB is on, or "" (kiro/install.sh keeps its clone on a kiro-v* tag; or LIB is not a clone)."""
+    return run("git", "-C", LIB, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+
+
+def lib_version():
+    """The VERSION of LIB's bin/task now: after `task update` it is not the one this process runs."""
+    m = re.search(r'(?m)^VERSION = "([^"]+)"', (LIB / "bin" / "task").read_text(errors="replace"))
+    return m.group(1) if m else "unknown"
+
+
+def read_update():
+    try:
+        d = json.loads(UPDATE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_update(**changes):
+    """A failure to note it only means origin is asked again next time."""
+    temp = UPDATE.with_name(f".{UPDATE.name}.{os.getpid()}.tmp")
+    try:
+        UPDATE.parent.mkdir(parents=True, exist_ok=True)
+        temp.write_text(json.dumps({**read_update(), **changes}))
+        temp.replace(UPDATE)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temp.unlink(missing_ok=True)
+
+
+class UpdateCheck:
+    """Whether origin has a newer release than this VERSION, as gh and Homebrew tell of theirs.
+
+    origin is asked (`git ls-remote`: the clone's own access, no GitHub token) at most once a day, while the command
+    does its own work, and waited for at most UPDATE_TIMEOUT. When it cannot be reached, nothing is said and it is
+    asked again after UPDATE_RETRY. Nothing for a clone that is not on a branch: `task update` could not move it.
+    """
+
+    def __init__(self):
+        self.proc = None
+        self.wanted = not os.environ.get("TASK_NO_UPDATE_NOTIFIER") and bool(lib_branch())
+        if not self.wanted or not self.due():
+            return
+        try:
+            self.proc = subprocess.Popen(["git", "-C", str(LIB), "ls-remote", "--tags", "--refs", "origin", "v*"],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         text=True, env=quiet_git_env(), **DETACHED)
+            self.began = time.monotonic()
+        except OSError:
+            pass
+
+    @staticmethod
+    def due():
+        last = read_update()
+        try:
+            age = seconds_since(last["checked"])
+        except (KeyError, TypeError, ValueError):
+            return True
+        return not 0 <= age < (UPDATE_EVERY if last.get("ok") else UPDATE_RETRY)
+
+    def newer(self):
+        """The newest release when it is newer than this VERSION, else ""."""
+        if not self.wanted:
+            return ""
+        if self.proc:
+            try:
+                stdout, _ = self.proc.communicate(timeout=max(0.1, UPDATE_TIMEOUT - (time.monotonic() - self.began)))
+                ok = self.proc.returncode == 0
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):  # its own session: git's https helper goes too
+                    self.proc.kill() if WINDOWS else os.killpg(self.proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self.proc.wait(timeout=1)
+                stdout, ok = "", False
+            self.proc = None
+            names = [line.split("\trefs/tags/", 1)[1] for line in stdout.splitlines() if "\trefs/tags/" in line]
+            write_update(checked=now(), ok=ok, **({"newest": newest_release(names)} if ok else {}))
+        newest = read_update().get("newest") or ""
+        return newest if version_key(newest) and version_key(newest) > version_key(VERSION) else ""
+
+
+def update_line(newest):
+    return f"update: {newest} が出ています。`task update` で更新(今は v{VERSION})"
+
+
+def update_notice(check):
+    """`task watch`'s line and notification of a new release: once per release, not at every check."""
+    newest = check.newer()
+    if not newest or read_update().get("notified") == newest:
+        return []
+    write_update(notified=newest)
+    notify({"event": "update", "version": newest, "reason": update_line(newest).removeprefix("update: ")})
+    return [update_line(newest)]
+
+
+def releases_url(tag):
+    url = run("git", "-C", LIB, "remote", "get-url", "origin").stdout.strip()
+    m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url)
+    return f"https://github.com/{m.group(1) if m else 'jyoka/task-hub'}/releases/tag/{tag}"
+
+
+def restart_watch():
+    """Restart the `task watch` launchd keeps running, so it runs the new code. Runs in progress keep theirs."""
+    if WINDOWS:  # no launchd: the watch is a scheduled task of windows/install.ps1
+        return "watch: if `task watch` runs, start it again (install.ps1 -Watch, docs/windows.md)"
+    job = f"gui/{os.getuid()}/{WATCH_LABEL}"
+    if not shutil.which("launchctl") or run("launchctl", "print", job).returncode != 0:
+        return "watch: not under launchd; if `task watch` runs in a pane, stop it (Ctrl-C) and start it again"
+    r = run("launchctl", "kickstart", "-k", job)
+    if r.returncode != 0:
+        return f"watch: could not restart {WATCH_LABEL} ({(r.stderr or r.stdout).strip()[-200:]}); " \
+               f"run `launchctl kickstart -k {job}`"
+    return f"watch: restarted {WATCH_LABEL} (launchd)"
+
+
+def copy_kiro():
+    """Copy Kiro's hook and workflow again where they are installed, when they differ from LIB's."""
+    copied = []
+    for key, (src, dest) in KIRO_COPIES.items():
+        src, dest = LIB / src, Path.home() / dest
+        if not src.is_file() or not (dest.exists() or dest.is_symlink()):
+            continue  # not installed: Kiro is not used here, or not this part of it
+        if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == src.read_bytes():
+            continue
+        temp = dest.with_name(f".{dest.name}.tmp")
+        try:
+            shutil.copyfile(src, temp)
+            temp.replace(dest)  # a link of an earlier manual install becomes a copy too, as Kiro requires
+        except OSError as e:
+            return [f"kiro: could not copy {home(src)} to {home(dest)} ({e}); copy it by hand (docs/setup.md)"]
+        note_install_copy(key, dest)
+        copied.append(home(dest))
+    return [f"kiro: copied again {', '.join(copied)}"] if copied else []
+
+
+def note_install_copy(key, dest):
+    """kiro/install.sh replaces only the copies whose SHA-256 it recorded: record the new one of a copy it owns."""
+    try:
+        m = json.loads(INSTALL_MANIFEST.read_text())
+        if not isinstance(m, dict) or (m.get("installed") or {}).get(key) != str(dest):
+            return
+        m.setdefault("sha256", {})[key] = hashlib.sha256(dest.read_bytes()).hexdigest()
+        temp = INSTALL_MANIFEST.with_name(f".{INSTALL_MANIFEST.name}.tmp")
+        temp.write_text(json.dumps(m, indent=2) + "\n")
+        temp.replace(INSTALL_MANIFEST)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 # ---------- commands ----------
 
 def cmd_home(_):
@@ -1869,7 +2053,10 @@ def cmd_list(a):
     """The open cards, read only: unlike `task`, it starts nothing and changes nothing (for the /chief agent)."""
     if a["watch"]:
         return list_watch()
-    out(*list_lines(tasks()))
+    check = UpdateCheck()  # asks origin while GitHub is read
+    lines = list_lines(tasks())
+    newest = check.newer()
+    out(*lines, *([update_line(newest)] if newest else []))
 
 
 def list_lines(board_):
@@ -2009,10 +2196,12 @@ def cmd_watch(_):
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     while True:
         config.cache_clear()  # pick up edits between checks, while each check uses one configuration
+        check = UpdateCheck()
         try:
             lines, _ = sync()
         except RuntimeError as e:  # a GitHub hiccup must not end the watch
             lines = [f"error: {e}"]
+        lines += update_notice(check)
         if lines:
             out(f"== {now()}", *lines)
         if os.environ.get("TASK_WATCH_ONCE"):  # tests
@@ -2021,6 +2210,55 @@ def cmd_watch(_):
             time.sleep(WATCH_SECONDS)
         except KeyboardInterrupt:
             return
+
+
+def cmd_update(_):
+    """Bring LIB to origin's newest release, then do what an update needs (docs/setup.md): restart the launchd
+    `task watch` and copy Kiro's hook and workflow again. Changes nothing when the clone has changes of its own."""
+    lib = home(LIB)
+    if run("git", "-C", LIB, "rev-parse", "--show-prefix").stdout.strip() or not (LIB / ".git").exists():
+        fail(f"{lib} is not a git clone of task-hub; nothing changed", "install it as docs/setup.md says")
+    branch = lib_branch()
+    if not branch:
+        fail(f"{lib} is not on a branch (kiro/install.sh keeps its clone on a kiro-v* tag); nothing changed",
+             "the Kiro installer's clone is updated by running kiro/install.sh again (docs/kiro-ide.md)")
+    dirty = run("git", "-C", LIB, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
+    if dirty:
+        fail(f"{lib} has uncommitted changes ({', '.join(line[3:] for line in dirty[:5])}); nothing changed",
+             f"see them with `git -C {lib} status`; commit them or `git -C {lib} stash` them, "
+             "then run `task update` again")
+    try:
+        r = subprocess.run(["git", "-C", str(LIB), "fetch", "-q", "--tags", "origin"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, env=quiet_git_env(), timeout=120)
+        why = "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["git fetch failed"])[-1]
+    except subprocess.TimeoutExpired:
+        why = "timed out"
+    if why:
+        fail(f"could not fetch from origin: {why}; nothing changed",
+             f"check the network (VPN, proxy) and that `git -C {lib} fetch` works, then run `task update` again")
+    newest = newest_release(run("git", "-C", LIB, "tag", "-l", "v*").stdout.split())
+    if not newest:
+        fail("origin has no v<MAJOR>.<MINOR>.<PATCH> tag yet; nothing changed", "releases: docs/release.md")
+    write_update(checked=now(), ok=True, newest=newest)
+    target = run("git", "-C", LIB, "rev-parse", f"refs/tags/{newest}^{{commit}}").stdout.strip()
+    contains = lambda a, b: run("git", "-C", LIB, "merge-base", "--is-ancestor", a, b).returncode == 0
+    before = lib_version()
+    if contains(target, "HEAD"):  # at the release, or past it on main
+        lines = [f"up_to_date: {before} (newest release {newest})"]
+    elif contains("HEAD", target):
+        r = run("git", "-C", LIB, "merge", "--ff-only", "-q", target)
+        if r.returncode != 0:
+            fail(f"could not move {branch} to {newest}: {(r.stderr or r.stdout).strip()[-300:]}; nothing changed",
+                 f"see `git -C {lib} status`")
+        lines = [f"updated: {before} -> {lib_version()} ({newest})", restart_watch()]
+    else:
+        base = run("git", "-C", LIB, "merge-base", "HEAD", target).stdout.strip()
+        own = run("git", "-C", LIB, "log", "--format=%h %s", f"{target}..HEAD").stdout.splitlines()
+        fail(f"{lib} has {len(own)} commit(s) of its own that {newest} does not have "
+             f"({'; '.join(own[:3])}{'; ...' if len(own) > 3 else ''}); nothing changed",
+             f"keep them on a branch and take {branch} back to where it left the releases, then run `task update` "
+             f"again: git -C {lib} branch local-changes && git -C {lib} reset -q --hard {base[:12]}")
+    out(*lines, *copy_kiro(), f"release_notes: {releases_url(newest)}")
 
 
 def cmd_show(a):
@@ -2306,6 +2544,8 @@ COMMANDS = {
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),
+    "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release, restart the launchd "
+               "`task watch`, copy Kiro's hook and workflow again"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
 }
