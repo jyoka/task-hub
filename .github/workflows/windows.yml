@@ -1,0 +1,22 @@
+# task-hub on Windows (docs/windows.md): the runs, and windows/install.ps1 with the scheduled watch
+name: windows
+on:
+  push:  # every branch: a PR's branch is pushed here too
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # install.ps1 clones this checkout
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+      - run: python -m unittest tests.test_windows -v
+        env:
+          TASK_TEST_WINDOWS_INSTALL: "1"

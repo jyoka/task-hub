@@ -74,6 +74,11 @@ ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so it
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
+WINDOWS = os.name == "nt"  # docs/windows.md: no ps, env, sh or osascript, and batch files cut arguments at line breaks
+# a process that outlives the command starting it: its own session; on Windows its own process group and a console
+# without a window, which the programs it starts (git, the agent) share instead of each opening one
+DETACHED = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if WINDOWS \
+    else {"start_new_session": True}
 
 
 # ---------- output (TOON) ----------
@@ -320,6 +325,37 @@ def agent_command(name, prompt):
     return [prompt if part == "{prompt}" else part for part in shlex.split(c["agents"][name])]
 
 
+def windows_command(argv):
+    """argv and the variables to add, as Windows can run them: a leading `env NAME=value ...` (as in the built-in
+    claude) becomes variables, and an npm .cmd shim runs its script with node, since a batch file cuts its
+    arguments at the first line break and the prompt has many. Elsewhere argv is returned as it is."""
+    env = {}
+    if not WINDOWS:
+        return argv, env
+    if argv and argv[0] == "env":
+        argv = argv[1:]
+        while argv and re.fullmatch(r"\w+=.*", argv[0], re.S):
+            k, v = argv.pop(0).split("=", 1)
+            env[k] = v
+    path = shutil.which(argv[0]) if argv else None
+    if not path:
+        return argv, env
+    if path.lower().endswith((".cmd", ".bat")):
+        script = re.search(r'"%~?dp0%?\\([^"]+)"\s+%\*', Path(path).read_text(errors="replace"))
+        if not script:
+            raise RuntimeError(f"{path} is a batch file, which cannot take a prompt of several lines: "
+                               "point [agents] at the program it runs (an .exe, or node with its script)")
+        target = Path(path).parent / script[1]
+        if target.suffix.lower() == ".exe":
+            return [str(target), *argv[1:]], env
+        if target.suffix.lower() not in (".js", ".cjs", ".mjs"):
+            raise RuntimeError(f"{path} runs {target.name}, which task-hub cannot start without it: "
+                               "point [agents] at the program it runs")
+        node = Path(path).parent / "node.exe"
+        return [str(node) if node.exists() else shutil.which("node") or "node", str(target), *argv[1:]], env
+    return [path, *argv[1:]], env
+
+
 def helper_agent(t, key):
     """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
     name = config()["runner"].get(key, "").strip()
@@ -337,9 +373,11 @@ def check_ready(name):
     if not cmd:
         return
     try:
-        r = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        argv, env = windows_command(shlex.split(cmd))
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                           env={**os.environ, **env})
         result, output = f"exited {r.returncode}", r.stdout + r.stderr
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
         r, result, output = None, "failed", str(e)
     if r and r.returncode == 0:
         return
@@ -549,6 +587,15 @@ def notification(e):
     return f"#{e['id']} {e['event']}: {e.get('title', '')}", "\n".join(body + ([d["pr"]] if d.get("pr") else []))
 
 
+WINDOWS_TOAST = """$m = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$x = $m::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$t = $x.GetElementsByTagName('text')
+[void]$t.Item(0).AppendChild($x.CreateTextNode($env:TASK_HUB_TITLE))
+[void]$t.Item(1).AppendChild($x.CreateTextNode($env:TASK_HUB_BODY))
+$m::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show(
+    [Windows.UI.Notifications.ToastNotification]::new($x))"""
+
+
 def notify(e):
     """Show the event on this machine if [notify] events lists it: herdr's notification if herdr runs, else macOS's.
     Fire and forget: a missing or hanging notifier must never cost the run or the command that wrote the event."""
@@ -565,11 +612,13 @@ def notify(e):
     elif shutil.which("osascript"):  # arguments, not a script built from the text: no quoting to get wrong
         cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
                "-e", "end run", title, body]
+    elif WINDOWS:  # a toast from Windows PowerShell (5.1, which loads WinRT types); the text goes in as variables
+        cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]
     else:
         return
     try:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+                         env={**os.environ, "TASK_HUB_TITLE": title, "TASK_HUB_BODY": body}, **DETACHED)
     except OSError:
         pass
 
@@ -616,7 +665,14 @@ def save_run(t):
     temp = RUNS / f".{t['id']}.{os.getpid()}.tmp"  # the runner and watcher write from different processes
     try:
         temp.write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
-        temp.replace(RUNS / f"{t['id']}.json")  # readers see a complete old or new record
+        for attempt in range(50):
+            try:
+                temp.replace(RUNS / f"{t['id']}.json")  # readers see a complete old or new record
+                break
+            except PermissionError:  # Windows: a reader has the file open for a moment
+                if not WINDOWS or attempt == 49:
+                    raise
+                time.sleep(0.02)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -653,8 +709,44 @@ def alive(t):
             return False  # no run of this task on this machine
         # launched but `_run` has not recorded itself yet; give it two minutes
         return seconds_since(t["started"]) < 120
+    if WINDOWS:
+        # this task's own run: Windows hands out pids again soon, and an agent's prompt can say _run
+        return bool(re.search(rf"\s_run\s+{t['id']}\s*$", windows_command_line(int(t["pid"]))))
     r = run("ps", "-p", t["pid"], "-o", "command=")
     return r.returncode == 0 and "_run" in r.stdout
+
+
+def windows_command_line(pid):
+    """The command line of a running process on Windows, which has no ps; "" when there is none.
+    Asked of the system directly: a PowerShell per card would cost a second on every sync."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", ctypes.c_void_p)]
+
+    kernel32, ntdll = ctypes.WinDLL("kernel32"), ctypes.WinDLL("ntdll")
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+                                                ctypes.POINTER(wintypes.ULONG)]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        code, size = wintypes.DWORD(), wintypes.ULONG()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return ""
+        ntdll.NtQueryInformationProcess(handle, 60, None, 0, ctypes.byref(size))  # ProcessCommandLineInformation
+        buf = ctypes.create_string_buffer(size.value)
+        if not size.value or ntdll.NtQueryInformationProcess(handle, 60, buf, size, ctypes.byref(size)) != 0:
+            return ""
+        s = UnicodeString.from_buffer(buf)
+        return ctypes.wstring_at(s.buffer, s.length // 2)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def slow_threshold(agent):
@@ -886,8 +978,12 @@ def run_setup(t, wt, say):
     set_stage(t, "setup")
     say(f"== setup: {cmd}")
     before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
-    proc = subprocess.Popen(["sh", "-c", "set -e\n" + cmd], cwd=wt, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Windows has no sh: PowerShell, stopping at a failing cmdlet, ending with the last program's exit code
+    shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $ErrorActionPreference = 'Stop'\n" + cmd
+             + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"] if WINDOWS else ["sh", "-c", "set -e\n" + cmd]
+    proc = subprocess.Popen(shell, cwd=wt, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     for line in proc.stdout:
         say(line.rstrip("\n"))
     code = proc.wait()
@@ -1017,8 +1113,14 @@ def launch(t):
             raise RuntimeError(f"the run did not start in herdr {'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
         with open(t["log"], "ab") as log:
-            subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                             start_new_session=True, env={**os.environ, "TASK_RUN_LOGGED": "1"})
+            start = lambda flags: subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=log,
+                                                   stderr=subprocess.STDOUT, env={**os.environ, "TASK_RUN_LOGGED": "1"},
+                                                   **flags)
+            try:  # Windows: out of the watch's Task Scheduler job, so stopping the watch leaves the run going
+                start({"creationflags": DETACHED["creationflags"] | subprocess.CREATE_BREAKAWAY_FROM_JOB}
+                      if WINDOWS else DETACHED)
+            except PermissionError:  # the job does not allow it
+                start(DETACHED)
 
 
 def prompt_file(t):
@@ -1297,8 +1399,9 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None):
 def agent_process(agent, prompt, wt, say):
     proc = None
     try:
-        proc = subprocess.Popen(agent_command(agent, prompt), cwd=wt, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        argv, env = windows_command(agent_command(agent, prompt))
+        proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
         for line in proc.stdout:
             say(line.rstrip("\n"))
         return proc.wait()
@@ -1313,12 +1416,16 @@ def agent_process(agent, prompt, wt, say):
     except FileNotFoundError as e:
         say(f"agent not found: {e}")
         return 127
+    except (RuntimeError, OSError) as e:  # windows_command: a batch file it cannot run; Windows: the command line
+        say(f"agent cannot run: {e}")     # is over 32,767 characters (a long goal or report)
+        return 127
 
 
 def build_review_prompt(t, report, diff):
     instructions = WORKER_REVIEW.read_text().split("\n---\n", 1)[-1].strip()
-    if len(diff) > 20000:
-        diff = diff[:20000] + "\n... (diff truncated)\n"
+    limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
+    if len(diff) > limit:
+        diff = diff[:limit] + "\n... (diff truncated)\n"
     return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
                       f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
                       issue(t)["body"].strip(), "", "# Agent report", "",
@@ -1973,7 +2080,7 @@ def cmd_open(a):
     cmd = [wt if part == "{path}" else part for part in shlex.split(template)]
     try:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+                         **DETACHED)
     except OSError as e:
         fail(f"could not run [ide] open ({cmd[0]}): {e}", f"check  [ide]  open  in {home(CONFIG)}")
     out(f"opening {home(wt)} with: {template}")
@@ -2255,4 +2362,12 @@ def hint(e):
 
 
 if __name__ == "__main__":
+    if WINDOWS and not sys.flags.utf8_mode:  # files and pipes would be read in the ANSI code page (cp932 in Japan)
+        # -X utf8 for this child, which holds even where the environment is ignored; PYTHONUTF8 for what it starts
+        utf8 = subprocess.Popen([sys.executable, "-X", "utf8", *sys.argv], env={**os.environ, "PYTHONUTF8": "1"})
+        while True:
+            try:
+                sys.exit(utf8.wait())
+            except KeyboardInterrupt:  # the console sent Ctrl-C to both: the UTF-8 one handles it, this one waits
+                pass
     main(sys.argv[1:])
