@@ -1527,13 +1527,18 @@ def upsert_pr(t, body, draft, base):
 def pr_merged(t):
     """Whether the task's PR was merged. REST, not GraphQL: the watch asks every minute, and GraphQL
     has the tighter hourly limit. Without this machine's run file (the task ran elsewhere), the PR is
-    found by its branch."""
+    found by its branch, as is a PR this machine's run did not open (made by hand after a run without changes).
+    Only the newest PR of that branch counts, only if it closes this task's Issue, and not if it was merged before
+    this machine's last run started: an older merged PR of a reused branch name never closes a card worked on again."""
     m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
     if m:
         return gh_json("api", f"repos/{m[1]}/pulls/{m[2]}").get("merged") is True
     owner = t["repo"].split("/")[0]
-    prs = gh_json("api", f"repos/{t['repo']}/pulls?head={owner}:task/{t['id']}&state=closed&per_page=1")
-    return bool(prs and prs[0].get("merged_at"))
+    prs = gh_json("api", f"repos/{t['repo']}/pulls?head={owner}:task/{t['id']}&state=all&sort=created"
+                         "&direction=desc&per_page=1")
+    if not prs or not prs[0].get("merged_at") or prs[0]["merged_at"] < (load_run(t["id"]).get("started") or ""):
+        return False
+    return bool(re.search(rf"(?i)\bcloses {re.escape(board()['issues'])}#{t['id']}\b", prs[0].get("body") or ""))
 
 
 def find_pr(t):

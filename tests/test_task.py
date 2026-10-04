@@ -136,11 +136,15 @@ elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<n
         fail("HTTP 404: Not Found")
     pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
     out = {"merged": pr.get("merged", False)}
-elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=closed
+elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=...
     repo = a[1].split("/", 1)[1].split("/pulls?")[0]
     head = a[1].split("head=")[1].split("&")[0].split(":", 1)[1]
-    pr = db["prs"].get(f"{repo} {head}")
-    out = [{"merged_at": "2026-09-23T00:00:00Z" if pr.get("merged") else None}] if pr and pr["state"] != "OPEN" else []
+    state = a[1].split("state=")[1].split("&")[0]
+    # newest first: the current PR, then the branch's older ones ("older_prs", newest first)
+    prs = [p for p in [db["prs"].get(f"{repo} {head}"), *db.get("older_prs", {}).get(f"{repo} {head}", [])] if p]
+    out = [{"merged_at": p.get("merged_at") or ("2026-09-23T00:00:00Z" if p.get("merged") else None),
+            "body": p.get("body", "")}
+           for p in prs if state == "all" or p["state"] != "OPEN"][:1]
 elif cmd == ["pr", "ready"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["isDraft"] = "--undo" in a
 else:
@@ -2409,6 +2413,52 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
         self.assertFalse(self.run_file(tid).exists())
         self.assertFalse(worktree.exists())
+
+    def test_an_older_merged_pr_of_the_same_branch_never_closes_the_card(self):
+        old = {"state": "MERGED", "merged": True, "url": "https://github.com/jyoka/app/pull/90"}
+        # a research card reopened after an earlier merge: this machine ran it after that PR was merged
+        research = self.new("nochange", "Compare search libraries", "jyoka/app", "--research")
+        self.task("start", research)
+        self.assertEqual(self.wait(research), "In review")
+        # ran on another machine: no run file here; the branch's newest PR is still open
+        rerun = self.new("ok")
+        self.task("start", rerun)
+        self.wait(rerun)
+        self.wait_for(lambda: "This pane stays open" in self.task("log", rerun))  # its run has written its file
+        self.run_file(rerun).unlink()
+        # ran on another machine: its merged PR closes an Issue of another board, and a number that only starts
+        # with this card's
+        other = self.new("ok")
+        self.task("start", other)
+        self.wait(other)
+        self.wait_for(lambda: "This pane stays open" in self.task("log", other))
+        self.run_file(other).unlink()
+        db = self.gh()
+        db["older_prs"] = {f"jyoka/app task/{research}": [{**old, "body": f"Closes jyoka/tasks#{research}"}],
+                           f"jyoka/app task/{rerun}": [{**old, "body": f"Closes jyoka/tasks#{rerun}"}]}
+        db["prs"][f"jyoka/app task/{other}"].update(state="MERGED", merged=True,
+                                                     body=f"Closes someone/board#1\nCloses jyoka/tasks#{other}0")
+        self.save_db(db)
+        self.task()
+        for tid in (research, rerun, other):
+            self.assertEqual(self.status(tid), "In review")
+            self.assertEqual(self.gh()["issues"][tid]["state"], "OPEN")
+
+    def test_a_pr_made_by_hand_after_a_run_without_changes_is_seen_when_merged(self):
+        tid = self.new("nochange")  # Blocked (no changes): the run file has no PR
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: "This pane stays open" in self.task("log", tid))
+        self.assertEqual(self.run_state(tid).get("pr", ""), "")
+        self.move(tid, "In review")  # the human pushed task/<id>, opened a PR, and moved the card
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"] = {"url": "https://github.com/jyoka/app/pull/90", "state": "MERGED",
+                                             "merged": True, "merged_at": "2099-01-01T00:00:00Z",
+                                             "body": f"Closes jyoka/tasks#{tid}", "base": "main"}
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
 
     def test_an_unreachable_pr_check_keeps_the_card_and_the_others_go_on(self):
         tid, other = self.new("ok"), self.new("ok", "Add hello", "jyoka/other")
