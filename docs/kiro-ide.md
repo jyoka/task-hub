@@ -437,13 +437,24 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
 ## 10. ボードをサイドバーとステータスバーに出す(拡張)
 
 `kiro/board-extension/` は、task-hub のボードを Kiro IDE のサイドバーとステータスバーに出す拡張です。
-Claude Code の mod(`claude/task-board/`)と同じ役割で、`task list` の読み方(`claude/task-board/hooks/parse.ts`)も
-共有しています。インストーラ(`sh kiro/install.sh`)は入れないので、手で入れます。
+Claude Code の mod(`claude/task-board/`)と同じ役割で、`task list` と `events.jsonl`・`metrics.jsonl` の読み方
+(`claude/task-board/hooks/parse.ts`、`panel.ts`)も共有しています。インストーラ(`sh kiro/install.sh`)は入れないので、
+手で入れます。
 
-- アクティビティバーの「task-hub」に、カードを Blocked → In review → wait for merge → In progress → Ready → Backlog
-  の順に並べます。知らない status は末尾です。実行中のカード(`In progress › review` など)は In progress の位置です。
-- 各行に `#番号`、タイトル、status、待ち先(`waits_for`)が出ます。
+- アクティビティバーの「task-hub」に、カードを「要対応 N」(Blocked、In review、wait for merge)、「実行中 N」、
+  「待ち N」(Ready)、「Backlog N」の折りたためるグループに分けて出します。Backlog と知らない status の「その他」は
+  初めは畳んでいます。空のグループは出しません。
+- アイコンの色は状態ごとです(Blocked は赤、In review は黄、wait for merge は緑、実行中は水色)。
+- 各行に `#番号`、タイトル、repo 名(owner なし)、待ち先が出ます。要対応のカードには列、実行中のカードには段階
+  (`agent`、`review`、`retry`)と「12分 / 普段9分」が出ます。普段を超えたらアイコンが警告色、`bin/task` が遅いと
+  判断する時間を超えたらエラー色になります。
+- カードの下に判断材料が 1 行出ます。In review は自動レビューの判定、Blocked は理由です。PR があれば、
+  押すとブラウザで開く行が足されます。カードにマウスを乗せると、タイトルの全文と詳細が出ます。
+- アクティビティバーのアイコンに要対応の件数が出ます(0 なら出ません)。
+- 経過時間・判定・理由・PR は `~/.local/state/task-hub/` の `events.jsonl` と `metrics.jsonl` から読みます。
+  ファイルがない、読めない、壊れた行があるときは、その分が出ないだけで一覧は出ます。
 - ステータスバーに、0 でない数だけ「task: 実行中1 レビュー待ち3 止まり1」のように出します。押すとボードが開きます。
+  左端に置いているので、ウィンドウが狭いと後ろ(止まり)から切れて見えることがあります。
 - 1 分ごとに読み直します。ビューの上の更新ボタンで、すぐに読み直せます。
 - `task list` が失敗したら、空のボードには見せません。ビューに「読めませんでした: 理由」、ステータスバーに
   「task: 読めない (理由)」と出します。

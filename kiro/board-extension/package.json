@@ -25,7 +25,7 @@
   },
   "scripts": {
     "build": "node --disable-warning=ExperimentalWarning scripts/build.mjs",
-    "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./test/resolve.mjs --test test/*.test.ts",
     "package": "node --disable-warning=ExperimentalWarning scripts/package.mjs"
   }
 }
