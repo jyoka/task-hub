@@ -1,1 +1,4 @@
 __pycache__/
+
+# Types Claude Code writes when it loads the mod
+claude/task-board/.claude-plugin/types/

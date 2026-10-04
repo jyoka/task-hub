@@ -236,6 +236,24 @@ draft でないかを確かめ、マージできなければ理由を伝えま�
 (`--digest`)で知らせ、`task show --full` はあなたに聞かれたときだけ読みます。2026-09-27 の実測では、別の作業と
 同じ長い会話で動かしたセッションが 1 回の呼び出しあたり約 $0.17、専用のセッションが約 $0.03 でした。
 
+### ボードを見るだけなら(Claude Code の task-board mod)
+
+`claude/task-board/` は、ボードをステータスライン(「task: 実行中1 レビュー待ち3 止まり1」)とペインに出す
+Claude Code の mod です。`/task-board` でペインを開くと、Blocked → In review → wait for merge(使っていれば)→
+In progress → Ready → Backlog の順に並び、待ち先(`waits_for`)も出ます。実行中のカード(`In progress › review`
+など)は In progress の位置に並びます。起動するときに読み込みます:
+
+```
+claude --plugin-dir ~/.local/lib/task-hub/claude/task-board
+```
+
+- Claude Code 専用です(`claude-code` の API を使います)。Kiro、Codex、Pi では動きません。
+- LLM を使いません。1 分ごとに `task list` を実行して表示するだけなので、費用はかかりません。
+- 実行するのは `$HOME/.local/bin/task list` だけです。素の `task` は Ready のカードを開始するので呼びません。
+
+mod の API は early access で、Claude Code のリリースごとに変わることがあります(Claude Code 2.1.289 で確認、
+2026-10-04)。読み込むと `.claude-plugin/types/` に型が書き出されますが、コミットしません(`.gitignore` 済み)。
+
 ### ほかのスキルからボードに Issue を作るとき(to-issues など)
 
 Matt Pocock の `to-prd` / `to-issues` のように Issue を作るスキルは、そのままだと `gh issue create` で作るので、
