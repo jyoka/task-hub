@@ -78,6 +78,8 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 `replan`、実行がいつもより長引いているときの `slow` です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
+GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
+このマシンで動かしたカードなら、`task` の同期が気づいたときに Done を 1 回だけ書きます。
 
 `slow` は、`task` の同期(`task watch` なら 1 分ごと)が、このマシンで生きている In progress の実行に 1 回だけ出します。
 しきい値は、そのエージェントの終わった実行の所要時間の中央値の 3 倍で、最低 15 分、終わった実行が 3 件未満なら
