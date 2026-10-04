@@ -140,10 +140,13 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 - 説明: `## Blocked`(ある場合)、`## Report`、`## Please review`、`Closes <issues repo>#<番号>`、エージェント名のフッター
 - マージされると `Closes` によって Issue が閉じ、Project のワークフロー(Item closed)でカードが Done に移ります。
   次の確認で task-hub はカードが開いた列から消えたことに気づき、worktree と herdr のワークスペースを削除します
-- Base branch 向けの PR について、GitHub のドキュメントは「`Closes` はデフォルトブランチへのマージのときだけ効く」と
-  しています(実際には閉じた例もありますが、保証がありません)。そのため task-hub が In review と wait for merge のカードの PR を確認し、マージされていれば Issue を閉じてカードを Done にし、
+- GitHub のドキュメントは「`Closes` はデフォルトブランチへのマージのときだけ効く」としています。デフォルトブランチへの
+  マージでも閉じなかったことがあります(jyoka/tasks#81)。そのため task-hub が In review と wait for merge のカードすべての
+  PR を確認し、マージされていれば Issue を閉じてカードを Done にし、
   worktree と herdr のワークスペースを削除します。この確認は GraphQL とは別枠の REST API で行います。
-  そのタスクを別のマシンで実行した場合も、ブランチ `task/<番号>` から PR を探して確認します
+  そのタスクを別のマシンで実行した場合や、変更なしで終わった実行のあとに人が PR を作った場合も、ブランチ `task/<番号>`
+  から PR を探して確認します。そのときは、いちばん新しい PR
+  の本文に `Closes <issues repo>#<番号>` があり、手元の最後の実行より後にマージされたときだけ Done にします
 - Base branch が GitHub にない(手元にしかない、マージ後に削除された)場合は、実行のたびに開始前に確かめて開始せず、
   「push してから Ready に戻してください」とコメントして Blocked にします
 - 前の実行が `task/<番号>` を push した後で Base branch を書き換えた(空欄にした場合を含む)カードは再実行せず、
