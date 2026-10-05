@@ -53,11 +53,21 @@ if db.get("down") and kind and (db["down"] is True or kind == db["down"]):
     fail("GraphQL: API rate limit exceeded for user ID 1.")
 if db.get("down") == "item-list-all" and kind == "item-list" and fields["q"] == "":  # only the read with Done cards
     fail("GraphQL: API rate limit exceeded for user ID 1.")
-if cmd == ["project", "view"]:
-    out = {"id": "PVT_1", "url": "https://github.com/users/jyoka/projects/2"}
-elif kind == "field-list":
-    assert fields["id"] == "PVT_1"
-    out = {"data": {"node": {"fields": {"nodes": db["fields"]}}}}
+if cmd == ["api", "graphql"]:
+    db["graphql_calls"] = db.get("graphql_calls", 0) + 1
+if kind == "field-list":  # the Project's id, url, and fields: db["owners"] says who is a User or an Organization
+    assert "repositoryOwner(" in fields["query"] and a[a.index("number=" + fields["number"]) - 1] == "-F", a  # Int!
+    owner_type = db.get("owners", {"jyoka": "User"}).get(fields["owner"])
+    if not owner_type:  # GitHub answers null, with no error
+        out = {"data": {"repositoryOwner": None}}
+    elif not re.search(r"\.\.\. on (ProjectV2Owner|%s) \{\s*projectV2\(" % owner_type, fields["query"]):
+        out = {"data": {"repositoryOwner": {}}}  # the fragment does not apply to this owner's type
+    elif f"{fields['owner']}/{fields['number']}" not in db.get("projects", ["jyoka/2"]):
+        print(json.dumps({"data": {"repositoryOwner": {"projectV2": None}}, "errors": [{"type": "NOT_FOUND"}]}))
+        fail(f"gh: Could not resolve to a ProjectV2 with the number {fields['number']}.")
+    else:
+        url = f"https://github.com/{'orgs' if owner_type == 'Organization' else 'users'}/{fields['owner']}/projects/{fields['number']}"
+        out = {"data": {"repositoryOwner": {"projectV2": {"id": "PVT_1", "url": url, "fields": {"nodes": db["fields"]}}}}}
 elif kind == "item-list":
     db["item_list_calls"] = db.get("item_list_calls", 0) + 1
     # each "alias: fieldValueByName(name: ...)" gets the value only if the name is spelled as on the board
@@ -3041,6 +3051,40 @@ class TaskTest(unittest.TestCase):
         self.assertIn('Status option "Blocked"', out)
         self.assertIn('text field "Agent"', out)
         self.assertIn('text field "Base branch" (it is SINGLE_SELECT, make it TEXT)', out)
+
+    def use_project(self, project, owners):
+        self.write_config()
+        cfg = self.root / ".config/task-hub/config.ini"
+        cfg.write_text(cfg.read_text().replace("project = jyoka/2", f"project = {project}"))
+        self.save_db({**self.gh(), "owners": owners, "projects": [project]})
+
+    def test_list_reads_the_board_in_two_github_calls(self):
+        tid = self.new("ok")
+        self.save_db({**self.gh(), "graphql_calls": 0})
+        self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
+        self.assertEqual(self.gh()["graphql_calls"], 2)  # the Project with its fields, then the cards
+
+    def test_a_project_owned_by_a_user_or_an_organization_is_read(self):
+        fields = self.gh()["fields"]
+        for owner, kind, path in (("alice", "User", "users"), ("acme", "Organization", "orgs")):
+            with self.subTest(kind):
+                self.use_project(f"{owner}/7", {owner: kind})
+                self.save_db({**self.gh(), "fields": fields})
+                tid = self.new("ok")
+                self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
+                self.save_db({**self.gh(), "fields": [f for f in fields if f["name"] != "Agent"]})
+                out = self.task("list", code=1)  # the help links the Project's settings by the url GitHub gave
+                self.assertIn(f"(https://github.com/{path}/{owner}/projects/7)", out)
+
+    def test_a_missing_project_or_owner_cannot_be_read(self):
+        help_ = "help: run `gh auth refresh -s project` and check [board] project in the config\n"
+        self.use_project("jyoka/9", {"jyoka": "User"})
+        self.save_db({**self.gh(), "projects": ["jyoka/2"]})
+        self.assertEqual(self.task("list", code=1), "error: cannot read GitHub Project jyoka/9: "
+                         "gh: Could not resolve to a ProjectV2 with the number 9.\n" + help_)
+        self.use_project("nosuch/2", {})
+        self.assertEqual(self.task("list", code=1),
+                         "error: cannot read GitHub Project nosuch/2: unknown owner type\n" + help_)
 
     def test_field_names_are_matched_without_regard_to_case(self):
         db = self.gh()
