@@ -91,7 +91,6 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
 # task feedback: a new Issue on task-hub's own repository, from a form in .github/ISSUE_TEMPLATE (not the board)
-FEEDBACK_URL = "https://github.com/jyoka/task-hub/issues/new"
 FEEDBACK_FORMS = {"bug": "bug_report.yml", "feature": "feature_request.yml"}
 WINDOWS = os.name == "nt"  # docs/windows.md: no ps, env, sh or osascript, and batch files cut arguments at line breaks
 # a process that outlives the command starting it: its own session; on Windows its own process group and a console
@@ -1989,10 +1988,15 @@ def update_notice(check):
     return [update_line(newest)]
 
 
-def releases_url(tag):
+def lib_repo():
+    """owner/repo of the clone's origin on GitHub (jyoka/task-hub when origin is not on GitHub)."""
     url = run("git", "-C", LIB, "remote", "get-url", "origin").stdout.strip()
     m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url)
-    return f"https://github.com/{m.group(1) if m else 'jyoka/task-hub'}/releases/tag/{tag}"
+    return m.group(1) if m else "jyoka/task-hub"
+
+
+def releases_url(tag):
+    return f"https://github.com/{lib_repo()}/releases/tag/{tag}"
 
 
 def restart_watch():
@@ -2374,7 +2378,7 @@ def cmd_feedback(a):
     fields = {"template": FEEDBACK_FORMS[kind]}
     if kind == "bug":  # each name is an id in the form; GitHub fills those fields from the URL
         fields.update(version=VERSION, os=os_description())
-    url = f"{FEEDBACK_URL}?{urlencode(fields, quote_via=quote)}"
+    url = f"https://github.com/{lib_repo()}/issues/new?{urlencode(fields, quote_via=quote)}"
     opened = open_in_browser(url)
     out("feedback:", f"  form: {kind}", f"  url: {url}", f"  opened: {'true' if opened else 'false'}",
         *([] if opened else ["help: open the url in your browser to write the report"]))

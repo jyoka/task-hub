@@ -3483,10 +3483,22 @@ class TaskTest(unittest.TestCase):
 
     # --- feedback ---
 
-    def feedback_url(self, out):
+    def feedback(self, *args, origin="https://github.com/jyoka/task-hub.git"):
+        """`task feedback` as a clone whose origin is the given URL runs it: the form is on that repository."""
+        lib = self.root / "feedback-lib"
+        (lib / "bin").mkdir(parents=True)
+        shutil.copy(BIN, lib / "bin/task")
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        subprocess.run(["git", "-C", str(lib), "remote", "add", "origin", origin], check=True)
+        r = subprocess.run([str(lib / "bin/task"), "feedback", *args], env=self.env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, f"{r.stdout}{r.stderr}")
+        return r.stdout
+
+    def feedback_url(self, out, repo="jyoka/task-hub"):
         url = re.search(r"url: (\S+)", out).group(1)
         parts = urllib.parse.urlsplit(url)
-        self.assertEqual(f"{parts.scheme}://{parts.netloc}{parts.path}", "https://github.com/jyoka/task-hub/issues/new")
+        self.assertEqual(f"{parts.scheme}://{parts.netloc}{parts.path}", f"https://github.com/{repo}/issues/new")
         fields = {k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items()}
         # every field the URL fills in is an id in that form: GitHub ignores the names it does not know
         form = (BIN.parent.parent / ".github" / "ISSUE_TEMPLATE" / fields["template"]).read_text()
@@ -3495,17 +3507,18 @@ class TaskTest(unittest.TestCase):
         return url, fields
 
     def no_browser(self):
-        """Only python3 on PATH: no open or xdg-open to start a browser with."""
+        """Only python3 and git on PATH: no open or xdg-open to start a browser with."""
         pybin = self.root / "pybin"
         pybin.mkdir()
         (pybin / "python3").symlink_to(sys.executable)
+        (pybin / "git").symlink_to(shutil.which("git"))
         self.env["PATH"] = str(pybin)
 
     def test_feedback_opens_the_bug_form_with_the_version_and_os(self):
         for opener in ("open", "xdg-open"):  # macOS's, and the one elsewhere
             (self.root / "fakebin" / opener).write_text(FAKE_IDE)
             (self.root / "fakebin" / opener).chmod(0o755)
-        out = self.task("feedback")
+        out = self.feedback()
         self.assertIn("opened: true", out)
         url, fields = self.feedback_url(out)
         self.assertEqual(fields["template"], "bug_report.yml")
@@ -3518,7 +3531,7 @@ class TaskTest(unittest.TestCase):
 
     def test_feedback_prints_the_url_when_no_browser_can_open(self):
         self.no_browser()
-        out = self.task("feedback")
+        out = self.feedback()
         self.assertIn("opened: false", out)
         self.assertIn("help: open the url in your browser", out)
         _, fields = self.feedback_url(out)
@@ -3526,8 +3539,13 @@ class TaskTest(unittest.TestCase):
 
     def test_feedback_feature_opens_the_feature_form(self):
         self.no_browser()
-        _, fields = self.feedback_url(self.task("feedback", "--feature"))
+        _, fields = self.feedback_url(self.feedback("--feature"))
         self.assertEqual(fields, {"template": "feature_request.yml"})
+
+    def test_feedback_opens_the_form_on_the_repository_task_runs_from(self):
+        self.no_browser()
+        out = self.feedback(origin="https://github.com/dip-ka-jo/task-hub.git")
+        self.feedback_url(out, repo="dip-ka-jo/task-hub")
 
     def test_help_lists_feedback(self):
         self.assertIn("task feedback [--feature]", self.task("help"))
