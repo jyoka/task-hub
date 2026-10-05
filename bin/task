@@ -431,8 +431,11 @@ def gh_json(*args):
 
 ADD_BLOCKED_BY = """mutation($issue: ID!, $blocker: ID!) {
   addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocker}) { issue { number } } }"""
-FIELDS_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { fields(first: 50) { nodes {
-  ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } }"""
+# the Project's id, url, and fields in one call (1 point), whether a user or an organization owns it;
+# `gh project view` cost 2 points (the owner's type, then the Project) and a fields query 1 more
+PROJECT_QUERY = """query($owner: String!, $number: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner {
+  projectV2(number: $number) { id url fields(first: 50) { nodes {
+    ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } } }"""
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
   items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id
@@ -445,7 +448,9 @@ ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { 
 
 
 def graphql(query, **variables):
-    return gh_json("api", "graphql", "-f", f"query={query}", *(a for k, v in variables.items() for a in ("-f", f"{k}={v}")))["data"]
+    # -F sends an int as a number (an Int! variable); -f sends a string as it is
+    return gh_json("api", "graphql", "-f", f"query={query}",
+                   *(a for k, v in variables.items() for a in ("-F" if isinstance(v, int) else "-f", f"{k}={v}")))["data"]
 
 
 _board = {}
@@ -457,8 +462,10 @@ def board():
         return _board
     owner, number, issues = board_config()
     try:
-        project = gh_json("project", "view", number, "--owner", owner, "--format", "json")
-        fields = graphql(FIELDS_QUERY, id=project["id"])["node"]["fields"]["nodes"]
+        project = (graphql(PROJECT_QUERY, owner=owner, number=int(number))["repositoryOwner"] or {}).get("projectV2")
+        if not project:  # no user or organization of that login (gh errors on a missing number itself)
+            raise RuntimeError("unknown owner type")  # what `gh project view` said
+        fields = project["fields"]["nodes"]
     except RuntimeError as e:  # raised, not fail(): a finishing run must still keep its report and block the card
         raise RuntimeError(f"cannot read GitHub Project {owner}/{number}: {e}")
     by_name = {f["name"].lower(): f for f in fields if f}
