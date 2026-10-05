@@ -1,6 +1,6 @@
 #!/bin/sh
 # kiro/doctor.sh: checks every stage of kiro/install.sh and lists what is missing, with what to do next
-# (docs/kiro-ide.md, "インストーラが行うこと", stage 11). It changes nothing: no file, no login, nothing on GitHub.
+# (docs/kiro-ide.md, "インストーラが行うこと", stage 12). It changes nothing: no file, no login, nothing on GitHub.
 #   sh kiro/doctor.sh [--in-install]
 # --in-install: kiro/install.sh runs it at its end; then only the list, the installer says the one next step.
 # It judges whether task-hub works, not whether it has the installer's form: a manual install (docs/setup.md: the
@@ -311,6 +311,48 @@ elif launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1; then
   ok "$(tilde "$PLIST")、動いています"
 else
   ng "$(tilde "$PLIST") はありますが、動いていません" "常駐を始めてよければ、sh kiro/install.sh --start-launchd を実行してください"
+fi
+
+# 11. Slack triage (docs/slack-triage.md): the wrapper, and the key waited for by launchd (unless slack-triage off)
+label="11. Slackトリアージ"
+ST_LABEL=com.task-hub.slack-triage
+ST_PLIST=$HOME/Library/LaunchAgents/$ST_LABEL.plist
+st_enabled=on st_key=⌃⌥S
+if [ -n "$PY" ]; then
+  set -- $("$PY" - "$HOME/.config/task-hub/slack-triage.json" <<'EOF' 2>/dev/null
+import json, sys
+try:
+    c = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    c = {}
+c = c if isinstance(c, dict) else {}
+m = [x.strip() for x in (c.get("hotkey_mods") or "ctrl,opt").split(",")]
+sym = "".join(s for n, s in ((("ctrl", "control"), "⌃"), (("opt", "option", "alt"), "⌥"), (("shift",), "⇧"),
+                              (("cmd", "command"), "⌘")) if any(x in m for x in n))
+print("off" if c.get("enabled") is False else "on", sym + (c.get("hotkey_key") or "s").upper())
+EOF
+  )
+  st_enabled=${1:-on} st_key=${2:-⌃⌥S}
+fi
+if [ ! -d "$clone/.git" ]; then
+  ng "task-hub 本体がないので確かめていません" "$INSTALL"
+elif [ ! -f "$clone/slack-triage/app/main.py" ]; then
+  ok "この版の task-hub にはありません"
+elif ! grep -q '^# task-hub: made by kiro/install.sh' "$BIN_DIR/slack-triage" 2>/dev/null; then
+  ng "$(tilde "$BIN_DIR/slack-triage") がありません" "$INSTALL"
+elif [ ! -x "$clone/slack-triage/bin/slack-triage-hotkey" ]; then
+  ng "キー受付プログラム($(tilde "$clone/slack-triage/bin/slack-triage-hotkey"))がありません" "$INSTALL"
+elif [ "$st_enabled" = off ]; then
+  ok "止めています(slack-triage off)。使うときは slack-triage on"
+elif [ ! -f "$ST_PLIST" ]; then
+  ng "$(tilde "$ST_PLIST") がありません" "$INSTALL"
+elif ! launchctl print "gui/$(id -u)/$ST_LABEL" >/dev/null 2>&1; then
+  ng "起動キー ${st_key} を待つ常駐が動いていません" "$INSTALL"
+else
+  case $(cat "$STATE_DIR/slack-triage-hotkey.status" 2>/dev/null) in
+    ok*) ok "Slack のスレッドをコピーして ${st_key} で使えます" ;;
+    *) ng "起動キー ${st_key} を登録できていません" "slack-triage key t のように別のキーにしてください" ;;
+  esac
 fi
 
 [ -n "$in_install" ] && exit $((missing > 0))
