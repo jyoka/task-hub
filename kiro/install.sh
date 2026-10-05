@@ -29,15 +29,20 @@ KIRO_CLI_TEAM=94KV3E626L  # AMZN Mobile LLC, who signs Kiro CLI.app (and Kiro.ap
 KIRO_DIR=$HOME/.kiro
 LAUNCHD_LABEL=com.task-hub.watch
 PLIST=$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist
+# Slack triage (docs/slack-triage.md): the key ⌃⌥S, waited for by a small agent of launchd
+ST_LABEL=com.task-hub.slack-triage
+ST_PLIST=$HOME/Library/LaunchAgents/$ST_LABEL.plist
+ST_CONFIG=$HOME/.config/task-hub/slack-triage.json
+ST_STATUS=$HOME/.local/state/task-hub/slack-triage-hotkey.status
 KEYCHAIN_SERVICE=task-hub-kiro-api-key  # docs/kiro-ide.md, section 6
 MARK='task-hub: made by kiro/install.sh'
 # The stages, in order. Each is a function stage_<name>.
 # The logins come before task_hub: task-hub's repo is private, and git clones it with gh's login.
-STAGES="prereq python gh kiro_cli gh_login kiro_login task_hub board config kiro launchd"
+STAGES="prereq python gh kiro_cli gh_login kiro_login task_hub board config kiro launchd slack_triage"
 # What the manifest records: "python" (the one ~/.local/bin/task uses) and, under "installed", what this script
 # put there (only that: an existing gh or Python is used, not recorded). Shell variable M_<key>, "_" for "-".
 MANIFEST_KEYS="uv uv_python gh kiro_cli kiro_cli_app task_hub task zprofile config kiro_skill_task kiro_skill_chief
-  kiro_steering kiro_hook kiro_workflow kiro_settings launchd"
+  kiro_steering kiro_hook kiro_workflow kiro_settings launchd slack_triage slack_triage_launchd"
 COPY_KEYS="kiro_hook kiro_workflow"  # fingerprints of copies this installer owns, before updating or removing them
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -780,6 +785,153 @@ $args
   ok 始めました "$(tilde "$PLIST")、ログは $(tilde "$STATE_DIR")/watch.err.log。${key}"
 }
 
+stage_slack_triage() {
+  label="11. Slackトリアージ"
+  # docs/slack-triage.md. Copy a Slack thread, press ⌃⌥S: Kiro (an agent with no tools) proposes tasks, and `task new`
+  # runs only for those the user says yes to. A small program kept by launchd waits for the key
+  # (RegisterEventHotKey: no Accessibility or Input Monitoring permission). Everyone gets it; `slack-triage off`
+  # stops it, and this stage then leaves it stopped.
+  src=$LIB_DIR/slack-triage
+  if [ ! -f "$src/app/main.py" ]; then
+    ok 飛ばしました "この版の task-hub にはありません"
+    return
+  fi
+  did=
+  # The program that waits for the key is not in the repository: it is built here from hotkey/main.swift, with swiftc
+  # of the Command Line Tools (stage 1), and built again when a new version of task-hub changed that source.
+  hotkey=$src/bin/slack-triage-hotkey
+  srcsum=$(shasum -a 256 "$src/hotkey/main.swift" | awk '{ print $1 }')
+  if [ ! -x "$hotkey" ] || [ "$(cat "$hotkey.source.sha256" 2>/dev/null)" != "$srcsum" ]; then
+    xcrun --find swiftc >/dev/null 2>&1 \
+      || die "Slackトリアージのキー受付プログラムを作る swiftc がありません(Xcode の Command Line Tools が古いか、足りません)" \
+        "情シスに Xcode の Command Line Tools を入れ直してもらい(ターミナルで xcode-select --install。管理者権限が要る場合があります)、もう一度実行してください"
+    sh "$src/hotkey/build.sh" >"$work/build.log" 2>&1 \
+      || die "Slackトリアージのキー受付プログラムをビルドできませんでした($(tail -n 1 "$work/build.log"))" \
+        "もう一度実行してください。続くときは task-hub の担当者に知らせてください"
+    printf '%s\n' "$srcsum" > "$hotkey.source.sha256"
+    did="${did}$(tilde "$hotkey")(ビルド)、"
+  fi
+  "$hotkey" </dev/null >/dev/null 2>&1
+  [ $? -eq 2 ] || die "Slackトリアージのキー受付プログラム($(tilde "$hotkey"))がこの Mac で動きません" \
+    "情シスに、ホームの下に置いた実行ファイルを止めていないか確かめてください"
+  # ~/.local/bin/slack-triage: a wrapper with the Python the installer checked, as ~/.local/bin/task
+  wrapper=$BIN_DIR/slack-triage
+  want="#!/bin/sh
+# $MARK. Runs Slack triage (docs/slack-triage.md) with the Python the installer checked.
+exec $(shquote "$PY") $(shquote "$src/app/main.py") \"\$@\""
+  if [ -e "$wrapper" ] && ! grep -q "^# $MARK" "$wrapper"; then
+    die "$(tilde "$wrapper") が既にあります(このインストーラが作ったものではありません)" "それを消すか移してから、もう一度実行してください"
+  fi
+  if [ "$(cat "$wrapper" 2>/dev/null)" != "$want" ]; then
+    mkdir -p "$BIN_DIR" && printf '%s\n' "$want" > "$wrapper.tmp" && chmod 755 "$wrapper.tmp" \
+      && mv -f "$wrapper.tmp" "$wrapper" || die "$(tilde "$wrapper") を書けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+    did="${did}$(tilde "$wrapper")、"
+  fi
+  M_slack_triage=$wrapper
+  write_manifest
+
+  want="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<!-- $MARK (docs/slack-triage.md). Waits for the key of Slack triage while you are logged in. -->
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key>
+  <string>$ST_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml "$hotkey")</string>
+    <string>--config</string>
+    <string>$(xml "$ST_CONFIG")</string>
+    <string>--status</string>
+    <string>$(xml "$ST_STATUS")</string>
+    <string>--</string>
+    <string>$(xml "$wrapper")</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml "$STATE_DIR/slack-triage-hotkey.err.log")</string>
+</dict>
+</plist>"
+  if [ -e "$ST_PLIST" ] && ! grep -qF "$MARK" "$ST_PLIST"; then
+    die "$(tilde "$ST_PLIST") が既にあります(このインストーラが作ったものではありません)" "それを移してから、もう一度実行してください"
+  fi
+  wrote=
+  if [ "$(cat "$ST_PLIST" 2>/dev/null)" != "$want" ]; then
+    printf '%s\n' "$want" > "$work/st-plist" && plutil -lint -s "$work/st-plist" >/dev/null \
+      && mkdir -p "$(dirname "$ST_PLIST")" && mv -f "$work/st-plist" "$ST_PLIST" \
+      || die "$(tilde "$ST_PLIST") を書けませんでした" "ホームの空き容量と権限を確かめて、もう一度実行してください"
+    wrote=1 did="${did}$(tilde "$ST_PLIST")、"
+  fi
+  M_slack_triage_launchd=$ST_PLIST
+  write_manifest
+
+  # The key, and whether it is stopped, from its settings (written by slack-triage, its first run asks the name)
+  set -- $("$PY" - "$ST_CONFIG" <<'EOF' 2>/dev/null
+import json, sys
+try:
+    c = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    c = {}
+c = c if isinstance(c, dict) else {}
+print("off" if c.get("enabled") is False else "on", c.get("hotkey_key") or "s", c.get("hotkey_mods") or "ctrl,opt",
+      "named" if c.get("owner_name") else "new")
+EOF
+  )
+  enabled=${1:-on} hk=${2:-s} mods=${3:-ctrl,opt} named=${4:-new}
+  keyname=
+  case ",$mods," in *,ctrl,*|*,control,*) keyname="${keyname}⌃" ;; esac
+  case ",$mods," in *,opt,*|*,option,*|*,alt,*) keyname="${keyname}⌥" ;; esac
+  case ",$mods," in *,shift,*) keyname="${keyname}⇧" ;; esac
+  case ",$mods," in *,cmd,*|*,command,*) keyname="${keyname}⌘" ;; esac
+  keyname=${keyname}$(printf '%s' "$hk" | tr 'a-z' 'A-Z')
+  domain=gui/$(id -u)
+  loaded=
+  launchctl print "$domain/$ST_LABEL" >/dev/null 2>&1 && loaded=1
+  if [ "$enabled" = off ]; then
+    [ -n "$did" ] && changed=1
+    ok "$([ -n "$did" ] && echo 入れました || echo 済み)" "${did}止めています(slack-triage off)。使うときは slack-triage on"
+    return
+  fi
+  # Started again when its plist or its program changed (a new version of task-hub)
+  sum=$(shasum -a 256 "$hotkey" | awk '{ print $1 }')
+  sumfile=$STATE_DIR/slack-triage-hotkey.sha256
+  [ "$(cat "$sumfile" 2>/dev/null)" = "$sum" ] || wrote=1
+  if [ -n "$loaded" ] && [ -z "$wrote" ] && case $(cat "$ST_STATUS" 2>/dev/null) in ok*) true ;; *) false ;; esac; then
+    [ -n "$did" ] && changed=1
+    ok "$([ -n "$did" ] && echo 入れました || echo 済み)" "${did}Slack のスレッドをコピーして ${keyname} で使えます"
+    return
+  fi
+  [ -n "$loaded" ] && launchctl bootout "$domain/$ST_LABEL" >/dev/null 2>&1
+  rm -f "$ST_STATUS"
+  i=0
+  until launchctl bootstrap "$domain" "$ST_PLIST" >"$work/launchctl.log" 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 5 ] || die "Slackトリアージの起動キーを launchd に登録できませんでした($(tail -n 1 "$work/launchctl.log"))" \
+      "時間をおいて、もう一度実行してください"
+    sleep 1  # bootout ends the old one in the background
+  done
+  i=0
+  while [ "$i" -lt 20 ] && [ ! -s "$ST_STATUS" ]; do sleep 0.25; i=$((i + 1)); done
+  case $(cat "$ST_STATUS" 2>/dev/null) in
+    ok*) ;;
+    *) die "Slackトリアージの起動キー ${keyname} を登録できませんでした($(cat "$ST_STATUS" 2>/dev/null || echo 応答なし))" \
+         "slack-triage key t のように別のキーにしてから、もう一度実行してください" ;;
+  esac
+  printf '%s\n' "$sum" > "$sumfile"
+  changed=1
+  first=
+  [ "$named" = new ] && first="。初めて押したときに、あなたの名前と登録先のリポジトリを聞きます"
+  ok 入れました "${did}Slack のスレッドをコピーして ${keyname} で使えます${first}。止めるときは slack-triage off"
+}
+
 # --- main ---
 
 label="準備"
@@ -810,7 +962,7 @@ for stage in $STAGES; do
   "stage_$stage"
 done
 
-# 11. the diagnosis: the list only; the one next step is said below
+# 12. the diagnosis: the list only; the one next step is said below
 doctor_ok=1
 PATH=$orig_path sh "$here/kiro/doctor.sh" --in-install || doctor_ok=  # the PATH it was run with: is ~/.local/bin on it
 

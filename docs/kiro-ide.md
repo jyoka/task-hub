@@ -35,7 +35,8 @@ GitHub 側の準備(タスク用リポジトリ、Project の Status と欄)と�
 | 8. 設定 | config.ini に足りない項目だけを足し、`task list` で確かめる | 2 章 |
 | 9. Kiro との連携 | スキルと steering はリンク、フックとワークフローはコピー、Workflows を有効に | 3〜5 章 |
 | 10. 常駐(任意) | `--with-launchd` で plist を置き、`--start-launchd` で始める | 6 章 |
-| 11. 診断 | `sh kiro/doctor.sh` を呼び、全段階を ○ / × の一覧で出す(何も変えない) | — |
+| 11. Slackトリアージ | 起動キーのプログラムを swiftc でビルドし、`~/.local/bin/slack-triage` と、⌃⌥S を待つ常駐の plist を置いて始める(`slack-triage off` で止めていれば止めたまま) | [slack-triage.md](slack-triage.md) |
+| 12. 診断 | `sh kiro/doctor.sh` を呼び、全段階を ○ / × の一覧で出す(何も変えない) | — |
 
 - GitHub と kiro-cli のログインは同じ Terminal の起動経路を使います。システム設定から取得したプロキシと、
   明示したプロキシ・証明書・`GH_CONFIG_DIR` の設定をログインにも渡します。ログイン用ファイルは本人だけが読める

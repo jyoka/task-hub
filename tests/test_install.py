@@ -7,6 +7,8 @@
   xcode-select (points to a folder whose usr/bin/git is the real git), scutil (no proxy), open (logs what it opens),
   kiro-cli (logged in while the file kiro-logged-in exists), hdiutil (a "disk image" is a tar), codesign,
   launchctl (never the real one: it logs, and keeps "loaded" in a file), security (no keychain), and per test python3 / gh.
+  For slack-triage/hotkey/build.sh: xcrun (finds the fake swiftc while it is there), swiftc (the "program" it builds is
+  a script that exits 2 when run without arguments, as the real one does, with its source in it) and lipo.
 - Kiro CLI's download server is the same local server (TASK_INSTALL_KIRO_CLI), with a manifest.json and a "DMG".
   /Applications is a folder of the test (TASK_INSTALL_APPLICATIONS), so the Mac's own Kiro CLI.app is not found.
 - gh (the one in the release zip, or one on PATH) is FAKE_GH: GitHub (the login, repos, Projects) is one JSON file.
@@ -38,6 +40,7 @@ KIRO_COPIES = [("kiro/hooks/task-hub-events.json", "hooks/task-hub-events.json")
                ("kiro/workflows/task-hub-events.workflow.json", "workflows/task-hub-events.workflow.json")]
 KIRO_SETTINGS = "Library/Application Support/Kiro/User/settings.json"
 PLIST = "Library/LaunchAgents/com.task-hub.watch.plist"
+ST_PLIST = "Library/LaunchAgents/com.task-hub.slack-triage.plist"
 KIRO_CLI_VERSION = "2.26.1"
 GH_TAG, UV_TAG = "v2.0.0", "0.9.0"
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -335,8 +338,25 @@ class InstallTest(unittest.TestCase):
                                '  detach) rm -rf "$last" ;;\n  *) exit 2 ;;\nesac\n')
         self.script("codesign", f'#!/bin/sh\necho "$*" >> "{self.codesign_calls}"\n'
                                 f'[ -e "{root}/codesign-fails" ] && {{ echo "$4: invalid signature" >&2; exit 1; }}\nexit 0\n')
+        self.swiftc_calls = root / "swiftc-calls.txt"
+        self.script("xcrun", f'#!/bin/sh\n[ "$*" = "--find swiftc" ] && [ -x "{self.fakebin}/swiftc" ] && echo "{self.fakebin}/swiftc"\n')
+        self.script("swiftc", f'#!/bin/sh\necho "$*" >> "{self.swiftc_calls}"\n'
+                              'while [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                              '{ echo "#!/bin/sh"; sed "s/^/# /" "$1"; echo "exit 2"; } > "$out" && chmod 755 "$out"\n')
+        self.script("lipo", '#!/bin/sh\n[ "$1" = -create ] || exit 0\ncp "$4" "$3"\n')
         self.launchctl_calls, self.launchd_loaded = root / "launchctl-calls.txt", root / "launchd-loaded"
-        self.script("launchctl", f'#!/bin/sh\necho "$*" >> "{self.launchctl_calls}"\ncase $1 in\n'
+        # Slack triage's agent (com.task-hub.slack-triage) has its own log and state; when it is bootstrapped, the
+        # fake writes the status the real program writes once it holds the key
+        self.st_calls, self.st_loaded = root / "slack-triage-launchctl-calls.txt", root / "slack-triage-loaded"
+        self.st_status = self.home / ".local/state/task-hub/slack-triage-hotkey.status"
+        self.script("launchctl", '#!/bin/sh\ncase "$*" in\n  *slack-triage*)\n'
+                                 f'    echo "$*" >> "{self.st_calls}"\n    case $1 in\n'
+                                 f'      print) [ -e "{self.st_loaded}" ] ;;\n'
+                                 f'      bootstrap) touch "{self.st_loaded}"; echo "ok ctrl,opt+s" > "{self.st_status}" ;;\n'
+                                 f'      bootout) rm -f "{self.st_loaded}" ;;\n'
+                                 f'      kickstart) echo "ok ctrl,opt+s" > "{self.st_status}" ;;\n'
+                                 '      *) exit 2 ;;\n    esac\n    exit ;;\nesac\n'
+                                 f'echo "$*" >> "{self.launchctl_calls}"\ncase $1 in\n'
                                  f'  print) [ -e "{self.launchd_loaded}" ] ;;\n'
                                  f'  bootstrap) touch "{self.launchd_loaded}" ;;\n'
                                  f'  bootout) rm -f "{self.launchd_loaded}" ;;\n  *) exit 2 ;;\nesac\n')
@@ -436,10 +456,10 @@ class InstallTest(unittest.TestCase):
         (src / "bin").mkdir(parents=True)
         (src / "bin/task").write_text(task)
         (src / "bin/task").chmod(0o755)
-        for path, _ in KIRO_LINKS + KIRO_COPIES:  # the real ones
+        for path, _ in KIRO_LINKS + KIRO_COPIES + [("slack-triage", None)]:  # the real ones
             (src / path).parent.mkdir(parents=True, exist_ok=True)
             if (REPO / path).is_dir():
-                shutil.copytree(REPO / path, src / path, ignore=shutil.ignore_patterns("__pycache__"))
+                shutil.copytree(REPO / path, src / path, ignore=shutil.ignore_patterns("__pycache__", "slack-triage-hotkey*"))
             else:
                 shutil.copy(REPO / path, src / path)
         for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"], ["git", "commit", "-qm", "init"],
@@ -614,7 +634,9 @@ class InstallTest(unittest.TestCase):
                           "kiro-steering": str(self.home / ".kiro/steering/task-hub.md"),
                           "kiro-hook": str(self.home / ".kiro/hooks/task-hub-events.json"),
                           "kiro-workflow": str(self.home / ".kiro/workflows/task-hub-events.workflow.json"),
-                          "kiro-settings": str(self.home / KIRO_SETTINGS)},
+                          "kiro-settings": str(self.home / KIRO_SETTINGS),
+                          "slack-triage": str(local / "bin/slack-triage"),
+                          "slack-triage-launchd": str(self.home / ST_PLIST)},
             "sha256": {"kiro-hook": hashlib.sha256((REPO / KIRO_COPIES[0][0]).read_bytes()).hexdigest(),
                        "kiro-workflow": hashlib.sha256((REPO / KIRO_COPIES[1][0]).read_bytes()).hexdigest()}})
         self.assertEqual([p for p in (self.home / ".local/state/task-hub").iterdir() if p.name.startswith("install.")],
@@ -628,8 +650,9 @@ class InstallTest(unittest.TestCase):
         stages = self.stage_lines(lines)
         self.assertEqual([line.split(":")[0] for line in stages],
                          ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. GitHub のログイン", "5. kiro-cli のログイン",
-                          "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"])
-        self.assertTrue(all(line.split(": ", 1)[1].startswith("済み") for line in stages[:-1]), stages)
+                          "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐", "11. Slackトリアージ"])
+        self.assertTrue(all(line.split(": ", 1)[1].startswith("済み") for line in stages if not line.startswith("10. ")),
+                        stages)
         self.assertIn("すべて済みです。変えたものはありません。", lines)
         self.assertEqual(lines[-1], "次にすること: Kiro の新しいチャットで /task を試してください")
         self.assertEqual(self.downloads(), [])
@@ -1194,7 +1217,8 @@ class InstallTest(unittest.TestCase):
         attach, detach = self.hdiutil_calls.read_text().splitlines()
         self.assertTrue(attach.startswith("attach -readonly -nobrowse -noautoopen -mountpoint "), attach)
         self.assertEqual(detach.split()[:2], ["detach", "-quiet"])
-        self.assertEqual(len(self.codesign_calls.read_text().splitlines()), 2)  # the app, and who signed kiro-cli
+        # the app, and who signed kiro-cli (not the ad-hoc signature of Slack triage's program, stage 11)
+        self.assertEqual(len([c for c in self.codesign_calls.read_text().splitlines() if "--sign -" not in c]), 2)
         self.assertIn('certificate leaf[subject.OU] = "94KV3E626L"', self.codesign_calls.read_text())
         self.assertEqual(os.readlink(self.home / ".local/bin/kiro-cli"), str(app / "Contents/MacOS/kiro-cli"))
         out = subprocess.run([str(self.home / ".local/bin/kiro-cli"), "--version"], capture_output=True, text=True)
@@ -1418,7 +1442,7 @@ class InstallTest(unittest.TestCase):
         return {line[2:].split(":")[0]: line[0] for line in lines if line[:2] in ("○ ", "× ")}
 
     STAGE_NAMES = ["1. 前提の確認", "2. Python", "3. gh", "4. kiro-cli", "5. GitHub のログイン", "5. kiro-cli のログイン",
-                   "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐"]
+                   "6. task-hub 本体", "7. ボード", "8. 設定", "9. Kiro との連携", "10. 常駐", "11. Slackトリアージ"]
 
     def test_doctor_on_a_mac_with_nothing_installed(self):
         (self.fakebin / "kiro-cli").unlink()
@@ -1436,7 +1460,7 @@ class InstallTest(unittest.TestCase):
         for i, line in enumerate(lines):
             if line.startswith("× "):
                 self.assertTrue(lines[i + 1].startswith("    → "), lines[i:i + 2])
-        self.assertEqual(lines[-2], "足りないものが 9 つあります。")
+        self.assertEqual(lines[-2], "足りないものが 10 つあります。")
         self.assertEqual(lines[-1], "次にすること: sh kiro/install.sh を実行してください(Kiro のチャットなら「セットアップして」)")
         self.assertEqual(self.snapshot(), {}, "it changed nothing")
         # no git: the first thing to do is 情シス's
@@ -1572,6 +1596,79 @@ class InstallTest(unittest.TestCase):
         hook.write_text(json.dumps(self.by_hand_hook, indent=2))
         self.doctor(0)  # each was put back
 
+    def test_slack_triage_key_is_set_up_for_everyone_and_off_keeps_it_off(self):
+        lines = self.install()
+        line = next(x for x in lines if x.startswith("11. Slackトリアージ: "))
+        self.assertTrue(line.startswith("11. Slackトリアージ: 入れました("
+                                        "~/.local/lib/task-hub/slack-triage/bin/slack-triage-hotkey(ビルド)、"
+                                        "~/.local/bin/slack-triage、~/Library/LaunchAgents/com.task-hub.slack-triage.plist、"
+                                        "Slack のスレッドをコピーして ⌃⌥S で使えます。初めて押したときに"), line)
+        # built from its source by slack-triage/hotkey/build.sh, for both CPUs
+        self.assertEqual([c.split()[2] for c in self.swiftc_calls.read_text().splitlines()],
+                         ["arm64-apple-macos12", "x86_64-apple-macos12"])
+        plist = self.home / ST_PLIST
+        text = plist.read_text()
+        self.assertIn("task-hub: made by kiro/install.sh", text)
+        self.assertIn(f"<string>{self.home}/.local/lib/task-hub/slack-triage/bin/slack-triage-hotkey</string>", text)
+        self.assertIn(f"<string>{self.home}/.config/task-hub/slack-triage.json</string>", text)
+        self.assertIn(f"<string>{self.home}/.local/bin/slack-triage</string>", text)
+        self.assertEqual([c for c in self.st_calls.read_text().splitlines() if not c.startswith("print ")],
+                         [f"bootstrap gui/{os.getuid()} {plist}"])
+        out = subprocess.run([str(self.home / ".local/bin/slack-triage"), "--help"], env=self.env,
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("slack-triage off", out.stdout)
+        self.assertIn("○ 11. Slackトリアージ: Slack のスレッドをコピーして ⌃⌥S で使えます", self.doctor(0))
+
+        # slack-triage off: the setting, and the agent booted out. The installer leaves it off
+        config = self.home / ".config/task-hub/slack-triage.json"
+        config.write_text(json.dumps({"enabled": False, "hotkey_key": "t"}))
+        self.st_loaded.unlink()
+        lines = self.install()
+        self.assertIn("11. Slackトリアージ: 済み(止めています(slack-triage off)。使うときは slack-triage on)", lines)
+        self.assertEqual(sum(c.startswith("bootstrap") for c in self.st_calls.read_text().splitlines()), 1)
+        self.assertIn("○ 11. Slackトリアージ: 止めています(slack-triage off)。使うときは slack-triage on", self.doctor(0))
+
+        # on again, with the key it was changed to: the installer starts it
+        config.write_text(json.dumps({"enabled": True, "hotkey_key": "t", "owner_name": "山田"}))
+        lines = self.install()
+        self.assertIn("11. Slackトリアージ: 入れました(Slack のスレッドをコピーして ⌃⌥T で使えます。"
+                      "止めるときは slack-triage off)", lines)
+        self.assertTrue(self.st_loaded.exists())
+
+        # the key not held: × with what to do
+        self.st_status.write_text("error -9868\n")
+        lines = self.doctor(1)
+        i = lines.index("× 11. Slackトリアージ: 起動キー ⌃⌥T を登録できていません")
+        self.assertEqual(lines[i + 1], "    → slack-triage key t のように別のキーにしてください")
+
+    def test_slack_triage_program_is_built_again_only_when_its_source_changed(self):
+        self.install()
+        hotkey = self.home / ".local/lib/task-hub/slack-triage/bin/slack-triage-hotkey"
+        built, swiftc = hotkey.read_text(), (self.fakebin / "swiftc").read_text()
+        (self.fakebin / "swiftc").unlink()  # not needed while the source is the same
+        lines = self.install()
+        self.assertIn("11. Slackトリアージ: 済み(Slack のスレッドをコピーして ⌃⌥S で使えます)", lines)
+        self.assertEqual(len(self.swiftc_calls.read_text().splitlines()), 2)
+
+        # a new version of task-hub changed it: built again, and started again with the new program
+        self.change_origin("slack-triage/hotkey/main.swift",
+                           (REPO / "slack-triage/hotkey/main.swift").read_text() + "// changed\n")
+        lines = self.install(1)
+        self.assertEqual(lines[-2:], [
+            "11. Slackトリアージ: 止まりました。Slackトリアージのキー受付プログラムを作る swiftc がありません"
+            "(Xcode の Command Line Tools が古いか、足りません)",
+            "次にすること: 情シスに Xcode の Command Line Tools を入れ直してもらい(ターミナルで xcode-select --install。"
+            "管理者権限が要る場合があります)、もう一度実行してください"])
+        self.assertEqual(hotkey.read_text(), built, "the program that works is kept")
+        self.script("swiftc", swiftc)
+        line = next(x for x in self.install() if x.startswith("11. Slackトリアージ: "))
+        self.assertTrue(line.startswith("11. Slackトリアージ: 入れました(~/.local/lib/task-hub/slack-triage/bin/"
+                                        "slack-triage-hotkey(ビルド)、Slack のスレッドをコピーして ⌃⌥S で使えます。"), line)
+        self.assertIn("// changed", hotkey.read_text())
+        self.assertEqual([c.split()[0] for c in self.st_calls.read_text().splitlines() if not c.startswith("print ")],
+                         ["bootstrap", "bootout", "bootstrap"])
+
     def test_uninstall_removes_only_what_the_manifest_lists(self):
         mine = {".zprofile": "export EDITOR=vi\n", ".local/bin/mytool": "#!/bin/sh\n", ".kiro/skills/other/SKILL.md": "x\n",
                 ".local/state/task-hub/events.jsonl": "{}\n"}
@@ -1611,6 +1708,8 @@ class InstallTest(unittest.TestCase):
         self.assertFalse((self.home / ".local/state/task-hub/install-manifest.json").exists())
         self.assertFalse(self.launchd_loaded.exists(), "task watch was stopped")
         self.assertIn(f"bootout gui/{os.getuid()}/com.task-hub.watch", self.launchctl_calls.read_text().splitlines())
+        self.assertFalse(self.st_loaded.exists(), "the key of Slack triage was stopped")
+        self.assertIn(f"bootout gui/{os.getuid()}/com.task-hub.slack-triage", self.st_calls.read_text().splitlines())
         self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
         self.assertEqual({k: v for k, v in self.github().items() if k != "calls"}, github, "the board on GitHub stays")
         self.assertEqual(self.writes(), [])
