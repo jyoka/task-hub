@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 MAX_PARALLEL = 5
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
