@@ -195,6 +195,10 @@ def handle(db):
                     p["workflows"] = [w for w in p["workflows"] if w["id"] != v["id"]]
                     return json.dumps({"data": {"deleteProjectV2Workflow": {"deletedWorkflowId": v["id"]}}})
             raise Fail("GraphQL: Could not resolve to a node")
+        if "repositoryOwner(" in q:  # bin/task: the Project and its fields
+            p = project(db, v["owner"], v["number"])
+            return json.dumps({"data": {"repositoryOwner": {"projectV2": {
+                "id": p["id"], "url": p["url"], "fields": {"nodes": p["fields"]}}}}})
         p = project(db, pid=v["id"])
         if "workflows(" in q:  # kiro/install-board
             return json.dumps({"data": {"node": {
@@ -205,8 +209,6 @@ def handle(db):
         if "items(" in q:  # bin/task: the cards (none)
             return json.dumps({"data": {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                                                            "nodes": []}}}})
-        if "fields(" in q:  # bin/task: the fields
-            return json.dumps({"data": {"node": {"fields": {"nodes": p["fields"]}}}})
     raise Fail(f"fake gh: unknown command {a}")
 
 with lock():

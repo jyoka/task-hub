@@ -237,7 +237,7 @@ GitHub の障害で起きることがあります。ステータスページ([gi
 ## `error: GraphQL: API rate limit exceeded`
 
 GitHub Projects は GraphQL API だけで操作でき、GraphQL には 1 時間あたり 5000 ポイントの利用上限があります
-(アカウント全体で共有)。task-hub は必要な欄だけを取るので、`task` 1 回は約 4 ポイント、`task watch` は 1 時間で
+(アカウント全体で共有)。task-hub は必要な欄だけを取るので、`task` 1 回は約 2 ポイント、`task watch` は 1 時間で
 約 60 ポイントです。上限に届くのは、ほかのツールやエージェントが重い呼び出しを繰り返しているときです。たとえば
 `gh project item-list` と `gh project field-list` は 1 回で 101 ポイント使います。上限に届いても `task watch` は止まらず、
 エラーを表示して次の確認を続けます。上限は区切りの時刻に回復します。残りと回復の時刻は次で分かります
