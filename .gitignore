@@ -7,3 +7,6 @@ claude/task-board/tsconfig.json
 # What `npm run package` in kiro/board-extension builds
 kiro/board-extension/out/
 kiro/board-extension/*.vsix
+
+# What slack-triage/hotkey/build.sh builds (kiro/install.sh runs it)
+slack-triage/bin/
