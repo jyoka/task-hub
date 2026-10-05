@@ -208,7 +208,8 @@ mkdir -p ~/.kiro/hooks && rm -f ~/.kiro/hooks/task-hub-events.json && cp ~/.loca
 ```
 
 ワークフローと同じく、リンクではなく **コピー** します(Kiro はフックのシンボリックリンクを読みません。下の「Workflows の watch」の 2)。
-task-hub を更新したら、同じコマンドでコピーし直します(`sh kiro/install.sh` を実行し直しても同じです)。
+task-hub を `task update` で更新すると、入っているコピーを新しい内容でコピーし直します(インストーラで入れた clone は、
+`sh kiro/install.sh` を実行し直すと同じことをします)。
 
 - トリガーは `UserPromptSubmit` です。チャットで送信するたびに `kiro/task-events-since` が動き(LLM は使いません)、
   前回からの出来事を `task-hub: new events since your last message:` に続けて文脈に足します。
@@ -244,8 +245,9 @@ task-hub を更新したら、同じコマンドでコピーし直します(`sh 
    新しいチャットを開くと読み直されます。先に `rm -f` するのは、前の手順で作ったリンクが残っていると、`cp` が
    リンク先と同じファイルだとして何もせずに失敗するためです。
 
-   **task-hub を更新したら**(`git -C ~/.local/lib/task-hub pull --ff-only`)、上の同じコマンドでコピーし直し、
-   「Refresh Recipes」か新しいチャットで読み直させます。コピーなので、更新しても自動では変わりません。
+   **task-hub を更新したら**(`task update`。コピーし直しもします)、「Refresh Recipes」か新しいチャットで
+   読み直させます。コピーなので、clone を進めるだけでは変わりません(`task update` を使わずに pull したときは、
+   上の同じコマンドでコピーし直します)。
 3. `/chief` 専用のチャットを開いて `/chief` と打ちます。`/chief` は始めるときに `run_workflow` で
    `task-hub-events` を 1 回動かします。
 
@@ -257,7 +259,7 @@ task-hub を更新したら、同じコマンドでコピーし直します(`sh 
 
 `/chief` を重ねて開いても、古いワークフローは 1 分以内に自分で終わり、出来事は一番新しい `/chief` にだけ届きます
 (`/chief` が起動のたびに新しい印を `~/.local/state/task-hub/kiro-chief-token` に書き、印が違う `watch` が終わるため)。
-定義はコピーで入れているので、この動きは task-hub を更新したあと `sh kiro/install.sh` を実行してコピーし直してから効きます。
+定義はコピーで入れているので、この動きは task-hub を更新したあと、`task update`(か `sh kiro/install.sh`)でコピーし直してから効きます。
 
 手で試すとき(1 回目は、今の位置をカーソルにした `idle` を返します):
 
