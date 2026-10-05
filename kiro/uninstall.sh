@@ -13,11 +13,12 @@ STATE_DIR=$HOME/.local/state/task-hub
 MANIFEST=$STATE_DIR/install-manifest.json
 ZPROFILE_COMMENT='# task-hub (kiro/install.sh)'
 LAUNCHD_LABEL=com.task-hub.watch
+ST_LABEL=com.task-hub.slack-triage
 MARK='task-hub: made by kiro/install.sh'
-# The order things are removed in: launchd first (it runs task watch), then Kiro's files, then what they use;
-# uv last, after the Python it installed.
-KEYS="launchd kiro-hook kiro-workflow kiro-steering kiro-skill-task kiro-skill-chief kiro-settings config zprofile task
-  task-hub kiro-cli kiro-cli-app gh uv-python uv"
+# The order things are removed in: launchd first (it runs task watch, and the key of Slack triage), then Kiro's files,
+# then what they use; uv last, after the Python it installed.
+KEYS="launchd slack-triage-launchd slack-triage kiro-hook kiro-workflow kiro-steering kiro-skill-task kiro-skill-chief
+  kiro-settings config zprofile task task-hub kiro-cli kiro-cli-app gh uv-python uv"
 
 yes=
 for a in "$@"; do
@@ -77,6 +78,11 @@ unlaunchd() {  # $1: the plist. Stops task watch first
   ! launchctl print "$domain/$LAUNCHD_LABEL" >/dev/null 2>&1 || launchctl bootout "$domain/$LAUNCHD_LABEL" || return
   rm -f "$1" "$STATE_DIR/launchd-stale"
 }
+unslack_triage() {  # $1: the plist. Stops the program that waits for the key of Slack triage first
+  domain=gui/$(id -u)
+  ! launchctl print "$domain/$ST_LABEL" >/dev/null 2>&1 || launchctl bootout "$domain/$ST_LABEL" || return
+  rm -f "$1"
+}
 
 if [ -n "$yes" ]; then
   echo "kiro/install.sh が入れたものを消します"
@@ -102,6 +108,10 @@ for k in $KEYS; do
     launchd)
       mine "$v" && [ -f "$v" ] && grep -qF "$MARK" "$v" || continue
       remove "$(tilde "$v")(常駐の task watch を止めてから)" unlaunchd "$v"
+      ;;
+    slack-triage-launchd)
+      mine "$v" && [ -f "$v" ] && grep -qF "$MARK" "$v" || continue
+      remove "$(tilde "$v")(Slackトリアージの起動キーを待つ常駐を止めてから)" unslack_triage "$v"
       ;;
     task)  # the wrapper, only while it is the installer's
       mine "$v" && [ -f "$v" ] && [ ! -L "$v" ] && grep -q "^# $MARK" "$v" || continue
@@ -167,6 +177,7 @@ done
 echo "消さないもの:"
 echo "- GitHub のログイン(gh)と kiro-cli のログイン、キーチェーンの task-hub-kiro-api-key(入れていれば)"
 echo "- task-hub のデータ: ~/.local/share/task-hub(worktree)、~/.local/state/task-hub(ログ、出来事)"
+[ -f "$HOME/.config/task-hub/slack-triage.json" ] && echo "- Slackトリアージの設定 ~/.config/task-hub/slack-triage.json(名前と候補リポジトリ)"
 [ -z "$settings" ] || echo "- $(tilde "$settings") の Workflows の設定(インストーラは有効にしただけです)"
 if [ -n "$project$issues" ]; then
   echo "- GitHub のボード(${issues:-?} と Project ${project:-?})。要らなければ、GitHub の画面で消します:"
