@@ -8,6 +8,7 @@
 """
 import contextlib
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -16,6 +17,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -420,6 +422,15 @@ with open(os.environ["TASK_TEST_NOTIFY"], "a") as f:
     f.write(json.dumps(["osascript", *sys.argv[1:]]) + "\n")
 '''
 
+FAKE_LAUNCHCTL = r'''#!/usr/bin/env python3
+# launchd, so `task update` never restarts the real `task watch`: it notes its arguments, and `print` finds the job
+# only when the test registered it.
+import json, os, sys
+with open(os.environ["TASK_TEST_LAUNCHCTL"], "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+sys.exit(0 if sys.argv[1] != "print" or os.environ.get("TASK_TEST_LAUNCHD") == "registered" else 113)
+'''
+
 FAKE_IDE = r'''#!/usr/bin/env python3
 # A stand-in IDE launcher: it records the arguments it got, so a test can check the worktree path
 # arrives as one argument (not split by a shell).
@@ -538,13 +549,17 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"), "TASK_TEST_KIRO": str(root / "kiro"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
                     "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
-                    "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl")}
+                    "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl"),
+                    "TASK_TEST_LAUNCHCTL": str(root / "launchctl.jsonl"),
+                    "TASK_NO_UPDATE_NOTIFIER": "1"}  # bin/task's own origin is GitHub: the update tests make their own
         fakebin = root / "fakebin"
         fakebin.mkdir()
         (fakebin / "osascript").write_text(FAKE_OSASCRIPT)
         (fakebin / "osascript").chmod(0o755)
         (fakebin / "fake-ide").write_text(FAKE_IDE)
         (fakebin / "fake-ide").chmod(0o755)
+        (fakebin / "launchctl").write_text(FAKE_LAUNCHCTL)
+        (fakebin / "launchctl").chmod(0o755)
         self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
         self.write_config()
@@ -3247,6 +3262,180 @@ class TaskTest(unittest.TestCase):
         wt = self.make_worktree_record("10")
         shutil.rmtree(wt)
         self.assertIn("gone", self.task("open", "10", code=1))
+
+    # --- update ---
+
+    def release(self, seed, version, hook):
+        """One release of task-hub in seed: VERSION, a Kiro hook that changes with it, the tag, pushed."""
+        git = lambda *a: subprocess.run(["git", "-C", str(seed), *a], check=True, capture_output=True, env=self.env)
+        (seed / "bin").mkdir(exist_ok=True)
+        (seed / "bin/task").write_text(re.sub(r'(?m)^VERSION = ".*"$', f'VERSION = "{version}"', BIN.read_text()))
+        (seed / "bin/task").chmod(0o755)
+        (seed / "kiro/hooks").mkdir(parents=True, exist_ok=True)
+        (seed / "kiro/hooks/task-hub-events.json").write_text(json.dumps({"hook": hook}) + "\n")
+        git("add", ".")
+        git("commit", "-qm", f"release {version}")
+        git("tag", "-a", f"v{version}", "-m", f"v{version}")  # docs/release.md
+        git("push", "-q", "origin", "main", f"v{version}")
+
+    def release_clone(self):
+        """The clone `task` runs from, made at v0.6.0; origin has released v0.7.0 since."""
+        origin, seed = self.root / "origins/task-hub.git", self.root / "hub-seed"
+        lib = self.root / ".local/lib/task-hub"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True, capture_output=True)
+        self.release(seed, "0.6.0", "old")
+        subprocess.run(["git", "clone", "-q", str(origin), str(lib)], check=True, capture_output=True)
+        self.release(seed, "0.7.0", "new")
+        return lib
+
+    def hub(self, lib, *args, code=0, env=None):
+        """`task` as the clone at lib runs it, with the update check on."""
+        env = {k: v for k, v in {**self.env, **(env or {})}.items() if k != "TASK_NO_UPDATE_NOTIFIER"}
+        r = subprocess.run([str(lib / "bin/task"), *args], env=env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        self.stderr.append(r.stderr)
+        self.assertEqual(r.returncode, code, f"{r.stdout}{r.stderr}")
+        return r.stdout
+
+    def lib_git(self, lib, *args):
+        return subprocess.run(["git", "-C", str(lib), *args], check=True, capture_output=True, text=True,
+                              env=self.env).stdout.strip()
+
+    def update_cache(self):
+        return json.loads((self.root / ".local/state/task-hub/update.json").read_text())
+
+    def launchctl_calls(self):
+        f = self.root / "launchctl.jsonl"
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
+
+    @contextlib.contextmanager
+    def silent_origin(self, lib):
+        """An origin that takes the connection and never answers, as a network that times out does."""
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(8)
+            srv.settimeout(0.2)
+            self.lib_git(lib, "remote", "set-url", "origin", f"http://127.0.0.1:{srv.getsockname()[1]}/task-hub.git")
+            yield srv
+
+    def test_list_tells_of_a_new_release_and_asks_origin_once_a_day(self):
+        lib = self.release_clone()
+        out = self.hub(lib, "list")
+        self.assertIn("tasks: 0 open tasks", out)
+        self.assertEqual(out.splitlines()[-1], "update: v0.7.0 が出ています。`task update` で更新(今は v0.6.0)")
+        cache = self.update_cache()
+        self.assertEqual((cache["newest"], cache["ok"]), ("v0.7.0", True))
+        with self.silent_origin(lib) as srv:  # the second look of the day must not reach it
+            began = time.time()
+            self.assertIn("update: v0.7.0", self.hub(lib, "list"))
+            self.assertLess(time.time() - began, 3)
+            with self.assertRaises(socket.timeout):
+                srv.accept()
+        self.assertEqual(self.update_cache(), cache)
+
+    def test_list_is_unchanged_and_not_slowed_when_origin_cannot_be_reached(self):
+        lib = self.release_clone()
+        expected = self.task("list")  # without the check, as before
+        with self.silent_origin(lib) as srv:
+            began = time.time()
+            self.assertEqual(self.hub(lib, "list"), expected)
+            self.assertLess(time.time() - began, 5 + 3)  # UPDATE_TIMEOUT, then on without a word
+            srv.accept()[0].close()  # it was asked
+        self.assertFalse(self.update_cache()["ok"])
+        self.lib_git(lib, "remote", "set-url", "origin", "http://127.0.0.1:9/task-hub.git")  # refused at once
+        began = time.time()
+        self.assertEqual(self.hub(lib, "list"), expected)  # not asked again within the hour, so not slowed either
+        self.assertLess(time.time() - began, 3)
+
+    def test_watch_shows_and_notifies_a_new_release_once(self):
+        lib = self.release_clone()
+        env = {"TASK_WATCH_ONCE": "1"}
+        self.assertIn("update: v0.7.0 が出ています", self.hub(lib, "watch", env=env))
+        self.wait_for(lambda: (self.root / "notifications.jsonl").exists())
+        self.assertNotIn("update:", self.hub(lib, "watch", env=env))
+        time.sleep(0.5)
+        notes = [json.loads(line) for line in (self.root / "notifications.jsonl").read_text().splitlines()]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], "osascript")
+        self.assertEqual(notes[0][-2:], ["task-hub v0.7.0", "v0.7.0 が出ています。`task update` で更新(今は v0.6.0)"])
+
+    def test_update_moves_the_clone_to_the_newest_release_and_does_what_an_update_needs(self):
+        lib = self.release_clone()
+        hook = self.root / ".kiro/hooks/task-hub-events.json"
+        hook.parent.mkdir(parents=True)
+        shutil.copy(lib / "kiro/hooks/task-hub-events.json", hook)
+        manifest = self.root / ".local/state/task-hub/install-manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"version": 1, "installed": {"kiro-hook": str(hook)},
+                                        "sha256": {"kiro-hook": "old"}}))
+        out = self.hub(lib, "update", env={"TASK_TEST_LAUNCHD": "registered"})
+        self.assertIn("updated: 0.6.0 -> 0.7.0 (v0.7.0)", out)
+        self.assertIn("watch: restarted com.task-hub.watch (launchd)", out)
+        self.assertIn("kiro: copied again ~/.kiro/hooks/task-hub-events.json", out)
+        self.assertIn("release_notes: https://github.com/jyoka/task-hub/releases/tag/v0.7.0", out)
+        self.assertEqual(self.hub(lib, "--version").strip(), "0.7.0")
+        self.assertEqual(self.lib_git(lib, "rev-parse", "HEAD"), self.lib_git(lib, "rev-parse", "v0.7.0^{commit}"))
+        self.assertIn(["kickstart", "-k", f"gui/{os.getuid()}/com.task-hub.watch"], self.launchctl_calls())
+        self.assertEqual(json.loads(hook.read_text()), {"hook": "new"})
+        self.assertFalse((self.root / ".kiro/workflows").exists())  # not installed: not added either
+        self.assertEqual(json.loads(manifest.read_text())["sha256"]["kiro-hook"],
+                         hashlib.sha256(hook.read_bytes()).hexdigest())  # kiro/install.sh still owns the copy
+        self.assertNotIn("update:", self.hub(lib, "list"))
+        calls = len(self.launchctl_calls())
+        self.assertIn("up_to_date: 0.7.0 (newest release v0.7.0)", self.hub(lib, "update"))
+        self.assertEqual(len(self.launchctl_calls()), calls)  # nothing changed: no restart
+
+    def test_update_without_launchd_or_kiro_only_moves_the_clone(self):
+        lib = self.release_clone()
+        out = self.hub(lib, "update")
+        self.assertIn("updated: 0.6.0 -> 0.7.0", out)
+        self.assertIn("watch: not under launchd", out)
+        self.assertNotIn("kiro:", out)
+        self.assertNotIn("kickstart", json.dumps(self.launchctl_calls()))
+        self.assertFalse((self.root / ".kiro").exists())
+
+    def assert_update_stops(self, lib, why):
+        head = self.lib_git(lib, "rev-parse", "HEAD")
+        status = self.lib_git(lib, "status", "--porcelain")
+        out = self.hub(lib, "update", code=1, env={"TASK_TEST_LAUNCHD": "registered"})
+        self.assertIn(why, out)
+        self.assertIn("nothing changed", out)
+        self.assertIn("help:", out)
+        self.assertEqual(self.lib_git(lib, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.lib_git(lib, "status", "--porcelain"), status)
+        self.assertEqual(self.hub(lib, "--version").strip(), "0.6.0")
+        self.assertNotIn("kickstart", json.dumps(self.launchctl_calls()))
+        return out
+
+    def test_update_stops_on_a_clone_with_commits_of_its_own(self):
+        lib = self.release_clone()
+        (lib / "local.txt").write_text("a change made on the work Mac\n")
+        self.lib_git(lib, "add", "local.txt")
+        self.lib_git(lib, "commit", "-qm", "local fix")
+        out = self.assert_update_stops(lib, "has 1 commit(s) of its own that v0.7.0 does not have")
+        self.assertIn("local fix", out)
+        base = self.lib_git(lib, "rev-parse", "v0.6.0^{commit}")[:12]
+        # the temporary HOME is under a link (/var -> /private/var on macOS), so the path is matched loosely
+        self.assertRegex(out, rf"git -C \S*/\.local/lib/task-hub branch local-changes && "
+                              rf"git -C \S*/\.local/lib/task-hub reset -q --hard {base}\n")
+
+    def test_update_stops_on_a_clone_with_uncommitted_changes(self):
+        lib = self.release_clone()
+        with (lib / "bin/task").open("a") as f:
+            f.write("# a change made on the work Mac\n")
+        self.assert_update_stops(lib, "has uncommitted changes (bin/task)")
+
+    def test_update_stops_when_origin_cannot_be_reached(self):
+        lib = self.release_clone()
+        self.lib_git(lib, "remote", "set-url", "origin", "http://127.0.0.1:9/task-hub.git")
+        self.assert_update_stops(lib, "could not fetch from origin")
+
+    def test_update_stops_on_a_clone_that_is_not_on_a_branch(self):
+        lib = self.release_clone()
+        self.lib_git(lib, "checkout", "-q", "--detach", "v0.6.0")
+        self.assert_update_stops(lib, "is not on a branch")
+        self.assertNotIn("update:", self.hub(lib, "list"))  # a notice `task update` could not act on
 
     # --- feedback ---
 

@@ -44,21 +44,34 @@ ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task       # ~/.local/bin mu
 task --version
 ```
 
-更新は、PR をマージしたあとにこの clone で pull するだけです。`task watch` を動かしているなら、止めてから
-起動し直します(実行中のタスクは、始めたときのコードのまま最後まで動きます)。何が変わったか、更新で何が要るかは
+更新は `task update` 1 つです。何が変わったか、更新で何が要るかは
 [リリースノート](https://github.com/jyoka/task-hub/releases)に書いています([release.md](release.md))。
 
 ```
-git -C ~/.local/lib/task-hub pull --ff-only
+task update
 ```
 
-Kiro IDE を使っているなら、pull のあとにフックとワークフローの定義をコピーし直します(リンクではなくコピーで
-入れているため、pull だけでは変わりません。[kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る)):
+`task update` は次のことをまとめて行い、最後に新しい版とリリースノートの URL を出します。
 
-```
-rm -f ~/.kiro/hooks/task-hub-events.json && cp ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
-rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
-```
+1. この clone を、origin の一番新しい `v*` のタグ(リリース)まで進めます(fast-forward だけ)
+2. `task watch` を launchd で常駐させているなら、`launchctl kickstart -k` で再起動して新しいコードを読ませます。
+   実行中のタスクは、始めたときのコードのまま最後まで動きます。launchd に登録していないときは再起動しません。
+   herdr のペインなどで動かしているなら、自分で止めて(Ctrl-C)起動し直します
+3. Kiro IDE のフックとワークフローの定義(`~/.kiro/hooks/task-hub-events.json`、
+   `~/.kiro/workflows/task-hub-events.workflow.json`)が入っていて、clone のものと違えば、コピーし直します
+   (リンクではなくコピーで入れているため、clone を進めるだけでは変わりません。
+   [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る))。入っていないものは足しません
+
+この clone に直接コミットした変更や、コミットしていない変更があると、`task update` は何も変えずに止まり、
+理由と対処(変更をブランチに残して clone を戻すコマンドなど)を出します。ブランチの上にない clone
+(Kiro のインストーラが `kiro-v*` のタグで入れたもの)も止まります。こちらはインストーラを実行し直して更新します。
+
+**新しい版の知らせ。** `task list` と `task watch` は、1 日 1 回まで origin の `v*` のタグを確かめ
+(`git ls-remote`。GitHub のトークンは使いません)、今の版より新しいものがあれば
+`` update: v0.7.0 が出ています。`task update` で更新(今は v0.6.0) `` の 1 行を出します。`task watch` は、同じ版について
+1 回だけ通知も出します(`[notify] events` の `update`)。結果は `~/.local/state/task-hub/update.json` に覚えるので、
+同じ日の 2 回目からはネットワークに行きません。つながらない、5 秒で答えがないときは何も出さずに、1 時間後に確かめ直します。
+確かめたくないときは、環境変数 `TASK_NO_UPDATE_NOTIFIER=1` で止められます。
 
 task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 -m unittest discover -s tests -v`)。
 
@@ -137,7 +150,7 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
 
    ```ini
    [notify]
-   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow。空にすると通知しない
+   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update。空にすると通知しない
    ```
 
    IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの
@@ -216,7 +229,8 @@ done
   [kiro-ide.md](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る) にあります。
 
   ワークフローの定義は、リンクではなく **コピー** で入れます。Kiro は実体のパスで許可された場所の中にあるかを
-  判定するので、リンクでは Recipes に出ず、`run_workflow` も拒否されます。task-hub を更新したらコピーし直します。
+  判定するので、リンクでは Recipes に出ず、`run_workflow` も拒否されます。task-hub を更新すると、`task update` が
+  コピーし直します。初めて入れるときは次のコマンドです。
 
   ```
   mkdir -p ~/.kiro/workflows && rm -f ~/.kiro/workflows/task-hub-events.workflow.json && cp ~/.local/lib/task-hub/kiro/workflows/task-hub-events.workflow.json ~/.kiro/workflows/task-hub-events.workflow.json
@@ -386,18 +400,10 @@ launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
 plist を書き換えたら、`bootout` してから `bootstrap` し直すと確実です(`kickstart -k` はプロセスを入れ替える
 だけで、plist の変更を読み直したいときは登録し直します)。
 
-**task-hub を更新したとき。** 動かす用の clone を pull したら(`git -C ~/.local/lib/task-hub pull --ff-only`)、
-常駐している `task watch` を再起動して新しいコードを読ませます(Kiro IDE の Workflows を使っているなら、
-[インストール](#インストール) のとおりワークフローの定義もコピーし直します)。herdr のペインで動かしているときに
-止めてから起動し直すのと同じで、launchd では次のどちらかです(実行中のタスクは、始めたときのコードのまま最後まで
-動きます)。
-
-```
-launchctl kickstart -k gui/$(id -u)/com.task-hub.watch
-# または
-launchctl bootout   gui/$(id -u)/com.task-hub.watch
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.task-hub.watch.plist
-```
+**task-hub を更新したとき。** `task update` が、launchd に登録されている `task watch` を
+`launchctl kickstart -k gui/$(id -u)/com.task-hub.watch` で再起動します([インストール](#インストール))。
+実行中のタスクは、始めたときのコードのまま最後まで動きます。plist を書き換えたときは、上のとおり `bootout` してから
+`bootstrap` し直します。
 
 **herdr のタブと通知はどうなるか。** launchd から動かした `task watch` が始めたタスクは、watch のペインが
 ないので、そのタスクの置き場所は「登録時に記録された workspace」→「そのリポジトリの checkout を開いている

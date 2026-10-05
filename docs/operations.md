@@ -130,11 +130,15 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 待たずに切り離して起動するので、通知が出せない、失敗する、止まったままになる、のどれでも task-hub の処理は
 そのまま続きます(その通知は出ないだけです)。
 
+`update` はタスクの出来事ではなく、task-hub 自身の新しい版です。`task watch` が 1 日 1 回まで origin のタグを確かめ、
+新しい版を見つけたときに、その版について 1 回だけ出します(見出し `task-hub v0.7.0`。events.jsonl には書きません)。
+更新は `task update` です([setup.md](setup.md#インストール))。
+
 どの出来事で通知するかは `~/.config/task-hub/config.ini` の `[notify]` で変えられます:
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow   ; 既定。列の名前か replan、slow をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update   ; 既定。列の名前か replan、slow、update をカンマ区切りで。空にすると通知しない
 ```
 
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
