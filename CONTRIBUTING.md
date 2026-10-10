@@ -33,6 +33,32 @@ Issue は「直す」「作る」ものだけに絞っています。空の Issu
 
 コミットメッセージは、何をしたかを 1 行目に日本語で書きます(`git log` を参考にしてください)。
 
+## リポジトリの中身
+
+```
+bin/task               CLI(Python 3 の標準ライブラリだけ。git、gh、動いていれば herdr を使う)
+worker/PROMPT.md       worker の指示書(実行のたびに渡す)
+worker/REVIEW.md       reviewer の指示書(受け入れ条件を 1 つずつ、根拠付きで)
+worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict、根拠付き)
+skills/task/SKILL.md   /task スキル
+skills/chief/SKILL.md  /chief スキル
+pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
+claude/task-board/     Claude Code の mod: ボードをステータスラインとペインに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
+kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
+kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
+slack-triage/          Slackトリアージ: スレッドをコピーして ⌃⌥S でタスクを提案する(docs/slack-triage.md)
+.kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
+windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
+tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
+tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
+.github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
+docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
+```
+
+`task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。新しい版が出ると `task list` と
+`task watch` が 1 行で知らせるので、`task update` で更新します(clone を最新のリリースまで進め、launchd の
+`task watch` の再起動と Kiro IDE の定義のコピーし直しもまとめて行います。[docs/setup.md](docs/setup.md#インストール))。
+
 ## テスト
 
 `bin/task` は Python 3.10 以上の標準ライブラリだけで書いています。テストも同じで、インストールは要りません。
@@ -85,6 +111,7 @@ README と `docs/` は日本語で書きます。読むのは、task-hub を使�
 | 内容 | 場所 |
 |---|---|
 | 何ができるか、使い方の全体、コマンドの一覧 | [README.md](README.md) |
+| タスクの頼み方、設定、役割、手元に残るもの | [docs/usage.md](docs/usage.md) |
 | セットアップ、エージェント、運用、形式 | `docs/` の各ページ([README の「ドキュメント」](README.md#ドキュメント)) |
 | なぜこの作りなのか | [docs/design.md](docs/design.md) |
 | 作って試して分かったこと | [docs/lessons.md](docs/lessons.md) |
