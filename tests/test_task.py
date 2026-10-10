@@ -49,8 +49,14 @@ out = None
 cmd = a[:2]
 fields = dict(x.split("=", 1) for x in a[3::2]) if cmd == ["api", "graphql"] else {}  # -f name=value pairs
 kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get("query", "") else
-                                          "add-blocked-by" if "addBlockedBy" in fields.get("query", "") else "field-list") \
+                                          "add-blocked-by" if "addBlockedBy" in fields.get("query", "") else
+                                          "move-to-top" if "updateProjectV2ItemPosition" in fields.get("query", "") else
+                                          "archive" if "archiveProjectV2Item" in fields.get("query", "") else
+                                          "field-list") \
     if cmd == ["api", "graphql"] else None
+def touch(iid):  # GitHub's updatedAt of the card: a clock that only goes forward, written as a sortable time
+    db["clock"] = db.get("clock", 0) + 1
+    db["items"][iid]["updated"] = f"2026-01-01T{db['clock']:08d}Z"
 if db.get("down") and kind and (db["down"] is True or kind == db["down"]):
     fail("GraphQL: API rate limit exceeded for user ID 1.")
 if db.get("down") == "item-list-all" and kind == "item-list" and fields["q"] == "":  # only the read with Done cards
@@ -77,10 +83,10 @@ elif kind == "item-list":
     names = {f["name"] for f in db["fields"]}
     nodes = []
     for iid, it in db["items"].items():
-        if fields["q"] == "-status:Done" and it["values"].get("status") == "Done":
+        if fields["q"] == "-status:Done" and it["values"].get("status") == "Done" or it.get("archived"):
             continue
         issue = db["issues"][str(it["number"])]
-        node = {"id": iid, "content": {"number": it["number"], "title": issue["title"], "body": issue["body"],
+        node = {"id": iid, "updatedAt": it.get("updated", ""), "content": {"number": it["number"], "state": issue["state"], "title": issue["title"], "body": issue["body"],
                                        "repository": {"nameWithOwner": db["issues_repo"]},
                                        "url": f"https://github.com/{db['issues_repo']}/issues/{it['number']}"}}
         if "blockedBy(" in fields["query"]:
@@ -93,6 +99,13 @@ elif kind == "item-list":
             node[alias] = None if v is None else {"name" if name == "Status" else "text": v}
         nodes.append(node)
     out = {"data": {"node": {"items": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+elif kind == "move-to-top":
+    db["positions"] = [fields["item"]] + [i for i in db.get("positions", []) if i != fields["item"]]
+    touch(fields["item"])
+    out = {"data": {"updateProjectV2ItemPosition": {"clientMutationId": None}}}
+elif kind == "archive":
+    db["items"][fields["item"]]["archived"] = True
+    out = {"data": {"archiveProjectV2Item": {"item": {"id": fields["item"]}}}}
 elif kind == "add-blocked-by":
     issue, blocker = fields["issue"].removeprefix("I_"), fields["blocker"].removeprefix("I_")
     db["issues"][issue].setdefault("blocked_by", []).append(blocker)
@@ -101,6 +114,7 @@ elif cmd == ["project", "item-add"]:
     number = int(opt("--url").rstrip("/").rsplit("/", 1)[-1])
     iid = f"PVTI_{number}"
     db["items"][iid] = {"number": number, "values": {}}
+    touch(iid)
     out = {"id": iid}
 elif cmd == ["project", "item-edit"]:
     field = next(f for f in db["fields"] if f["id"] == opt("--field-id"))
@@ -109,6 +123,7 @@ elif cmd == ["project", "item-edit"]:
     else:
         value = opt("--text")
     db["items"][opt("--id")]["values"][field["name"].lower()] = value
+    touch(opt("--id"))
     out = {"id": opt("--id")}
 elif cmd == ["issue", "create"]:
     if opt("--repo") != db["issues_repo"]:
@@ -697,6 +712,8 @@ class TaskTest(unittest.TestCase):
         with self.db_lock():
             db = json.loads(self.db.read_text())
             db["items"][f"PVTI_{tid}"]["values"]["status"] = status
+            db["clock"] = db.get("clock", 0) + 1  # GitHub's updatedAt moves with the card
+            db["items"][f"PVTI_{tid}"]["updated"] = f"2026-01-01T{db['clock']:08d}Z"
             self.db.write_text(json.dumps(db))
         self.edited_on_github()
 
@@ -704,11 +721,14 @@ class TaskTest(unittest.TestCase):
         return [c["body"] for c in self.gh()["issues"][tid]["comments"]]
 
     def wait(self, tid, timeout=20):
-        """Wait for the background run to leave In progress."""
+        """Wait for the background run to leave In progress, and for the event of where it went: set_status writes
+        the event just after it moves the card, so a test reading events.jsonl at once could miss it."""
         end = time.time() + timeout
         while time.time() < end:
-            if self.status(tid) != "In progress":
-                return self.status(tid)
+            status = self.status(tid)
+            if status != "In progress" and (not self.events_file().exists() or any(
+                    e["event"] == status for e in self.events_of(tid)[-3:])):
+                return status
             time.sleep(0.2)
         self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
 
@@ -910,6 +930,8 @@ class TaskTest(unittest.TestCase):
             db = json.loads(self.db.read_text())
             db["issues"][tid].update(state="CLOSED", reason=reason)
             db["items"][f"PVTI_{tid}"]["values"]["status"] = "Done"  # GitHub's "Item closed" workflow
+            db["clock"] = db.get("clock", 0) + 1
+            db["items"][f"PVTI_{tid}"]["updated"] = f"2026-01-01T{db['clock']:08d}Z"
             self.db.write_text(json.dumps(db))
         self.edited_on_github()
 
@@ -1892,9 +1914,12 @@ class TaskTest(unittest.TestCase):
         blocked = [e for e in events if e["id"] == stuck][-1]
         self.assertEqual((blocked["event"], blocked["reason"]), ("Blocked", "Need the Stripe test key."))
 
+    def events_file(self):
+        return self.root / ".local/state/task-hub/events.jsonl"
+
     def events_of(self, tid):
-        path = self.root / ".local/state/task-hub/events.jsonl"
-        return [e for e in map(json.loads, path.read_text().splitlines()) if e["id"] == tid]
+        path = self.events_file()
+        return [e for e in map(json.loads, path.read_text().splitlines()) if e["id"] == tid] if path.exists() else []
 
     def done_events(self, tid):
         return [e for e in self.events_of(tid) if e["event"] == "Done"]
@@ -3211,6 +3236,79 @@ class TaskTest(unittest.TestCase):
             self.assertEqual(self.gh()["graphql_calls"], 1)
             self.assertFalse(lock.exists())  # released: the next pane that misses takes it again
 
+    # --- newest first, and the oldest Done cards archived ---
+
+    def test_the_card_that_moved_last_comes_first_on_the_board_and_in_the_list(self):
+        first, second, third = self.new(title="first"), self.new(title="second"), self.new(title="third")
+        self.assertEqual(self.gh()["positions"][:3], [f"PVTI_{third}", f"PVTI_{second}", f"PVTI_{first}"])
+        ids = lambda out: re.findall(r'^  "(\d+)"', out, re.M)
+        self.assertEqual(ids(self.task("list")), [third, second, first])
+        self.task("start", first, "--agent", "fake")  # moved by task-hub: to the top of its column on GitHub
+        self.assertEqual(self.gh()["positions"][0], f"PVTI_{first}")
+        self.wait(first)
+        self.assertEqual(ids(self.task("list"))[0], first)
+        self.move(second, "Ready")  # moved by hand on GitHub: GitHub's updatedAt says it moved last
+        self.assertEqual(ids(self.task("list"))[0], second)
+
+    def test_ready_cards_start_in_the_order_they_were_made_whatever_the_order_shown(self):
+        ids = [self.new("slow", f"t{i}") for i in range(5 + 1)]
+        for tid in reversed(ids):  # the last one made is moved last, so it is shown first
+            self.move(tid, "Ready")
+        out = self.task()
+        self.assertIn(f'"{ids[0]}",t0,In progress', out.split("tasks[")[1].splitlines()[1])  # shown first: moved last
+        self.assertEqual(self.status(ids[-1]), "Ready")  # the newest waits; the oldest five run
+        self.assertEqual({self.status(t) for t in ids[:-1]}, {"In progress"})
+        # each run has its pid before the test ends, so tearDown stops them all before removing HOME
+        self.wait_for(lambda: all(self.run_state(t).get("pid") for t in ids[:-1]))
+
+    def seed_cards(self, statuses):
+        """Cards made on GitHub, oldest first: an Issue each, and the card's last change in that order."""
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            for status in statuses:
+                n = str(len(db["issues"]) + 1)
+                db["issues"][n] = {"title": f"card {n}", "body": "", "state": "CLOSED" if status == "Done" else "OPEN",
+                                   "comments": [], "labels": []}
+                db["clock"] = db.get("clock", 0) + 1
+                db["items"][f"PVTI_{n}"] = {"number": int(n), "values": {"status": status, "target repo": "jyoka/app"},
+                                            "updated": f"2026-01-01T{db['clock']:08d}Z"}
+            self.db.write_text(json.dumps(db))
+        self.edited_on_github()
+
+    def archived(self):
+        return sorted((int(i.removeprefix("PVTI_")) for i, it in self.gh()["items"].items() if it.get("archived")))
+
+    def test_over_100_cards_the_done_ones_moved_longest_ago_are_archived(self):
+        self.seed_cards(["Backlog", "Blocked"] + ["Done"] * 99 + ["In review"])  # 102: the two oldest are open
+        self.env["TASK_WATCH_ONCE"] = "1"
+        out = self.task("watch")
+        self.assertEqual(self.archived(), [3, 4])  # the two oldest Done; never the older open ones
+        self.assertIn("archived: 2 Done card(s), the board keeps the newest 100 cards: #3, #4", out)
+        self.assertEqual(self.gh()["issues"]["3"]["state"], "CLOSED")  # the Issue stays: only the card is archived
+        self.assertEqual(self.task("watch").count("archived:"), 0)  # 100 now: nothing more
+
+        tid = self.new(title="one more")  # 101 cards, but it is open: nothing to archive until a card gets Done
+        self.assertEqual(self.archived(), [3, 4])
+        self.task("done", tid)
+        self.assertEqual(self.archived(), [3, 4, 5])
+        self.assertNotIn(int(tid), self.archived())  # the newest Done stays
+
+    def test_only_done_cards_are_archived_even_when_the_board_stays_over_100(self):
+        self.seed_cards(["Backlog"] * 101 + ["Done"])
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("watch")
+        self.assertEqual(self.archived(), [102])  # 101 open cards stay: the board is over 100 only by work still owed
+
+    def test_a_card_dragged_to_done_with_its_issue_still_open_is_not_archived(self):
+        self.seed_cards(["Done"] * 102)
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["issues"]["1"]["state"] = "OPEN"  # dragged to Done on GitHub; nothing closed the Issue
+            self.db.write_text(json.dumps(db))
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("watch")
+        self.assertEqual(self.archived(), [2, 3])  # an archived card would vanish from task-hub with its Issue open
+
     def test_a_command_that_moves_cards_reads_the_projects_ids_again(self):
         tid = self.new(title="closed by hand")
         self.task("list")  # the Project's ids are saved
@@ -3300,7 +3398,7 @@ class TaskTest(unittest.TestCase):
         self.save_db(db)
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("watch")
-        self.assertEqual(self.gh()["item_list_calls"], 1)
+        self.assertEqual(self.gh()["item_list_calls"], 2)  # the archive check when the watch starts, then the cycle
 
     def test_home_reuses_the_board_snapshot_when_nothing_changes(self):
         tid = self.new(title="waiting for approval")
