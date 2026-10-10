@@ -3,6 +3,7 @@
 **GitHub Project のカードを Ready に移すと、手元のコーディングエージェントが実装して PR を出す。**
 
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 あなたが決めるのは 2 つだけです。
 
@@ -146,3 +147,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 
 `task feedback`(機能の要望は `task feedback --feature`)で、版と OS を入れたフォームが開きます。
 質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ。脆弱性は [SECURITY.md](SECURITY.md) の手順で知らせてください。
+
+## ライセンス
+
+[MIT](LICENSE)
