@@ -1,291 +1,148 @@
 # task-hub
 
-GitHub Project をかんばんボードにして、そのタスクをコーディングエージェント(Claude Code、Codex、Pi、Kiro など、
-非対話モードを持つ CLI なら何でも)に実行させるツールです。
+**GitHub Project のカードを Ready に移すと、手元のコーディングエージェントが実装して PR を出す。**
+
+[![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 
 あなたが決めるのは 2 つだけです。
 
 - **始めてよいか**: カードを Ready に移す
 - **入れてよいか**: PR をマージする
 
-その間の実装、レビュー、PR の作成、止まったときの仕分け、順番待ちは、task-hub とエージェントが進めます。
+その間の実装、テスト、レビュー、PR、止まったときの仕分け、順番待ち、後片付けは、task-hub とエージェントが進めます。
+エージェントは Claude Code、Codex、Pi、Kiro など、非対話モードを持つ CLI なら何でも使えます。
 
-> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** Kiro IDE でこのリポジトリを開き、
+> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** このリポジトリを Kiro IDE で開き、
 > チャットに「セットアップして」と言うだけで入ります(ターミナルも管理者権限も要りません)。
 
-## 全体構成
+## しくみ
 
-```
-あなた
- ├─ 話す・頼む ──▶ あなたのエージェントの会話
- │                   /task    今の会話をタスクとして登録
- │                   /chief   ボードを見張って知らせる、作業を分けて提案、「うん」で登録・開始
- │                   to-issues などほかのスキルも task new で登録
- │                        │
- │                        ▼
- ├─ Ready に移す ─▶ GitHub(状態はすべてここ)
- │                   Project     かんばんボード
- │                   Issue       タスク(本文が Goal)。Blocked by で前後関係、research ラベルで調べもの
- │                   PR          成果(作業先のリポジトリ)
- │                        │ 1 分ごとに読む
- │                        ▼
- │                 task-hub(bin/task、あなたの Mac で動くコード)
- │                   開始の判定  Ready で、待ち先がすべて完了していて、実行の枠(最大 5)が空いている
- │                   準備        clone → worktree(task/<番号>)→ [env] のコピー → [setup] の実行
- │                   実行        worker → reviewer ─ pass ─────────▶ commit・push・PR → In review
- │                                  ▲        └ needs changes(1 回だけ差し戻す。2 回目も不合格なら Blocked)
- │                                  └────────┘
- │                               worker が「Blocked」と書いた → replanner が仕分けて Issue にコメント
- │                   後片付け    マージを見て Done に。worktree、ブランチ、herdr のタブを片付ける
- │                   記録        events.jsonl(出来事。/chief を起こす)、metrics.jsonl(実行ごとの数字)
- │                   通知        In review、Blocked などを herdr か macOS の通知で出す(LLM は使わない)
- │                        │
- └─ PR をマージ ◀─────────┘ In review
+```mermaid
+flowchart LR
+    you(["あなた"]) -- "1. 頼む(/task、/chief)" --> board[("GitHub Project<br/>Backlog")]
+    you -- "2. Ready に移す" --> board
+    board -- "3. 1 分ごとに読む" --> th["task-hub<br/>(あなたの Mac)"]
+    th -- "4. worktree で実行" --> agent["エージェント<br/>実装 → 自動レビュー"]
+    agent --> th
+    th -- "5. PR、レポート、In review" --> board
+    you -- "6. マージ" --> done[("Done<br/>後片付け")]
 ```
 
-### 役割
+- 状態はすべて GitHub にあります。スマホから Ready に移しても始まります
+- エージェントがするのは「ファイルを編集し、テストし、レポートを書く」ことだけです。git、PR、Issue へのコメントは
+  task-hub がコードで行うので、どのエージェントでも同じ形の PR になります
+- LLM を使うのは、実装、レビュー、止まった理由の仕分けの 3 か所だけです。いつ始めるか、通知、後片付けはコードが決めます
 
-task-hub が定義している役割は 5 つです。どれも Claude Code の sub-agent ではなく、役割ごとの指示書です。
-ランナーが起動する 3 つは別プロセスの CLI として動くので、どのエージェントでも同じ形で使えます。
+## 特長
 
-| 役割 | どこで動くか | 仕事 | 書いてよいもの | 指示書 |
-|---|---|---|---|---|
-| **worker** | task-hub が起動(タスクごと) | Goal を実装し、テストし、レポートを書く | worktree のファイル、`.task-report.md` | [worker/PROMPT.md](worker/PROMPT.md) |
-| **reviewer**(任意) | task-hub が起動(worker の後、PR の前) | Goal の受け入れ条件を 1 つずつ、PR 全体と照らし合わせる | `.task-review.md` だけ | [worker/REVIEW.md](worker/REVIEW.md) |
-| **replanner**(任意) | task-hub が起動(worker が自分で Blocked と書いたとき) | 止まった理由を「リポジトリから答えられる / 人に聞く / Goal が矛盾」に仕分ける | 何も書けない(コメントの本文を返すだけ) | [worker/REPLAN.md](worker/REPLAN.md) |
-| **/task** | あなたのエージェントの会話 | 今の会話を Backlog のタスクとして登録する | ボードへの登録だけ | [skills/task](skills/task/SKILL.md) |
-| **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する。名指しで頼まれたら開始・`task done`・マージを実行する | 登録・開始・`task done`・マージ(どれもあなたが頼んだときだけ。自分からはしない) | [skills/chief](skills/chief/SKILL.md) |
+- **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
+- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
+- **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書いて Ready に戻すと、同じ PR で続きます
+- **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
+- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します(LLM は使いません)
+- **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます
+- **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
-### 分担
+## はじめる
 
-- **LLM が担うのは、判断が要る 3 か所だけです**: 実装する、評価する、止まった理由を仕分ける。
-- **それ以外はコードが決めます**: いつ始めるか、git と PR、判定の読み取り、replanner の根拠(`path:行番号` と引用)が
-  実物と合うかの照合、reviewer が勝手に書き換えた分の取り消し、前後関係の判定。エージェントとの約束は
-  「ファイルを編集し、テストし、レポートを書く」だけなので、どのベンダーでも同じ動きになります。
-- **エージェントがタスクを勝手に作ったり始めたりすることはありません。** 登録は `/task`(Claude Code では、会話で「タスクにして」と
-  頼んだときも)・`task new`・`/chief`(あなたの「うん」のあと)だけ、開始は Ready に移したとき(または `task start`)だけです。
+必要なもの: macOS(Windows は [docs/windows.md](docs/windows.md))、Python 3.10 以上、git、ログイン済みの `gh`、
+ログイン済みのエージェント CLI 1 つ以上。
 
-## タスクの一生
+```sh
+# 1. 動かす用の clone を入れる
+git clone https://github.com/jyoka/task-hub.git ~/.local/lib/task-hub
+ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task
 
-| 列 (Status) | 何が起きているか | あなたの対応 |
-|---|---|---|
-| **Backlog** | 登録済み、未承認 | やってほしいときに Ready へ |
-| **Ready** | 承認済み。枠(最大 5)が空けば始まる。「Blocked by」の待ち先が終わるまでは、枠を使わずに待つ(`task list` の `waits_for` に理由) | なし(待ち先が Blocked なら、そちらに対応) |
-| **In progress** | worker が作業中。reviewer と、その差し戻しもこの間 | なし |
-| **In review** | PR ができた(調べものはレポートだけ)。reviewer を設定していれば、自動レビューも通っている | PR をレビューしてマージ(調べものは読んで `task done`) |
-| wait for merge(任意) | レビュー済みで、マージ待ち。列のないボードでは使わない | なし |
-| **Blocked** | エージェントが何かを必要としている、自動レビューが通らなかった、または実行が失敗した。理由と replanner の仕分けは Issue のコメント | 答えを Goal に書き足して Ready へ(同じブランチと PR で続く) |
-| **Done** | PR がマージされた、または Issue が閉じられた。後片付けが済み、これを待っていたタスクが始まる | なし |
+# 2. GitHub Project を使う権限
+gh auth refresh -s project
+
+# 3. 設定を書いて(下)、確かめる
+task list
+```
+
+```ini
+; ~/.config/task-hub/config.ini
+[board]
+project = <owner>/<Project の番号>
+issues = <owner>/<Issue を置くリポジトリ>
+
+[runner]
+agent = claude
+reviewer = agent
+```
+
+GitHub Project の準備(列と欄)、スキルのインストール、常駐のさせ方は [docs/setup.md](docs/setup.md) にあります。
+
+## 使い方
+
+使い方は 3 通りで、混ぜても構いません。
+
+| 使い方 | やること |
+|---|---|
+| **総指揮と話す**(おすすめ) | エージェントで `/chief`。話した作業をタスクに分けて提案し、「うん」で登録と開始をし、In review や Blocked になると知らせてきます |
+| **会話から登録** | 普段の会話で `/task`。Backlog にカードができるので、やってほしいときに Ready へ移します |
+| **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` で様子を見ます |
+
+Ready のカードを自動で始めるには、`task watch` を動かしておきます(1 分ごとに確認)。
 
 例: 「ログインを直す」を頼んで、マージするまで。
 
 ```
 あなた      /task(または /chief に話す)            → Issue jyoka/tasks#12、Backlog
 あなた      カードを Ready に移す                    → task-hub が開始                 In progress
-            herdr に "#12 ログインを直す" のタブが開く
 worker      編集し、テストし、レポートを書く
 reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら 1 回差し戻し)
 task-hub    task/12 を push し、PR を作り、レポートと判定を Issue にコメント   In review
-            タブは自分で閉じる(出力は task log 12 に残る)
 あなた      PR をレビューしてマージ                  → Issue が閉じる                  Done
 ```
 
-止まったとき:
+Goal の書き方、タスクの分け方、前後関係、調べもののタスク、設定の詳細は [docs/usage.md](docs/usage.md) にあります。
 
-```
-worker      「Stripe のテスト用キーが要る」と書いて止まる                          Blocked
-replanner   answered(リポジトリにある答えを根拠付きで)/ human(あなたへの質問を 1 行に)/ goal-conflict
-あなた      Goal に答えを書き足して Ready に戻す     → 同じブランチと PR で続きから
-```
+## タスクの一生
 
-## はじめる
+| 列 (Status) | 何が起きているか | あなたの対応 |
+|---|---|---|
+| **Backlog** | 登録済み、未承認 | やってほしいときに Ready へ |
+| **Ready** | 承認済み。枠(最大 5)が空けば始まる。待ち先があれば、終わるまで待つ | なし |
+| **In progress** | worker が作業中。自動レビューと差し戻しもこの間 | なし |
+| **In review** | PR ができた(調べものはレポートだけ) | PR をレビューしてマージ |
+| **Blocked** | エージェントが何かを必要としている、自動レビューが通らなかった、または実行が失敗した | 答えを Goal に書き足して Ready へ |
+| **Done** | PR がマージされた。後片付けが済み、これを待っていたタスクが始まる | なし |
 
-セットアップは [docs/setup.md](docs/setup.md) にあります(GitHub Project の準備、動かす用の clone、設定、スキルのリンク)。
-Windows では [docs/windows.md](docs/windows.md) だけで進められます(はじめての人向け)。
-使い方は 3 通りで、混ぜても構いません。
-
-| 使い方 | やること |
-|---|---|
-| **総指揮と話す**(おすすめ) | 作業中の herdr の workspace のペインでエージェントを起動し、`/chief`。状況を教え、話した作業をタスクに分けて提案し、「うん」で登録と開始をし、In review や Blocked になると向こうから知らせてきます。`/chief` 専用のセッションで動かし、長くなったら開き直すと安く済みます([docs/setup.md](docs/setup.md#task-と-chief-スキルのインストール)) |
-| **会話から登録して、ボードで承認** | 普段のエージェントとの会話で `/task`。Backlog にカードができるので、やってほしいときに Ready へ移します |
-| **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` と `task events` で様子を見ます |
-
-`/task` と `/chief` は Claude Code と Kiro での呼び方です。Pi では `/skill:chief`、Codex では `$chief` のように
-呼びます([docs/setup.md](docs/setup.md#task-と-chief-スキルのインストール))。
-
-Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
-`task` を引数なしで実行しても、その場で 1 回確認して始めます。
-
-In review、Blocked、replanner の仕分け、Done、長引いている実行(`slow`)は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
-通知、なければ macOS の通知)。文面はタイトル、判定か理由、見てほしいこと、PR の URL で、LLM は使わないので
-費用はかかりません。知らせを受けるためだけに `/chief` を開いておく必要はなく、相談したいときに開けば足ります。
-
-## タスクの頼み方
-
-### Goal に書くこと
-
-エージェントが見るのは Goal(Issue の本文)とリポジトリだけです。会話で決まったことは、すべて Goal に書きます。
-
-- 何をするか、なぜか。関係するファイル、決まったこと、制約、やらないこと
-- **受け入れ条件**: エージェントと reviewer が 1 つずつ確かめられるチェックリスト
-- **`### Ready conditions`**(任意): 開始前にそろっているべきこと。依存するタスクとそこから使うもの、決まっているべき
-  仕様、`.env` のキーなど。エージェントは最初にこれを確かめ、足りなければ何も変えずに Blocked で止まります
-
-### 大きさと分け方
-
-1 つのタスクは、単独でレビュー・マージ・取り消しができる 1 つの関心ごとにします(10〜15 分でレビューできる PR が
-目安)。性質の違う作業(機能、バグ、開発環境、ドキュメント)は分け、同じファイルを触る作業はまとめます(分けると
-PR 同士が競合します)。`/task` と `/chief` はこの基準で分け方を提案し、分けたタスクには「PR #23 follow-up (1/3): ...」
-のような共通の接頭辞を付けます。
-
-### 前後関係
-
-前のタスクのコードや結論が必要なタスクには、GitHub の「Blocked by」を付けます。
-
-```
-task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 --goal-file goal.md
-```
-
-- 待っているタスクは Ready にしておいて構いません。#12 が完了として閉じる(PR のマージ、`task done`)と自動で始まります。
-  開始時に最新のベースから作業を始めるので、#12 の PR がマージされていれば、その変更を前提に作業できます。
-- 待ち先が「not planned」や「duplicate」で閉じた場合は、前提が届いていないので待ち続けます。不要ならリンクを外します。
-- `/task` と `/chief` は、分けたタスクに前後関係があれば付けます。Issue の画面の Relationships から付けても同じです。
-- 本文の `Blocked by` や `Ready conditions` の見出しの下にだけ書かれた番号(`task new` を通さずに作った Issue)も、
-  ボード上の開いたカードなら開始を待たせ、`waits_for` に「only in the body: link it」と出します。
-- to-prd や to-issues など、ほかのスキルからボードに作るときの手順は [docs/issue-tracker.md](docs/issue-tracker.md) にあります。
-
-### そのほかの頼み方
-
-| やりたいこと | 方法 |
-|---|---|
-| 調べもの(コードを変えない)を頼む | `task new --research ...`、または `/task` や `/chief` に「調べて」と頼む。レポートが成果物になり、PR なしで In review になる。読み終えたら `task done` |
-| main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出る |
-| このタスクだけ別のエージェントを使う | カードの Agent 欄に書く、または `task start --agent kiro` |
-| エージェントを使わない雑務を管理する | Project の「+ Add item」で下書きのカードを作る。Issue ではないカードを task-hub は無視する |
+列の上にあるのは、最後に動いたカードです。カードが 100 枚を超えると、古い Done のカードをアーカイブします。
 
 ## コマンド
 
 | コマンド | すること |
 |---|---|
 | `task` | ボードと同期し、Ready のカードを始め、あなたの対応が必要なものを出す |
-| `task list [--watch]` | 開いているカードの一覧(読むだけで、何も始めない)。`--watch` は 1 分ごとに描き直し続ける(エージェントの隣のペイン向け。[docs/operations.md](docs/operations.md)) |
-| `task new --title ... --repo owner/name (--goal ... \| --goal-file ...)` | タスクを登録する。`--base`、`--agent`、`--research`、`--blocked-by 12,14` |
-| `task start [<番号>] [--agent 名前]` | Backlog を承認する、または Blocked を再実行する。番号なしなら一覧から選ぶ |
+| `task list [--watch] [--max-age 秒]` | 開いているカードの一覧(読むだけ) |
+| `task new --title ... --repo owner/name --goal ...` | タスクを登録する(`--base`、`--agent`、`--research`、`--blocked-by 12,14`) |
+| `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
-| `task show <番号> [--full \| --digest]` | Issue と最新のレポート、replanner の仕分け。`--digest` は判断用の要点だけ |
+| `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
-| `task open <番号>` | そのタスクの worktree を IDE で開く(`[ide] open`)。未設定ならパスを表示する |
-| `task events [--follow \| --next] [--only "In review,Blocked"] [--digest]` | 最近の出来事。`--follow` は起きるたびに 1 行、`--next` は次の出来事を待って終わる。`--digest` は判断用の要点を行の下に出す。列の移動のほか、いつもより長引いている実行の `slow`(経過時間といつもの時間付き、1 回だけ)も出る |
-| `task stats` | このマシンで終わった実行の集計(自動レビュー、差し戻し、Blocked の理由、`slow` が出た実行の数、PR の大きさ、トークン数) |
-| `task done <番号>` | 手で閉じる・取り消す(マージされた PR は自動で閉じる) |
-| `task update` | task-hub を最新のリリースに更新する(launchd の `task watch` の再起動、Kiro IDE の定義のコピーし直しも)。新しい版は `task list` と `task watch` が 1 行で知らせる |
-| `task feedback [--feature]` | task-hub のバグ報告(`--feature` なら機能の要望)のフォームを、版と OS を入れてブラウザで開く。開けないときは URL を表示する([下](#バグ報告と要望)) |
+| `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
+| `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
+| `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
+| `task done <番号>` | 手で閉じる・取り消す |
+| `task update` | 最新のリリースに更新する |
+| `task feedback [--feature]` | バグ報告・機能の要望のフォームを開く |
 
-## 設定
-
-`~/.config/task-hub/config.ini` です。全体は [docs/setup.md](docs/setup.md)、エージェントごとの設定は [docs/agents.md](docs/agents.md) にあります。
-
-```ini
-[runner]
-agent = claude          ; このマシンのデフォルトの worker
-reviewer = agent        ; PR の前の自動レビュー。agent = worker と同じエージェントを新しいコンテキストで
-replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
-
-[env]
-; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
-jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
-
-[setup]
-; worker の前に worktree で実行する準備(仮想環境など)。失敗したら Blocked
-jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
-
-[notify]
-events = In review, Blocked, replan, Done, slow   ; 通知を出す出来事(これが既定)。空にすると出さない
-```
-
-| 設定 | 有効にすると | 人が決めること |
-|---|---|---|
-| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。`needs changes` なら 1 回だけ差し戻し、それでも通らなければドラフト PR で Blocked | マージするかどうか |
-| `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
-| `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
-| `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
-
-`reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
-
-## 見え方と、手元に残るもの
-
-**herdr のタブ。** herdr が動いていれば、各タスクは "#<番号> <タイトル>" のタブで動きます。置き場所は次の順で決まります。
-
-1. `/task` や `/chief` で登録した workspace
-2. 登録時の記録がなければ、`task start` や `task` を手で実行した workspace(`task watch` は含まない)
-3. そのリポジトリの checkout を開いているペインがある workspace
-4. どれもなければ、タスク専用の workspace
-
-In review で終わったタブは自動で閉じ、Blocked のタブは中身を見られるように残します。herdr がなくても、実行は
-バックグラウンドで動き、`task log` で追えます。
-
-**手元の記録。** GitHub に載るのは Issue、コメント、PR だけです。実行中の情報はこのマシンにだけ残ります。
-
-| 内容 | 場所 |
-|---|---|
-| 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
-| 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
-| 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
-| worktree とリポジトリの clone | `~/.local/share/task-hub/` |
-| task-hub の新しい版を確かめた結果(1 日 1 回まで) | `~/.local/state/task-hub/update.json` |
-
-## リポジトリの中身
-
-```
-bin/task               CLI(Python 3 の標準ライブラリだけ。git、gh、動いていれば herdr を使う)
-worker/PROMPT.md       worker の指示書(実行のたびに渡す)
-worker/REVIEW.md       reviewer の指示書(受け入れ条件を 1 つずつ、根拠付きで)
-worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict、根拠付き)
-skills/task/SKILL.md   /task スキル
-skills/chief/SKILL.md  /chief スキル
-pi/task-events.ts      Pi の拡張機能: 出来事で /chief を起こす(Pi にはバックグラウンド実行がないため)
-claude/task-board/     Claude Code の mod: ボードをステータスラインとペインに出す(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
-kiro/                  Kiro IDE 用の部品と、かんたんセットアップ(install.sh、doctor.sh、uninstall.sh)
-kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
-slack-triage/          Slackトリアージ: スレッドをコピーして ⌃⌥S でタスクを提案する(docs/slack-triage.md)
-.kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
-windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
-tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
-tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
-.github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
-docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
-```
-
-`task` は、開発用とは別の clone(`~/.local/lib/task-hub`)から動かします。新しい版が出ると `task list` と
-`task watch` が 1 行で知らせるので、`task update` で更新します(clone を最新のリリースまで進め、launchd の
-`task watch` の再起動と Kiro IDE の定義のコピーし直しもまとめて行います。[docs/setup.md](docs/setup.md#インストール))。
-
-## バグ報告と要望
-
-task-hub のバグや欲しい機能は、このリポジトリの Issue で受けています。
-
-```
-task feedback              # バグ報告のフォームを、版と OS を入れて開く
-task feedback --feature    # 機能の要望のフォームを開く
-```
-
-- 使い方の質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ
-- 脆弱性は公開の Issue に書かず、[SECURITY.md](SECURITY.md) の手順で知らせてください
-- PR の出し方、テストの回し方、ドキュメントの書き方は [CONTRIBUTING.md](CONTRIBUTING.md) にあります
+すべてのフラグは `task help` と各コマンドの `--help` で見られます。
 
 ## ドキュメント
 
-- [docs/setup.md](docs/setup.md): セットアップ(GitHub Project、動かす用の clone、設定、スキル、仕事用 Mac も含む)
-- [docs/windows.md](docs/windows.md): Windows でのセットアップ(はじめての人向け。常駐、エラーと対処、実機で確かめること)
-- [docs/kiro-quickstart.md](docs/kiro-quickstart.md): Kiro IDE で「セットアップして」と言って使いはじめる手順(画面の操作だけ)
-- [docs/kiro-ide.md](docs/kiro-ide.md): Kiro IDE 版のセットアップの中身(インストーラが行うこと)
-- [docs/agents.md](docs/agents.md): 各エージェントの実行方法、reviewer と replanner、安全性、エージェントの追加
-- [docs/task-format.md](docs/task-format.md): Issue、Blocked by と Ready conditions、レポートファイル、コメント、PR の形式
-- [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順
-- [docs/operations.md](docs/operations.md): 実行の見守り、herdr のタブ、events と stats、トラブルシューティング、後片付け
-- [docs/release.md](docs/release.md): 版の付け方(semver とタグ `v<VERSION>`)、リリースの手順、リリースノートの型
-- [docs/architecture/hld.md](docs/architecture/hld.md)、[lld.md](docs/architecture/lld.md): 全体の部品とデータの流れ、関数・ファイル・呼び出しの詳細(図つき)。機能を足すときは [feature-design.md](docs/architecture/feature-design.md) の手順で設計メモを作る
-- [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
-- [docs/lessons.md](docs/lessons.md): 作って試してわかったこと、まだ確かめていないこと
-- [CONTRIBUTING.md](CONTRIBUTING.md): バグ報告と要望の送り先、PR の出し方、テスト、README と docs の書き方
-- [SECURITY.md](SECURITY.md): 脆弱性を非公開で知らせる手順
+| はじめる | 使う | 仕組み | 開発する |
+|---|---|---|---|
+| [setup.md](docs/setup.md) セットアップ | [usage.md](docs/usage.md) 使い方の詳細 | [architecture/hld.md](docs/architecture/hld.md) 全体図 | [CONTRIBUTING.md](CONTRIBUTING.md) PR とテスト |
+| [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) 運用とトラブル | [architecture/lld.md](docs/architecture/lld.md) 詳細設計 | [architecture/feature-design.md](docs/architecture/feature-design.md) 機能の設計 |
+| [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) エージェント | [design.md](docs/design.md) なぜこの作りか | [release.md](docs/release.md) リリース |
+| [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
+| | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
+| | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+
+## バグ報告と要望
+
+`task feedback`(機能の要望は `task feedback --feature`)で、版と OS を入れたフォームが開きます。
+質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ。脆弱性は [SECURITY.md](SECURITY.md) の手順で知らせてください。
