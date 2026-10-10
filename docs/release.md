@@ -29,7 +29,7 @@ Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別�
 
 1. **VERSION を上げる PR を出して、マージします。** `bin/task` の `VERSION` を新しい版にします。
    リリースノートの下書き(下の型)を PR の本文に書いておくと、3 でそのまま使えます。
-   README と docs が、この版の使い方と合っているかも確かめます(README のコマンドの表はテストが確かめます。
+   2 つの README と docs が、この版の使い方と合っているかも確かめます(README のコマンドの表はテストが確かめます。
    構成は [CONTRIBUTING.md](../CONTRIBUTING.md#readme-の構成))。
 2. **main にタグを付けて push します。** タグを付ける前に、main の `VERSION` が新しい版になっていることを確かめます。
 

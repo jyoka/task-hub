@@ -18,7 +18,7 @@ task-hub を使いはじめるために、このリポジトリを開いて「�
 ## 書き方
 
 - `bin/task` のコード、コメント、コマンドの出力は英語。周りのコードに合わせる。Python 3.10 以上の標準ライブラリだけ
-- README と `docs/` は日本語。書き方は [CONTRIBUTING.md の「README と docs の書き方」](CONTRIBUTING.md#readme-と-docs-の書き方)
+- README は英語の `README.md` と日本語の `README.ja.md` の 2 つで、同じ PR で両方を直す。`docs/` は日本語。書き方は [CONTRIBUTING.md の「README と docs の書き方」](CONTRIBUTING.md#readme-と-docs-の書き方)
 - README の構成は決まっている([CONTRIBUTING.md の「README の構成」](CONTRIBUTING.md#readme-の構成))。詳しいことは
   README に足さず、docs に置いてリンクする
 - 使い方が変わる変更は、同じ PR で README と関係する docs も直す。部品、流れ、ファイル、外部の呼び出しが変わるなら
