@@ -410,7 +410,7 @@ plist を書き換えたら、`bootout` してから `bootstrap` し直すと確
 **herdr のタブと通知はどうなるか。** launchd から動かした `task watch` が始めたタスクは、watch のペインが
 ないので、そのタスクの置き場所は「登録時に記録された workspace」→「そのリポジトリの checkout を開いている
 ペインがある workspace」→「タスク専用の workspace を新しく作る」の順で決まります(herdr のペインで動かした
-場合も、`task watch` が始めたタスクは watch の場所には置かないので、扱いは同じです。README の
+場合も、`task watch` が始めたタスクは watch の場所には置かないので、扱いは同じです。[usage.md](usage.md#見え方と手元に残るもの) の
 「見え方と、手元に残るもの」と [operations.md](operations.md#実行の様子を見る) を参照)。通知は、実行が
 終わったプロセス自身が出します。herdr が動いていれば herdr の通知、動いていなければ macOS の通知
 (`osascript`)になるので、launchd から動かしていても In review や Blocked は届きます([operations.md](operations.md#通知llm-なし))。

@@ -1,153 +1,164 @@
 # task-hub
 
-**GitHub Project のカードを Ready に移すと、手元のコーディングエージェントが実装して PR を出す。**
+English | [日本語](README.ja.md)
+
+**Move a GitHub Project card to Ready. Your local coding agent implements it and opens a PR.**
 
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-あなたが決めるのは 2 つだけです。
+You make two decisions:
 
-- **始めてよいか**: カードを Ready に移す
-- **入れてよいか**: PR をマージする
+- **May it start?** Move the card to Ready.
+- **May it go in?** Merge the PR.
 
-その間の実装、テスト、レビュー、PR、止まったときの仕分け、順番待ち、後片付けは、task-hub とエージェントが進めます。
-エージェントは Claude Code、Codex、Pi、Kiro など、非対話モードを持つ CLI なら何でも使えます。
+task-hub and your agents do the rest: implement, test, review, open the PR, sort out why a task stopped, wait in
+line, and clean up. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.
 
-> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** このリポジトリを Kiro IDE で開き、
-> チャットに「セットアップして」と言うだけで入ります(ターミナルも管理者権限も要りません)。
+> **Kiro IDE users: see [docs/kiro-quickstart.md](docs/kiro-quickstart.md).** Open this repository in Kiro IDE and
+> say "セットアップして" ("set it up") in the chat. You need no terminal and no admin rights.
 
-## しくみ
+The detailed docs in `docs/` are in Japanese.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    you(["あなた"]) -- "1. 頼む(/task、/chief)" --> board[("GitHub Project<br/>Backlog")]
-    you -- "2. Ready に移す" --> board
-    board -- "3. 1 分ごとに読む" --> th["task-hub<br/>(あなたの Mac)"]
-    th -- "4. worktree で実行" --> agent["エージェント<br/>実装 → 自動レビュー"]
+    you(["You"]) -- "1. Ask (/task, /chief)" --> board[("GitHub Project<br/>Backlog")]
+    you -- "2. Move to Ready" --> board
+    board -- "3. Read every minute" --> th["task-hub<br/>(your Mac)"]
+    th -- "4. Run in a worktree" --> agent["Agent<br/>implement → auto review"]
     agent --> th
-    th -- "5. PR、レポート、In review" --> board
-    you -- "6. マージ" --> done[("Done<br/>後片付け")]
+    th -- "5. PR, report, In review" --> board
+    you -- "6. Merge" --> done[("Done<br/>clean up")]
 ```
 
-- 状態はすべて GitHub にあります。スマホから Ready に移しても始まります
-- エージェントがするのは「ファイルを編集し、テストし、レポートを書く」ことだけです。git、PR、Issue へのコメントは
-  task-hub がコードで行うので、どのエージェントでも同じ形の PR になります
-- LLM を使うのは、実装、レビュー、止まった理由の仕分けの 3 か所だけです。いつ始めるか、通知、後片付けはコードが決めます
+- GitHub holds all the state. Move a card to Ready from your phone, and the task starts.
+- The agent only edits files, runs tests, and writes a report. task-hub does git, the PR, and the Issue comments in
+  code. So every agent produces the same kind of PR.
+- An LLM does only three jobs: implement, review, and sort out why a task stopped. Code decides when to start, when
+  to notify, and when to clean up.
 
-## 特長
+## Features
 
-- **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
-- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
-- **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書いて Ready に戻すと、同じ PR で続きます
-- **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します(LLM は使いません)
-- **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます
-- **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
+- **1 task = 1 branch = 1 worktree = 1 PR.** Up to 5 tasks run at the same time.
+- **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
+- **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
+- **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
+- **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications. No LLM is used.
+- **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`.
+- **Light.** Python standard library only. You install one clone.
 
-## はじめる
+## Get started
 
-必要なもの: macOS(Windows は [docs/windows.md](docs/windows.md))、Python 3.10 以上、git、ログイン済みの `gh`、
-ログイン済みのエージェント CLI 1 つ以上。
+You need: macOS (Windows: [docs/windows.md](docs/windows.md)), Python 3.10 or later, git, `gh` logged in, and at
+least one agent CLI logged in.
 
 ```sh
-# 1. 動かす用の clone を入れる
+# 1. Install the clone that runs task-hub
 git clone https://github.com/jyoka/task-hub.git ~/.local/lib/task-hub
 ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task
 
-# 2. GitHub Project を使う権限
+# 2. Give gh access to GitHub Projects
 gh auth refresh -s project
 
-# 3. 設定を書いて(下)、確かめる
+# 3. Write the config (below), then check it
 task list
 ```
 
 ```ini
 ; ~/.config/task-hub/config.ini
 [board]
-project = <owner>/<Project の番号>
-issues = <owner>/<Issue を置くリポジトリ>
+project = <owner>/<project number>
+issues = <owner>/<repository that holds the Issues>
 
 [runner]
 agent = claude
 reviewer = agent
 ```
 
-GitHub Project の準備(列と欄)、スキルのインストール、常駐のさせ方は [docs/setup.md](docs/setup.md) にあります。
+[docs/setup.md](docs/setup.md) tells you how to prepare the GitHub Project (columns and fields), install the
+skills, and keep `task watch` running.
 
-## 使い方
+## Usage
 
-使い方は 3 通りで、混ぜても構いません。
+Use any of the three ways, or mix them.
 
-| 使い方 | やること |
+| Way | What you do |
 |---|---|
-| **総指揮と話す**(おすすめ) | エージェントで `/chief`。話した作業をタスクに分けて提案し、「うん」で登録と開始をし、In review や Blocked になると知らせてきます |
-| **会話から登録** | 普段の会話で `/task`。Backlog にカードができるので、やってほしいときに Ready へ移します |
-| **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` で様子を見ます |
+| **Talk to the chief** (recommended) | Run `/chief` in your agent. It splits what you describe into tasks and proposes them. Say yes, and it registers and starts them. It tells you when a task is In review or Blocked |
+| **Register from a chat** | Run `/task` in a normal chat. A card appears in Backlog. Move it to Ready when you want the work done |
+| **Terminal only** | Register with `task new`, start with `task start <id>`, and watch with `task list` |
 
-Ready のカードを自動で始めるには、`task watch` を動かしておきます(1 分ごとに確認)。
+To start Ready cards automatically, keep `task watch` running. It checks every minute.
 
-例: 「ログインを直す」を頼んで、マージするまで。
+Example: you ask to fix the login, then merge.
 
 ```
-あなた      /task(または /chief に話す)            → Issue jyoka/tasks#12、Backlog
-あなた      カードを Ready に移す                    → task-hub が開始                 In progress
-worker      編集し、テストし、レポートを書く
-reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら 1 回差し戻し)
-task-hub    task/12 を push し、PR を作り、レポートと判定を Issue にコメント   In review
-あなた      PR をレビューしてマージ                  → Issue が閉じる                  Done
+You         /task (or tell /chief)                    → Issue jyoka/tasks#12, Backlog
+You         Move the card to Ready                    → task-hub starts it           In progress
+worker      Edits, tests, writes the report
+reviewer    Checks each acceptance criterion          → pass (needs changes: sent back once)
+task-hub    Pushes task/12, opens the PR, comments the report and verdict on the Issue   In review
+You         Review and merge the PR                   → the Issue closes             Done
 ```
 
-Goal の書き方、タスクの分け方、前後関係、調べもののタスク、設定の詳細は [docs/usage.md](docs/usage.md) にあります。
+[docs/usage.md](docs/usage.md) explains how to write a Goal, how to split tasks, dependencies, research tasks, and
+the full config.
 
-## タスクの一生
+## Task lifecycle
 
-| 列 (Status) | 何が起きているか | あなたの対応 |
+| Column (Status) | What happens | What you do |
 |---|---|---|
-| **Backlog** | 登録済み、未承認 | やってほしいときに Ready へ |
-| **Ready** | 承認済み。枠(最大 5)が空けば始まる。待ち先があれば、終わるまで待つ | なし |
-| **In progress** | worker が作業中。自動レビューと差し戻しもこの間 | なし |
-| **In review** | PR ができた(調べものはレポートだけ) | PR をレビューしてマージ |
-| **Blocked** | エージェントが何かを必要としている、自動レビューが通らなかった、または実行が失敗した | 答えを Goal に書き足して Ready へ |
-| **Done** | PR がマージされた。後片付けが済み、これを待っていたタスクが始まる | なし |
+| **Backlog** | Registered, not approved | Move to Ready when you want it done |
+| **Ready** | Approved. Starts when one of the 5 slots is free. Waits until its dependencies are done | Nothing |
+| **In progress** | The worker runs. The auto review and its send-back also happen here | Nothing |
+| **In review** | The PR is ready (a research task has only a report) | Review and merge the PR |
+| **Blocked** | The agent needs something, the auto review failed, or the run failed | Add the answer to the Goal and move to Ready |
+| **Done** | The PR is merged. task-hub cleans up, and tasks that waited for this one start | Nothing |
 
-列の上にあるのは、最後に動いたカードです。カードが 100 枚を超えると、古い Done のカードをアーカイブします。
+The card at the top of a column is the one that moved last. When the board has more than 100 cards, task-hub
+archives the oldest Done cards.
 
-## コマンド
+## Commands
 
-| コマンド | すること |
+| Command | What it does |
 |---|---|
-| `task` | ボードと同期し、Ready のカードを始め、あなたの対応が必要なものを出す |
-| `task list [--watch] [--max-age 秒]` | 開いているカードの一覧(読むだけ) |
-| `task new --title ... --repo owner/name --goal ...` | タスクを登録する(`--base`、`--agent`、`--research`、`--blocked-by 12,14`) |
-| `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
-| `task watch` | Ready のカードを自動で始める(1 分ごと) |
-| `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
-| `task log <番号> [--full]` | このマシンでの実行の出力 |
-| `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
-| `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
-| `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
-| `task done <番号>` | 手で閉じる・取り消す |
-| `task update` | 最新のリリースに更新する |
-| `task feedback [--feature]` | バグ報告・機能の要望のフォームを開く |
+| `task` | Syncs with the board, starts Ready cards, and shows what needs you |
+| `task list [--watch] [--max-age seconds]` | Lists the open cards (read only) |
+| `task new --title ... --repo owner/name --goal ...` | Registers a task (`--base`, `--agent`, `--research`, `--blocked-by 12,14`) |
+| `task start [<id>] [--agent name]` | Approves a Backlog card, or runs a Blocked card again |
+| `task watch` | Starts Ready cards automatically (every minute) |
+| `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
+| `task log <id> [--full]` | Shows the output of the run on this machine |
+| `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
+| `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
+| `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
+| `task done <id>` | Closes or cancels a task by hand |
+| `task update` | Updates task-hub to the newest release |
+| `task feedback [--feature]` | Opens the bug report or feature request form |
 
-すべてのフラグは `task help` と各コマンドの `--help` で見られます。
+`task help` and `--help` on each command show all the flags.
 
-## ドキュメント
+## Documentation
 
-| はじめる | 使う | 仕組み | 開発する |
+The docs are in Japanese.
+
+| Get started | Use | How it works | Develop |
 |---|---|---|---|
-| [setup.md](docs/setup.md) セットアップ | [usage.md](docs/usage.md) 使い方の詳細 | [architecture/hld.md](docs/architecture/hld.md) 全体図 | [CONTRIBUTING.md](CONTRIBUTING.md) PR とテスト |
-| [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) 運用とトラブル | [architecture/lld.md](docs/architecture/lld.md) 詳細設計 | [architecture/feature-design.md](docs/architecture/feature-design.md) 機能の設計 |
-| [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) エージェント | [design.md](docs/design.md) なぜこの作りか | [release.md](docs/release.md) リリース |
-| [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
-| | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
-| | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+| [setup.md](docs/setup.md) Setup | [usage.md](docs/usage.md) Usage details | [architecture/hld.md](docs/architecture/hld.md) High-level design | [CONTRIBUTING.md](CONTRIBUTING.md) PRs and tests |
+| [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) Operations and troubleshooting | [architecture/lld.md](docs/architecture/lld.md) Low-level design | [architecture/feature-design.md](docs/architecture/feature-design.md) Designing a feature |
+| [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) Agents | [design.md](docs/design.md) Design decisions | [release.md](docs/release.md) Releases |
+| [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
+| | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
+| | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
 
-## バグ報告と要望
+## Bug reports and feature requests
 
-`task feedback`(機能の要望は `task feedback --feature`)で、版と OS を入れたフォームが開きます。
-質問や相談は [Discussions](https://github.com/jyoka/task-hub/discussions) へ。脆弱性は [SECURITY.md](SECURITY.md) の手順で知らせてください。
+Run `task feedback` (or `task feedback --feature`). It opens a form with your version and OS filled in. Ask
+questions in [Discussions](https://github.com/jyoka/task-hub/discussions). Report vulnerabilities as
+[SECURITY.md](SECURITY.md) describes.
 
-## ライセンス
+## License
 
 [MIT](LICENSE)
