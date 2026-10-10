@@ -4,6 +4,7 @@
   "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す。船の絵と実績バッジつき(LLM を使わない)",
   "version": "0.1.0",
   "publisher": "jyoka",
+  "license": "MIT",
   "private": true,
   "engines": { "vscode": "^1.90.0" },
   "main": "./out/extension.js",

@@ -33,10 +33,13 @@ Issue は「直す」「作る」ものだけに絞っています。空の Issu
 
 コミットメッセージは、何をしたかを 1 行目に日本語で書きます(`git log` を参考にしてください)。
 
+PR で送った変更は、このリポジトリと同じ [MIT ライセンス](LICENSE) で公開されます。
+
 ## リポジトリの中身
 
 ```
 AGENTS.md              エージェント向けの入口(CLAUDE.md はこれを読み込むだけ)
+LICENSE                MIT ライセンス
 bin/task               CLI(Python 3 の標準ライブラリだけ。git、gh、動いていれば herdr を使う)
 worker/PROMPT.md       worker の指示書(実行のたびに渡す)
 worker/REVIEW.md       reviewer の指示書(受け入れ条件を 1 つずつ、根拠付きで)
@@ -123,6 +126,7 @@ README は、初めて来た人が最初の画面で「何か」「なぜ使う�
 | 7 | `## コマンド` | 公開しているコマンドすべてを 1 行ずつ。フラグの全部は `task help` に任せる |
 | 8 | `## ドキュメント` | はじめる・使う・仕組み・開発する の 4 列の表(ほかの docs がこの見出しにリンクしている) |
 | 9 | `## バグ報告と要望` | `task feedback`、Discussions、SECURITY.md |
+| 10 | `## ライセンス` | [LICENSE](LICENSE) へのリンク 1 行 |
 
 - 版の番号や変更の履歴は README に書きません。リリースノートに書きます([docs/release.md](docs/release.md))
 - コマンドを足したら、README の「コマンド」の表に 1 行足します。表に全部のコマンドがあることはテストが確かめます
