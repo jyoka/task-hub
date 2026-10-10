@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 MAX_PARALLEL = 5
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
