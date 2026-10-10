@@ -3788,6 +3788,16 @@ class TaskTest(unittest.TestCase):
         _, fields = self.feedback_url(self.task("feedback", "--feature"))
         self.assertEqual(fields, {"template": "feature_request.yml"})
 
+    def test_readme_lists_every_command(self):
+        """CONTRIBUTING.md: a new command gets a row in the README's command table in the same PR."""
+        help_ = self.task("help")
+        commands = sorted(set(re.findall(r"^  task (\w+)", help_, re.M)))
+        self.assertIn("list", commands)
+        readme = (BIN.parent.parent / "README.md").read_text()
+        table = readme.split("## コマンド", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("| `task` |", table)  # bare `task`: sync and start
+        self.assertEqual([c for c in commands if f"| `task {c}" not in table], [])
+
     def test_help_lists_feedback(self):
         self.assertIn("task feedback [--feature]", self.task("help"))
 
