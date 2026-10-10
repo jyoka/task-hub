@@ -657,6 +657,12 @@ class TaskTest(unittest.TestCase):
     def save_db(self, db):
         with self.db_lock():
             self.db.write_text(json.dumps(db))
+        self.edited_on_github()
+
+    def edited_on_github(self):
+        """A change made on GitHub, not by task-hub: `task list` would show it once its cache is older than
+        --max-age. The tests want it at once, as if that time had passed."""
+        (self.root / ".local/state/task-hub/board-cache.json").unlink(missing_ok=True)
 
     def gh(self):
         with self.db_lock():
@@ -692,6 +698,7 @@ class TaskTest(unittest.TestCase):
             db = json.loads(self.db.read_text())
             db["items"][f"PVTI_{tid}"]["values"]["status"] = status
             self.db.write_text(json.dumps(db))
+        self.edited_on_github()
 
     def comments(self, tid):
         return [c["body"] for c in self.gh()["issues"][tid]["comments"]]
@@ -904,6 +911,7 @@ class TaskTest(unittest.TestCase):
             db["issues"][tid].update(state="CLOSED", reason=reason)
             db["items"][f"PVTI_{tid}"]["values"]["status"] = "Done"  # GitHub's "Item closed" workflow
             self.db.write_text(json.dumps(db))
+        self.edited_on_github()
 
     def test_a_task_waits_for_its_blocker_and_starts_once_it_is_done(self):
         first = self.new(title="first")
@@ -1560,6 +1568,7 @@ class TaskTest(unittest.TestCase):
 
     def test_list_watch_keeps_going_after_a_github_error(self):
         tid = self.new("ok")
+        (self.root / ".local/state/task-hub/board-meta.json").unlink()  # the Project is read again, and fails first
         db = self.gh()
         db["down"] = True
         self.save_db(db)
@@ -1590,15 +1599,17 @@ class TaskTest(unittest.TestCase):
         state = self.root / ".local/state/task-hub"
         data = self.root / ".local/share/task-hub"
         before = {k: v for k, v in self.gh().items() if not k.endswith("_calls")}
-        files = sorted(p.relative_to(self.root) for p in self.root.rglob("*") if state in p.parents or data in p.parents)
+        # the board caches are the only files it may write: what it read from GitHub
+        written = lambda: sorted(p.relative_to(self.root) for p in self.root.rglob("*")
+                                 if (state in p.parents or data in p.parents) and not p.name.startswith("board-"))
+        files = written()
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("list", "--watch")
         self.watch_in_terminal()
         self.list_watch([lambda: None], terminal=True)
         time.sleep(1)
         self.assertEqual({k: v for k, v in self.gh().items() if not k.endswith("_calls")}, before)  # no Project edit
-        self.assertEqual(sorted(p.relative_to(self.root) for p in self.root.rglob("*")
-                                if state in p.parents or data in p.parents), files)  # no worktree, run, or event
+        self.assertEqual(written(), files)  # no worktree, run, or event
         self.assertEqual(self.agent_calls(), [])
 
     def follow_events(self, *args):
@@ -1920,7 +1931,10 @@ class TaskTest(unittest.TestCase):
         self.task("start", stuck)
         self.wait(stuck)
         self.wait_for(lambda: len(self.notifications()) == 3)  # In review, Blocked, replan: not Backlog or In progress
-        (review, blocked, replan), pr = self.notifications(), self.pr(ok)["url"]
+        # each notifier is a detached process: under load they can land in any order (jyoka/tasks#147)
+        [review], [blocked], [replan] = (self.notifications_of(ok, "In review"), self.notifications_of(stuck, "Blocked"),
+                                         self.notifications_of(stuck, "replan"))
+        pr = self.pr(ok)["url"]
         # herdr is off here: macOS's notifier, given the text as arguments (no AppleScript quoting to break)
         self.assertEqual(review[:6], ["osascript", "-e", "on run argv", "-e",
                                       "display notification (item 2 of argv) with title (item 1 of argv)", "-e"])
@@ -3075,9 +3089,155 @@ class TaskTest(unittest.TestCase):
 
     def test_list_reads_the_board_in_two_github_calls(self):
         tid = self.new("ok")
+        (self.root / ".local/state/task-hub/board-meta.json").unlink()
         self.save_db({**self.gh(), "graphql_calls": 0})
         self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
         self.assertEqual(self.gh()["graphql_calls"], 2)  # the Project with its fields, then the cards
+        self.save_db({**self.gh(), "graphql_calls": 0})
+        self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
+        self.assertEqual(self.gh()["graphql_calls"], 1)  # the Project's ids are kept: only the cards
+
+    # --- the shared board cache of `task list` ---
+
+    def state(self, name):
+        return self.root / ".local/state/task-hub" / name
+
+    def zero_calls(self):
+        """Count GitHub calls from here, without save_db: that stands for a change on GitHub and drops the cache."""
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["graphql_calls"] = 0
+            self.db.write_text(json.dumps(db))
+
+    def load_bin(self):
+        with unittest.mock.patch.dict(os.environ, self.env):
+            loader = importlib.machinery.SourceFileLoader("task_cache", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_cache", loader))
+            loader.exec_module(task)
+        return task
+
+    def test_a_fresh_board_cache_is_shown_without_github_with_this_machines_runs(self):
+        slow = self.new("slow")
+        waiting = self.new("ok", "after slow", "jyoka/app", "--blocked-by", f"#{slow}")
+        self.task("start", slow)
+        self.wait_for(lambda: "waiting" in self.task("log", slow))
+        self.wait_for(lambda: self.run_state(slow)["stage"] == "agent")
+        fresh = self.task("list")
+        self.zero_calls()
+        cached = self.task("list")
+        self.assertEqual(self.gh()["graphql_calls"], 0)
+        self.assertEqual(cached, fresh)
+        self.assertIn(f'"{slow}",Add hello,In progress › agent,jyoka/app', cached)  # the stage of the live run
+        self.assertIn(f'"{waiting}",after slow,Backlog,jyoka/app,"","#{slow} (In progress)"', cached)
+        self.zero_calls()
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.assertIn(f'"{slow}",Add hello,In progress › agent', self.task("list", "--watch", "--max-age", "60"))
+        self.assertEqual(self.gh()["graphql_calls"], 0)
+
+    def test_list_reads_github_when_the_cache_cannot_be_used(self):
+        self.new(title="on the board")
+        cache = self.state("board-cache.json")
+        self.task("list")
+        good = json.loads(cache.read_text())
+        cases = {"--max-age 0": None, "old": {**good, "fetched_at": time.time() - 91},
+                 "broken JSON": "{", "other board": {**good, "key": ["jyoka", "3", "jyoka/tasks"]},
+                 "from the future": {**good, "fetched_at": time.time() + 3600}}
+        for name, saved in cases.items():
+            with self.subTest(name):
+                self.task("list")  # a good cache again
+                if saved is not None:
+                    cache.write_text(saved if isinstance(saved, str) else json.dumps(saved))
+                self.zero_calls()
+                out = self.task("list", *(["--max-age", "0"] if saved is None else []))
+                self.assertIn("on the board", out)
+                self.assertEqual(self.gh()["graphql_calls"], 2 if saved is None else 1)  # 0 also reads the fields
+        self.task("list", "--max-age", "soon", code=2)
+
+    def test_a_change_task_hub_makes_is_shown_at_once(self):
+        tid = self.new("slow")
+        cancelled = self.new(title="cancelled")
+        self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
+        self.task("start", tid)
+        self.assertIn(f'"{tid}",Add hello,In progress', self.task("list"))
+        self.task("done", cancelled)
+        self.assertNotIn("cancelled", self.task("list"))
+
+    def test_a_board_read_begun_before_a_change_is_never_used(self):
+        tid = self.new(title="moved while read")
+        task = self.load_bin()
+        with unittest.mock.patch.dict(os.environ, self.env):
+            card = next(t for t in task.tasks() if t["id"] == tid)
+            real = task.graphql
+
+            def slow_read(query, **variables):  # GitHub answers this read with the board as it was
+                answer = real(query, **variables)
+                if "items(" in query:
+                    task.set_status(card, task.READY)  # another process moves the card meanwhile
+                return answer
+
+            with unittest.mock.patch.object(task, "graphql", slow_read):
+                old = task.tasks()
+            self.assertEqual(next(t for t in old if t["id"] == tid)["status"], "Backlog")
+            self.assertIsNone(task.cached_items(90))  # written, but older than the change
+            self.assertEqual(next(t for t in task.tasks(max_age=90) if t["id"] == tid)["status"], "Ready")
+            self.assertIsNotNone(task.cached_items(90))
+
+    def test_a_pane_waits_for_the_one_reading_github(self):
+        self.new(title="shared")
+        task = self.load_bin()
+        with unittest.mock.patch.dict(os.environ, self.env):
+            task.tasks(max_age=90)
+            saved = self.state("board-cache.json").read_text()
+            self.state("board-cache.json").unlink()
+            lock = self.state("board-cache.fetching")
+            lock.touch()  # another pane is reading GitHub
+
+            def other_pane():
+                time.sleep(0.5)
+                data = json.loads(saved)
+                task.write_atomic(self.state("board-cache.json"), json.dumps({**data, "fetched_at": time.time()}))
+                lock.unlink()
+
+            threading.Thread(target=other_pane).start()
+            self.zero_calls()
+            self.assertEqual([t["title"] for t in task.tasks(max_age=90)], ["shared"])
+            self.assertEqual(self.gh()["graphql_calls"], 0)
+            self.state("board-cache.json").unlink()
+            lock.touch()
+            os.utime(lock, (time.time() - 31, time.time() - 31))  # left by a pane that was killed
+            began = time.time()
+            self.assertEqual([t["title"] for t in task.tasks(max_age=90)], ["shared"])
+            self.assertLess(time.time() - began, 5)  # taken over at once, not waited for
+            self.assertEqual(self.gh()["graphql_calls"], 1)
+            self.assertFalse(lock.exists())  # released: the next pane that misses takes it again
+
+    def test_a_command_that_moves_cards_reads_the_projects_ids_again(self):
+        tid = self.new(title="closed by hand")
+        self.task("list")  # the Project's ids are saved
+        db = self.gh()
+        status = next(f for f in db["fields"] if f["name"] == "Status")
+        for o in status["options"]:
+            if o["name"] == "Done":
+                o["name"] = "Done (old)"  # renamed on the board, and a new Done made
+        status["options"].append({"id": "O_new_done", "name": "Done"})
+        self.save_db(db)
+        self.task("done", tid)
+        self.assertEqual(self.status(tid), "Done")  # never the old column with the saved id
+
+    def test_a_failed_edit_forgets_the_projects_ids(self):
+        tid = self.new(title="renamed option")
+        meta = self.state("board-meta.json")
+        self.assertTrue(meta.exists())
+        task = self.load_bin()
+        with unittest.mock.patch.dict(os.environ, self.env):
+            card = next(t for t in task.tasks() if t["id"] == tid)
+            task._board["status_options"]["ready"] = "O_gone"  # an option remade on the board since it was read
+            with unittest.mock.patch.object(task, "run", return_value=subprocess.CompletedProcess(
+                    [], 1, "", "GraphQL: Could not resolve to a node with the global id of 'O_gone'")):
+                with self.assertRaises(RuntimeError):
+                    task.set_status(card, task.READY)
+        self.assertFalse(meta.exists())
+        self.assertEqual(task._board, {})
 
     def test_a_project_owned_by_a_user_or_an_organization_is_read(self):
         fields = self.gh()["fields"]
@@ -3088,7 +3248,8 @@ class TaskTest(unittest.TestCase):
                 tid = self.new("ok")
                 self.assertIn(f'"{tid}",Add hello,Backlog', self.task("list"))
                 self.save_db({**self.gh(), "fields": [f for f in fields if f["name"] != "Agent"]})
-                out = self.task("list", code=1)  # the help links the Project's settings by the url GitHub gave
+                # the Project's ids are kept for an hour; --max-age 0 reads them again at once
+                out = self.task("list", "--max-age", "0", code=1)  # the help links the Project's settings by its url
                 self.assertIn(f"(https://github.com/{path}/{owner}/projects/7)", out)
 
     def test_a_missing_project_or_owner_cannot_be_read(self):

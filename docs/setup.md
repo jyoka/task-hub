@@ -73,7 +73,7 @@ task update
 同じ日の 2 回目からはネットワークに行きません。つながらない、5 秒で答えがないときは何も出さずに、1 時間後に確かめ直します。
 確かめたくないときは、環境変数 `TASK_NO_UPDATE_NOTIFIER=1` で止められます。
 
-task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 -m unittest discover -s tests -v`)。
+task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 tests/run.py`、[CONTRIBUTING.md](../CONTRIBUTING.md#テスト))。
 
 ## GitHub 側の準備(1 回だけ)
 

@@ -90,6 +90,15 @@ INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record o
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
 GH = os.environ.get("TASK_GH", "gh")
+# the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
+# A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
+BOARD_CACHE = STATE / "board-cache.json"
+BOARD_STALE = STATE / "board-cache.stale"
+BOARD_FETCHING = STATE / "board-cache.fetching"  # held by the one `task list` reading GitHub for the others
+# `task watch` writes the cache every WATCH_SECONDS plus a sync; at 60 a pane would miss just before it about once a minute
+LIST_MAX_AGE = 90
+BOARD_META = STATE / "board-meta.json"  # the Project's id and field ids from board(), kept for META_MAX_AGE
+META_MAX_AGE = 3600
 # task feedback: a new Issue on task-hub's own repository, from a form in .github/ISSUE_TEMPLATE (not the board)
 FEEDBACK_URL = "https://github.com/jyoka/task-hub/issues/new"
 FEEDBACK_FORMS = {"bug": "bug_report.yml", "feature": "feature_request.yml"}
@@ -418,8 +427,18 @@ def check_agent(name):
 
 # ---------- the board: a GitHub Project of Issues ----------
 
+BOARD_CHANGES = {("project", "item-edit"), ("project", "item-add"), ("project", "item-delete"),
+                 ("project", "item-archive"), ("issue", "create"), ("issue", "edit"), ("issue", "close"),
+                 ("issue", "reopen"), ("issue", "delete")}
+
+
 def gh(*args):
-    r = run(GH, *args)
+    try:
+        r = run(GH, *args)
+    finally:  # every board change goes through here; stamped even on a failure, which may have changed it anyway
+        if tuple(args[:2]) in BOARD_CHANGES or (tuple(args[:2]) == ("api", "graphql") and len(args) > 3
+                                                 and str(args[3]).startswith("query=mutation")):
+            write_cache(BOARD_STALE, str(max(time.time(), read_json_number(BOARD_STALE))))  # never backwards
     if r.returncode != 0:
         raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or ["gh failed"])[-1])
     return r.stdout
@@ -456,11 +475,20 @@ def graphql(query, **variables):
 _board = {}
 
 
-def board():
-    """Project id and the ids of the Status options and the text fields (checked once per command)."""
+def board(saved_ok=False):
+    """Project id and the ids of the Status options and the text fields (checked once per command).
+
+    saved_ok: BOARD_META will do (read-only `task list`). A command that moves cards reads the Project again, so an
+    option remade on the board since then can never send a card to the wrong column; its read refreshes BOARD_META."""
     if _board:
         return _board
     owner, number, issues = board_config()
+    saved = read_json(BOARD_META) if saved_ok else {}
+    at = saved.get("at")
+    if saved.get("key") == [owner, number, issues] and isinstance(at, (int, float)) \
+            and 0 <= time.time() - at < META_MAX_AGE and isinstance(saved.get("board"), dict):
+        _board.update(saved["board"])
+        return _board
     try:
         project = (graphql(PROJECT_QUERY, owner=owner, number=int(number))["repositoryOwner"] or {}).get("projectV2")
         if not project:  # no user or organization of that login (gh errors on a missing number itself)
@@ -482,38 +510,129 @@ def board():
                   status_field=status["id"], status_options=options,
                   text_fields={n: by_name[n.lower()]["id"] for n in TEXT_FIELDS},
                   names={n: by_name[n.lower()]["name"] for n in ["Status", *TEXT_FIELDS]})
+    write_cache(BOARD_META, json.dumps({"key": [owner, number, issues], "at": time.time(), "board": _board}))
     return _board
 
 
-def tasks(include_done=False):
+def write_cache(path, text):
+    """A cache that cannot be written is only a cache: never the reason a command or a run fails."""
+    with contextlib.suppress(OSError):
+        write_atomic(path, text)
+
+
+def forget_board():
+    """After a GitHub call that used board()'s ids failed: they may be stale (a field renamed, an option remade)."""
+    _board.clear()
+    with contextlib.suppress(OSError):  # Windows: a pane may have it open for a moment
+        BOARD_META.unlink(missing_ok=True)
+
+
+def read_json(path):
+    """A cache file as a dict; missing, half-written by an older version, or unreadable reads as {}."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def cached_items(max_age):
+    """The raw open items of BOARD_CACHE when read from GitHub less than max_age seconds ago and after the last
+    board change, else None."""
+    data, stale = read_json(BOARD_CACHE), read_json_number(BOARD_STALE)
+    at = data.get("fetched_at")
+    if data.get("key") != list(board_config()) or not isinstance(at, (int, float)) or not isinstance(
+            data.get("items"), list) or at <= stale or not 0 <= time.time() - at < max_age:
+        return None
+    return data["items"]
+
+
+def read_json_number(path):
+    try:
+        return float(path.read_text())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def fetch_items(include_done, saved_ok=False):
+    """The raw items from GitHub; the open ones are kept in BOARD_CACHE for `task list` in other panes."""
+    b = board(saved_ok)
+    query = ITEMS_QUERY
+    for n, spelled in b["names"].items():
+        query = query.replace(f'"@{n}"', json.dumps(spelled))
+    fetched_at = time.time()  # before the read: a board change during it makes this read stale
+    items, after = [], None
+    try:
+        while True:
+            page = graphql(query, id=b["id"], q="" if include_done else "-status:Done",
+                           **({"after": after} if after else {}))["node"]["items"]
+            items += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+    except (RuntimeError, TypeError):  # TypeError: the node is null, e.g. the Project was deleted
+        forget_board()
+        raise
+    if not include_done and fetched_at > read_json_number(BOARD_STALE):  # else readers would never use it
+        write_cache(BOARD_CACHE, json.dumps({"key": list(board_config()), "fetched_at": fetched_at, "items": items}))
+    return items
+
+
+def shared_items(max_age):
+    """The open items for `task list`: from BOARD_CACHE when fresh. Otherwise one pane reads GitHub while the
+    others wait for it, at most 15 seconds; a lock left by a killed process is ignored after 30."""
+    items = cached_items(max_age)
+    if items is not None:
+        return items
+    for attempt in range(2):
+        try:
+            os.close(os.open(BOARD_FETCHING, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - BOARD_FETCHING.stat().st_mtime >= 30:  # its pane was killed (no finally runs then)
+                    BOARD_FETCHING.unlink()
+                    continue
+                for _ in range(75):
+                    time.sleep(0.2)
+                    if not BOARD_FETCHING.exists():
+                        break
+            except OSError:  # gone meanwhile, or Windows would not remove it
+                pass
+            items = cached_items(max_age)
+            return items if items is not None else fetch_items(include_done=False, saved_ok=True)
+        except OSError:  # no STATE yet: nobody else is reading either
+            return fetch_items(include_done=False, saved_ok=True)
+    else:
+        return fetch_items(include_done=False, saved_ok=True)
+    try:
+        return fetch_items(include_done=False, saved_ok=True)
+    finally:
+        with contextlib.suppress(OSError):
+            BOARD_FETCHING.unlink(missing_ok=True)
+
+
+def tasks(include_done=False, max_age=0):
     """The Issues from the issues repo that are on the Project, as task dicts sorted by number.
 
     Projects are GraphQL-only and GitHub limits GraphQL to 5000 points per hour. `gh project item-list`
     costs 101 points a call (it asks for 100 field values of every card), which a watch asking every
     minute exceeds; ITEMS_QUERY asks for just our fields and costs 1 point per 100 cards.
+    max_age: open cards from BOARD_CACHE when it is fresher, for read-only `task list` only; never before a change.
+    What this machine knows (runs, stages, waits_for) is worked out again each time.
     """
-    b = board()
-    query = ITEMS_QUERY
-    for n, spelled in b["names"].items():
-        query = query.replace(f'"@{n}"', json.dumps(spelled))
-    items, after = [], None
-    while True:
-        page = graphql(query, id=b["id"], q="" if include_done else "-status:Done",
-                       **({"after": after} if after else {}))["node"]["items"]
-        items += page["nodes"]
-        if not page["pageInfo"]["hasNextPage"]:
-            break
-        after = page["pageInfo"]["endCursor"]
+    items = shared_items(max_age) if max_age and not include_done else fetch_items(include_done)
+    issues = board_config()[2]
     result = []
     for item in items:
         content = item.get("content") or {}
-        if "number" not in content or content["repository"]["nameWithOwner"].lower() != b["issues"].lower():
+        if "number" not in content or content["repository"]["nameWithOwner"].lower() != issues.lower():
             continue  # a draft card or a PR, or an Issue from another repo
         value = lambda k: ((item.get(k) or {}).get("name") or (item.get(k) or {}).get("text") or "").strip()
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
              "base": value("base"), "url": content.get("url", ""),
-             "blockers": [{"ref": f"#{n['number']}" if n["repository"]["nameWithOwner"].lower() == b["issues"].lower()
+             "blockers": [{"ref": f"#{n['number']}" if n["repository"]["nameWithOwner"].lower() == issues.lower()
                            else f"{n['repository']['nameWithOwner']}#{n['number']}",
                            "number": str(n["number"]), "title": n.get("title", ""), "state": n.get("state", ""),
                            "reason": n.get("stateReason") or ""}
@@ -590,8 +709,12 @@ def set_status(t, status, reason="", digest_=None):
         print(f"warning: task {t['id']} moved {t['status'] or '(new)'} -> {status}, "
               "not in StatusLifecycle.transitions", file=sys.stderr, flush=True)
     b = board()
-    gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
-       "--single-select-option-id", b["status_options"][status.lower()])
+    try:
+        gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["status_field"],
+           "--single-select-option-id", b["status_options"][status.lower()])
+    except RuntimeError:
+        forget_board()
+        raise
     t["status"] = status
     if digest_ is None and status == BLOCKED and reason:
         digest_ = {"reason": clip(reason, DIGEST_TEXT)}
@@ -657,8 +780,12 @@ def notify(e):
 
 def set_text(t, field, value):
     b = board()
-    gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["text_fields"][field],
-       "--text", value)
+    try:
+        gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", b["text_fields"][field],
+           "--text", value)
+    except RuntimeError:
+        forget_board()
+        raise
     t[field.lower()] = value
 
 
@@ -693,13 +820,18 @@ def load_run(tid):
 
 
 def save_run(t):
-    RUNS.mkdir(parents=True, exist_ok=True)
-    temp = RUNS / f".{t['id']}.{os.getpid()}.tmp"  # the runner and watcher write from different processes
+    write_atomic(RUNS / f"{t['id']}.json", json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+
+
+def write_atomic(path, text):
+    """Readers in other processes see the complete old or new file, never a half-written one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.parent / f".{path.name}.{os.getpid()}.tmp"  # the runner, watcher and panes write from different processes
     try:
-        temp.write_text(json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+        temp.write_text(text)
         for attempt in range(50):
             try:
-                temp.replace(RUNS / f"{t['id']}.json")  # readers see a complete old or new record
+                temp.replace(path)
                 break
             except PermissionError:  # Windows: a reader has the file open for a moment
                 if not WINDOWS or attempt == 49:
@@ -2063,10 +2195,16 @@ def cmd_home(_):
 
 def cmd_list(a):
     """The open cards, read only: unlike `task`, it starts nothing and changes nothing (for the /chief agent)."""
+    max_age = a["max_age"] if a["max_age"] is not None else str(LIST_MAX_AGE)
+    if not max_age.isdigit():
+        fail(f"--max-age takes a number of seconds, got {max_age!r}", f"usage: {COMMANDS['list'][3]}", 2)
+    max_age = int(max_age)
+    if not max_age:  # also the Project's ids: after renaming a field or an option on the board
+        forget_board()
     if a["watch"]:
-        return list_watch()
+        return list_watch(max_age)
     check = UpdateCheck()  # asks origin while GitHub is read
-    lines = list_lines(tasks())
+    lines = list_lines(tasks(max_age=max_age))
     newest = check.newer()
     out(*lines, *([update_line(newest)] if newest else []))
 
@@ -2084,18 +2222,18 @@ def list_lines(board_):
 CLEAR_SCREEN, MARK, UNMARK = "\033[H\033[2J", "\033[1;33m", "\033[0m"  # ANSI: home + clear, bold yellow, reset
 
 
-def list_watch():
+def list_watch(max_age):
     """`task list` again every WATCH_SECONDS, for a pane next to any agent. Read only like `task list`: never sync().
 
     On a terminal each look redraws the screen, and the rows whose status changed since the last look stand out.
     Piped, each look is appended after an `== <time>` line, without ANSI codes.
     """
     terminal = sys.stdout.isatty()
-    last = None  # id -> shown status at the last look that reached GitHub
+    last = None  # id -> shown status at the last look that read the board
     try:
         while True:
             try:
-                board_ = tasks()
+                board_ = tasks(max_age=max_age)
                 lines = list_lines(board_)
                 for i, t in enumerate(board_, 2):
                     if terminal and last is not None and last.get(t["id"]) != shown_status(t):
@@ -2586,9 +2724,10 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
-    "list": (cmd_list, [], {"watch": False},
-             "task list [--watch]  # the open cards, read only: starts nothing (use `task` to start Ready cards); "
-             f"--watch redraws them every {WATCH_SECONDS}s"),
+    "list": (cmd_list, [], {"watch": False, "max-age": True},
+             "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
+             f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "
+             f"last --max-age seconds (default {LIST_MAX_AGE}) is shown without asking GitHub, 0 always asks"),
     "events": (cmd_events, [], {"follow": False, "next": False, "after": True, "only": True, "digest": False},
                "task events [--follow | --next [--after N] | --after N] [--only \"In review,Blocked\"] [--digest]  # what "
                "task-hub did lately; --follow prints each new event as it happens, --next waits for the next ones and "

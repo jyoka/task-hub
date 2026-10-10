@@ -47,6 +47,22 @@ task list --watch
 - パイプやファイルに流すと、ANSI の色や画面の消去を使わず、`== <時刻>` の行と `task list` と同じ行を毎回追記します
 - GitHub のエラーでは止まりません。`error:` の行を出して、次の回にまた読みます。止めるときは Ctrl-C です
 
+### ボードの読み取りを共有する(`--max-age`)
+
+Claude Code の mod と Kiro の拡張は、窓ごとに 1 分おきに `task list` を実行します。窓が増えても GitHub への
+問い合わせが増えないように、`task list` は直近に読んだボードを共有します。
+
+- task-hub のコマンドが GitHub から開いているカードを読むと、`~/.local/state/task-hub/board-cache.json` に書きます。
+  `task watch` は 1 分ごとに書くので、動いていれば窓の `task list` は GitHub を呼びません
+- `task list` と `task list --watch` は、これが 90 秒より新しければそれを出します。秒数は `--max-age <秒>` で変えられ、
+  `0` なら必ず GitHub から読みます。古ければ 1 つの窓だけが GitHub を読み、ほかの窓はその結果を待って使います
+- 共有するのは GitHub から読んだカードだけです。段階(stage)、`waits_for`、実行中かどうかは毎回このマシンで計算します
+- task-hub がボードを変えたとき(開始、移動、`task new`、`task done` など)は、それより前に読んだボードを使いません。
+  変更はすぐに出ます。GitHub の画面で動かしたカードやマージで閉じた Issue は、最大 90 秒遅れて出ます
+- mod と拡張の「今すぐ更新」ボタンは `--max-age 0` で読みます
+- Project の id と欄の id は `~/.local/state/task-hub/board-meta.json` に 1 時間取っておきます。ボードで欄や選択肢の名前を
+  変えたら、`task list --max-age 0` で読み直します
+
 ## 起きたことを受け取る(events.jsonl)
 
 task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
@@ -198,6 +214,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
+| 直近に読んだボード(`task list` が共有) | `~/.local/state/task-hub/board-cache.json`、`board-meta.json` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | worktree | `~/.local/share/task-hub/worktrees/<番号>` |
 | プロンプト | `~/.local/share/task-hub/prompts/<番号>.md` |
@@ -242,7 +259,8 @@ GitHub の障害で起きることがあります。ステータスページ([gi
 
 GitHub Projects は GraphQL API だけで操作でき、GraphQL には 1 時間あたり 5000 ポイントの利用上限があります
 (アカウント全体で共有)。task-hub は必要な欄だけを取るので、`task` 1 回は約 2 ポイント、`task watch` は 1 時間で
-約 60 ポイントです。上限に届くのは、ほかのツールやエージェントが重い呼び出しを繰り返しているときです。たとえば
+約 60 ポイントです。mod や拡張の窓は直近に読んだボードを共有するので、窓が増えてもほとんど増えません
+(「ボードの読み取りを共有する」)。上限に届くのは、ほかのツールやエージェントが重い呼び出しを繰り返しているときです。たとえば
 `gh project item-list` と `gh project field-list` は 1 回で 101 ポイント使います。上限に届いても `task watch` は止まらず、
 エラーを表示して次の確認を続けます。上限は区切りの時刻に回復します。残りと回復の時刻は次で分かります
 (`gh api rate_limit` は上限中でも「残り 5000」と表示することがあり、当てになりません):
@@ -259,7 +277,7 @@ gh api graphql -f query='{rateLimit{used remaining resetAt}}'
 ## `the Project is missing: ...` / `the board is not configured`
 
 Project の欄や選択肢、または設定ファイルが足りていません。[setup.md](setup.md) の「GitHub 側の準備」を見て、
-表示された名前のものを追加してください。
+表示された名前のものを追加してください。追加したら `task list --max-age 0` で読み直します(欄の id は 1 時間取っておくため)。
 
 ## PR をマージせずに閉じた
 
