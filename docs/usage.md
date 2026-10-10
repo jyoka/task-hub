@@ -1,6 +1,6 @@
 # 使い方の詳細
 
-README の続きです。タスクの頼み方、設定、役割、手元に残るものを書きます。セットアップは [setup.md](setup.md)、
+[README](../README.ja.md) の続きです。タスクの頼み方、設定、役割、手元に残るものを書きます。セットアップは [setup.md](setup.md)、
 全体の仕組みは [architecture/hld.md](architecture/hld.md) にあります。
 
 ## タスクの頼み方
