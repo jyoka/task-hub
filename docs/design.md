@@ -1,5 +1,8 @@
 # 設計
 
+ここには「なぜこの作りなのか」を書きます。部品とデータの流れの全体図は [architecture/hld.md](architecture/hld.md)、
+関数・ファイル・呼び出しの詳細は [architecture/lld.md](architecture/lld.md) にあります。
+
 ## 課題
 
 エージェントによるコーディングのセッションはチャット形式です。これを Jira のようなタスク形式にすることが目的です。
