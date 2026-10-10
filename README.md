@@ -250,7 +250,7 @@ kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステ�
 slack-triage/          Slackトリアージ: スレッドをコピーして ⌃⌥S でタスクを提案する(docs/slack-triage.md)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
-tests/test_task.py     テスト: python3 -m unittest discover -s tests -v
+tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
