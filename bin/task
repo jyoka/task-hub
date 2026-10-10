@@ -35,6 +35,7 @@ from urllib.parse import quote, urlencode
 
 VERSION = "0.8.0"
 MAX_PARALLEL = 5
+MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
     ["Backlog", "Ready", "In progress", "In review", "wait for merge", "Blocked", "Done"]
@@ -450,6 +451,11 @@ def gh_json(*args):
 
 ADD_BLOCKED_BY = """mutation($issue: ID!, $blocker: ID!) {
   addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocker}) { issue { number } } }"""
+ARCHIVE_ITEM = """mutation($project: ID!, $item: ID!) {
+  archiveProjectV2Item(input: {projectId: $project, itemId: $item}) { item { id } } }"""
+# no afterId: the first place, so the top of the card's column in a board view that is not sorted by a field
+MOVE_TO_TOP = """mutation($project: ID!, $item: ID!) {
+  updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item}) { clientMutationId } }"""
 # the Project's id, url, and fields in one call (1 point), whether a user or an organization owns it;
 # `gh project view` cost 2 points (the owner's type, then the Project) and a fields query 1 more
 PROJECT_QUERY = """query($owner: String!, $number: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner {
@@ -457,8 +463,8 @@ PROJECT_QUERY = """query($owner: String!, $number: Int!) { repositoryOwner(login
     ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } } }"""
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
-  items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id
-    content { ... on Issue { number title url body repository { nameWithOwner }
+  items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id updatedAt
+    content { ... on Issue { number title url body state repository { nameWithOwner }
       blockedBy(first: 50) { nodes { number title state stateReason repository { nameWithOwner } } } } }
     status: fieldValueByName(name: "@Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
     repo: fieldValueByName(name: "@Target repo") { ... on ProjectV2ItemFieldTextValue { text } }
@@ -613,7 +619,7 @@ def shared_items(max_age):
 
 
 def tasks(include_done=False, max_age=0):
-    """The Issues from the issues repo that are on the Project, as task dicts sorted by number.
+    """The Issues from the issues repo that are on the Project, as task dicts, the card changed last first.
 
     Projects are GraphQL-only and GitHub limits GraphQL to 5000 points per hour. `gh project item-list`
     costs 101 points a call (it asks for 100 field values of every card), which a watch asking every
@@ -630,6 +636,8 @@ def tasks(include_done=False, max_age=0):
             continue  # a draft card or a PR, or an Issue from another repo
         value = lambda k: ((item.get(k) or {}).get("name") or (item.get(k) or {}).get("text") or "").strip()
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
+             "updated": item.get("updatedAt") or "",  # the card's last change on the Project, e.g. its last move
+             "closed": content.get("state") == "CLOSED",
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
              "base": value("base"), "url": content.get("url", ""),
              "blockers": [{"ref": f"#{n['number']}" if n["repository"]["nameWithOwner"].lower() == issues.lower()
@@ -653,7 +661,36 @@ def tasks(include_done=False, max_age=0):
         t["waits_for"] = ", ".join([f"{x['ref']} ({why})" for x, why in
                                     ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why]
                                    + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked] + own)
-    return sorted(result, key=lambda t: int(t["id"]))
+    # the card changed last first, as on the board: what just moved is at the top of its column
+    return sorted(result, key=lambda t: (t["updated"], int(t["id"])), reverse=True)
+
+
+def move_to_top(t):
+    """Put the card first on the Project, so the top of its column is the card that moved last."""
+    with contextlib.suppress(RuntimeError):  # only its place on the board: never worth failing the move itself
+        graphql(MOVE_TO_TOP, project=board()["id"], item=t["item"])
+
+
+def archive_overflow():
+    """Over MAX_CARDS cards on the board: archive the Done ones moved longest ago until MAX_CARDS are left.
+    Only Done cards of closed Issues: an open card, or a card dragged to Done with its Issue still open, is work still
+    owed, and an archived card no longer shows in task-hub. The Project's "Archived items" restores a card.
+    Returns the ids archived; a GitHub failure names the ones archived before it."""
+    cards = tasks(include_done=True)
+    done = sorted((t for t in cards if t["status"] == DONE and t["closed"]), key=lambda t: (t["updated"], int(t["id"])))
+    archived = []
+    for t in done[:max(len(cards) - MAX_CARDS, 0)]:
+        try:
+            graphql(ARCHIVE_ITEM, project=board()["id"], item=t["item"])  # 1 point: `gh project item-archive` costs more
+        except RuntimeError as e:
+            raise RuntimeError(f"{e} (archived before it: {', '.join('#' + i for i in archived) or 'none'})")
+        archived.append(t["id"])
+    return archived
+
+
+def archive_lines(archived):
+    return [f"archived: {len(archived)} Done card(s), the board keeps the newest {MAX_CARDS} cards: "
+            + ", ".join(f"#{i}" for i in archived)] if archived else []
 
 
 def mentioned_blockers(body):
@@ -719,6 +756,7 @@ def set_status(t, status, reason="", digest_=None):
     if digest_ is None and status == BLOCKED and reason:
         digest_ = {"reason": clip(reason, DIGEST_TEXT)}
     emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_)
+    move_to_top(t)  # after the event: whoever sees the new Status finds its event already written
 
 
 def emit(t, event, **extra):
@@ -1940,6 +1978,7 @@ def sync(started_here=False):
             # written it already
             if card and card["status"] == DONE and not any(
                     e.get("id") == t["id"] and e.get("time", "") >= t.get("started", "") for e in events_named(DONE)):
+                move_to_top(card)
                 emit(t, DONE, pr=t.get("pr", ""))
             left = cleanup(t)
             if left:
@@ -1972,6 +2011,11 @@ def sync(started_here=False):
             continue
         if t["status"] != before:
             changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
+    if any(c["now"] in (DONE, "cleaned up (card is Done)") for c in changed):
+        try:
+            lines += archive_lines(archive_overflow())
+        except RuntimeError as e:  # the next card that gets Done tries again
+            errors.append({"id": "", "error": f"archiving old Done cards: {e}"})
     if changed:
         lines += table("updated", changed, ["id", "title", "now"])
     if errors:
@@ -1982,7 +2026,8 @@ def sync(started_here=False):
     waiting = [t for t in board_ if t["status"] == READY and t["waits_for"]]
     if waiting:  # never started, so they take no slot; each starts once what it waits for is done
         lines += table("waiting", waiting, ["id", "title", "waits_for"])
-    ready = [t for t in board_ if t["status"] == READY and not t["waits_for"]]
+    # started in the order they were made, whatever order the board is shown in
+    ready = sorted((t for t in board_ if t["status"] == READY and not t["waits_for"]), key=lambda t: int(t["id"]))
     if ready and free <= 0:
         lines.append(f"queue: {len(ready)} Ready task(s) waiting, all {MAX_PARALLEL} slots busy")
     started = []
@@ -2344,6 +2389,10 @@ def events_next(a, wanted):
 def cmd_watch(_):
     board()  # fail fast on a bad config
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
+    try:  # afterwards, each card that gets Done checks again
+        out(*archive_lines(archive_overflow()))
+    except RuntimeError as e:
+        out(f"error: archiving old Done cards: {e}")
     while True:
         config.cache_clear()  # pick up edits between checks, while each check uses one configuration
         check = UpdateCheck()
@@ -2705,8 +2754,12 @@ def cmd_done(a):
     if issue(t)["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
     set_status(t, DONE)
+    try:
+        archived = archive_lines(archive_overflow())
+    except RuntimeError as e:  # the next card that gets Done tries again
+        archived = [f"error: archiving old Done cards: {e}"]
     out("task:", f"  id: {t['id']}", f"  status: {DONE}",
-        *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []))
+        *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []), *archived)
 
 
 COMMANDS = {
