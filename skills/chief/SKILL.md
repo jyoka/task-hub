@@ -85,7 +85,8 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
 - **Blocked**: give the `reason` in one line and say what would unblock it.
 - **replan**: give the `decision` and its `question`, `answer`, or `goal_change`. Fold it into the Blocked
   message for the same task if you have not sent that yet.
-- **Done**: one line, only if the user is not in the middle of something else. Then run `task list` and look
+- **Done**: one line, only if the user is not in the middle of something else. Then run `task list --max-age 0`
+  (GitHub closed the card, so the board `task list` keeps for 90 seconds may not show it yet) and look
   for tasks whose `waits_for` named this one. A Ready one starts by itself; say so in the same line. For a
   Backlog one, read its `### Ready conditions` (`task show <id>`): if everything there now looks met, ask
   whether to start it; if not, say what is still missing. A task still waiting on something that will not
@@ -154,7 +155,8 @@ Whether work goes in stays the user's decision, so carry out only what they expl
   draft, or is otherwise not mergeable, do not merge: tell the user why in one line.
 - If the target is unclear (for example "put that in" while several tasks are In review), ask once which one.
 - When it is done, say the result in one line. A merge closes the Issue; the card moves to Done through the
-  Project's "Item closed" workflow or `task done`.
+  Project's "Item closed" workflow or `task done`. To check the board right after a merge, use
+  `task list --max-age 0`: plain `task list` may show the board as it was up to 90 seconds before.
 
 ## Never
 
