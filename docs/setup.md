@@ -90,7 +90,9 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    - テキスト欄 **Target repo**、**Agent**、**Base branch** を追加します(Target repo は作業先リポジトリ `owner/name`、
      Agent は使うエージェント名、Base branch は作業を始めるブランチで、Agent と Base branch は空でも構いません。
      `Repo` という名前は GitHub の予約語なので使えません)
-   - Board 表示にして、列を Status でグループ化します
+   - Board 表示にして、列を Status でグループ化します。**Sort は付けません**(View の設定の Sort by を「No sorting」に)。
+     task-hub はカードを動かすたびに列のいちばん上に置くので、最後に動いたカードが上に来ます。Sort を付けた表示では
+     GitHub がこの並びを使いません。Sort の設定は API から変えられないので、画面で外します
    - Workflows は **「Item closed」(Status を Done にする)だけを有効**にします。無効のままのことがあるので必ず確認します。
      ほかの Status を変えるワークフロー(「Item added to project」「Pull request linked to issue」「Pull request merged」)は
      **無効**にします。task-hub が付けた Status を上書きしてしまいます(実際に、PR を出した直後に Backlog に、マージ後に

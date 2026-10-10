@@ -63,6 +63,25 @@ Claude Code の mod と Kiro の拡張は、窓ごとに 1 分おきに `task li
 - Project の id と欄の id は `~/.local/state/task-hub/board-meta.json` に 1 時間取っておきます。ボードで欄や選択肢の名前を
   変えたら、`task list --max-age 0` で読み直します
 
+### 並び順と、古い Done のアーカイブ
+
+- **並び順**: task-hub はカードの Status を変えるたびに、そのカードを Project のいちばん上に置きます。列の上にあるのが、
+  最後に動いたカードです(作った順ではありません)。`task list`、`task`、mod のペイン、Kiro のビューは、カードを最後に
+  変えた時刻(GitHub の updatedAt)の新しい順に並べるので、GitHub の画面で動かしたカードも上に来ます。GitHub の画面で
+  欄だけを書き換えたカードは、こちらでは上に来ても、GitHub の列では動きません。Board の表示に Sort を付けていると、
+  GitHub の列はこの並びになりません([setup.md](setup.md) の「GitHub 側の準備」)
+- **始める順番**: Ready のカードが枠より多いときは、表示の順ではなく、作った順(番号の小さい順)に始めます
+- **アーカイブ**: タスクのカード(Issue リポジトリの Issue)が 100 枚を超えると、Done のカードを、動いたのが古い順に
+  アーカイブして 100 枚に戻します。確かめるのは、`task watch` を始めたとき、`task done` のとき、このマシンで動いた
+  タスクが Done になったとき(マージ)です。GitHub の画面だけで閉じた Issue では確かめないので、次のどれかまで 100 枚を
+  超えたままのことがあります
+  - アーカイブするのは、Done で Issue も閉じているカードだけです。開いているカード(Backlog、Ready、In progress、
+    In review、Blocked)と、Issue を閉じずに Done へ動かしたカードは、古くてもアーカイブしません。開いているカード
+    だけで 100 枚を超えることもあります
+  - Issue は閉じたまま残ります。カードは Project の「Archived items」から戻せます
+  - アーカイブしたカードは task-hub から見えません。`task show <番号>` も `not found on the board` になります。
+    中身は Issue を直接見ます(`gh issue view <番号> --repo <Issue リポジトリ>`)
+
 ## 起きたことを受け取る(events.jsonl)
 
 task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/events.jsonl` に 1 行書きます。GitHub を見に行かなくても、
