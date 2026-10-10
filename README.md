@@ -284,6 +284,7 @@ task feedback --feature    # 機能の要望のフォームを開く
 - [docs/issue-tracker.md](docs/issue-tracker.md): ほかのスキル(to-prd、to-issues など)がボードに Issue を作るときの手順
 - [docs/operations.md](docs/operations.md): 実行の見守り、herdr のタブ、events と stats、トラブルシューティング、後片付け
 - [docs/release.md](docs/release.md): 版の付け方(semver とタグ `v<VERSION>`)、リリースの手順、リリースノートの型
+- [docs/architecture/hld.md](docs/architecture/hld.md)、[lld.md](docs/architecture/lld.md): 全体の部品とデータの流れ、関数・ファイル・呼び出しの詳細(図つき)。機能を足すときは [feature-design.md](docs/architecture/feature-design.md) の手順で設計メモを作る
 - [docs/design.md](docs/design.md): なぜこの作りなのか、ほかに検討したもの
 - [docs/lessons.md](docs/lessons.md): 作って試してわかったこと、まだ確かめていないこと
 - [CONTRIBUTING.md](CONTRIBUTING.md): バグ報告と要望の送り先、PR の出し方、テスト、README と docs の書き方
