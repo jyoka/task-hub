@@ -38,10 +38,13 @@ Issue は「直す」「作る」ものだけに絞っています。空の Issu
 `bin/task` は Python 3.10 以上の標準ライブラリだけで書いています。テストも同じで、インストールは要りません。
 
 ```
-python3 -m unittest discover -s tests -v
+python3 tests/run.py
 ```
 
-全体で 11 分ほどかかります。作業中は、変えた部分のテストだけを動かすと速く済みます。
+テストを 1 件ずつ別のプロセスで、CPU の数だけ並べて動かします(10 コアで約 3.5 分)。並べる数は `-j 4` のように
+指定できます。名前を渡すと、その文字を含むテストだけを動かします(例: `python3 tests/run.py test_task`)。
+1 件ずつ順に動かすときは `python3 -m unittest discover -s tests -v` です(全体で 13 分ほど)。
+作業中は、変えた部分のテストだけを動かすと速く済みます。
 
 ```
 python3 -m unittest tests.test_task.TaskTest -k feedback -v

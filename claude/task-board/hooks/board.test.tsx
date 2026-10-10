@@ -150,7 +150,7 @@ test('ペインは列ごとにまとめ、色・経過時間・判定・PR・理
     expect(await ui.find({ type: 'Text', text: /^ task-hub $/ })).toBeDefined()
     await ui.unmount()
   }
-  expect(ran.every(argv => argv.join(' ') === '/home/me/.local/bin/task list')).toBe(true)
+  expect(ran.every(argv => argv.join(' ') === '/home/me/.local/bin/task list --max-age 0')).toBe(true) // the button
   expect(read).toContain('/home/me/.local/state/task-hub/events.jsonl')
   expect(read).toContain('/home/me/.local/state/task-hub/metrics.jsonl')
   expect(JSON.stringify(statuses.at(-1))).toContain('task: 実行中2 レビュー待ち1 止まり1')
@@ -293,4 +293,36 @@ test('閉じたグループは、カードがなくなっても閉じたまま�
   const later = toggleFold('needs-you', toggleFold('ready', []))
   expect(later).toEqual(['ready', 'needs-you'])
   expect(toggleFold('ready', later)).toEqual(['needs-you'])
+})
+
+test('毎分の読み取りは引数なし(共有のキャッシュ)、今すぐ更新は --max-age 0。古い bin/task なら引数なしで読み直す', async ($, on) => {
+  mock.env(on, { HOME: '/home/me' })
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on)
+  files(on, ALL)
+  let old = false // a bin/task from before --max-age: `fail(..., 2)` on the flag
+  const ran: string[] = []
+  on('process.run', async ($, e) => {
+    ran.push(e.argv.slice(1).join(' '))
+    const stdout = old && e.argv.includes('--max-age')
+      ? 'error: unknown flag --max-age for `list`\nhelp: usage: task list [--watch]\n' : LIST
+    return { value: { exitCode: stdout === LIST ? 0 : 2, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(60_000)
+  expect(ran).toEqual(['list', 'list'])
+
+  const ui = await $.ui.mount({ plugin: 'task-board', surface: 'terminal', component: 'Pane', requestId: 'task-board', props: PANE })
+  ran.length = 0
+  await ui.press({ key: 'refresh' })
+  expect(ran).toEqual(['list --max-age 0'])
+
+  old = true
+  ran.length = 0
+  await ui.press({ key: 'refresh' })
+  expect(ran).toEqual(['list --max-age 0', 'list'])
+  expect(await ui.find({ type: 'Text', text: /^要対応 3$/ })).toBeDefined() // the board, not the flag's error
+  await ui.unmount()
 })

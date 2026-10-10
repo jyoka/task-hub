@@ -61,13 +61,19 @@ const optional = ($: EngineInterface, path: string): Promise<string> => $.fs.rea
 
 // `task list` is read only (it never starts a card); bare `task` would start Ready cards.
 // events.jsonl and metrics.jsonl are local files task-hub writes: no LLM, no GitHub.
-async function refresh($: EngineInterface): Promise<void> {
+// The minute's look shows the board any task-hub command read in the last 90 seconds; the button asks GitHub
+// (`--max-age 0`), and asks again without it when `bin/task` is older than the flag (it exits 2 on an unknown flag).
+async function refresh($: EngineInterface, fresh = false): Promise<void> {
   const home = (await $.env.get('HOME')) ?? ''
   const now = await $.clock.now()
   const checkedAt = new Date(now).toTimeString().slice(0, 5)
   let next: Board
   try {
-    const { exitCode, stdout, stderr } = await $.process.run([`${home}/.local/bin/task`, 'list'], { timeoutMs: 60_000 })
+    const task = `${home}/.local/bin/task`
+    let run = await $.process.run([task, 'list', ...(fresh ? ['--max-age', '0'] : [])], { timeoutMs: 60_000 })
+    if (fresh && run.exitCode === 2 && run.stdout.includes('unknown flag --max-age'))
+      run = await $.process.run([task, 'list'], { timeoutMs: 60_000 })
+    const { exitCode, stdout, stderr } = run
     next = exitCode === 0 ? parseList(stdout, checkedAt)
       : { counts: {}, cards: [], checkedAt, error: failure(exitCode, stdout, stderr) }
   } catch (err) {
@@ -121,7 +127,7 @@ export const register: Register = on => {
     const hidden = await read($, shipHidden)
     const unlocked = await read($, badges)
     const chosen = await read($, folded)
-    const refreshButton = <Button key="refresh" label="今すぐ更新" onPress={() => refresh($)} />
+    const refreshButton = <Button key="refresh" label="今すぐ更新" onPress={() => refresh($, true)} />
     if (!b) return <Box><Text dimColor>読み込み中... </Text>{refreshButton}</Box>
     const columns = Math.max(24, e.props.bodyColumns ?? e.viewport?.columns ?? 60)
     const inner = columns - 4 // a framed group: its border and one cell of padding on each side

@@ -133,7 +133,7 @@ const eventsNow = (): string => {
 const FILES = async () => ({ events: eventsNow(), metrics: METRICS, ini: CONFIG })
 const NO_FILES = async () => ({ events: '', metrics: '', ini: '' })
 
-const start = (run: () => Promise<unknown>, read: () => Promise<unknown> = NO_FILES, globalState = memento()) => {
+const start = (run: (fresh?: boolean) => Promise<unknown>, read: () => Promise<unknown> = NO_FILES, globalState = memento()) => {
   const { vscode, seen } = fakeVscode()
   const ext = load(vscode)
   const context = fakeContext(globalState)
@@ -160,11 +160,13 @@ const start = (run: () => Promise<unknown>, read: () => Promise<unknown> = NO_FI
 
 test('ビューに並べ、ステータスバーに数を出し、更新ボタンで task list を読み直す', async () => {
   let runs = 0
-  const { seen, view, stop, refresh } = start(async () => (runs++, { exitCode: 0, stdout: LIST, stderr: '' }))
+  const fresh: boolean[] = []
+  const { seen, view, stop, refresh } = start(async f => (runs++, fresh.push(f === true), { exitCode: 0, stdout: LIST, stderr: '' }))
   try {
     assert.equal(seen.trees[0].id, 'taskHub.board')
     await refresh() // the run started by activate: the button waits for it instead of starting another
     assert.equal(runs, 1)
+    assert.deepEqual(fresh, [false]) // activate and the minute's look: the shared cache
     const groups = view()
     assert.deepEqual(groups.map((i: any) => [i.label, i.collapsibleState, i.iconPath]), [
       ['要対応 3', 2, undefined], ['実行中 2', 2, undefined], ['待ち 1', 2, undefined], ['Backlog 1', 1, undefined],
@@ -189,6 +191,7 @@ test('ビューに並べ、ステータスバーに数を出し、更新ボタ�
     assert.equal(bar.backgroundColor, undefined)
     await refresh()
     assert.equal(runs, 2)
+    assert.deepEqual(fresh, [false, true]) // the button asks GitHub
   } finally {
     stop()
   }
@@ -300,6 +303,16 @@ test('実行するのは ~/.local/bin/task list だけ(ホームを展開した�
   await withHome(null, async home => {
     assert.deepEqual(await ext.runTaskList(), { reason: `${home}/.local/bin/task がありません` })
   })
+  // the refresh button: --max-age 0, and without it on a bin/task from before the flag
+  await withHome(`#!/bin/sh\nprintf '%s\\n' "$@" >> "$HOME/argv"\necho 'counts: Blocked=1'\n`, async home => {
+    assert.deepEqual(await ext.runTaskList(true), { exitCode: 0, stdout: 'counts: Blocked=1\n', stderr: '' })
+    assert.equal(readFileSync(join(home, 'argv'), 'utf8'), 'list\n--max-age\n0\n')
+  })
+  const old = `#!/bin/sh\nprintf '%s\\n' "$*" >> "$HOME/argv"\n[ "$2" = --max-age ] && { echo 'error: unknown flag --max-age for \`list\`'; exit 2; }\necho 'counts: Blocked=1'\n`
+  await withHome(old, async home => {
+    assert.deepEqual(await ext.runTaskList(true), { exitCode: 0, stdout: 'counts: Blocked=1\n', stderr: '' })
+    assert.equal(readFileSync(join(home, 'argv'), 'utf8'), 'list --max-age 0\nlist\n')
+  })
 })
 
 test('読むファイルは ~/.local/state/task-hub/ の events.jsonl と metrics.jsonl と config.ini、ないものは空', async () => {
@@ -337,13 +350,13 @@ test('ステータスバーは位置を変えず(左、優先度 100)いつも�
   }
 })
 
-test('素の task を呼ぶコードがない: プロセスを起動するのは execFile(taskPath(), [\'list\']) の 1 か所だけ', () => {
+test('素の task を呼ぶコードがない: プロセスを起動するのは execFile(taskPath(), [\'list\', ...]) の 1 か所だけ', () => {
   const dir = build(temp())
   const sources = [...readdirSync(join(ROOT, 'src')).map(f => join(ROOT, 'src', f)),
     ...readdirSync(dir).map(f => join(dir, f))]
   const calls = sources.flatMap(f => readFileSync(f, 'utf8').match(/\b(execFile|execFileSync|exec|execSync|spawn|spawnSync|fork)\(.*/g) ?? [])
   assert.equal(calls.length, 2) // src/extension.ts and out/extension.js
-  for (const call of calls) assert.match(call, /^execFile\(task, \['list'\], /)
+  for (const call of calls) assert.match(call, /^execFile\(task, \['list', \.\.\.\(fresh \? \['--max-age', '0'\] : \[\]\)\], /)
   for (const f of sources) {
     const text = readFileSync(f, 'utf8')
     if (/const task = /.test(text)) assert.match(text, /const task = taskPath\(\)/)

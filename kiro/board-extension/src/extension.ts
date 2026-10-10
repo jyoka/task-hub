@@ -36,11 +36,11 @@ const childPath = (): string => {
   return [...have, ...more].join(delimiter)
 }
 
-export type Run = () => Promise<Outcome | { reason: string }>
+export type Run = (fresh?: boolean) => Promise<Outcome | { reason: string }>
 
-export const runTaskList: Run = () => new Promise(resolve => {
+const runTask = (fresh: boolean): ReturnType<Run> => new Promise(resolve => {
   const task = taskPath()
-  execFile(task, ['list'], { timeout: TIMEOUT_MS, env: { ...process.env, PATH: childPath() } }, (err, stdout, stderr) => {
+  execFile(task, ['list', ...(fresh ? ['--max-age', '0'] : [])], { timeout: TIMEOUT_MS, env: { ...process.env, PATH: childPath() } }, (err, stdout, stderr) => {
     if (!err) resolve({ exitCode: 0, stdout, stderr })
     else if (typeof err.code === 'number') resolve({ exitCode: err.code, stdout, stderr })
     else if (err.code === 'ENOENT') resolve({ reason: `${task} がありません` })
@@ -48,6 +48,14 @@ export const runTaskList: Run = () => new Promise(resolve => {
     else resolve({ reason: err.message.split('\n')[0] ?? '' })
   })
 })
+
+// The minute's look shows the board any task-hub command read in the last 90 seconds; the refresh button asks GitHub
+// (`--max-age 0`), and asks again without it when `bin/task` is older than the flag (it exits 2 on an unknown flag).
+export const runTaskList: Run = async (fresh = false) => {
+  const out = await runTask(fresh)
+  return fresh && 'exitCode' in out && out.exitCode === 2 && out.stdout.includes('unknown flag --max-age')
+    ? runTask(false) : out
+}
 
 export type Read = () => Promise<Files>
 
@@ -201,8 +209,8 @@ export function activate(context: vscode.ExtensionContext, run: Run = runTaskLis
 
   // One run at a time: the refresh button during a run waits for that run.
   let running: Promise<void> | undefined
-  const refresh = (): Promise<void> => running ??= Promise.resolve()
-    .then(run)
+  const refresh = (fresh = false): Promise<void> => running ??= Promise.resolve()
+    .then(() => run(fresh))
     .catch((err: unknown) => ({ reason: String(err) }))
     .then(async next => {
       const now = Date.now()
@@ -219,7 +227,7 @@ export function activate(context: vscode.ExtensionContext, run: Run = runTaskLis
   bar.show()
   const timer = setInterval(() => void refresh(), EVERY_MS)
   const frames = setInterval(() => ship.tick(), FRAME_MS)
-  context.subscriptions.push(provider, view, bar, vscode.commands.registerCommand(REFRESH, refresh),
+  context.subscriptions.push(provider, view, bar, vscode.commands.registerCommand(REFRESH, () => refresh(true)),
     vscode.commands.registerCommand(OPEN, (url: string) => vscode.env.openExternal(vscode.Uri.parse(url))),
     vscode.window.registerWebviewViewProvider(SHIP, ship),
     { dispose: () => { clearInterval(timer); clearInterval(frames) } })
