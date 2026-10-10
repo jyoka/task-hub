@@ -124,7 +124,15 @@ class WindowsTest(unittest.TestCase):
         return re.search(r"id: (\d+)", out).group(1)
 
     def gh(self):
-        return json.loads(self.db.read_text(encoding="utf-8"))
+        """The fake GitHub. Windows refuses to open a file another process is writing, and the fake gh writes it
+        without a lock here (fcntl is a no-op shim): read again for a moment instead of failing the test."""
+        for attempt in range(50):
+            try:
+                return json.loads(self.db.read_text(encoding="utf-8"))
+            except (PermissionError, json.JSONDecodeError):
+                if attempt == 49:
+                    raise
+                time.sleep(0.05)
 
     def status(self, tid):
         return self.gh()["items"][f"PVTI_{tid}"]["values"].get("status")
