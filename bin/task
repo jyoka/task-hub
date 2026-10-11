@@ -61,11 +61,11 @@ HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # 
 DEFAULT_AGENTS = {
     "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
               " claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}",
-    "codex": "codex exec -s workspace-write {prompt}",
-    "pi": "pi -p {prompt}",
-    "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
+    "codex": "codex exec -s workspace-write --json {prompt}",
+    "pi": "pi -p --mode json {prompt}",
+    "kiro": "kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}",
 }
-LOG_LINE_MAX = 200  # a step of a stream-json agent, as one log line (docs/operations.md)
+LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/operations.md)
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
@@ -1645,11 +1645,14 @@ def agent_process(agent, prompt, wt, say):
         argv, env = windows_command(agent_command(agent, prompt))
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
-        steps = streams_json(agent)
+        steps = STEPS.get(step_format(agent), Steps)(wt)
         for line in proc.stdout:
-            for shown in stream_json_lines(line.rstrip("\n"), wt) if steps else [line.rstrip("\n")]:
+            for shown in steps.lines(line.rstrip("\n")):
                 say(shown)
-        return proc.wait()
+        for shown in steps.end():
+            say(shown)
+        code = proc.wait()
+        return 1 if code == 0 and steps.failed else code
     except KeyboardInterrupt:  # Ctrl-C in the pane stops the agent; still push what it did
         if proc:
             proc.terminate()
@@ -1666,19 +1669,261 @@ def agent_process(agent, prompt, wt, say):
         return 127
 
 
-def streams_json(name):
-    """Whether the agent's command asks Claude Code for --output-format stream-json, as the built-in claude does.
-    Only the command is looked at, never the prompt: a goal may well mention stream-json."""
+def step_format(name):
+    """Which CLI's JSON events the agent's command asks for, as the built-in commands do: "claude" or "kiro" for
+    --output-format stream-json (kiro when the command runs kiro-cli), "codex" for `codex exec --json`, "pi" for
+    `pi --mode json`, or None for text. Only the command is looked at, never the prompt: a goal may well mention
+    these flags."""
     parts = shlex.split(config()["agents"].get(name, ""))
-    return "--output-format=stream-json" in parts or any(
-        a == "--output-format" and b == "stream-json" for a, b in zip(parts, parts[1:]))
+    programs = {re.sub(r"\.(exe|cmd)$", "", Path(p).name, flags=re.I) for p in parts}
+    given = lambda flag, value: f"{flag}={value}" in parts or any(
+        a == flag and b == value for a, b in zip(parts, parts[1:]))
+    if given("--output-format", "stream-json"):
+        return "kiro" if programs & {"kiro-cli", "kiro-cli-chat"} else "claude"
+    if "codex" in programs and "exec" in parts and "--json" in parts:
+        return "codex"
+    if "pi" in programs and given("--mode", "json"):
+        return "pi"
+    return None
+
+
+def cut(s):
+    """One step as one log line of at most LOG_LINE_MAX characters."""
+    return s if len(s) <= LOG_LINE_MAX else s[:LOG_LINE_MAX - 3] + "..."
+
+
+def first_line(text):
+    return next((t.strip() for t in text.splitlines() if t.strip()), "")
+
+
+class Steps:
+    """An agent's output as log lines: as it came, for a command that prints text. The subclasses read one CLI's
+    JSON events (step_format) into a line per tool call (`· <tool>: <target>`, tool_step) and per text (its first
+    line), the final answer in full, and nothing for tool results, thinking, or bookkeeping. There, a line that is
+    not JSON stays as it is, and JSON of a type or shape we do not know is kept, cut to LOG_LINE_MAX."""
+    failed = False  # the events said the run failed, which the CLI's exit code may not (pi --mode json exits 0)
+
+    def __init__(self, wt):
+        self.wt = wt
+
+    def lines(self, line):
+        return [line]
+
+    def end(self):
+        """What is still held back when the output ends."""
+        return []
+
+
+class ClaudeSteps(Steps):
+    def lines(self, line):
+        return stream_json_lines(line, self.wt)
+
+
+class JsonSteps(Steps):
+    def lines(self, line):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            return [line]
+        if not isinstance(d, dict) or "type" not in d:
+            return [line]
+        try:
+            shown = self.event(d)
+        except (KeyError, TypeError, AttributeError, IndexError):  # a shape we do not know
+            shown = None
+        return [cut(line)] if shown is None else shown
+
+    def event(self, d):
+        """The log lines for one event, or None for a type we do not know."""
+        return None
+
+
+class CodexSteps(JsonSteps):
+    """`codex exec --json` (checked on codex-cli 0.160.0): items that start and complete. A tool call is shown when
+    it starts. A message is held until the next item: then its first line is shown, or, when the turn ends, all of
+    it, as `codex exec` prints its last message."""
+    NAMES = {"command_execution": "shell", "file_change": "apply_patch", "todo_list": "update_plan"}
+
+    def __init__(self, wt):
+        super().__init__(wt)
+        self.said, self.started, self.error = "", set(), None
+
+    def held(self):
+        first, self.said = first_line(self.said), ""
+        return [cut(first)] if first else []
+
+    def end(self):
+        said, self.said = self.said, ""
+        return said.splitlines()
+
+    def event(self, d):
+        kind = d["type"]
+        if kind in ("thread.started", "turn.started", "item.updated"):
+            return []
+        if kind == "turn.completed":
+            return self.end()
+        if kind in ("error", "turn.failed"):
+            message = str((d["error"] if kind == "turn.failed" else d)["message"])
+            if message == self.error:  # codex says it twice: the error, then the failed turn
+                return []
+            self.error = message
+            return self.held() + f"ERROR: {message}".splitlines()
+        if kind not in ("item.started", "item.completed"):
+            return None
+        item = d["item"]
+        if item["type"] == "agent_message":
+            shown, self.said = self.held(), str(item.get("text") or "")
+            return shown
+        if item["type"] == "reasoning":
+            return []
+        if item["type"] == "error":  # a warning: the turn goes on
+            return self.held() + [cut(f"warning: {item['message']}")]
+        if item["id"] in self.started:
+            return []
+        self.started.add(item["id"])
+        return self.held() + [cut(f"· {self.step(item)}")]
+
+    def step(self, item):
+        kind = item["type"]
+        if kind == "command_execution":
+            return tool_step("shell", {"command": unwrapped(item["command"])}, self.wt)
+        if kind == "file_change":
+            paths = ", ".join(shown_path(c["path"], self.wt) for c in item.get("changes") or [])
+            return f"apply_patch: {paths}" if paths else "apply_patch"
+        if kind == "mcp_tool_call":
+            return tool_step(f"{item['server']}.{item['tool']}", item.get("arguments"), self.wt)
+        if kind == "web_search":
+            return tool_step("web_search", {"query": item.get("query")}, self.wt)
+        return self.NAMES.get(kind, kind)
+
+
+def unwrapped(command):
+    """`/bin/zsh -lc 'cargo test'`, as codex reports the commands it runs: `cargo test`."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return command
+    if len(parts) == 3 and Path(parts[0]).name in ("sh", "bash", "zsh") and parts[1] in ("-c", "-lc"):
+        return parts[2]
+    return command
+
+
+class PiSteps(JsonSteps):
+    """`pi -p --mode json` (checked on pi 1.1.0). A tool call is shown when it starts to run, and the text of a
+    message that calls tools by its first line. The last message of a run is held: pi may compact its context and go
+    on (after a context overflow or an answer cut short), and then it is shown by its first line. When pi settles, or
+    the output ends, the held one is shown in full, as `pi -p` prints it, or why it failed: `pi -p` then exits 1,
+    but pi --mode json exits 0, so `failed` is set."""
+    QUIET = {"session", "turn_start", "turn_end", "message_start", "message_update", "tool_execution_update",
+             "tool_execution_end", "queue_update", "entry_appended", "session_info_changed", "thinking_level_changed",
+             "compaction_end", "auto_retry_end"}
+
+    def __init__(self, wt):
+        super().__init__(wt)
+        self.last = None
+
+    def end(self):
+        last, self.last = self.last, None
+        if last is None:
+            return []
+        self.failed = last.get("stopReason") in ("error", "aborted")
+        if self.failed:
+            return f"== pi ended with {last['stopReason']}: {last.get('errorMessage') or 'no message'}".splitlines()
+        return self.text(last).splitlines()
+
+    @staticmethod
+    def text(message):
+        return "\n".join(b["text"] for b in message["content"] if b.get("type") == "text")
+
+    def event(self, d):
+        kind = d["type"]
+        if kind in self.QUIET:
+            return []
+        indent = "  " if d.get("parentToolCallId") else ""  # a subagent's step
+        if kind == "tool_execution_start":
+            return [cut(f"{indent}· {tool_step(d.get('toolName') or 'tool', d.get('args'), self.wt)}")]
+        if kind == "message_end":
+            m = d["message"]
+            if m.get("role") != "assistant" or not any(b.get("type") == "toolCall" for b in m["content"]):
+                return []  # the last message is shown whole at the end
+            first = first_line(self.text(m))
+            return [cut(indent + first)] if first else []
+        if kind == "agent_start":  # pi goes on after compacting: the held message was not the last
+            last, self.last = self.last, None
+            first = "" if indent or last is None or last.get("stopReason") == "error" else first_line(self.text(last))
+            return [cut(first)] if first else []
+        if kind == "agent_end":
+            last = (d.get("messages") or [{}])[-1]
+            if not indent and not d.get("willRetry") and last.get("role") == "assistant":
+                self.last = last
+            return []
+        if kind == "agent_settled":
+            return [] if indent else self.end()
+        if kind == "auto_retry_start":
+            return [cut(f"== pi retries ({d.get('attempt')}/{d.get('maxAttempts')}): {d.get('errorMessage')}")]
+        if kind == "compaction_start":
+            return [f"== pi compacts its context ({d.get('reason')})"]
+        return None
+
+
+class KiroSteps(JsonSteps):
+    """kiro-cli's --output-format stream-json (checked on kiro-cli 2.28.0): ACP session updates. The text comes in
+    chunks. What came before a tool call is shown by its first line, and what came after the last one, the final
+    answer, in full when the run finishes."""
+    QUIET = {"tool_call_update", "agent_thought_chunk", "user_message_chunk", "plan", "available_commands_update",
+             "current_mode_update"}
+
+    def __init__(self, wt):
+        super().__init__(wt)
+        self.text = ""
+
+    def end(self):
+        text, self.text = self.text, ""
+        return text.splitlines()
+
+    def event(self, d):
+        kind = d["type"]
+        if kind in ("runStarted", "metadata"):
+            return []
+        if kind == "runFinished":
+            data = d["data"]
+            ended = [] if data.get("status") == "success" else [
+                f"== kiro ended with {data.get('status')} ({data.get('stopReason')})"]
+            return self.end() + ended
+        if kind == "runError":
+            self.failed = True
+            return self.end() + f"== kiro ended with an error: {d['data'].get('message')}".splitlines()
+        if kind != "sessionUpdate":
+            return None
+        update = d["data"]["update"]
+        what = update["sessionUpdate"]
+        if what == "agent_message_chunk":
+            self.text += update["content"].get("text") or ""
+            return []
+        if what == "tool_call":
+            first, self.text = first_line(self.text), ""
+            return ([cut(first)] if first else []) + [cut(f"· {self.step(update)}")]
+        return [] if what in self.QUIET else None
+
+    def step(self, update):
+        """`shell: cargo test`, `read: src/x.rs`: kiro-cli's name for the tool, and its command or file."""
+        name = ((update.get("_meta") or {}).get("kiro") or {}).get("toolName") or update.get("kind") or "tool"
+        args = dict(update["rawInput"]) if isinstance(update.get("rawInput"), dict) else {}
+        if update.get("kind") != "execute":
+            args.pop("command", None)  # write's "create" or "strReplace", not a command
+        if not isinstance(args.get("path"), str) and update.get("locations"):
+            args["path"] = update["locations"][0].get("path")
+        return tool_step(name, args, self.wt)
+
+
+STEPS = {"claude": ClaudeSteps, "codex": CodexSteps, "pi": PiSteps, "kiro": KiroSteps}
 
 
 def stream_json_lines(line, wt):
     """The log lines for one line of Claude Code's stream-json: one per tool call and per text (its first line), the
     final result in full, and nothing for the rest (tool results, hooks, system). A line that is not JSON stays as
     it is. No tool result and no input beyond the one shown reaches the log, and no step is over LOG_LINE_MAX.
-    JSON of another type or shape (a newer Claude Code, another CLI's stream-json) is kept, cut to LOG_LINE_MAX."""
+    JSON of another type or shape (a newer Claude Code) is kept, cut to LOG_LINE_MAX."""
     try:
         d = json.loads(line)
     except ValueError:
@@ -1687,29 +1932,30 @@ def stream_json_lines(line, wt):
         return [line]
     if d["type"] in ("system", "user", "rate_limit_event", "stream_event"):  # hooks, tool results, partial messages
         return []
-    clip = lambda s: s if len(s) <= LOG_LINE_MAX else s[:LOG_LINE_MAX - 3] + "..."
     try:
         if d["type"] == "result":
             text = d.get("result") if isinstance(d.get("result"), str) else ""
             ended = [f"== claude ended with {d.get('subtype') or 'an error'}"] if d.get("is_error") else []
             return text.splitlines() + ended
         if d["type"] != "assistant":
-            return [clip(line)]
+            return [cut(line)]
         indent = "  " if d.get("parent_tool_use_id") else ""  # a subagent's step
         shown = []
         for block in d["message"]["content"]:
             if block.get("type") == "tool_use":
-                shown.append(f"{indent}· {tool_step(block.get('name') or 'tool', block.get('input') or {}, wt)}")
+                shown.append(f"{indent}· {tool_step(block.get('name') or 'tool', block.get('input'), wt)}")
             elif block.get("type") == "text":
-                first = next((t.strip() for t in block["text"].splitlines() if t.strip()), "")
+                first = first_line(block["text"])
                 shown += [indent + first] if first else []
-        return [clip(s) for s in shown]
+        return [cut(s) for s in shown]
     except (KeyError, TypeError, AttributeError):  # a shape we do not know
-        return [clip(line)]
+        return [cut(line)]
 
 
 def tool_step(name, args, wt):
     """`Bash: cargo test`, `Edit: src/x.rs`, `Grep: "pattern"`: the tool and the one input that says what it does."""
+    if not isinstance(args, dict):  # no input, or one of a shape we do not know: only the name
+        return name
     for key in ("command", "file_path", "notebook_path", "pattern", "url", "query", "description", "skill", "path"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
@@ -1719,13 +1965,18 @@ def tool_step(name, args, wt):
     lines = value.strip().splitlines()
     value = lines[0] + " ..." * (len(lines) > 1)
     if key in ("file_path", "notebook_path", "path"):
-        for base in (os.path.realpath(wt), str(wt)):  # Claude Code gives the real path (/private/var on macOS)
-            try:
-                value = Path(value).relative_to(base).as_posix()
-                break
-            except ValueError:
-                continue
+        value = shown_path(value, wt)
     return f'{name}: "{value}"' if key == "pattern" else f"{name}: {value}"
+
+
+def shown_path(path, wt):
+    """The path from the worktree when it is in it. The agents give the real path (/private/var on macOS)."""
+    for base in (os.path.realpath(wt), str(wt)):
+        try:
+            return Path(path).relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return path
 
 
 def build_review_prompt(t, report, diff):

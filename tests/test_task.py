@@ -624,6 +624,162 @@ tool("Write", file_path=f"{cwd}/.task-report.md", content="SECRET REPORT")
 finish("All done.\nAdded hello.txt and wrote the report.\n\nThe last line of the result.")
 '''
 
+FAKE_STEPS = r'''#!/usr/bin/env python3
+# codex, pi, and kiro-cli as task-hub runs them (the name it is called by says which), in the shapes seen from
+# codex-cli 0.160.0 (`exec --json`), pi 1.1.0 (`-p --mode json`), and kiro-cli 2.28.0 (`--output-format stream-json`):
+# one JSON line per event. Without those flags, their text output: codex and kiro-cli print their steps, with the
+# tool output (codex), on stderr; all three print the final answer on stdout. WAIT in the goal holds the run before it
+# finishes, until the test creates the release file. MODE:failed ends the run with an error.
+import json, os, shlex, subprocess, sys, time
+from pathlib import Path
+cli, prompt, argv = Path(sys.argv[0]).name, sys.argv[-1], sys.argv[1:-1]
+given = lambda flag, value: any(a == flag and b == value for a, b in zip(argv, argv[1:]))
+stream = {"codex": "--json" in argv, "pi": given("--mode", "json"), "kiro-cli": given("--output-format", "stream-json")}[cli]
+cwd = os.path.realpath(os.getcwd())
+failed = "MODE:failed" in prompt
+said_before, ids, texts = [], iter(range(100)), []
+def out(text, end="\n"):
+    print(text, end=end, flush=True)
+def err(text):
+    print(text, file=sys.stderr, flush=True)
+def emit(d):
+    if stream:
+        out(json.dumps(d))
+def kiro(update):
+    emit({"type": "sessionUpdate", "data": {"sessionId": "s1", "update": update}})
+def say(text):
+    """Text the model writes before its next tool call."""
+    if cli == "codex":
+        emit({"type": "item.completed", "item": {"id": f"item_{next(ids)}", "type": "agent_message", "text": text}})
+        if not stream:
+            err("codex")
+            err(text)
+    elif cli == "pi":
+        said_before.append(text)  # pi sends it in the same message as the tool call
+    else:
+        for i in range(0, len(text), 7):
+            kiro({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text[i:i + 7]}})
+        texts.append(text)
+        if not stream:
+            out(text)
+def tool(name, args, result, title=""):
+    """One tool call: in codex `shell` (args: the command) or `apply_patch` (the path); in pi and kiro-cli its own."""
+    n = next(ids)
+    if cli == "codex" and name == "shell":
+        item = {"id": f"item_{n}", "type": "command_execution", "command": f"/bin/zsh -lc {shlex.quote(args)}",
+                "aggregated_output": "", "exit_code": None, "status": "in_progress"}
+        emit({"type": "item.started", "item": item})
+        emit({"type": "item.completed", "item": {**item, "aggregated_output": result, "exit_code": 0, "status": "completed"}})
+        if not stream:
+            err(f"exec\n/bin/zsh -lc {shlex.quote(args)} in {cwd}\n succeeded in 3ms:\n{result}\n")
+    elif cli == "codex":
+        item = {"id": f"item_{n}", "type": "file_change", "changes": [{"path": f"{cwd}/{args}", "kind": "add"}]}
+        emit({"type": "item.started", "item": {**item, "status": "in_progress"}})
+        emit({"type": "item.completed", "item": {**item, "status": "completed"}})
+        if not stream:
+            err(f"apply patch\npatch: completed\n{cwd}/{args}\n{result}")
+    elif cli == "pi":
+        call = {"type": "toolCall", "id": f"call_{n}", "name": name, "arguments": args}
+        content = [{"type": "text", "text": t} for t in said_before] + [call]
+        said_before.clear()
+        emit({"type": "message_start", "message": {"role": "assistant", "content": []}})
+        emit({"type": "message_update", "assistantMessageEvent": {"type": "toolcall_delta", "delta": json.dumps(args)}})
+        emit({"type": "message_end", "message": {"role": "assistant", "content": content, "stopReason": "toolUse"}})
+        emit({"type": "tool_execution_start", "toolCallId": f"call_{n}", "toolName": name, "args": args})
+        emit({"type": "tool_execution_end", "toolCallId": f"call_{n}", "toolName": name,
+              "result": {"content": [{"type": "text", "text": result}]}, "isError": False})
+        emit({"type": "message_end", "message": {"role": "toolResult", "toolName": name,
+                                                 "content": [{"type": "text", "text": result}]}})
+        emit({"type": "turn_end", "message": {"role": "assistant", "content": content}, "toolResults": []})
+        emit({"type": "turn_start"})
+    else:
+        kind, raw = name
+        call = {"toolCallId": f"tooluse_{n}", "title": title, "kind": kind, "rawInput": args,
+                **({"locations": [{"path": args.get("path") or args["operations"][0]["path"]}]} if kind != "execute" else {})}
+        kiro({"sessionUpdate": "tool_call", **call, "_meta": {"kiro": {"toolName": raw}}})
+        kiro({"sessionUpdate": "tool_call_update", "toolCallId": f"tooluse_{n}",
+              "content": [{"type": "content", "content": {"type": "text", "text": result}}]})
+        kiro({"sessionUpdate": "tool_call_update", **call, "status": "completed", "rawOutput": {"items": [{"Text": result}]}})
+        if not stream:
+            err(f"[tool] {title}\n[tool] status: Completed")
+def finish(text):
+    if cli == "codex":
+        emit({"type": "item.completed", "item": {"id": "item_r", "type": "reasoning", "text": "SECRET THOUGHT"}})
+        if failed:
+            emit({"type": "error", "message": "stream disconnected before completion"})
+            emit({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}})
+            if not stream:
+                err("ERROR: stream disconnected before completion")
+            sys.exit(1)
+        emit({"type": "item.completed", "item": {"id": "item_e", "type": "agent_message", "text": text}})
+        emit({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 10}})
+        if not stream:
+            err(f"codex\n{text}\ntokens used\n1,234")
+            out(text)
+    elif cli == "pi":
+        last = {"role": "assistant", "content": [{"type": "thinking", "thinking": "SECRET THOUGHT"}, {"type": "text", "text": text}],
+                "stopReason": "error" if failed else "stop", **({"errorMessage": "429 rate limited"} if failed else {})}
+        emit({"type": "message_end", "message": last})
+        emit({"type": "turn_end", "message": last, "toolResults": []})
+        emit({"type": "agent_end", "willRetry": False, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": prompt}]},
+            {"role": "toolResult", "content": [{"type": "text", "text": "SECRET README CONTENT"}]}, last]})
+        emit({"type": "agent_settled", "aborted": False})
+        if not stream:
+            if failed:
+                err("429 rate limited")
+                sys.exit(1)
+            out(text)
+    else:
+        if failed:
+            emit({"type": "runError", "data": {"sessionId": "s1", "stage": "prompt", "message": "Internal error: throttled"}})
+            if not stream:
+                err("Error: Internal error: throttled")
+            sys.exit(1)
+        say(text)
+        emit({"type": "metadata", "data": {"sessionId": "s1", "meteringUsage": [{"value": 0.1, "unit": "credit"}]}})
+        emit({"type": "runFinished", "data": {"sessionId": "s1", "status": "success", "stopReason": "end_turn",
+                                              "finalText": "".join(texts), "finalTextTruncated": False}})
+if cli == "codex":
+    emit({"type": "thread.started", "thread_id": "t1"})
+    emit({"type": "turn.started"})
+    if not stream:
+        err(f"OpenAI Codex v0.160.0\n--------\nworkdir: {cwd}\n--------\nuser\n{prompt}")
+elif cli == "pi":
+    emit({"type": "session", "version": 3, "id": "s1", "cwd": cwd})
+    emit({"type": "agent_start"})
+    emit({"type": "turn_start"})
+else:
+    emit({"type": "runStarted", "data": {"payloadSchema": "acp", "engine": "v2"}})
+    emit({"type": "metadata", "data": {"sessionId": "s1", "contextUsagePercentage": 1.0}})
+if "USAGE" in prompt and cli == "kiro-cli":
+    subprocess.run([os.environ["TASK_TEST_KIRO"], "V2"], check=True)
+say("I'll look around first.\nThis second line stays out of the log.")
+tool({"codex": "shell", "pi": "read", "kiro-cli": ("read", "read")}[cli],
+     {"codex": "sed -n '1,200p' README.md", "pi": {"path": "README.md", "offset": None, "limit": None},
+      "kiro-cli": {"operations": [{"mode": "Line", "path": "README.md"}]}}[cli],
+     "SECRET README CONTENT", "Reading README.md:1")
+shell = lambda command, result: tool({"codex": "shell", "pi": "bash", "kiro-cli": ("execute", "shell")}[cli],
+                                     command if cli == "codex" else {"command": command}, result, f"Running: {command}")
+shell("cargo test -p task-rs", "test result: ok. SECRET TEST OUTPUT")
+out("a warning line that is not JSON")
+if "WAIT" in prompt:
+    release, end = Path(os.environ["TASK_TEST_CLAUDE_RELEASE"]), time.time() + 30
+    while not release.exists() and time.time() < end:
+        time.sleep(0.1)
+shell("echo " + "x" * 500 + "\necho second line", "SECRET ECHO")
+write = lambda path, content: tool({"codex": "apply_patch", "pi": "write", "kiro-cli": ("edit", "write")}[cli],
+                                   path if cli == "codex" else {"path": path, "content": content} if cli == "pi"
+                                   else {"command": "create", "path": path, "content": content}, "SECRET DONE",
+                                   f"Creating {Path(path).name}")
+Path("hello.txt").write_text("hello\n")
+write(f"{cwd}/hello.txt" if cli != "codex" else "hello.txt", "SECRET NEW")
+if not failed:
+    Path(".task-report.md").write_text("## Report\n\nAdded hello.txt.\n\n## Please review\n\n- hello.txt\n")
+write(".task-report.md", "SECRET REPORT")
+finish("All done.\nAdded hello.txt and wrote the report.\n\nThe last line of the result.")
+'''
+
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
@@ -2432,8 +2588,8 @@ class TaskTest(unittest.TestCase):
                 {"type": "tool_use", "name": "Read", "input": {"file_path": "/etc/hosts"}}]}}),
                 ["· TodoWrite", "· Bash: cd x && ...", "· Read: /etc/hosts"])
             # only the command decides, never a prompt that mentions it
-            self.assertTrue(task.streams_json("claude"))
-            self.assertFalse(task.streams_json("fake"))
+            self.assertEqual(task.step_format("claude"), "claude")
+            self.assertIsNone(task.step_format("fake"))
 
     def test_own_claude_command_without_stream_json_logs_as_before(self):
         self.fake_claude()
@@ -2445,6 +2601,164 @@ class TaskTest(unittest.TestCase):
         agent = lines[lines.index("== agent: claude") + 1:lines.index("== agent exited with code 0")]
         self.assertEqual(agent, ["a warning line that is not JSON", "All done.",
                                  "Added hello.txt and wrote the report.", "", "The last line of the result."])
+
+    def fake_steps(self):
+        """`codex`, `pi`, and `kiro-cli` on PATH, so the built-in commands run them (FAKE_STEPS)."""
+        for cli in ("codex", "pi", "kiro-cli"):
+            (self.root / "fakebin" / cli).write_text(FAKE_STEPS)
+            (self.root / "fakebin" / cli).chmod(0o755)
+        self.env["TASK_TEST_CLAUDE_RELEASE"] = str(self.root / "claude.release")
+
+    def assert_steps_while_it_runs(self, agent, steps):
+        """The built-in `agent` shows each of its steps in `task log` before it ends, and its final answer in full."""
+        self.fake_steps()
+        tid = self.new("ok WAIT USAGE", "Add hello", "jyoka/app", "--agent", agent)
+        self.task("start", tid)
+        self.wait_for(lambda: steps[2] in self.task("log", tid, "--full"))
+        self.assertEqual(self.status(tid), "In progress")  # the steps arrive while the agent still runs
+        self.assertNotIn("All done.", self.task("log", tid, "--full"))
+        (self.root / "claude.release").touch()
+        self.assertEqual(self.wait(tid), "In review")
+        lines = self.task("log", tid, "--full").splitlines()
+        section = lines[lines.index(f"== agent: {agent}") + 1:lines.index("== agent exited with code 0")]
+        self.assertEqual([line for line in section if line.startswith(("· ", "I'll"))], steps)
+        self.assertIn("a warning line that is not JSON", section)  # not JSON: as it came
+        said = [line for line in section if not line.startswith("== agent used ")]
+        self.assertEqual(said[-4:], ["All done.", "Added hello.txt and wrote the report.", "",
+                                     "The last line of the result."])  # whole, and once
+        log = "\n".join(lines)
+        for hidden in ("SECRET", "second line", '"type"', "README CONTENT", "tooluse_", "OpenAI Codex"):
+            self.assertNotIn(hidden, log)  # no tool results, inputs beyond the one shown, prompt, or raw events
+        self.assertLessEqual(max(len(line) for line in lines if "·" in line), 200)
+        self.assertIn("Added hello.txt.", self.comments(tid)[-1])  # the report is read as before
+        return log
+
+    def test_builtin_codex_shows_each_step_in_the_log_while_it_runs(self):
+        # task 173: like claude (task 172), codex gets --json; its text output also copied every tool output and the prompt
+        self.assert_steps_while_it_runs("codex", [
+            "I'll look around first.", "· shell: sed -n '1,200p' README.md", "· shell: cargo test -p task-rs",
+            "· shell: echo " + "x" * 183 + "...", "· apply_patch: hello.txt", "· apply_patch: .task-report.md"])
+
+    def test_builtin_pi_shows_each_step_in_the_log_while_it_runs(self):
+        # task 173: `pi -p` printed only its final answer
+        self.assert_steps_while_it_runs("pi", [
+            "I'll look around first.", "· read: README.md", "· bash: cargo test -p task-rs",
+            "· bash: echo " + "x" * 184 + "...", "· write: hello.txt", "· write: .task-report.md"])
+
+    def test_builtin_kiro_shows_each_step_in_the_log_while_it_runs(self):
+        log = self.assert_steps_while_it_runs("kiro", [
+            "I'll look around first.", "· read: README.md", "· shell: cargo test -p task-rs",
+            "· shell: echo " + "x" * 183 + "...", "· write: hello.txt", "· write: .task-report.md"])
+        # the credits are still read from kiro-cli's own session files
+        self.assertIn("== agent used 3 calls, 0.87 credits, models claude-opus-5.5", log)
+
+    def test_builtin_agents_that_fail_say_why_and_exit_non_zero(self):
+        self.fake_steps()
+        for n, (agent, why) in enumerate((("codex", "ERROR: stream disconnected before completion"),
+                                          ("pi", "== pi ended with error: 429 rate limited"),
+                                          ("kiro", "== kiro ended with an error: Internal error: throttled")), 1):
+            tid = self.new("failed", "Add hello", "jyoka/app", "--agent", agent)
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked", agent)
+            log = self.task("log", tid, "--full").splitlines()
+            self.assertEqual(log.count(why), 1, agent)
+            # pi --mode json exits 0 even then; `pi -p` exits 1, and the run must not look like a success
+            self.assertIn("== agent exited with code 1", log, agent)
+
+    def test_json_steps_of_codex_pi_kiro_of_other_shapes_are_kept_short_or_left_out(self):
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            def lines(fmt, *events):
+                steps = task.STEPS[fmt](self.root)
+                shown = [s for e in events for s in steps.lines(e if isinstance(e, str) else json.dumps(e))]
+                return shown + steps.end(), steps.failed
+            for fmt in ("codex", "pi", "kiro"):
+                self.assertEqual(lines(fmt, "not JSON", "[1]"), (["not JSON", "[1]"], False), fmt)
+                future = lines(fmt, {"type": "a_future_event", "data": "x" * 500})[0]
+                self.assertEqual((len(future), len(future[0]), future[0][-3:]), (1, 200, "..."), fmt)
+            item = lambda kind, i, **d: {"type": f"item.{kind}", "item": {"id": i, **d}}
+            self.assertEqual(lines("codex",
+                item("completed", "a", type="agent_message", text="First.\nSECRET"),
+                item("completed", "w", type="error", message="Model metadata not found"),
+                item("started", "m", type="mcp_tool_call", server="gh", tool="search", arguments="SECRET"),
+                item("completed", "m", type="mcp_tool_call", server="gh", tool="search", arguments="SECRET", result="S"),
+                item("completed", "s", type="web_search", query="python shlex"),  # completed only: still shown
+                item("started", "t", type="todo_list", items=[{"text": "SECRET", "completed": False}]),
+                item("started", "c", type="command_execution", command="bash -c 'cd x &&\nmake'"),
+                {"type": "error", "message": "Reconnecting... 1/5"},
+                item("completed", "z", type="agent_message", text="Last words."),
+                {"type": "turn.failed", "error": {"message": "Reconnecting... 1/5"}})[0],
+                ["First.", "warning: Model metadata not found", "· gh.search", "· web_search: python shlex",
+                 "· update_plan", "· shell: cd x && ...", "ERROR: Reconnecting... 1/5", "Last words."])
+            final = {"role": "assistant", "content": [{"type": "text", "text": "a\n\nb"}], "stopReason": "stop"}
+            self.assertEqual(lines("pi",
+                {"type": "tool_execution_start", "toolName": "grep", "args": {"pattern": "x", "path": "src"}},
+                {"type": "tool_execution_start", "toolName": "subagent", "args": None, "parentToolCallId": "c1"},
+                {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "errorMessage": "overloaded"},
+                {"type": "agent_end", "willRetry": True, "messages": [final]},  # not the end yet
+                {"type": "agent_end", "messages": [final]})[0],
+                ['· grep: "x"', "  · subagent", "== pi retries (1/3): overloaded", "a", "", "b"])
+            self.assertEqual(lines("pi", {"type": "agent_end", "messages": [{**final, "stopReason": "aborted"}]}),
+                             (["== pi ended with aborted: no message"], True))
+            overflow = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "prompt is too long"}
+            cut_short = {**final, "content": [{"type": "text", "text": "partial\nSECRET"}], "stopReason": "length"}
+            for first in (overflow, cut_short):  # pi compacts its context and goes on: only the last answer counts
+                self.assertEqual(lines("pi",
+                    {"type": "agent_start"}, {"type": "agent_end", "messages": [first]},
+                    {"type": "compaction_start", "reason": "overflow"}, {"type": "compaction_end"},
+                    {"type": "agent_start"}, {"type": "agent_end", "messages": [final]},
+                    {"type": "agent_settled", "aborted": False}),
+                    (["== pi compacts its context (overflow)"] + (["partial"] if first is cut_short else [])
+                     + ["a", "", "b"], False), first["stopReason"])
+            self.assertEqual(lines("pi",  # compacted after a full answer, without going on: that answer is the last
+                {"type": "agent_end", "messages": [final]}, {"type": "compaction_start", "reason": "overflow"},
+                {"type": "agent_settled", "aborted": False}),
+                (["== pi compacts its context (overflow)", "a", "", "b"], False))
+            self.assertEqual(lines("pi",  # the retry after compacting failed too
+                {"type": "agent_end", "messages": [overflow]}, {"type": "compaction_start", "reason": "overflow"},
+                {"type": "agent_start"}, {"type": "agent_end", "messages": [overflow]}),
+                (["== pi compacts its context (overflow)", "== pi ended with error: prompt is too long"], True))
+            update =lambda **u: {"type": "sessionUpdate", "data": {"update": u}}
+            self.assertEqual(lines("kiro",
+                update(sessionUpdate="agent_message_chunk", content={"type": "text", "text": "\nLooking.\nSECRET"}),
+                update(sessionUpdate="tool_call", kind="edit", rawInput={"command": "strReplace", "path": "a.py"},
+                       _meta={"kiro": {"toolName": "write"}}),
+                update(sessionUpdate="tool_call", kind="search", rawInput={"pattern": "x"}),
+                update(sessionUpdate="tool_call", title="SECRET"),
+                update(sessionUpdate="agent_thought_chunk", content={"type": "text", "text": "SECRET"}),
+                update(sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Done,\nfully."}),
+                {"type": "runFinished", "data": {"status": "cancelled", "stopReason": "cancelled"}})[0],
+                ["Looking.", "· write: a.py", '· search: "x"', "· tool", "Done,", "fully.",
+                 "== kiro ended with cancelled (cancelled)"])
+            # the built-in commands, and only the command decides: not the agent's name, nor a prompt
+            self.assertEqual([task.step_format(a) for a in ("claude", "codex", "pi", "kiro")],
+                             ["claude", "codex", "pi", "kiro"])
+            for command, fmt in (("codex exec {prompt}", None), ("codex exec --json {prompt}", "codex"),
+                                 ("pi -p {prompt}", None), ("/opt/bin/pi --mode=json -p {prompt}", "pi"),
+                                 ("kiro-cli chat --no-interactive {prompt}", None),
+                                 ("env A=1 kiro-cli chat --output-format=stream-json {prompt}", "kiro"),
+                                 ("mytool --json {prompt}", None), ("claude -p --output-format stream-json {prompt}",
+                                                                     "claude")):
+                self.write_config(f"mine = {command}\n")
+                task.config.cache_clear()
+                self.assertEqual(task.step_format("mine"), fmt, command)
+
+    def test_own_codex_pi_kiro_commands_without_json_log_as_before(self):
+        self.fake_steps()
+        self.write_config(f"codex = {self.root}/fakebin/codex exec -s workspace-write {{prompt}}\n"
+                          f"pi = pi -p {{prompt}}\nkiro = kiro-cli chat --no-interactive {{prompt}}\n")
+        for agent, expected in (("codex", "/bin/zsh -lc 'cargo test -p task-rs' in "), ("pi", "All done."),
+                                ("kiro", "[tool] Running: cargo test -p task-rs")):
+            tid = self.new("ok", "Add hello", "jyoka/app", "--agent", agent)
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+            lines = self.task("log", tid, "--full").splitlines()
+            section = lines[lines.index(f"== agent: {agent}") + 1:lines.index("== agent exited with code 0")]
+            self.assertTrue(any(line.startswith(expected) for line in section), (agent, section))
+            self.assertFalse(any(line.startswith("· ") for line in section), agent)
+            self.assertEqual(section[-1], "The last line of the result.", agent)
 
     def test_records_are_read_from_claude_config_dir_when_set(self):
         self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")

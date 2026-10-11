@@ -18,9 +18,11 @@
   何が起きたかを見られるように残し、`task done <番号>` か PR のマージで閉じます。task-hub が閉じるのは、自分が
   作ったタブだけです(herdr が同じ id を別のタブに使い回していないか、名前で確かめてから閉じます)。
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
-- **claude の途中経過**: 組み込みの claude は、手順ごとに 1 行をログ(herdr のタブ、`task log`、task-rs の `l`)に
-  出します。ツールの呼び出しは `· ツール名: 何を`、assistant の文は先頭の 1 行、サブエージェントの手順は 2 字下げです。
-  最後の結果の文は全部残ります。ツールの結果の中身は出さず、1 行は 200 字までです。
+- **途中経過**: 組み込みのエージェント(claude、codex、pi、kiro)は、手順ごとに 1 行をログ(herdr のタブ、`task log`、
+  task-rs の `l`)に出します。ツールの呼び出しは `· ツール名: 何を`、エージェントの文は先頭の 1 行、サブエージェントの
+  手順は 2 字下げです。最後の結果の文は全部残ります。ツールの結果の中身は出さず、1 行は 200 字までです。
+  ツール名は各 CLI のものです(claude は `Bash`、`Read`、codex は `shell`、`apply_patch`、pi は `bash`、`read`、
+  kiro は `shell`、`read`、`write`)。
   ```
   == agent: claude
   I'll look at the TUI first.
@@ -29,9 +31,13 @@
   · Edit: rust/src/tui.rs
   · Bash: cargo test -p task-rs
   ```
-  `slow` が届いたら、最後の行がいつのものかで、進んでいるのか止まっているのかを判断します。`config.ini` で claude の
-  コマンドを自分で書いていて `--output-format stream-json` がなければ、今までどおり最後の結果だけが出ます
-  ([agents.md](agents.md#エージェントの変更と追加))。codex、pi、kiro の出力はそのまま書きます。
+  `slow` が届いたら、最後の行がいつのものかで、進んでいるのか止まっているのかを判断します。`config.ini` でコマンドを
+  自分で書いていて、組み込みと同じ出力のフラグ(claude と kiro は `--output-format stream-json`、codex は `--json`、
+  pi は `--mode json`)がなければ、今までどおり出力をそのまま書きます
+  ([agents.md](agents.md#エージェントの変更と追加))。そのとき claude と pi は最後の結果だけ、codex はツールの出力と
+  プロンプトも含めた全部、kiro は `[tool] Running: ...` の行が出ます。
+  エージェントが失敗で終わると、その理由が `ERROR: ...`(codex)、`== pi ended with error: ...`、
+  `== kiro ended with an error: ...`、`== claude ended with ...` の行に出ます。
 - **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
   `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
   `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です

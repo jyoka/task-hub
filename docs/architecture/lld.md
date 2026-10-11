@@ -13,7 +13,7 @@ flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、build_prompt、<br/>run_agent_process、stream_json_lines、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、build_prompt、<br/>run_agent_process、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -263,7 +263,7 @@ sequenceDiagram
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
-| `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail` | テキスト。エージェントの出力は 1 行ずつ。コマンドに `--output-format stream-json` があるエージェント(組み込みの claude)は、`stream_json_lines` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
+| `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail` | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
 | `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list` | `{key, fetched_at, items}` |
@@ -322,12 +322,42 @@ sequenceDiagram
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
 
-組み込みの claude は `claude -p ... --output-format stream-json --verbose` で、手順ごとに JSON の 1 行を出します。
-`agent_process` はコマンドに `--output-format stream-json` があるときだけ、`stream_json_lines` でそれを直します。
-`assistant` の `tool_use` は `· <名前>: <入力の 1 つ>`(`tool_step`。パスは worktree からの相対)、`text` は先頭の 1 行、
-`result` の `result` は全文(`is_error` なら `== claude ended with <subtype>` も)。`system`、`user`(ツールの結果)、
-`rate_limit_event`、`stream_event` は書きません。JSON でない行はそのまま、知らない種類や形の JSON は `LOG_LINE_MAX` 字に切って書きます。使った量はこの出力からは読まず、
-今までどおり `agent_usage` が手元の記録から読みます。
+組み込みのエージェントは、手順ごとに JSON の 1 行を出すフラグ付きで動きます。`agent_process` は、コマンド(プロンプトは
+見ない)からどの CLI の JSON かを `step_format` で決め、`STEPS` のクラス(`Steps` の子)で 1 行ずつ直します。
+どれでもなければ `Steps` そのもので、出力をそのまま書きます。
+
+| `step_format` | コマンドの条件 | クラス | 確かめた版 |
+|---|---|---|---|
+| `claude` | `--output-format stream-json`(kiro-cli でない) | `ClaudeSteps`(`stream_json_lines`) | claude 2.1.296 |
+| `codex` | `codex`、`exec`、`--json` | `CodexSteps` | codex-cli 0.160.0 |
+| `pi` | `pi`、`--mode json` | `PiSteps` | pi 1.1.0 |
+| `kiro` | `kiro-cli`、`--output-format stream-json` | `KiroSteps` | kiro-cli 2.28.0 |
+
+- ツールの呼び出しは `· <名前>: <入力の 1 つ>`(`tool_step`。パスは worktree からの相対、`shown_path`)。
+  - claude: `assistant` の `tool_use`。
+  - codex: `item.started` の項目(`command_execution` は `shell` で、`/bin/zsh -lc '...'` の中のコマンド(`unwrapped`)、
+    `file_change` は `apply_patch` とパス、`mcp_tool_call` は `<server>.<tool>`)。
+  - pi: `tool_execution_start`。
+  - kiro: `sessionUpdate` の `tool_call`(`_meta.kiro.toolName`。`execute` でなければ `rawInput.command` は使わない)。
+- エージェントの文は先頭の 1 行(`first_line`)。最後の結果は全文。
+  - claude: `assistant` の `text` が 1 行、`result` の `result` が全文。
+  - codex: `agent_message` を次の項目まで持ち、次の項目が来たら 1 行、`turn.completed` で全文。
+  - pi: ツールを呼ぶ `message_end` の文が 1 行。`agent_end` の最後のメッセージは持つだけで、`willRetry` なら持たない。
+    `agent_settled` か出力が閉じたときに、持っているものを全文で書く。pi は context overflow や `length` で
+    止まった後に compact して続けることがある。そのときは次の `agent_start` で、持っていたものを 1 行にする
+    (`error` なら書かない)。失敗かどうかも、最後に持っているメッセージの `stopReason` で決める。
+  - kiro: `agent_message_chunk` をためて、`tool_call` で 1 行、`runFinished` で全文。
+- 失敗: claude は `== claude ended with <subtype>`、codex は `ERROR: <message>`(`error` と `turn.failed` の同じ文は 1 回)、
+  pi は `== pi ended with <stopReason>: <errorMessage>`、kiro は `== kiro ended with an error: <message>`。
+  pi の `--mode json` は失敗でも 0 で終わる(`pi -p` は 1)ので、`Steps.failed` が立ったら `agent_process` は 1 を返す。
+- 書かないもの: ツールの結果(claude の `user`、codex の `item.completed` のコマンドの出力、pi の `tool_execution_end`、
+  kiro の `tool_call_update`)、考えたこと(`thinking`、`reasoning`、`agent_thought_chunk`)、途中の差分(`stream_event`、
+  `message_update`、`agent_message_chunk` そのもの)、セッションの情報(`system`、`session`、`metadata` など)。
+- JSON でない行(stderr の警告など)はそのまま、知らない種類や形の JSON は `LOG_LINE_MAX` 字に切って書く。
+- 出力が終わったときにまだ持っている文(codex、kiro)は全文で書く(`Steps.end`)。
+
+使った量はこの出力からは読まず、今までどおり `agent_usage` が手元の記録から読みます(kiro の stream-json の実行も、
+v2 のセッションのファイルに残ることを 2.28.0 で確かめた)。
 
 ## 8. 失敗の扱い
 
