@@ -55,6 +55,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 agent = claude          ; このマシンのデフォルトの worker
 reviewer = agent        ; PR の前の自動レビュー。agent = worker と同じエージェントを新しいコンテキストで
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
+parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)

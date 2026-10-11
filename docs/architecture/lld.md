@@ -17,7 +17,7 @@ flowchart TB
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
-    config["config<br/>config、board_config、agent_command、check_ready"]
+    config["config<br/>config、board_config、parallel、agent_command、check_ready"]
     output["output(TOON)<br/>out、table、fail、q"]
     updates["updates<br/>UpdateCheck、cmd_update"]
 
@@ -101,7 +101,7 @@ flowchart LR
     subgraph short["その場で終わる"]
         cmds["task、task start、task new、<br/>task done、task list ..."]
     end
-    subgraph perTask["タスクごと(最大 5)"]
+    subgraph perTask["タスクごと(最大 [runner] parallel、既定 5)"]
         run1["task _run 12<br/>herdr のタブ、またはバックグラウンド"]
         run2["task _run 13"]
     end
@@ -167,7 +167,7 @@ sequenceDiagram
     opt 何かが Done になった
         S->>GH: archive_overflow
     end
-    S->>S: Ready で待ち先がないものを番号順に、枠の数だけ
+    S->>S: Ready で待ち先がないものを番号順に、枠([runner] parallel)の数だけ
     S->>S: launch
 ```
 
@@ -251,7 +251,7 @@ sequenceDiagram
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて | JSON(`RUN_KEYS`) |
 | `state/logs/<id>.log` | `task _run` | `task log` | テキスト |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
