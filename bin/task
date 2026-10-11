@@ -8,7 +8,7 @@ Move a card to Ready (or run `task start`) and task-hub runs it on this machine:
 branch `task/<number>`, a herdr workspace (or a background process without herdr), and the agent
 CLI of your choice (claude, codex, pi, kiro, ...). The agent only edits files and writes
 `.task-report.md`; task-hub commits, pushes, opens the PR, comments the report on the Issue, and
-moves the card. At most MAX_PARALLEL tasks are In progress at once.
+moves the card. At most [runner] parallel tasks (5 by default) are In progress at once.
 
 Board: Backlog -> Ready -> In progress -> In review -> Done   (or Blocked)
 An optional "wait for merge" column between In review and Done holds reviewed cards
@@ -34,7 +34,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 VERSION = "0.9.0"
-MAX_PARALLEL = 5
+PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
@@ -330,7 +330,8 @@ def digest_lines(d, skip=()):
 @cache
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": ""},
+    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
+                            "parallel": str(PARALLEL)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     try:
@@ -393,6 +394,15 @@ def helper_agent(t, key):
     """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
     name = config()["runner"].get(key, "").strip()
     return t["agent"] if name == "agent" else name
+
+
+def parallel():
+    """[runner] parallel: how many tasks may be In progress at once; fewer on a PC short of memory."""
+    value = config()["runner"].get("parallel", "").strip() or str(PARALLEL)
+    if not re.fullmatch(r"\d+", value) or int(value) < 1:
+        fail(f"[runner] parallel must be a whole number, 1 or more; got {value!r}",
+             f"set  [runner]  parallel = <number>  in {home(CONFIG)} (default {PARALLEL}; 1 or 2 on a slow PC)")
+    return int(value)
 
 
 def pass_env():
@@ -1956,6 +1966,7 @@ def cleanup(t):
 def sync(started_here=False):
     """started_here: someone ran `task` or `task start` by hand, so the tasks it starts belong where they are.
     Not for `task watch`: it starts whatever becomes Ready, wherever it happens to run."""
+    slots = parallel()  # a bad value stops before anything changes
     lines, changed, errors = [], [], []
     open_ = tasks()
     # a card that left the open columns (GitHub moves it to Done when its Issue closes, e.g. the PR
@@ -2022,14 +2033,14 @@ def sync(started_here=False):
         lines += table("github_errors", errors, ["id", "error"])
 
     board_ = tasks() if changed else open_
-    free = MAX_PARALLEL - sum(t["status"] == IN_PROGRESS for t in board_)
+    free = slots - sum(t["status"] == IN_PROGRESS for t in board_)
     waiting = [t for t in board_ if t["status"] == READY and t["waits_for"]]
     if waiting:  # never started, so they take no slot; each starts once what it waits for is done
         lines += table("waiting", waiting, ["id", "title", "waits_for"])
     # started in the order they were made, whatever order the board is shown in
     ready = sorted((t for t in board_ if t["status"] == READY and not t["waits_for"]), key=lambda t: int(t["id"]))
     if ready and free <= 0:
-        lines.append(f"queue: {len(ready)} Ready task(s) waiting, all {MAX_PARALLEL} slots busy")
+        lines.append(f"queue: {len(ready)} Ready task(s) waiting, all {slots} slots busy")
     started = []
     for t in ready[:max(free, 0)]:
         try:
@@ -2227,7 +2238,7 @@ def cmd_home(_):
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}  # Done is not fetched
     active = board_
     out(f"bin: {home(BIN)}",
-        f"description: runs coding agents on the tasks of a GitHub Project, max {MAX_PARALLEL} at once",
+        f"description: runs coding agents on the tasks of a GitHub Project, max {parallel()} at once",
         f"board: {board()['url']}",
         "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()), *lines)
     out(*table("tasks", active, ["id", "title", "status", "agent", "waits_for"]) if active else ["tasks: 0 open tasks"])
@@ -2387,7 +2398,7 @@ def events_next(a, wanted):
 
 
 def cmd_watch(_):
-    board()  # fail fast on a bad config
+    board(), parallel()  # fail fast on a bad config
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     try:  # afterwards, each card that gets Done checks again
         out(*archive_lines(archive_overflow()))
@@ -2733,6 +2744,7 @@ def cmd_start(a):
         return
     if t["status"] not in StatusLifecycle.startable_explicitly:
         fail(f"task {t['id']} is {t['status']}; only Backlog or Blocked tasks can be started")
+    parallel()  # a bad config stops before the card moves
     if a["agent"]:
         set_text(t, "Agent", a["agent"])
     set_status(t, READY)

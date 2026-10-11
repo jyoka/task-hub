@@ -182,6 +182,9 @@ reviewer = agent            ; 実装のあと、同じエージェントがレ�
 kiro = kiro-cli whoami      ; 始める前にログインを確かめる。失敗したら、クレジットを使う前に止まる
 ```
 
+**性能の低い PC では**、`[runner]` に `parallel = 1`(または 2)を足します。同時に動かすタスクの数で、既定は 5 です。
+エージェントの CLI は 1 つで数百 MB のメモリを使うため、5 つを同時に動かすとメモリが足りなくなります。
+
 **保存のしかた**: メモ帳の「ファイル」→「名前を付けて保存」で、「エンコード」を **UTF-8** にして保存します
 (「UTF-8 (BOM 付き)」でも読めます)。PowerShell の `>` や `Out-File` で作ると UTF-16 になり、読めません。
 
@@ -407,7 +410,7 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 | Ready に移しても始まらない | 手順 8 の「動いているかを確かめる」 | State が Running でなければ、`install.ps1 -Watch` をもう一度実行する |
 | watch.log の最後が `error: ...` | その error の内容 | 上の「`task` を動かしたとき」の表で、同じ表示を探す。直せば、1 分以内に自分で始め直します |
 | watch.log がない | 一度も始まっていない | `install.ps1 -Watch` をもう一度実行し、出た表示を担当者に伝える |
-| `queue: N Ready task(s) waiting, all 5 slots busy` | 同時に動かせる上限(5 件)に達している | 正常です。前の作業が終われば始まります |
+| `queue: N Ready task(s) waiting, all M slots busy` | 同時に動かせる上限(`[runner] parallel`、既定 5 件)に達している | 正常です。前の作業が終われば始まります |
 | サインインし直すと止まっている | タスク スケジューラの登録 | `Get-ScheduledTask -TaskName 'task-hub watch'` でエラーになるなら、`install.ps1 -Watch` をもう一度 |
 
 ### 通知が出ない
