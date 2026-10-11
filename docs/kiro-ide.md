@@ -106,7 +106,7 @@ project = <you>/<番号>        ; Project の URL の users/<you>/projects/<番�
 issues = <you>/tasks
 
 [runner]
-agent = kiro                  ; 実行は kiro-cli(kiro-cli chat --no-interactive --trust-all-tools)
+agent = kiro                  ; 実行は kiro-cli(kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json)
 reviewer = agent              ; 自動レビューもタスクと同じ kiro で、実装を見ていない新しいコンテキストで動かす
 replanner = agent             ; Blocked の仕分けも kiro。クレジットを節約したいなら、どちらも空にする
 pass_env = KIRO_API_KEY       ; herdr のペインで動く実行にも渡す変数の名前

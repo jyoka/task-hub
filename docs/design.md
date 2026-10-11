@@ -157,7 +157,7 @@
    `--no-interactive` で実物を確認。`conversations_v2` の行の `key` と `created_at` / `updated_at`)と、v2 の
    `~/.kiro/sessions/cli/<id>.json`(新しい版。`cwd` とユーザーのターンの `end_timestamp`)の両方を読みます。SQLite は
    読み取り専用で開きます。使用量は stream-json からは読みません。公式のスキーマがなく、独自のコマンドでは出ないからです
-   (組み込みの claude は途中経過のログのために stream-json を出します。決定事項 20)。
+   (組み込みのエージェントは途中経過のログのために JSON を出します。決定事項 20)。
    Codex、Pi は記録の形式を実物で確かめてから足します。それまでは秒数だけを残します。記録にない欄(Kiro のトークン、
    Claude Code のクレジット)は 0 ではなく「なし」にし、`task stats` はトークンを測れた実行とクレジットを測れた実行を
    分けて数えます。処理の流れにエージェント名の分岐はなく、どの起動でも同じ読み取りを
@@ -184,7 +184,12 @@
    コマンドは今までどおりの出力になります。`--include-partial-messages` は使いません。1 手順 1 行で、進んでいるかを
    見るには十分だからです。JSON でない行はそのまま書きます。知らない種類や形の JSON(新しい Claude Code、ほかの CLI の
    stream-json)は捨てずに、200 字に切って書きます。
-   codex、pi、kiro は今のままです。
+   codex、pi、kiro も同じ形にしました(タスク 173)。それぞれ `codex exec --json`、`pi -p --mode json`、
+   `kiro-cli chat --output-format stream-json` を付け、CLI ごとのクラスが同じ 1 行に直します。どの CLI の JSON かも
+   コマンド(CLI の名前とフラグ)で決めます。kiro-cli と Claude Code は同じ `--output-format stream-json` なので、
+   `kiro-cli` があるかで分けます。text のままにしなかった理由は 3 つです。`pi -p` は最後の答えしか出しません。
+   codex の text はプロンプト全体とツールの出力をそのまま stderr に出します。kiro の text は手順を出しますが、形が
+   ほかと違い、長さの上限もありません。
 
 ## Status の遷移
 

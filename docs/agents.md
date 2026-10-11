@@ -13,9 +13,9 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 | 名前 | task-hub が実行するコマンド | 補足 |
 |---|---|---|
 | `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
-| `codex` | `codex exec -s workspace-write {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません |
-| `pi` | `pi -p {prompt}` | Pi の print モード |
-| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`) |
+| `codex` | `codex exec -s workspace-write --json {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
+| `pi` | `pi -p --mode json {prompt}` | Pi の print モード。`--mode json` は途中の手順をログに出すためです |
+| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
 
 `{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。
 
@@ -101,7 +101,16 @@ aider = aider --yes-always --message {prompt}
 
 `claude` を上書きするときも、組み込みと同じ `env ...` の 3 つの環境変数を付けてください。付けないと、長いテストが Bash ツールの時間の上限(既定 2 分、最大 10 分)を超えたときにバックグラウンドへ回され、`claude -p` はその終わりを待たずにレポートなしで終わります。
 
-途中の手順もログに出したいときは、`--output-format stream-json --verbose` も付けてください。task-hub は、コマンド(プロンプトを除く)に `--output-format stream-json` があるエージェントの出力を、手順ごとの短い 1 行に直してログに書きます。付けなければ、出力をそのまま書きます(`claude -p` なら最後の結果の文だけ)。
+途中の手順もログに出したいときは、組み込みと同じ出力のフラグを付けてください。task-hub は、コマンド(プロンプトを除く)にそのフラグがあるエージェントの出力を、手順ごとの短い 1 行に直してログに書きます。付けなければ、出力をそのまま書きます(`claude -p` と `pi -p` なら最後の結果の文だけ)。
+
+| CLI | 付けるフラグ | コマンドの条件 |
+|---|---|---|
+| Claude Code | `--output-format stream-json --verbose` | `--output-format stream-json` がある(下の kiro-cli でないもの) |
+| Codex | `--json` | `codex` と `exec` と `--json` がある |
+| Pi | `--mode json` | `pi` と `--mode json` がある |
+| Kiro CLI | `--output-format stream-json` | `kiro-cli` と `--output-format stream-json` がある |
+
+`codex` などの CLI は、パス付き(`/opt/homebrew/bin/pi`)でも、`env A=1 ...` の後ろでもかまいません。
 
 コマンドが動くための条件:
 
