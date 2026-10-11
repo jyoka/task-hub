@@ -259,6 +259,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
+| `could not start: the run did not start in herdr tab ...` | herdr のペインが 16 秒の間に `task _run` を始めませんでした(シェルが立ち上がらない、など)。そのタブを見てから Ready に戻します(戻すと、そのタブは閉じます)。あとからそのタブで実行が始まることはありません |
 | `could not start: branch X is not on GitHub ...` | Base branch が GitHub にありません(push していない、マージ後に削除された)。push してから Ready に戻します。別のブランチに変えたいときは、欄を書き換えます(すでに `task/<番号>` を push していたら次の行のとおり) |
 | `could not start: Base branch was changed after the first run ...` | 前の実行が `task/<番号>` を GitHub に push した後で Base branch を書き換えました。そのブランチと PR は前のベースから作られているので続けられません。欄を元に戻すか、PR を閉じてブランチ `task/<番号>` を GitHub で削除してから Ready に戻します(新しいベースから作り直します) |
 

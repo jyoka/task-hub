@@ -56,6 +56,8 @@ NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update"
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
+# how long a herdr pane gets to begin the run, twice (the second time after one more Enter)
+HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # tests: a dead pane fails in seconds
 DEFAULT_AGENTS = {
     "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
               " claude -p --dangerously-skip-permissions {prompt}",
@@ -889,6 +891,25 @@ def write_atomic(path, text):
         temp.unlink(missing_ok=True)
 
 
+@contextlib.contextmanager
+def launch_lock(tid):
+    """Held by the one process starting this task's run: `task start` and the watch can both see the card Ready.
+    Yields False while another process holds it. The system lets go of it when its holder exits or is killed."""
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with open(RUNS / f"{tid}.lock", "a") as f:
+        try:
+            if WINDOWS:
+                import msvcrt
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+
+
 def set_stage(t, stage):
     t["stage"] = stage
     save_run(t)
@@ -1310,19 +1331,28 @@ def launch(t):
         launcher.parent.mkdir(parents=True, exist_ok=True)
         launcher.touch(mode=0o600)
         launcher.chmod(0o600)  # it may hold API keys
-        launcher.write_text("#!/bin/sh\nrm -f " + shlex.quote(str(launcher)) + "  # it may hold API keys: gone once read\n"
+        # it may hold API keys: gone once read. Already gone: task-hub gave up on this start, so it must not run
+        launcher.write_text("#!/bin/sh\nrm " + shlex.quote(str(launcher)) + " || exit 1\n"
                             "exec " + shlex.join(["env", *(f"{k}={v}" for k, v in keep.items()), *cmd]) + "\n")
         pane = res["root_pane"]["pane_id"]
         herdr("pane", "run", pane, shlex.join(["sh", str(launcher)]))
-        # a brand-new shell can swallow the Enter while it is still starting up: confirm the run began
+        # the run has begun once the launcher removed itself: a file, not the pane's screen, where a redraw or a
+        # flood of output can hide the run's first line (#43). A brand-new shell can swallow the Enter while it is
+        # still starting up: one more Enter, then give up
         for retry in (False, True):
             if retry:
                 herdr("pane", "send-keys", pane, "enter")
-            if herdr("pane", "wait-output", pane, "--match", f"== task {t['id']}:", "--timeout", "8000").returncode == 0:
+            end = time.time() + HERDR_START_SECONDS
+            while launcher.exists() and time.time() < end:
+                time.sleep(0.2)
+            if not launcher.exists():
                 break
         else:
-            launcher.unlink(missing_ok=True)  # never ran, so never removed itself
-            raise RuntimeError(f"the run did not start in herdr {'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
+            # whoever removes the launcher first decides: the run, which then goes on, or this, after which it never can
+            with contextlib.suppress(FileNotFoundError):
+                launcher.unlink()
+                raise RuntimeError("the run did not start in herdr "
+                                   f"{'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
         with open(t["log"], "ab") as log:
             start = lambda flags: subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=log,
@@ -1958,6 +1988,8 @@ def cleanup(t):
             return f"branch {t['branch']} could not be deleted"
     (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
     (RUNS / f"{t['id']}.json").unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        (RUNS / f"{t['id']}.lock").unlink(missing_ok=True)
     return ""
 
 
@@ -2043,18 +2075,25 @@ def sync(started_here=False):
         lines.append(f"queue: {len(ready)} Ready task(s) waiting, all {slots} slots busy")
     started = []
     for t in ready[:max(free, 0)]:
-        try:
-            if started_here:  # Issues made without `task new` (gh, GitHub, other skills) have no workspace yet
-                remember_where_asked(t, keep=True)
-            launch(t)
-        except RuntimeError as e:
-            record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""), "agent": t.get("agent", ""),
-                        "started": now(), "finished": now(), "seconds": 0, "status": BLOCKED,
-                        "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
-            report_comment(t, blocked=f"could not start: {str(e)[:300]}")
-            set_status(t, BLOCKED, reason=f"could not start: {str(e)[:300]}")
-            lines.append(f"error: task {t['id']} could not start: {e}")
-            continue
+        with launch_lock(t["id"]) as mine:
+            # the board was read before another task-hub on this machine started it: a second start would
+            # close the first one's tab and share its worktree (#43)
+            if not mine or alive(load_run(t["id"])):
+                lines.append(f"skipped: task {t['id']} is already starting in another task-hub "
+                             "(`task watch` or `task start`)")
+                continue
+            try:
+                if started_here:  # Issues made without `task new` (gh, GitHub, other skills) have no workspace yet
+                    remember_where_asked(t, keep=True)
+                launch(t)
+            except RuntimeError as e:  # still holding the lock: no other start sees the card Ready in between
+                record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""),
+                            "agent": t.get("agent", ""), "started": now(), "finished": now(), "seconds": 0,
+                            "status": BLOCKED, "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
+                report_comment(t, blocked=f"could not start: {str(e)[:300]}")
+                set_status(t, BLOCKED, reason=f"could not start: {str(e)[:300]}")
+                lines.append(f"error: task {t['id']} could not start: {e}")
+                continue
         started.append({"id": t["id"], "agent": t["agent"],
                         "where": f"herdr tab {t['tab']}" if t["tab"] else
                         f"herdr workspace {t['workspace']}" if t["workspace"] else home(t["log"])})
