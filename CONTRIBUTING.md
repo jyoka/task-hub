@@ -72,10 +72,16 @@ docs/                  セットアップ、エージェント、設計、形式
 python3 tests/run.py
 ```
 
-テストを 1 件ずつ別のプロセスで、CPU の数だけ並べて動かします(10 コアで約 3.5 分)。並べる数は `-j 4` のように
-指定できます。名前を渡すと、その文字を含むテストだけを動かします(例: `python3 tests/run.py test_task`)。
+テストを 1 件ずつ別のプロセスで、2 つずつ並べて動かします(約 8 分)。並べる数は `-j 4` のように指定できます。
+マシンを使い切らないよう、穏やかに動かします。
+
+- テストのプロセスは低い優先度で動きます(Unix は `nice`、Windows は `BELOW_NORMAL_PRIORITY_CLASS`)。人の作業とエージェントの反応を落とさないためです
+- 全部のテストは、1 台のマシンで同時に 1 つだけ動きます。2 つめは `waiting for the full test run ...` と 1 行出して、1 つめが終わるまで待ちます。
+  ロックは一時ディレクトリの `task-hub-tests.lock` で、持ち主のプロセスが死んでいれば取り直します
+- 名前を渡すと、その文字を含むテストだけを動かします(例: `python3 tests/run.py test_task`)。このときは待ちません
+
 1 件ずつ順に動かすときは `python3 -m unittest discover -s tests -v` です(全体で 13 分ほど)。
-作業中は、変えた部分のテストだけを動かすと速く済みます。
+作業中は変えた部分のテストだけを動かし、全部のテストは最後に 1 回だけ動かします。
 
 ```
 python3 -m unittest tests.test_task.TaskTest -k feedback -v
@@ -86,6 +92,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 |---|---|
 | `tests/test_task.py` | `bin/task` をサブプロセスとして動かす。GitHub(`gh`)、エージェント、herdr はフェイクに置き換え、git は本物を使う |
 | `tests/test_install.py` | Kiro 用のインストーラ(`kiro/install.sh` など) |
+| `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `kiro/board-extension` の `npm test` | Kiro IDE の拡張。Node.js 22.18 以上か 23.6 以上([docs/kiro-ide.md](docs/kiro-ide.md)) |

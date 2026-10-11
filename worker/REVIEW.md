@@ -30,8 +30,10 @@ fails, not to confirm that it works. The pull request is opened after you finish
    the evidence (a file and line, or a command and its output). Also flag work the Goal did not ask for.
 2. **Correctness.** Look for concrete inputs that break the change: empty, zero, missing, unexpected
    values, the second run, the error path.
-3. **Tests.** Do the tests check the acceptance criteria, or only mirror the implementation? Run them
-   if you can, and quote the command and the result.
+3. **Tests.** Do the tests check the acceptance criteria, or only mirror the implementation? Run the
+   tests that check the acceptance criteria, and quote the command and the result. If the report gives
+   the result of the full test suite, do not run the full suite again unless you have a concrete reason
+   to doubt that result (say what it is).
 4. **Regressions.** Does the change break existing behaviour or the repository's own rules
    (AGENTS.md, CLAUDE.md, and so on)?
 
