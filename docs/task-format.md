@@ -63,7 +63,32 @@ What changed, how it was verified, what was not done.
 ## Please review
 
 Exact files, decisions, and risks to check.
+
+- Learning route:          <- always the last item; one per report
+  - Question: ...
+  - Entry point: ...
+  - Search: ...
+  - Trace: ...
+  - Check: ...
+  - Explain yourself: ...
 ```
+
+Please review の最後の項目は、人がコードを自分で探して理解するための学習ルート(Learning route)です。
+変えた中でいちばん大事な動きについて、次の 6 行を 1 つの項目の下に字下げして書きます。
+
+| 行 | 中身 |
+|---|---|
+| Question | 人が調べること |
+| Entry point | 読みはじめる実在のファイルと関数 |
+| Search | エージェントがこの実行で動かし、役に立つ一致を確かめた読み取りだけの `rg` コマンド。`rg` がなければそう書き、代わりに動かした `git grep` などを書く |
+| Trace | 動きの流れを読む順に、関数やファイルを最大 3 つ |
+| Check | 関係するテストと、それで分かること。動かしたのか、勧めるだけなのかを分ける |
+| Explain yourself | 人が自分で答える質問を 1 つ。答えは書かない |
+
+当てはまらない行(research タスク、ドキュメントだけの変更、テストがない)は `n/a` と理由を書き、実際にある根拠
+(文書の節、出典)を示します。学習ルートは確認すべきリスクや判断の代わりではなく、その後ろに足すものです。
+見出しは増やさないので、task-hub の読み取りと、PR や Issue への転記はこれまでと同じです。ルートが 1 つの項目
+なので、digest の `review`([operations.md](operations.md#判断用の要点digest))にはリスクの項目が先に出ます。
 
 ## task-hub のレポートコメント
 

@@ -277,6 +277,14 @@ if mode == "long":  # a report far longer than anyone should read to decide
 if mode == "prline":  # a research report that quotes a PR line and nests its review bullets
     report = ("## Report\n\nCompared the libraries.\nPR: #26\n\n## Please review\n\n"
               "- a\n  - a1\n  - a2\n- b\n")
+if mode == "route":  # review items, then the learning route worker/PROMPT.md asks for, as the last item
+    report += ("- hello.txt: tone\n- Learning route:\n"
+               "  - Question: where does the greeting come from?\n"
+               "  - Entry point: `hello.txt`\n"
+               "  - Search: `rg -n \"hello\" .` (ran it: `hello.txt:1`)\n"
+               "  - Trace: `hello.txt` -> `README.md`\n"
+               "  - Check: n/a: no tests in this repo (not run)\n"
+               "  - Explain yourself: why is the greeting a file, not code?\n")
 if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
 if mode != "noreport":
@@ -2193,6 +2201,21 @@ class TaskTest(unittest.TestCase):
         d = self.events_of(quoted)[-1]["digest"]  # only task-hub's own last PR line counts, not the agent's text
         self.assertEqual(("pr" in d, d["report"].startswith("Compared the libraries."), d["review"]),
                          (False, True, ["a", "b"]))
+
+    def test_a_learning_route_reaches_the_pr_and_issue_unchanged_after_the_review_items(self):
+        tid = self.new("route")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        route = ("- Learning route:\n  - Question: where does the greeting come from?\n"
+                 "  - Entry point: `hello.txt`\n  - Search: `rg -n \"hello\" .` (ran it: `hello.txt:1`)\n"
+                 "  - Trace: `hello.txt` -> `README.md`\n  - Check: n/a: no tests in this repo (not run)\n"
+                 "  - Explain yourself: why is the greeting a file, not code?")
+        review = f"## Please review\n\n- hello.txt: wording\n- hello.txt: tone\n{route}\n\n"
+        self.assertIn(review, self.pr(tid)["body"])
+        self.assertIn(review, self.comments(tid)[-1])
+        # the route is one item, after the review items: the digest shows those first
+        self.assertEqual(self.events_of(tid)[-1]["digest"]["review"],
+                         ["hello.txt: wording", "hello.txt: tone", "Learning route:"])
 
     def test_events_digest_prints_it_below_each_line_and_changes_nothing_without_it(self):
         ok, stuck = self.new("ok"), self.new("stuck")
