@@ -936,6 +936,10 @@ class TaskTest(unittest.TestCase):
         self.assertIn("Do **not** commit", call["prompt"])
         self.assertIn("split it into smaller runs", call["prompt"])  # a tool may background a long test run
         self.assertIn("while a command is still running", call["prompt"])
+        for rule in ("finite wall-clock deadline", "No output alone",
+                     "Do not rerun a timed-out command unchanged",
+                     "only the test/build processes you launched", "bounded cleanup"):
+            self.assertIn(rule, call["prompt"])
         self.assertIn("which parts you ran", call["prompt"])
         self.assertIn("Skip the parts written for a person", call["prompt"])  # e.g. a setup steering file
         self.assertIn("do not run installers and do not sign in", call["prompt"])
@@ -2804,6 +2808,10 @@ class TaskTest(unittest.TestCase):
         self.assertIn("Say hello. MODE:ok", prompt)  # the Goal, with its acceptance criteria
         self.assertIn("+hello from mode ok", prompt)  # hello.txt is a new file
         self.assertIn("split it into smaller runs", prompt)  # a tool may background a long test run
+        for rule in ("finite wall-clock deadline", "No output alone",
+                     "Do not rerun a timed-out command unchanged",
+                     "only the test/build processes you launched", "bounded cleanup"):
+            self.assertIn(rule, prompt)
 
     def test_reviewer_sees_the_whole_branch_on_a_rerun(self):
         self.write_config(reviewer=True)

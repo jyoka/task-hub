@@ -24,6 +24,25 @@ fails, not to confirm that it works. The pull request is opened after you finish
    difference. When a file should not be in the pull request, the fix to ask for is deleting it
    (or adding it to `.gitignore`, if the Goal allows), never `git rm --cached`.
 
+## Test and build waits
+
+- Give every test/build command a finite wall-clock deadline before starting it. Default to
+  2 minutes for one test; use the repository's documented timings plus margin for longer runs
+  and a separate deadline for waiting on a test-suite lock. Check that the timeout mechanism
+  exists: macOS does not include `timeout` by default. A tool's 30-minute ceiling is not a plan.
+- For longer runs, arrange progress output or checkpoints at least every 60 seconds.
+  No output alone does not prove a hang: check the process tree, elapsed time, CPU, and log
+  or file timestamps. Do not extend a deadline without concrete progress and a new finite limit.
+- On timeout, capture the command, elapsed time, last output, and process state. Terminate
+  only the test/build processes you launched, after checking their identities, and confirm
+  their children exit too. Never kill task runners, agents, or another task's tests.
+- Do not rerun a timed-out command unchanged. Diagnose the cause and ask the worker to fix it
+  in Please fix; do not edit the harness yourself or hide failures by skipping the test.
+- Tests that launch subprocesses or PTYs need bounded cleanup as well as bounded assertions.
+  Drain or close pipes/terminal connections as appropriate before reaping children; flag an
+  unbounded `wait()` or `waitpid()` in teardown when it can prevent the test from finishing.
+- Record timeouts, termination, and incomplete verification in the Review. A timeout is not a pass.
+
 ## What to check, in this order
 
 1. **Goal.** Go through the Goal's acceptance criteria one by one. For each, say met or not met and

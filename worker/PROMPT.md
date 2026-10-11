@@ -41,6 +41,25 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    root). It is required: without it the task counts as failed. task-hub reads it and never
    commits it, so it does not count as a changed file and needs no mention in the report.
 
+## Test and build waits
+
+- Give every test/build command a finite wall-clock deadline before starting it. Default to
+  2 minutes for one test; use the repository's documented timings plus margin for longer runs
+  and a separate deadline for waiting on a test-suite lock. Check that the timeout mechanism
+  exists: macOS does not include `timeout` by default. A tool's 30-minute ceiling is not a plan.
+- For longer runs, arrange progress output or checkpoints at least every 60 seconds.
+  No output alone does not prove a hang: check the process tree, elapsed time, CPU, and log
+  or file timestamps. Do not extend a deadline without concrete progress and a new finite limit.
+- On timeout, capture the command, elapsed time, last output, and process state. Terminate
+  only the test/build processes you launched, after checking their identities, and confirm
+  their children exit too. Never kill task runners, agents, or another task's tests.
+- Do not rerun a timed-out command unchanged. Diagnose and fix the cause first, then retry
+  the smallest relevant test with a deadline. Do not hide failures by skipping the test.
+- Tests that launch subprocesses or PTYs need bounded cleanup as well as bounded assertions.
+  Drain or close pipes/terminal connections as appropriate before reaping children; never use
+  an unbounded `wait()` or `waitpid()` in teardown.
+- Record timeouts, termination, and incomplete verification in the Report. A timeout is not a pass.
+
 ## `.task-report.md`
 
 Use exactly these headings. task-hub copies them into the pull request and the task board.
