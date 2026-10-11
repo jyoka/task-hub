@@ -354,7 +354,10 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   kiro の `tool_call_update`)、考えたこと(`thinking`、`reasoning`、`agent_thought_chunk`)、途中の差分(`stream_event`、
   `message_update`、`agent_message_chunk` そのもの)、セッションの情報(`system`、`session`、`metadata` など)。
 - JSON でない行(stderr の警告など)はそのまま、知らない種類や形の JSON は `LOG_LINE_MAX` 字に切って書く。
-- 出力が終わったときにまだ持っている文(codex、kiro)は全文で書く(`Steps.end`)。
+- 出力が終わったときにまだ持っている文(codex、pi、kiro)は全文で書く(`Steps.end`)。
+- `agent_process` は `Steps.read` と `Steps.close` を呼ぶ。中の `lines` と `end` がどんな例外を出しても、run は続く。
+  `lines` ならその行を `LOG_LINE_MAX` 字に切って書き、`end` なら `== cannot show the end of the agent's output (...)`
+  を書く。ログの見せ方のせいで、エージェントの作業が push されないことはない。
 
 使った量はこの出力からは読まず、今までどおり `agent_usage` が手元の記録から読みます(kiro の stream-json の実行も、
 v2 のセッションのファイルに残ることを 2.28.0 で確かめた)。

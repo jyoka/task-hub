@@ -629,7 +629,8 @@ FAKE_STEPS = r'''#!/usr/bin/env python3
 # codex-cli 0.160.0 (`exec --json`), pi 1.1.0 (`-p --mode json`), and kiro-cli 2.28.0 (`--output-format stream-json`):
 # one JSON line per event. Without those flags, their text output: codex and kiro-cli print their steps, with the
 # tool output (codex), on stderr; all three print the final answer on stdout. WAIT in the goal holds the run before it
-# finishes, until the test creates the release file. MODE:failed ends the run with an error.
+# finishes, until the test creates the release file. MODE:failed ends the run with an error. MODE:odd (pi) ends the
+# output after a last message of a shape task-hub does not know, without agent_settled.
 import json, os, shlex, subprocess, sys, time
 from pathlib import Path
 cli, prompt, argv = Path(sys.argv[0]).name, sys.argv[-1], sys.argv[1:-1]
@@ -637,6 +638,7 @@ given = lambda flag, value: any(a == flag and b == value for a, b in zip(argv, a
 stream = {"codex": "--json" in argv, "pi": given("--mode", "json"), "kiro-cli": given("--output-format", "stream-json")}[cli]
 cwd = os.path.realpath(os.getcwd())
 failed = "MODE:failed" in prompt
+odd = "MODE:odd" in prompt
 said_before, ids, texts = [], iter(range(100)), []
 def out(text, end="\n"):
     print(text, end=end, flush=True)
@@ -719,11 +721,15 @@ def finish(text):
     elif cli == "pi":
         last = {"role": "assistant", "content": [{"type": "thinking", "thinking": "SECRET THOUGHT"}, {"type": "text", "text": text}],
                 "stopReason": "error" if failed else "stop", **({"errorMessage": "429 rate limited"} if failed else {})}
+        if odd:
+            last = {"role": "assistant", "content": None, "stopReason": "stop"}
         emit({"type": "message_end", "message": last})
         emit({"type": "turn_end", "message": last, "toolResults": []})
         emit({"type": "agent_end", "willRetry": False, "messages": [
             {"role": "user", "content": [{"type": "text", "text": prompt}]},
             {"role": "toolResult", "content": [{"type": "text", "text": "SECRET README CONTENT"}]}, last]})
+        if odd:
+            sys.exit(0)
         emit({"type": "agent_settled", "aborted": False})
         if not stream:
             if failed:
@@ -2665,6 +2671,19 @@ class TaskTest(unittest.TestCase):
             # pi --mode json exits 0 even then; `pi -p` exits 1, and the run must not look like a success
             self.assertIn("== agent exited with code 1", log, agent)
 
+    def test_a_run_goes_on_when_the_agents_output_ends_in_a_shape_task_hub_does_not_know(self):
+        # task 173: pi's last message, held to the end of the output, had no content: `task _run` crashed, and the
+        # agent's work was never pushed
+        self.fake_steps()
+        tid = self.new("ok MODE:odd", "Add hello", "jyoka/app", "--agent", "pi")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        log = self.task("log", tid, "--full").splitlines()
+        self.assertIn("== agent exited with code 0", log)
+        self.assertTrue(any(line.startswith("== cannot show the end of the agent's output (TypeError: ")
+                            for line in log), log)
+        self.assertIn("Added hello.txt.", self.comments(tid)[-1])  # the work and the report went out
+
     def test_json_steps_of_codex_pi_kiro_of_other_shapes_are_kept_short_or_left_out(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
             loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
@@ -2672,8 +2691,8 @@ class TaskTest(unittest.TestCase):
             loader.exec_module(task)
             def lines(fmt, *events):
                 steps = task.STEPS[fmt](self.root)
-                shown = [s for e in events for s in steps.lines(e if isinstance(e, str) else json.dumps(e))]
-                return shown + steps.end(), steps.failed
+                shown = [s for e in events for s in steps.read(e if isinstance(e, str) else json.dumps(e))]
+                return shown + steps.close(), steps.failed
             for fmt in ("codex", "pi", "kiro"):
                 self.assertEqual(lines(fmt, "not JSON", "[1]"), (["not JSON", "[1]"], False), fmt)
                 future = lines(fmt, {"type": "a_future_event", "data": "x" * 500})[0]
@@ -2720,7 +2739,19 @@ class TaskTest(unittest.TestCase):
                 {"type": "agent_end", "messages": [overflow]}, {"type": "compaction_start", "reason": "overflow"},
                 {"type": "agent_start"}, {"type": "agent_end", "messages": [overflow]}),
                 (["== pi compacts its context (overflow)", "== pi ended with error: prompt is too long"], True))
-            update =lambda **u: {"type": "sessionUpdate", "data": {"update": u}}
+            self.assertEqual(lines("pi",  # held to the end, in a shape we do not know: the run still goes on
+                {"type": "agent_end", "messages": [{"role": "assistant", "content": None, "stopReason": "stop"}]}),
+                (["== cannot show the end of the agent's output (TypeError: 'NoneType' object is not iterable)"],
+                 False))
+            class Broken(task.Steps):  # any reader, and any exception
+                def lines(self, line):
+                    raise ValueError(line)
+                def end(self):
+                    raise RuntimeError("x" * 500)
+            broken = Broken(self.root)
+            self.assertEqual(broken.read("as it came"), ["as it came"])
+            self.assertEqual(len(broken.close()[0]), 200)
+            update = lambda **u: {"type": "sessionUpdate", "data": {"update": u}}
             self.assertEqual(lines("kiro",
                 update(sessionUpdate="agent_message_chunk", content={"type": "text", "text": "\nLooking.\nSECRET"}),
                 update(sessionUpdate="tool_call", kind="edit", rawInput={"command": "strReplace", "path": "a.py"},

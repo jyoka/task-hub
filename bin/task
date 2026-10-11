@@ -1647,9 +1647,9 @@ def agent_process(agent, prompt, wt, say):
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
         steps = STEPS.get(step_format(agent), Steps)(wt)
         for line in proc.stdout:
-            for shown in steps.lines(line.rstrip("\n")):
+            for shown in steps.read(line.rstrip("\n")):
                 say(shown)
-        for shown in steps.end():
+        for shown in steps.close():
             say(shown)
         code = proc.wait()
         return 1 if code == 0 and steps.failed else code
@@ -1712,6 +1712,20 @@ class Steps:
     def end(self):
         """What is still held back when the output ends."""
         return []
+
+    # What agent_process calls. Showing the output must never cost the run, whatever a CLI prints: a reader that
+    # breaks (any exception, on a shape we do not know) keeps the line as it came, and the run goes on.
+    def read(self, line):
+        try:
+            return self.lines(line)
+        except Exception:
+            return [cut(line)]
+
+    def close(self):
+        try:
+            return self.end()
+        except Exception as e:
+            return [cut(f"== cannot show the end of the agent's output ({type(e).__name__}: {e})")]
 
 
 class ClaudeSteps(Steps):
