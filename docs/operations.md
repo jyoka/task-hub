@@ -18,6 +18,20 @@
   何が起きたかを見られるように残し、`task done <番号>` か PR のマージで閉じます。task-hub が閉じるのは、自分が
   作ったタブだけです(herdr が同じ id を別のタブに使い回していないか、名前で確かめてから閉じます)。
 - **herdr なしの場合**: `task log <番号>` で最後の 40 行を、`task log <番号> --full` ですべてを表示します。
+- **claude の途中経過**: 組み込みの claude は、手順ごとに 1 行をログ(herdr のタブ、`task log`、task-rs の `l`)に
+  出します。ツールの呼び出しは `· ツール名: 何を`、assistant の文は先頭の 1 行、サブエージェントの手順は 2 字下げです。
+  最後の結果の文は全部残ります。ツールの結果の中身は出さず、1 行は 200 字までです。
+  ```
+  == agent: claude
+  I'll look at the TUI first.
+  · Read: rust/src/tui.rs
+  · Grep: "log_tail"
+  · Edit: rust/src/tui.rs
+  · Bash: cargo test -p task-rs
+  ```
+  `slow` が届いたら、最後の行がいつのものかで、進んでいるのか止まっているのかを判断します。`config.ini` で claude の
+  コマンドを自分で書いていて `--output-format stream-json` がなければ、今までどおり最後の結果だけが出ます
+  ([agents.md](agents.md#エージェントの変更と追加))。codex、pi、kiro の出力はそのまま書きます。
 - **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
   `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
   `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です

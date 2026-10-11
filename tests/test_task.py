@@ -557,6 +557,73 @@ if form in ("V2", "BAD"):
         session("old", cwd, [turn(iso(now - 3600), [100], 50)], "old-model", at=now - 3600)
 '''
 
+FAKE_CLAUDE = r'''#!/usr/bin/env python3
+# Claude Code's print mode, in the shapes seen from claude 2.1.296: only the final result as text, or with
+# --output-format stream-json --verbose one JSON line per step. WAIT in the goal holds it before it finishes, until
+# the test creates the release file, so the log can be read while the run is still going.
+import json, os, re, subprocess, sys, time
+from pathlib import Path
+prompt, argv = sys.argv[-1], sys.argv[1:-1]
+stream = "stream-json" in argv and "--verbose" in argv
+cwd = os.path.realpath(os.getcwd())  # Claude Code names files by their real path (/private/var on macOS)
+def emit(d):
+    if stream:
+        print(json.dumps({**d, "session_id": "s1", "uuid": "u1"}), flush=True)
+def tool(name, parent=None, **args):
+    emit({"type": "assistant", "parent_tool_use_id": parent, "message": {"id": "msg_1", "role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": name, "input": args, "caller": {"type": "direct"}}]}})
+def said(text):
+    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_2", "role": "assistant", "content": [
+        {"type": "thinking", "thinking": "", "signature": "x"}, {"type": "text", "text": text}]}})
+def tool_result(content):
+    emit({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+        {"tool_use_id": "toolu_1", "type": "tool_result", "content": content}]}, "tool_use_result": {"stdout": content}})
+def finish(text):
+    said(text)
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "result": text})
+    if not stream:
+        print(text, flush=True)
+emit({"type": "system", "subtype": "hook_started", "hook_name": "SessionStart:startup"})
+emit({"type": "system", "subtype": "init", "cwd": cwd, "tools": ["Bash", "Read", "Edit"], "model": "claude-x"})
+if "adversarial reviewer of one completed task-hub run" in prompt:
+    if "USAGE" in prompt:
+        subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
+    tool("Read", file_path=f"{cwd}/hello.txt")
+    tool_result("1\tREVIEWED FILE CONTENT")
+    Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nchecked hello.txt\n")
+    finish("Reviewed: pass.")
+    sys.exit(0)
+if "You triage one blocked task-hub run" in prompt:
+    tool("Grep", pattern="Stripe", path=cwd)
+    tool_result("no matches")
+    Path(".task-replan.md").write_text("## Decision\n\nhuman\n\n## For the human\n\nWhere is the Stripe test key?\n")
+    finish("Asked the human.")
+    sys.exit(0)
+if "USAGE" in prompt:
+    subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "agent"], check=True)
+said("I'll look around first.\nThis second line stays out of the log.")
+tool("Read", file_path=f"{cwd}/README.md")
+tool_result("1\tSECRET README CONTENT")
+tool("Grep", pattern="hello", output_mode="content")
+tool("Task", description="Find the tests", subagent_type="Explore", prompt="look for tests")
+tool("Glob", parent="toolu_1", pattern="tests/**/*.py")
+print("a warning line that is not JSON", flush=True)
+tool("Bash", command="cargo test -p task-rs", description="Run the tests")
+tool_result("test result: ok. SECRET TEST OUTPUT")
+if "WAIT" in prompt:
+    release, end = Path(os.environ["TASK_TEST_CLAUDE_RELEASE"]), time.time() + 30
+    while not release.exists() and time.time() < end:
+        time.sleep(0.1)
+tool("Bash", command="echo " + "x" * 500 + "\necho second line")
+Path("hello.txt").write_text("hello from claude\n")
+tool("Edit", file_path=f"{cwd}/hello.txt", old_string="SECRET OLD", new_string="SECRET NEW")
+blocked = "MODE:blocked" in prompt
+Path(".task-report.md").write_text(("## Blocked\n\nNeed the Stripe test key.\n\n" if blocked else "")
+                                   + "## Report\n\nAdded hello.txt.\n\n## Please review\n\n- hello.txt\n")
+tool("Write", file_path=f"{cwd}/.task-report.md", content="SECRET REPORT")
+finish("All done.\nAdded hello.txt and wrote the report.\n\nThe last line of the result.")
+'''
+
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
@@ -906,7 +973,8 @@ class TaskTest(unittest.TestCase):
             cmd = task.agent_command("claude", "do it")
         # claude -p ends without waiting for a backgrounded test, so the run has no report (tasks#47, #51)
         self.assertEqual(cmd, ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
-                               "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions", "do it"])
+                               "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions",
+                               "--output-format", "stream-json", "--verbose", "do it"])
 
     def test_unknown_agent_on_a_card_blocks_only_that_card(self):
         bad, good = self.new(title="bad"), self.new(title="good")
@@ -2288,6 +2356,95 @@ class TaskTest(unittest.TestCase):
         [agent] = self.metrics(1)[0]["usage"]
         self.assertEqual(set(agent), {"role", "agent", "seconds"})
         self.assertNotIn(" used ", self.task("log", tid, "--full"))
+
+    def fake_claude(self):
+        """A `claude` on PATH, so the built-in claude command runs it; the release file lets a WAIT run finish."""
+        (self.root / "fakebin" / "claude").write_text(FAKE_CLAUDE)
+        (self.root / "fakebin" / "claude").chmod(0o755)
+        self.env["TASK_TEST_CLAUDE_RELEASE"] = str(self.root / "claude.release")
+
+    def test_builtin_claude_shows_each_step_in_the_log_while_it_runs(self):
+        # task 169: `claude -p` printed only its final result, so a 40-minute run showed two lines and looked stuck
+        self.fake_claude()
+        self.write_config(reviewer="claude")
+        tid = self.new("ok WAIT USAGE", "Add hello", "jyoka/app", "--agent", "claude")
+        self.task("start", tid)
+        self.wait_for(lambda: "· Bash: cargo test -p task-rs" in self.task("log", tid, "--full"))
+        self.assertEqual(self.status(tid), "In progress")  # the steps arrive while claude still runs
+        self.assertNotIn("All done.", self.task("log", tid, "--full"))
+        (self.root / "claude.release").touch()
+        self.assertEqual(self.wait(tid), "In review")
+        lines = self.task("log", tid, "--full").splitlines()
+        agent = lines[lines.index("== agent: claude"):lines.index("== reviewer: claude")]
+        self.assertEqual([line for line in agent if line.startswith(("· ", "  · ", "I'll"))], [
+            "I'll look around first.", "· Read: README.md", '· Grep: "hello"', "· Task: Find the tests",
+            '  · Glob: "tests/**/*.py"', "· Bash: cargo test -p task-rs", "· Bash: echo " + "x" * 184 + "...",
+            "· Edit: hello.txt", "· Write: .task-report.md"])
+        self.assertIn("a warning line that is not JSON", agent)  # not JSON: as it came
+        # the final result stays whole, as `claude -p` printed it before, after the first line of the same last text
+        end = len(agent) - 1 - agent[::-1].index("All done.")
+        self.assertEqual(agent[end - 1], "All done.")
+        self.assertEqual(agent[end:end + 4], ["All done.", "Added hello.txt and wrote the report.", "",
+                                             "The last line of the result."])
+        log = "\n".join(lines)
+        for hidden in ("SECRET", "second line", '"type"', "session_id", "hook_started"):
+            self.assertNotIn(hidden, log)  # no tool results, inputs beyond the one shown, or raw events
+        self.assertLessEqual(max(len(line) for line in lines if "·" in line), 200)
+        # what each launch used is still read from Claude Code's transcripts, and the reviewer streams too
+        self.assertIn("== agent used 4 calls, 448 tokens (4 out), 2 subagent calls, models claude-agent", log)
+        self.assertIn("== reviewer used 4 calls, 3.1k tokens (28 out), 2 subagent calls, models claude-reviewer", log)
+        reviewer = lines[lines.index("== reviewer: claude"):]
+        self.assertIn("· Read: hello.txt", reviewer)
+        self.assertIn("Reviewed: pass.", reviewer)
+        self.assertIn("== reviewer verdict: pass", reviewer)
+        self.assertIn("Added hello.txt.", self.comments(tid)[-1])  # the report is read as before
+
+    def test_builtin_claude_as_replanner_shows_its_steps_too(self):
+        self.fake_claude()
+        self.write_config(replanner="claude")
+        tid = self.new("blocked", "Add hello", "jyoka/app", "--agent", "claude")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: self.replans(tid))
+        self.assertIn("Decision: human", self.replans(tid)[-1])
+        self.wait_for(lambda: "== replanner decision: human" in self.task("log", tid, "--full"))
+        lines = self.task("log", tid, "--full").splitlines()
+        replanner = lines[lines.index("== replanner: claude"):]
+        self.assertEqual(replanner[1:3], ['· Grep: "Stripe"', "Asked the human."])
+
+    def test_stream_json_lines_of_other_shapes_are_kept_short_or_left_out(self):
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            lines = lambda d: task.stream_json_lines(d if isinstance(d, str) else json.dumps(d), self.root)
+            self.assertEqual(lines('[1, 2]'), ['[1, 2]'])  # JSON, but no event: as it came
+            self.assertEqual(lines(""), [""])
+            self.assertEqual(lines({"type": "user", "message": {"content": [{"content": "SECRET"}]}}), [])
+            future = lines({"type": "a_future_event", "data": "x" * 500})
+            self.assertEqual((len(future), len(future[0]), future[0][-3:]), (1, 200, "..."))
+            self.assertEqual(len(lines({"type": "assistant", "message": "a shape we do not know" * 20})[0]), 200)
+            self.assertEqual(lines({"type": "result", "subtype": "error_max_turns", "is_error": True}),
+                             ["== claude ended with error_max_turns"])
+            self.assertEqual(lines({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "TodoWrite", "input": {"todos": [{"content": "SECRET"}]}},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "cd x &&\nmake"}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/etc/hosts"}}]}}),
+                ["· TodoWrite", "· Bash: cd x && ...", "· Read: /etc/hosts"])
+            # only the command decides, never a prompt that mentions it
+            self.assertTrue(task.streams_json("claude"))
+            self.assertFalse(task.streams_json("fake"))
+
+    def test_own_claude_command_without_stream_json_logs_as_before(self):
+        self.fake_claude()
+        self.write_config(f"claude = {self.root}/fakebin/claude -p --dangerously-skip-permissions {{prompt}}\n")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--agent", "claude")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        lines = self.task("log", tid, "--full").splitlines()
+        agent = lines[lines.index("== agent: claude") + 1:lines.index("== agent exited with code 0")]
+        self.assertEqual(agent, ["a warning line that is not JSON", "All done.",
+                                 "Added hello.txt and wrote the report.", "", "The last line of the result."])
 
     def test_records_are_read_from_claude_config_dir_when_set(self):
         self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")
