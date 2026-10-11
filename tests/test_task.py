@@ -389,7 +389,12 @@ def new_tab(db, ws, cwd, label):
     return {"root_pane": db["panes"][pane], "tab": db["tabs"][tab]}
 def out_file(pane):
     return f"{path}.{pane.replace(':', '_')}.out"
+def pane_or_fail(pane):
+    # like herdr, a pane whose tab or workspace was closed is gone: its commands fail at once
+    return locked(lambda db: db["panes"].get(pane)) or fail(f"pane {pane} not found")
 cmd = a[:2]
+if cmd in (["workspace", "create"], ["tab", "create"]) and os.environ.get("TASK_TEST_HERDR_SLOW"):
+    time.sleep(float(os.environ["TASK_TEST_HERDR_SLOW"]))  # a busy herdr: two task-hubs are opening tabs at once
 if cmd == ["status", "server"]:
     print("status: running")
 elif cmd == ["workspace", "list"]:
@@ -408,6 +413,7 @@ elif cmd in (["workspace", "close"], ["tab", "close"]):
     def close(db):
         db["workspaces" if cmd[0] == "workspace" else "tabs"].pop(a[2], None)
         db["closed"].append(a[2])
+        db["panes"] = {k: p for k, p in db["panes"].items() if a[2] not in (p["tab_id"], p["workspace_id"])}
     locked(close)
     res({"type": "ok"})
 elif cmd == ["tab", "create"]:
@@ -420,19 +426,25 @@ elif cmd == ["tab", "get"]:
 elif cmd == ["pane", "list"]:
     res(locked(lambda db: {"panes": list(db["panes"].values())}))
 elif cmd == ["pane", "run"]:
-    pane = locked(lambda db: db["panes"][a[2]])
+    pane = pane_or_fail(a[2])
+    if os.environ.get("TASK_TEST_HERDR_RUN") == "swallow":  # a shell still starting up: the command waits, typed
+        locked(lambda db: db.setdefault("swallowed", []).append({"cwd": pane["cwd"], "command": a[3]}))
+        sys.exit(0)
     # like a real pane, the shell has the herdr server's environment, not the caller's: only what the launcher passes
     subprocess.Popen(["sh", "-c", a[3]], cwd=pane["cwd"], stdin=subprocess.DEVNULL, stdout=open(out_file(a[2]), "ab"),
                      stderr=subprocess.STDOUT, start_new_session=True, env={"PATH": os.environ["PATH"]})
 elif cmd == ["pane", "wait-output"]:
+    if os.environ.get("TASK_TEST_HERDR_WAIT") == "miss":  # the text scrolled out of the snapshot, or a redraw hid it
+        fail("timed out waiting for output match")
     end = time.time() + int(opt("--timeout")) / 1000
     while time.time() < end:
+        pane_or_fail(a[2])
         if os.path.exists(out_file(a[2])) and opt("--match") in open(out_file(a[2]), errors="replace").read():
             sys.exit(0)
         time.sleep(0.1)
     sys.exit(1)
 elif cmd == ["pane", "send-keys"]:
-    pass
+    pane_or_fail(a[2])
 elif cmd == ["notification", "show"]:
     with open(os.environ["TASK_TEST_NOTIFY"], "a") as f:
         f.write(json.dumps(a) + "\n")
@@ -1417,6 +1429,58 @@ class TaskTest(unittest.TestCase):
         seen = [self.task("log", tid, "--full"), (self.root / ".local/state/task-hub/events.jsonl").read_text(),
                 *self.comments(tid), *[f.read_text(errors="replace") for f in self.root.glob("herdr.json*")]]
         self.assertEqual([text for text in seen if secret in text], [])
+
+    def test_run_that_began_in_herdr_is_not_blocked_when_its_header_is_not_on_the_screen(self):
+        # #43: the screen is no proof either way; the run began, so the card stays with it
+        self.use_herdr()
+        self.env["TASK_TEST_HERDR_WAIT"] = "miss"
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertEqual([c for c in self.comments(tid) if "could not start" in c], [])
+
+    def test_two_task_hubs_starting_the_same_card_at_once_start_it_once(self):
+        # #43: `task start` and the watch both saw the card Ready. The second closed the first one's new tab, whose
+        # wait-output then failed at once: the card went Blocked while the second run worked on
+        self.use_herdr()
+        self.env["TASK_TEST_HERDR_SLOW"] = "1"  # both are opening a tab at the same time
+        tid = self.new("ok")
+        self.move(tid, "Ready")
+        both = [subprocess.Popen([str(BIN)], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                 stdin=subprocess.DEVNULL) for _ in range(2)]
+        out = "".join(p.communicate(timeout=60)[0] for p in both)
+        self.assertEqual(self.wait(tid), "In review", out)
+        self.assertEqual(len(self.agent_calls()), 1, out)
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("In progress"), 1, out)
+        self.assertEqual([c for c in self.comments(tid) if "could not start" in c], [], out)
+
+    def test_card_another_task_hub_is_starting_is_left_to_it(self):
+        tid = self.new("ok")
+        self.move(tid, "Ready")
+        lock = self.root / ".local/state/task-hub/runs" / f"{tid}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)  # the watch is starting it right now
+            out = self.task()
+        self.assertIn(f"skipped: task {tid} is already starting in another task-hub", out)
+        self.assertEqual((self.status(tid), self.agent_calls()), ("Ready", []))
+        self.assertIn("started[1]", self.task())  # the other one let go without starting it: this check does
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_run_that_never_began_in_herdr_blocks_the_card_and_cannot_begin_later(self):
+        self.use_herdr()
+        self.env.update(TASK_TEST_HERDR_RUN="swallow", TASK_HERDR_START_SECONDS="1")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("could not start: the run did not start in herdr workspace", self.comments(tid)[-1])
+        # the shell wakes up after all and runs what was typed: no run starts behind the Blocked card
+        typed = self.herdr_db()["swallowed"][-1]
+        subprocess.run(["sh", "-c", typed["command"]], cwd=typed["cwd"], env=self.env, capture_output=True)
+        self.assertEqual(self.agent_calls(), [])
+        self.assertEqual(self.run_state(tid)["pid"], "")
+        self.assertEqual(self.status(tid), "Blocked")
 
     def test_task_not_asked_in_herdr_opens_next_to_a_checkout_of_its_repo(self):
         other = self.checkout("other", "https://github.com/jyoka/other.git")

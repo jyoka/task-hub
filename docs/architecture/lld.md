@@ -115,6 +115,14 @@ flowchart LR
 
 - `launch` は実行の記録を書いてから In progress にし、`task _run` を起動します。herdr があればタブで、
   なければログ付きのバックグラウンドプロセスで動かします
+- `sync` はカードごとに `launch_lock`(`runs/<id>.lock` のロック)を取ってから `launch` を呼びます。取れないとき、
+  または取ったあとで実行が生きている(`alive`)ときは、別の task-hub(`task watch` と `task start` など)が始めたので
+  `skipped:` と出して何もしません。2 つ目の開始が 1 つ目のタブを閉じて、1 つ目が「could not start」になるのを防ぎます(#43)
+- herdr のタブでは、ペインに `sh <ランチャー>`(`share/run/<id>.sh`)を打ち込みます。ランチャーは最初に自分を消し、
+  消せなければ(もうなければ)終わります。`launch` はランチャーが消えたら始まったとみなします。画面の文字は見ません
+  (出力が流れたり描き直されたりすると、最初の行が画面から消えるため)。8 秒たっても消えなければ Enter を送ってもう 8 秒待ち、
+  それでも残っていれば自分で消して開始の失敗にします。先に消した方が決まるので、あきらめたあとに実行が遅れて始まることはありません。
+  ランチャーがすでに消えていたら(直前に始まった)、失敗にしません
 - `task _run` は自分の pid を記録します。同期は `alive` でプロセスを確かめ、消えていてカードが In progress なら Blocked にします
 - herdr のタブで動かすときは、環境変数を `HOME`、`PATH`、`TASK_*`、`GIT_AUTHOR_*`、`GIT_COMMITTER_*`、`[runner] pass_env` だけに絞ります
 
@@ -253,6 +261,8 @@ sequenceDiagram
 |---|---|---|---|
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて | JSON(`RUN_KEYS`) |
+| `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
+| `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log` | テキスト |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
@@ -290,6 +300,9 @@ sequenceDiagram
   古いか新しいかの完全なファイルだけを見ます
 - 追記のファイル(events、metrics)は 1 行ずつ書きます。書けなくても実行もコマンドも止めません
 - 同じタスクの実行は 1 つだけです。プロセスが生きているタスク(`alive`)は、Status が何でも開始しません
+- 同じマシンの 2 つの task-hub(`task watch` と `task start` など)が同じ Ready のカードを読んでも、開始するのは
+  `launch_lock` を取った 1 つだけです。ロックは OS のファイルロック(POSIX は `flock`、Windows は `msvcrt.locking`)なので、
+  持っていたプロセスが落ちても残りません。開始の失敗で Blocked にするまでロックを持ちます
 - キャッシュは正しさに関わりません。書けない、読めない、壊れているときは GitHub から読むだけです
 
 ## 7. 外部の呼び出し
@@ -314,7 +327,7 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
 |---|---|
 | GitHub の失敗(同期の中) | その回の `github_errors` に出し、次の回にまた試す。watch は止めない |
 | GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする |
-| 開始の失敗 | カードを Blocked にし、理由をコメントする |
+| 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」 |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
@@ -324,7 +337,7 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
 1. エージェントが git と GitHub を操作しなくても、PR の形式はコードで決まる
 2. reviewer と replanner の書き換えは結果に残らない
 3. task-hub が動かす Status の遷移は `StatusLifecycle.transitions` の表と、design.md の図と一致する
-4. 生きている実行のあるタスクで、2 つ目の実行は始まらない
+4. 生きている実行のあるタスクで、2 つ目の実行は始まらない。2 つの task-hub が同じカードを同時に始めても、実行は 1 つで、カードは Blocked にならない
 5. 変更の前に読み始めたボードは、変更のあとに表示されない
 6. 開いているカードと、Issue が開いている Done のカードはアーカイブされない
 7. Ready のカードは作った順に始まる
