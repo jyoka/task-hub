@@ -31,6 +31,8 @@ Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別�
    リリースノートの下書き(下の型)を PR の本文に書いておくと、3 でそのまま使えます。
    2 つの README と docs が、この版の使い方と合っているかも確かめます(README のコマンドの表はテストが確かめます。
    構成は [CONTRIBUTING.md](../CONTRIBUTING.md#readme-の構成))。
+   弱い PC で重くなっていないかを `python3 tests/bench.py` で測り、結果を PR の本文に貼ります
+   ([benchmark.md](benchmark.md))。
 2. **main にタグを付けて push します。** タグを付ける前に、main の `VERSION` が新しい版になっていることを確かめます。
 
    ```
