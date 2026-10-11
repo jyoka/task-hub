@@ -55,6 +55,7 @@ slack-triage/          Slackトリアージ: スレッドをコピーして ⌃�
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
+tests/bench.py         弱い PC 向けの計測(テストではない。頼まれたときとリリースの前に動かす。docs/benchmark.md)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
@@ -93,6 +94,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_install.py` | Kiro 用のインストーラ(`kiro/install.sh` など) |
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
+| `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `kiro/board-extension` の `npm test` | Kiro IDE の拡張。Node.js 22.18 以上か 23.6 以上([docs/kiro-ide.md](docs/kiro-ide.md)) |
 
 - バグを直すときは、まず使う人から見た動きで再現するテストを書き、失敗するのを見てから直します

@@ -651,13 +651,14 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False, replanner="", pass_env=""):
+    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
                        + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
                        + (f"replanner = {replanner}\n" if replanner else "")
-                       + (f"pass_env = {pass_env}\n" if pass_env else "") + "\n"
+                       + (f"pass_env = {pass_env}\n" if pass_env else "")
+                       + (f"parallel = {parallel}\n" if parallel else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -922,6 +923,42 @@ class TaskTest(unittest.TestCase):
         self.task()
         self.assertEqual(self.status(ids[0]), "Blocked")  # its run died
         self.assertEqual(self.wait(ids[5]), "In review")
+
+    def test_parallel_from_config_limits_the_runs(self):
+        self.write_config(parallel="1")  # an old PC: one agent CLI at a time
+        first, second = self.new("slow", "first"), self.new("ok", "second")
+        self.move(first, "Ready")
+        self.move(second, "Ready")
+        out = self.task()
+        self.assertIn("started[1]", out)
+        self.assertIn("description: runs coding agents on the tasks of a GitHub Project, max 1 at once", out)
+        self.assertEqual(self.status(first), "In progress")
+        self.assertEqual(self.status(second), "Ready")
+        self.wait_for(lambda: self.run_state(first).get("pid"))  # so tearDown stops it
+        self.assertIn("queue: 1 Ready task(s) waiting, all 1 slots busy", self.task())
+        self.assertEqual(self.status(second), "Ready")
+
+    def test_parallel_is_five_without_config(self):
+        ids = [self.new("slow", f"t{i}") for i in range(5 + 1)]
+        for tid in ids:
+            self.move(tid, "Ready")
+        out = self.task()
+        self.assertIn("started[5]", out)
+        self.assertEqual({self.status(t) for t in ids[:-1]}, {"In progress"})
+        self.assertEqual(self.status(ids[-1]), "Ready")
+        self.wait_for(lambda: all(self.run_state(t).get("pid") for t in ids[:-1]))
+
+    def test_bad_parallel_stops_with_help(self):
+        tid = self.new()
+        self.env["TASK_WATCH_ONCE"] = "1"  # in case it does not stop
+        for bad in ["0", "abc", "-1"]:
+            self.write_config(parallel=bad)
+            for args in [(), ("start", tid), ("watch",)]:
+                out = self.task(*args, code=1)
+                self.assertIn(f"error: [runner] parallel must be a whole number, 1 or more; got '{bad}'\n", out)
+                self.assertIn("help: set  [runner]  parallel = <number>", out)
+            self.assertEqual(self.status(tid), "Backlog")  # `task start` stopped before moving the card
+        self.assertEqual(self.agent_calls(), [])
 
     # --- dependencies (GitHub's "Blocked by") ---
 

@@ -224,6 +224,11 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。
 
+## 弱い PC で重くないか測る
+
+`task watch` の常駐のメモリと CPU、`task list` の時間は `tests/bench.py` で測ります。手順、目安、今わかっている値は
+[benchmark.md](benchmark.md) にあります。
+
 ## 保存場所
 
 | 内容 | 場所 |
@@ -270,9 +275,9 @@ GitHub の障害で起きることがあります。ステータスページ([gi
 確認してください。2026-09-23 には「Users may experience stale Project search results」という障害が出ていて、
 その間は新しく追加したカードが何時間も一覧に出ませんでした。この場合は、GitHub の復旧を待ちます。
 
-## `queue: N Ready task(s) waiting, all 5 slots busy`
+## `queue: N Ready task(s) waiting, all M slots busy`
 
-正常な状態です。実行中のタスクが終わると、次の確認(`task watch` なら 1 分以内)で開始されます。
+正常な状態です。M は同時に動かすタスクの数(`[runner] parallel`、既定 5)です。実行中のタスクが終わると、次の確認(`task watch` なら 1 分以内)で開始されます。
 
 ## `error: GraphQL: API rate limit exceeded`
 
@@ -317,7 +322,9 @@ Issue を閉じるか、`task done <番号>` を実行します。そのタス�
 
 ## 同時実行数の上限を変更する
 
-`bin/task` の先頭にある `MAX_PARALLEL` を変更します。
+`~/.config/task-hub/config.ini` の `[runner]` に `parallel = <数>` を書きます(1 以上、既定 5)。次の確認から
+その数まで始めます。エージェントの CLI は 1 つで数百 MB のメモリを使うので、性能の低い PC では 1 か 2 にします。
+0 や数でない値を書くと、`error: [runner] parallel must be a whole number, 1 or more` で止まります。
 
 ## ディスクの整理
 
