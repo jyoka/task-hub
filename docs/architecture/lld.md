@@ -338,3 +338,4 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)
 - `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`)
 - `python3 tests/run.py`: テストを 1 件ずつ別プロセスで並べて動かす(約 3.5 分)
+- `tests/bench.py`: 弱い PC 向けの計測。使い捨ての HOME と偽物の `gh` で、1 度に 1 プロセスずつ動かす([benchmark.md](../benchmark.md))。テストではない

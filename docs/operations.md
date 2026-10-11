@@ -224,6 +224,11 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。
 
+## 弱い PC で重くないか測る
+
+`task watch` の常駐のメモリと CPU、`task list` の時間は `tests/bench.py` で測ります。手順、目安、今わかっている値は
+[benchmark.md](benchmark.md) にあります。
+
 ## 保存場所
 
 | 内容 | 場所 |

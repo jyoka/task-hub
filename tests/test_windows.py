@@ -37,6 +37,7 @@ if WINDOWS:  # test_task imports fcntl, which Windows lacks
     sys.modules["fcntl"] = types.ModuleType("fcntl")
     exec(FCNTL, sys.modules["fcntl"].__dict__)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_bench  # noqa: E402
 from test_task import BIN, FAKE_AGENT, FAKE_GH, STATUS_OPTIONS  # noqa: E402
 
 REPO = BIN.parent.parent
@@ -299,6 +300,11 @@ class InstallTest(unittest.TestCase):
         self.assertIsNone(bystander.poll())
         tasks = subprocess.run(["schtasks", "/Query", "/TN", "task-hub watch"], capture_output=True)
         self.assertNotEqual(tasks.returncode, 0)
+
+
+@unittest.skipUnless(WINDOWS, "Windows only")
+class WindowsBenchTest(test_bench.BenchTest):
+    """tests/bench.py --quick on Windows: ctypes (GetProcessMemoryInfo, GetProcessTimes) instead of os.wait4 and ps."""
 
 
 if __name__ == "__main__":
