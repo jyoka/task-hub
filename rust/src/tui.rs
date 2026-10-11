@@ -1,7 +1,7 @@
 //! `task-rs tui`: a live, read-only view of the local board, the runs on this machine, and the events.
-//! It reads only local files and redraws when they change. GitHub is read only when the user presses `s`.
+//! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`.
 
-use super::{ago, board_config, epoch, load_local, now, shown_status, state, sync, tasks, text, Task};
+use super::{ago, board_config, epoch, fetch, fetched_line, load_local, now, shown_status, state, tasks, text, tilde, Task};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -19,7 +19,7 @@ use std::{fs, thread};
 
 /// Columns in the order a person acts on them: what needs you first.
 const ORDER: [&str; 7] = ["In review", "Blocked", "In progress", "Ready", "wait for merge", "Backlog", "Done"];
-const KEYS: &str = "↑↓ move  ⏎ PR  i Issue  l log  o open  s sync  q quit";
+const KEYS: &str = "↑↓ move  ⏎ issue  d diff  l log  b browser  o open  f fetch  q quit";
 
 fn color(status: &str) -> Color {
     match status {
@@ -139,6 +139,93 @@ fn open_url(url: &str) -> String {
     }
 }
 
+/// What the right pane shows for the selected card.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Details,
+    Issue,
+    Diff,
+    Log,
+}
+
+fn git(wt: &str, args: &[&str]) -> String {
+    Command::new("git").arg("-C").arg(wt).args(args).stdin(Stdio::null()).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+}
+
+/// What the agent changed in the task's worktree since it left its base, committed or not. Reads only: unlike
+/// bin/task's staged_diff, it never runs `git add`.
+fn diff_lines(t: &Task) -> Vec<Line<'static>> {
+    if t.worktree.is_empty() || !PathBuf::from(&t.worktree).is_dir() {
+        return vec![Line::from("no worktree for this task on this machine"), Line::default(),
+                    Line::from("task-hub makes one when the task runs here and removes it when the task is Done.").dim()];
+    }
+    let wt = t.worktree.as_str();
+    let base = if t.base.is_empty() {
+        Some(git(wt, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).trim().to_string())
+            .filter(|b| !b.is_empty()).unwrap_or_else(|| "origin/main".into())
+    } else {
+        format!("origin/{}", t.base)
+    };
+    let fork = Some(git(wt, &["merge-base", &base, "HEAD"]).trim().to_string())
+        .filter(|f| !f.is_empty()).unwrap_or_else(|| "HEAD".into());
+    let short: String = fork.chars().take(7).collect();
+    let mut lines = vec![Line::from(format!("changes since {base} ({short}) in {}", tilde(&PathBuf::from(wt)))).dim()];
+    lines.extend(git(wt, &["diff", "--stat", &fork, "--"]).lines().map(|l| Line::from(l.to_string())));
+    let untracked = git(wt, &["ls-files", "--others", "--exclude-standard"]);
+    let new: Vec<&str> = untracked.lines().filter(|f| !f.starts_with(".task-")).collect();
+    lines.extend(new.iter().map(|f| Line::from(format!(" new, not added yet: {f}")).yellow()));
+    lines.push(Line::default());
+    let diff = git(wt, &["diff", &fork, "--"]);
+    if diff.trim().is_empty() && new.is_empty() {
+        lines.push(Line::from("no changes").dim());
+    }
+    for l in diff.lines() {
+        let style = if l.starts_with("diff --git") {
+            Style::new().yellow().bold()
+        } else if l.starts_with("@@") {
+            Style::new().cyan()
+        } else if l.starts_with("+++") || l.starts_with("---") || l.starts_with("index ") {
+            Style::new().dim()
+        } else if l.starts_with('+') {
+            Style::new().green()
+        } else if l.starts_with('-') {
+            Style::new().red()
+        } else {
+            Style::new()
+        };
+        lines.push(Line::styled(l.replace('\t', "    "), style));
+    }
+    lines
+}
+
+/// The Issue (its Goal) from the local copy of the board: no browser, no network.
+fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("#{} {}", t.id, t.title)).bold(),
+        Line::from(format!("{} (local copy from {} ago)", t.url, ago(age))).dim(),
+        Line::default(),
+    ];
+    if t.body.trim().is_empty() {
+        lines.push(Line::from("no body").dim());
+    }
+    let mut code = false;
+    for l in t.body.lines() {
+        let l = l.replace('\t', "    ");
+        if l.trim_start().starts_with("```") {
+            code = !code;
+            lines.push(Line::from(l).dim());
+        } else if code {
+            lines.push(Line::from(l).dim());
+        } else if l.starts_with('#') {
+            lines.push(Line::from(l.trim_start_matches('#').trim().to_string()).bold().cyan());
+        } else {
+            lines.push(Line::from(l));
+        }
+    }
+    lines
+}
+
 struct App {
     board: Vec<Task>,
     age: f64,
@@ -146,12 +233,14 @@ struct App {
     error: String,
     events: Vec<Value>,
     selected: ListState,
-    show_log: bool,
+    view: View,
+    scroll: u16, // u16::MAX: the bottom (the log starts there)
+    diff: Option<(String, Vec<Line<'static>>)>, // the selected card's diff, made when shown
     status: String,
     offset: i64,
     seen: (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>),
     loaded_at: f64,
-    syncing: Option<Receiver<Result<usize, String>>>,
+    fetching: Option<Receiver<Result<(usize, bool), String>>>,
     quit: bool,
 }
 
@@ -159,8 +248,9 @@ impl App {
     fn new() -> Self {
         let mut app = App {
             board: vec![], age: 0.0, changed: false, error: String::new(), events: vec![],
-            selected: ListState::default(), show_log: false, status: "read only: GitHub is read only when you press s".into(),
-            offset: utc_offset(), seen: (None, None, None), loaded_at: 0.0, syncing: None, quit: false,
+            selected: ListState::default(), view: View::Details, scroll: 0, diff: None,
+            status: "read only: GitHub is read only when you press f".into(),
+            offset: utc_offset(), seen: (None, None, None), loaded_at: 0.0, fetching: None, quit: false,
         };
         app.reload();
         app
@@ -191,6 +281,7 @@ impl App {
         self.selected.select(at.map(|i| i.min(self.board.len().saturating_sub(1))));
         self.seen = Self::files();
         self.loaded_at = now();
+        self.diff = None; // made again, from the worktree as it is now
     }
 
     fn current(&self) -> Option<&Task> {
@@ -205,13 +296,10 @@ impl App {
     }
 
     fn tick(&mut self) {
-        if let Some(rx) = &self.syncing {
+        if let Some(rx) = &self.fetching {
             if let Ok(result) = rx.try_recv() {
-                self.status = match result {
-                    Ok(n) => format!("synced {n} open card(s) from GitHub"),
-                    Err(e) => format!("sync failed: {e} (the local board is unchanged)"),
-                };
-                self.syncing = None;
+                self.status = fetched_line(&result);
+                self.fetching = None;
                 self.reload();
                 return;
             }
@@ -222,24 +310,36 @@ impl App {
         }
     }
 
+    /// Shows a view in the right pane, or the details again when it is already shown.
+    fn show(&mut self, view: View) {
+        self.view = if self.view == view { View::Details } else { view };
+        self.top();
+    }
+
+    fn top(&mut self) {
+        self.scroll = if self.view == View::Log { u16::MAX } else { 0 };
+        self.diff = None;
+    }
+
     fn key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
-            KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
-            KeyCode::Home | KeyCode::Char('g') => self.selected.select_first(),
-            KeyCode::End | KeyCode::Char('G') => self.selected.select_last(),
-            KeyCode::Char('l') => self.show_log = !self.show_log,
-            KeyCode::Char('r') => {
-                self.reload();
-                self.status = "reloaded the local files".into();
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => self.show(View::Details),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected.select_next();
+                self.top();
             }
-            KeyCode::Enter | KeyCode::Char('p') => {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected.select_previous();
+                self.top();
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::Enter => self.show(View::Issue),
+            KeyCode::Char('d') => self.show(View::Diff),
+            KeyCode::Char('l') => self.show(View::Log),
+            KeyCode::Char('b') => {
                 let url = self.current().map(|t| self.pr_of(t).unwrap_or_else(|| t.url.clone())).unwrap_or_default();
-                self.status = open_url(&url);
-            }
-            KeyCode::Char('i') => {
-                let url = self.current().map(|t| t.url.clone()).unwrap_or_default();
                 self.status = open_url(&url);
             }
             KeyCode::Char('o') => {
@@ -251,13 +351,13 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char('s') if self.syncing.is_none() => {
+            KeyCode::Char('f') if self.fetching.is_none() => {
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
-                    let _ = tx.send(sync());
+                    let _ = tx.send(fetch());
                 });
-                self.syncing = Some(rx);
-                self.status = "syncing from GitHub…".into();
+                self.fetching = Some(rx);
+                self.status = "fetching from GitHub (read only)…".into();
             }
             _ => {}
         }
@@ -290,12 +390,33 @@ impl App {
             format!(" · {running} running · {} open · board {} ago", self.board.len(), ago(self.age)).into(),
         ];
         if self.changed {
-            head_spans.push(" (changed: s)".yellow());
+            head_spans.push(" (changed: f)".yellow());
         }
         f.render_widget(Line::from(head_spans), head);
 
         self.draw_board(f, left);
-        if self.show_log { self.draw_log(f, right) } else { self.draw_details(f, right) }
+        match self.view {
+            View::Details => self.draw_details(f, right),
+            View::Issue => {
+                let (title, lines) = match self.current() {
+                    Some(t) => (format!(" Issue #{} (⏎ back, PgUp/PgDn) ", t.id), issue_lines(t, self.age)),
+                    None => (" Issue ".into(), vec![]),
+                };
+                self.draw_pane(f, right, title, lines, true);
+            }
+            View::Diff => {
+                let Some((id, title)) = self.current().map(|t| (t.id.clone(), format!(" Diff #{} (d back, PgUp/PgDn) ", t.id))) else {
+                    return self.draw_pane(f, right, " Diff ".into(), vec![], false);
+                };
+                if self.diff.as_ref().map_or(true, |(had, _)| *had != id) {
+                    let lines = self.current().map(diff_lines).unwrap_or_default();
+                    self.diff = Some((id, lines));
+                }
+                let lines = self.diff.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+                self.draw_pane(f, right, title, lines, false);
+            }
+            View::Log => self.draw_log(f, right),
+        }
         self.draw_events(f, feed);
 
         let status = if self.error.is_empty() { self.status.clone() } else { format!("error: {}", self.error) };
@@ -321,7 +442,7 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.selected);
     }
 
-    fn draw_details(&self, f: &mut Frame, area: Rect) {
+    fn draw_details(&mut self, f: &mut Frame, area: Rect) {
         let Some(t) = self.current() else {
             f.render_widget(Paragraph::new("no open cards").block(Block::bordered().title(" Details ")), area);
             return;
@@ -365,19 +486,29 @@ impl App {
                 lines.extend(report.lines().map(|l| Line::from(l.to_string())));
             }
         }
-        let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
-            .block(Block::bordered().title(" Details (l: log) "));
+        self.draw_pane(f, area, " Details ".into(), lines, true);
+    }
+
+    /// The right pane: lines from the scroll position, which is kept within the text.
+    fn draw_pane(&mut self, f: &mut Frame, area: Rect, title: String, lines: Vec<Line<'static>>, wrap: bool) {
+        let height = area.height.saturating_sub(2) as usize;
+        // wrapped text can be longer on screen than in lines: let it scroll up to its last line
+        let max = if wrap { lines.len().saturating_sub(1) } else { lines.len().saturating_sub(height) };
+        self.scroll = self.scroll.min(max.min(u16::MAX as usize) as u16);
+        let mut p = Paragraph::new(Text::from(lines)).block(Block::bordered().title(title)).scroll((self.scroll, 0));
+        if wrap {
+            p = p.wrap(Wrap { trim: false });
+        }
         f.render_widget(p, area);
     }
 
-    fn draw_log(&self, f: &mut Frame, area: Rect) {
+    fn draw_log(&mut self, f: &mut Frame, area: Rect) {
         let (title, lines) = match self.current() {
-            Some(t) if !t.log.is_empty() => (format!(" Log #{} (l: details) ", t.id), log_tail(&t.log, area.height as usize)),
+            Some(t) if !t.log.is_empty() => (format!(" Log #{} (l back, PgUp/PgDn) ", t.id), log_tail(&t.log, 2000)),
             Some(t) => (format!(" Log #{} ", t.id), vec!["no run of this task on this machine".into()]),
             None => (" Log ".into(), vec![]),
         };
-        let p = Paragraph::new(lines.join("\n")).block(Block::bordered().title(title));
-        f.render_widget(p, area);
+        self.draw_pane(f, area, title, lines.into_iter().map(Line::from).collect(), false);
     }
 
     fn draw_events(&self, f: &mut Frame, area: Rect) {
