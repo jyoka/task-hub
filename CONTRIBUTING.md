@@ -52,6 +52,7 @@ kiro/                  Kiro IDE 用の部品と、かんたんセットアップ
 kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 slack-triage/          Slackトリアージ: スレッドをコピーして ⌃⌥S でタスクを提案する(docs/slack-triage.md)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
+rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)

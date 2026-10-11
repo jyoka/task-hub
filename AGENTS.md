@@ -43,3 +43,5 @@ claude plugin test claude/task-board       # Claude Code の mod
 - 引数なしの `task`、`task watch`、`task start` を本物のボードに向けて動かさない(Ready のカードが始まる)。
   確かめるのはテストの偽物の GitHub で行う。本物で読むだけなら `task list`
 - `~/.local/lib/task-hub`(動かす用の clone)を編集しない。作業はこのリポジトリのブランチで行う
+- `rust/` は別の実験(task-rs)。頼まれない限り触らない。`bin/task` は Python 標準ライブラリだけのまま。
+  task-rs は手元のファイルの形式(`board-cache.json` など)を読むので、形式を変えたら `rust/` も合わせる
