@@ -1,7 +1,8 @@
-"""task-rs tui's `g`: Lazygit in the selected task's worktree, driven the way a person does, in a real terminal (a PTY).
+"""task-rs tui, driven the way a person does, in a real terminal (a PTY): `g` (Lazygit in the selected task's worktree)
+and the full-screen reader (Enter, d, l).
 
 Each test builds task-rs (cargo, debug) once, then runs `task-rs tui` in a PTY with a temporary HOME: a config, a
-local board, runs/<id>.json and real git worktrees. `lazygit` on PATH is a fake that records where and how it ran
+local board, runs/<id>.json, logs and real git worktrees. `lazygit` on PATH is a fake that records where and how it ran
 (working directory, arguments, whether its stdin and stdout are a terminal, the terminal's mode), talks to the
 person through the terminal, and can change the board or exit with a code meanwhile. `gh` (TASK_GH) notes any call.
 Skipped without cargo, and on Windows (no PTY).
@@ -37,8 +38,9 @@ _built = None
 class Screen:
     """Just enough of a terminal to see what ratatui drew: it moves the cursor, clears, and prints."""
 
-    def __init__(self):
-        self.grid = [[" "] * COLS for _ in range(ROWS)]
+    def __init__(self, rows=ROWS, cols=COLS):
+        self.rows, self.cols = rows, cols
+        self.grid = [[" "] * cols for _ in range(rows)]
         self.row = self.col = 0
         self.pending = ""
 
@@ -49,27 +51,30 @@ class Screen:
             c = data[at]
             if c == "\x1b":
                 m = ESCAPE.match(data, at)
-                if not m:
+                # a sequence cut by the read matches only the catch-all "\x1b.": wait for its end too
+                cut = m and m.end() == at + 2 and data[at + 1] in "[]()" and len(data) - at < 64
+                if not m or cut:
                     self.pending = data[at:]  # the rest comes in the next read
                     return
                 if m.group(3) == "H":
                     nums = [int(n) if n else 1 for n in (m.group(1) or "1;1").split(";")] + [1]
-                    self.row, self.col = min(nums[0], ROWS) - 1, min(nums[1], COLS) - 1
+                    self.row, self.col = min(nums[0], self.rows) - 1, min(nums[1], self.cols) - 1
                 elif m.group(3) == "J" and m.group(1) in ("2", "3"):
-                    self.grid = [[" "] * COLS for _ in range(ROWS)]
+                    self.grid = [[" "] * self.cols for _ in range(self.rows)]
                 at = m.end()
                 continue
             if c == "\r":
                 self.col = 0
             elif c == "\n":
-                self.row = min(self.row + 1, ROWS - 1)
+                self.row = min(self.row + 1, self.rows - 1)
             elif c >= " ":
-                if self.col < COLS:
+                if self.col < self.cols:
                     self.grid[self.row][self.col] = c
                 self.col += 1
             at += 1
 
-    def text(self, rows=(0, ROWS), cols=(0, COLS)):
+    def text(self, rows=None, cols=None):
+        rows, cols = rows or (0, self.rows), cols or (0, self.cols)
         return "\n".join("".join(self.grid[r][cols[0]:cols[1]]) for r in range(*rows))
 
 FAKE_LAZYGIT = r"""#!/bin/sh
@@ -126,7 +131,7 @@ def snapshot(root):
 
 @unittest.skipIf(WINDOWS, "needs a PTY")
 @unittest.skipUnless(shutil.which("cargo"), "needs cargo to build task-rs")
-class LazygitHandoffTest(unittest.TestCase):
+class TuiCase(unittest.TestCase):
     def setUp(self):
         self.binary = build()
         self.tmp = Path(tempfile.mkdtemp(prefix="task-rs-test-"))
@@ -161,14 +166,22 @@ class LazygitHandoffTest(unittest.TestCase):
         self.out, self.pid, self.fd, self.mark, self.screen = "", None, None, 0, Screen()
 
     def tearDown(self):
+        # the terminal is closed before the wait: a killed process can hang exiting while its output goes unread
         if self.pid:
             try:
                 os.kill(self.pid, 9)
-                os.waitpid(self.pid, 0)
-            except (ProcessLookupError, ChildProcessError):
+            except ProcessLookupError:
                 pass
         if self.fd is not None:
             os.close(self.fd)
+        end = time.time() + 10
+        while self.pid and time.time() < end:
+            try:
+                if os.waitpid(self.pid, os.WNOHANG)[0]:
+                    break
+            except ChildProcessError:
+                break
+            time.sleep(0.1)
 
     # ---------- the board, the runs, the fake ----------
 
@@ -202,8 +215,8 @@ class LazygitHandoffTest(unittest.TestCase):
 
     # ---------- the terminal ----------
 
-    def start(self, then_stty=False):
-        """task-rs tui in a 40x140 PTY; with then_stty, the terminal's mode is noted after it quits."""
+    def start(self, then_stty=False, rows=ROWS, cols=COLS):
+        """task-rs tui in a PTY (40x140 unless told); with then_stty, the terminal's mode is noted after it quits."""
         env = {"HOME": str(self.home), "PATH": self.path, "TERM": "xterm-256color", "LG": str(self.lg),
                "TASK_GH": str(self.tmp / "gh"), "LANG": "en_US.UTF-8", "TMPDIR": str(self.tmp)}
         argv = [str(self.binary), "tui"]
@@ -213,11 +226,11 @@ class LazygitHandoffTest(unittest.TestCase):
         pid, fd = pty.fork()
         if pid == 0:
             try:
-                fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+                fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
                 os.execve(argv[0], argv, env)
             finally:
                 os._exit(127)
-        self.pid, self.fd = pid, fd
+        self.pid, self.fd, self.screen = pid, fd, Screen(rows, cols)
         self.wait_screen("needs you")
 
     def read(self, seconds):
@@ -254,14 +267,18 @@ class LazygitHandoffTest(unittest.TestCase):
         while True:
             shown = where() if where else self.screen.text()
             if text in shown:
-                return shown
+                while self.read(0.1):  # the rest of the frame that showed it
+                    pass
+                shown = where() if where else self.screen.text()
+                if text in shown:
+                    return shown
             if time.time() > end:
                 self.fail(f"{text!r} is not on the screen:\n{self.screen.text()}")
             self.read(0.2)
 
     def status(self):
         """The last 3 rows, where the keys and the status line are (it wraps when long), joined again."""
-        return re.sub(r"\s+", " ", self.screen.text(rows=(ROWS - 3, ROWS)))
+        return re.sub(r"\s+", " ", self.screen.text(rows=(self.screen.rows - 3, self.screen.rows)))
 
     def popup(self):
         """The confirmation's text and its border's titles, its wrapped lines joined again."""
@@ -298,14 +315,19 @@ class LazygitHandoffTest(unittest.TestCase):
         return self.wait_exit()
 
     def assert_responsive(self, number):
-        """The board takes single keys again (raw mode): l alone, no Enter, shows the selected card's log, and l
-        again goes back."""
+        """The board takes single keys again (raw mode): l alone, no Enter, opens the selected card's log in the
+        reader, and Esc goes back to the board."""
         self.press("l")
-        self.wait_screen(f" Log #{number} ")
-        self.press("l")
+        self.wait_screen(f"#{number} ", self.header)
+        self.wait_screen("Log", self.header)
+        self.press("\x1b")
         self.wait_screen(" Details ")
 
-    # ---------- the tests ----------
+    def header(self):
+        return self.screen.text(rows=(0, 1))
+
+
+class LazygitHandoffTest(TuiCase):
 
     def test_g_confirms_then_lends_the_terminal_to_lazygit_in_the_worktree_and_comes_back(self):
         wt5, wt6 = self.worktree(5), self.worktree(6)
@@ -519,6 +541,356 @@ class LazygitHandoffTest(unittest.TestCase):
         self.press("g")
         self.wait_screen("no card selected: Lazygit not opened", self.status)
         self.assertEqual(self.quit(), 0)
+
+
+WORDS = " ".join(f"w{n:04}" for n in range(1, 601))  # one logical line, 3600 characters: many rows when wrapped
+WHEEL_UP, WHEEL_DOWN = "\x1b[<64;20;10M", "\x1b[<65;20;10M"  # SGR mouse reports, as a terminal sends them
+UP, DOWN, LEFT, RIGHT = "\x1b[A", "\x1b[B", "\x1b[D", "\x1b[C"
+PGUP, PGDN, HOME, END = "\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F"
+
+
+def with_body(it, body):
+    it["content"]["body"] = body
+    return it
+
+
+class ReaderTest(TuiCase):
+    """The full-screen reader in a small terminal: Enter, d and l open the selected task's Issue, diff and log over
+    the whole screen; arrows, pages, Home, End and the wheel scroll it and never change the task; Esc goes back."""
+
+    SMALL = (20, 80)
+
+    def setUp(self):
+        super().setUp()
+        self.wt = self.worktree(5)
+        self.run_file(5, self.wt)
+        self.log = self.state / "logs" / "5.log"
+        self.log.parent.mkdir()
+        self.issue = f"### Goal\nfirst line of the Issue\n{WORDS} END-OF-LONG-LINE\n\nlast line of the Issue"
+        self.write_board(with_body(item(5, "Alpha", "In review"), self.issue), item(6, "Beta", "Blocked"))
+        self.before = snapshot(self.state / "runs")
+
+    def body(self):
+        """The rows between the header and the footer's 3 rows, as text."""
+        return self.screen.text(rows=(1, self.screen.rows - 3))
+
+    def page_through(self, key, until, limit=200):
+        """Presses key until `until` is on the screen, collecting each screen it showed (the header says where)."""
+        seen = self.screen.text()
+        for _ in range(limit):
+            if until in self.screen.text():
+                return seen
+            before = self.header()
+            self.press(key)
+            end = time.time() + 3
+            while self.header() == before and time.time() < end:
+                self.read(0.1)
+            while self.read(0.1):  # the rest of that frame
+                pass
+            seen += "\n" + self.screen.text()
+        self.fail(f"{until!r} never came on the screen; it shows:\n{self.screen.text()}")
+
+    def resize(self, rows, cols):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        self.screen = Screen(rows, cols)  # ratatui clears and draws everything again at the new size
+        self.settle(1)
+
+    def assert_no_gh_and_read_only(self):
+        self.assertFalse(self.gh_calls.exists(), "task-rs called gh")
+        self.assertEqual(snapshot(self.state / "runs"), self.before)  # no run file written
+
+    # ---------- the tests ----------
+
+    def test_issue_opens_full_screen_and_every_wrapped_word_is_reachable(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("Issue", self.header)
+        self.settle(0.5)  # the whole screen drawn
+        self.assertIn("#5 Alpha", self.header())
+        shown = self.screen.text()
+        self.assertNotIn(" Board ", shown)  # the board and the events make room for the Issue
+        self.assertNotIn(" Events ", shown)
+        self.assertIn("Esc back", self.status())
+        self.assertIn("first line of the Issue", self.body())
+        # paging down shows every word of the long line, then its end and the last line
+        seen = self.page_through(PGDN, "last line of the Issue")
+        missing = [w for w in WORDS.split() if w not in seen]
+        self.assertEqual(missing, [], "words of the wrapped line that paging never showed")
+        self.assertIn("END-OF-LONG-LINE", seen)
+        # paging up goes back to the top
+        self.page_through(PGUP, "first line of the Issue")
+        self.press(END)
+        self.wait_screen("last line of the Issue")
+        self.press(HOME)
+        self.wait_screen("first line of the Issue")
+        self.assertNotIn("last line of the Issue", self.screen.text())
+        self.assert_no_gh_and_read_only()
+        self.assertEqual(self.quit(), 0)
+
+    def test_arrows_and_jk_scroll_the_reader_and_never_change_the_task(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        for key in (DOWN, "j") * 3:  # past the title, the link and the heading above it
+            self.press(key)
+            self.settle(0.2)
+        self.assertIn("#5 Alpha", self.header())  # still #5, never #6 Beta
+        self.assertNotIn("Beta", self.screen.text())
+        self.assertNotIn("first line of the Issue", self.screen.text())  # it scrolled instead
+        for key in (UP, "k") * 3:
+            self.press(key)
+            self.settle(0.2)
+        self.wait_screen("first line of the Issue")
+        self.assertIn("#5 Alpha", self.header())
+        # the wheel scrolls too, without changing the task: the terminal reports it in the reader only
+        self.assertIn("\x1b[?1000h", self.out)
+        for _ in range(4):
+            self.press(WHEEL_DOWN)
+            self.settle(0.2)
+        self.assertNotIn("first line of the Issue", self.screen.text())
+        self.assertIn("#5 Alpha", self.header())
+        for _ in range(4):
+            self.press(WHEEL_UP)
+            self.settle(0.2)
+        self.wait_screen("first line of the Issue")
+        # Esc: the board again, with #5 still selected
+        self.press("\x1b")
+        self.wait_screen(" Board ")
+        self.assertIn("\x1b[?1000l", self.out[self.mark:])  # the board leaves the mouse to the terminal again
+        self.assertIn("▶ #5", self.screen.text())
+        self.assertIn("⏎ issue", self.status())
+        self.assertEqual(self.quit(), 0)
+
+    def test_the_diff_shows_all_lines_and_scrolls_sideways_to_the_end_of_a_wide_line(self):
+        (self.wt / "wide.txt").write_text("".join(f"line {n:03}\n" for n in range(1, 200)))
+        git(self.wt, "add", "wide.txt")
+        git(self.wt, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "committed by the agent")
+        (self.wt / "uncommitted.txt").write_text("x" * 250 + " RIGHT-END-MARKER\n")
+        git(self.wt, "add", "-N", "uncommitted.txt")  # intent to add: in the diff, staged nothing
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        time.sleep(1.1)
+        os.utime(self.wt / "wide.txt")  # newer, same content: git diff would refresh the index and write it
+        git_dir = self.repo / ".git" / "worktrees" / "5"
+        before = snapshot(self.wt), snapshot(git_dir)
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("d")
+        self.wait_screen("Diff", self.header)
+        self.assertIn("#5 Alpha", self.header())
+        self.assertNotIn(" Board ", self.screen.text())
+        self.wait_screen("wide.txt")
+        # all lines, committed and not: the end of the committed file (git lists it after the uncommitted one)
+        self.press(END)
+        self.wait_screen("+line 199")
+        self.press(HOME)
+        self.wait_screen("uncommitted.txt")
+        self.assertNotIn("RIGHT-END-MARKER", self.screen.text())  # the wide line goes past the right edge
+        self.page_through(RIGHT, "RIGHT-END-MARKER", limit=80)
+        self.assertIn("#5 Alpha", self.header())
+        self.page_through(LEFT, "diff --git", limit=80)
+        self.assertEqual(self.quit(), 0)
+        self.assert_no_gh_and_read_only()
+        self.assertEqual((snapshot(self.wt), snapshot(git_dir)), before)  # no git add, no index written, no lock
+
+    def test_the_log_follows_new_output_only_at_the_bottom(self):
+        self.log.write_text("".join(f"log line {n:03}\n" for n in range(1, 301)))
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("l")
+        self.wait_screen("log line 300")  # it opens at the end
+        self.assertIn("Log", self.header())
+        with self.log.open("a") as f:
+            f.write("log line 301 FOLLOWED\n")
+        self.wait_screen("log line 301 FOLLOWED", timeout=5)  # at the bottom, it follows
+        # scroll up: following pauses, and new output does not pull the view down
+        self.press(PGUP)
+        self.settle(0.3)
+        self.assertNotIn("FOLLOWED", self.screen.text())
+        top = self.body().split("\n")[0]
+        with self.log.open("a") as f:
+            f.write("log line 302 NOT-PULLED\n")
+        self.settle(2)
+        self.assertNotIn("NOT-PULLED", self.screen.text())
+        self.assertEqual(self.body().split("\n")[0], top, "the view moved while reading older output")
+        self.assertIn("paused", self.header())
+        # back at the bottom, it follows again
+        self.press(END)
+        self.wait_screen("log line 302 NOT-PULLED")
+        with self.log.open("a") as f:
+            f.write("log line 303 FOLLOWED AGAIN\n")
+        self.wait_screen("log line 303 FOLLOWED AGAIN", timeout=5)
+        self.assertEqual(self.quit(), 0)
+
+    def test_a_reload_then_a_resize_keeps_the_line_at_the_top(self):
+        self.log.write_text("".join(f"log line {n:03} " + "x" * 90 + "\n" for n in range(1, 301)))  # 2 rows at 80
+
+        def top_line():
+            """The log line on the top row, which may be its second row."""
+            rows = self.body().split("\n")
+            first = next(i for i, r in enumerate(rows) if r.startswith("log line "))
+            return int(rows[first].split()[2]) - (1 if first else 0)
+
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("l")
+        self.wait_screen("log line 300")
+        for _ in range(10):
+            self.press(PGUP)
+        self.settle(0.5)
+        top = top_line()
+        self.assertLess(top, 250)
+        with self.log.open("a") as f:
+            f.write("log line 301 NEW\n")
+        self.settle(1)
+        self.assertEqual(top_line(), top)  # new output did not move it
+        with self.log.open("a") as f:  # read again in the same frame as the resize
+            f.write("log line 302 NEW\n")
+        self.resize(20, 120)
+        self.wait_screen("paused", self.header)
+        self.assertEqual(top_line(), top, "the resize moved the reader to another line")
+        self.assertTrue(self.body().startswith(f"log line {top:03}"))
+        self.assertEqual(self.quit(), 0)
+
+    def test_a_view_resized_away_comes_back_at_the_same_words(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        self.press(PGDN)
+        self.press(PGDN)
+        self.wait_screen("33-48", self.header)
+        first = int(self.body().split()[0][1:])  # the first word on the top row, w0352 -> 352
+        self.press("l")
+        self.wait_screen("Log", self.header)
+        self.resize(20, 120)
+        self.press("\r")
+        self.wait_screen("Issue", self.header)
+        now = int(self.body().split()[0][1:])
+        # within a long line the place is kept in proportion: up to 2 rows (40 words at 120 columns) off
+        self.assertTrue(first - 40 <= now <= first + 20, f"came back at w{now:04}, not near w{first:04}")
+        self.assertEqual(self.quit(), 0)
+
+    def test_the_diff_never_writes_the_index_even_when_git_would_refresh_it(self):
+        (self.wt / "a.txt").write_text("a\n")
+        git(self.wt, "add", "a.txt")
+        git(self.wt, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "c")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "task/5")  # nothing committed since the base
+        (self.wt / "b.txt").write_text("b\n")
+        git(self.wt, "add", "-N", "b.txt")
+        time.sleep(1.1)
+        os.utime(self.wt / "a.txt")  # same content, newer time: git diff refreshes the index and writes it back
+        git_dir = self.repo / ".git" / "worktrees" / "5"
+        before = snapshot(git_dir)
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("d")
+        self.wait_screen("+b")  # the uncommitted change, read through a copy of the index
+        self.assertNotIn("a.txt", self.screen.text())
+        self.assertEqual(self.quit(), 0)
+        self.assertEqual(snapshot(git_dir), before)
+        self.assertEqual([f.name for f in self.tmp.glob("task-rs-*.index*")], [])  # the copy is removed
+
+    def test_enter_d_l_switch_the_reader_and_keep_each_position(self):
+        self.log.write_text("".join(f"log line {n:03}\n" for n in range(1, 301)))
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        self.press(END)
+        self.wait_screen("last line of the Issue")
+        self.press("l")
+        self.wait_screen("log line 300")
+        self.press("d")
+        self.wait_screen("Diff", self.header)
+        self.press("\r")
+        self.wait_screen("Issue", self.header)
+        self.wait_screen("last line of the Issue")  # where it was
+        self.assertIn("#5 Alpha", self.header())
+        self.assertEqual(self.quit(), 0)
+
+    def test_resize_and_shrinking_content_keep_a_valid_position(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.press(END)
+        self.wait_screen("last line of the Issue")
+        self.resize(30, 120)
+        self.wait_screen("last line of the Issue")
+        self.resize(14, 50)
+        self.wait_screen("last line of the Issue")
+        self.press(PGUP)
+        self.settle(0.3)
+        self.press(END)
+        self.wait_screen("last line of the Issue")
+        # the Issue gets much shorter while the end of the old one is shown
+        self.write_board(with_body(item(5, "Alpha", "In review"), "### Goal\nshort now"), item(6, "Beta", "Blocked"))
+        self.wait_screen("short now", timeout=5)
+        self.assertIn("#5 Alpha", self.header())
+        self.press(PGUP)
+        self.press(PGDN)
+        self.press(DOWN)
+        self.wait_screen("short now")
+        self.assertEqual(self.quit(), 0)
+
+    def test_a_task_that_leaves_the_board_is_not_replaced_by_another(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        self.write_board(item(6, "Beta", "Blocked"))  # #5 is Done
+        self.wait_screen("no longer on the local board", timeout=5)
+        self.assertIn("#5", self.header())
+        self.assertNotIn("Beta", self.screen.text())
+        self.press(DOWN)
+        self.press("l")
+        self.settle(0.5)
+        self.assertNotIn("Beta", self.screen.text())
+        self.press("\x1b")
+        self.wait_screen(" Board ")
+        self.assertIn("▶ #6", self.screen.text())  # back on the board, a card that is still there
+        self.assertEqual(self.quit(), 0)
+
+    def test_no_worktree_no_run_and_no_lazygit_are_explained_in_the_reader(self):
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("j")  # #6 has no run on this machine
+        self.press("d")
+        self.wait_screen("no worktree for this task on this machine")
+        self.assertIn("#6 Beta", self.header())
+        self.press("l")
+        self.wait_screen("no run of this task on this machine")
+        self.press("g")
+        self.wait_screen("no worktree recorded for #6", self.status)
+        self.assertIn("#6 Beta", self.header())  # still reading #6
+        self.press("\x1b")
+        self.wait_screen(" Board ")
+        self.assertIn("▶ #6", self.screen.text())
+        self.press("k")  # #5 has a worktree, but there is no lazygit on PATH
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        self.press("gg")
+        self.wait_screen("lazygit is not on PATH", self.status)
+        self.assertIn("Issue", self.header())
+        self.assertIn("#5 Alpha", self.header())
+        self.assertNotIn(LEAVE_ALT, self.out)  # the terminal was never handed over
+        self.assertEqual(self.quit(), 0)
+        self.assert_no_gh_and_read_only()
+
+    def test_g_from_the_reader_comes_back_to_the_same_view_and_position(self):
+        self.install_fake()
+        self.start(rows=self.SMALL[0], cols=self.SMALL[1])
+        self.press("\r")
+        self.wait_screen("first line of the Issue")
+        self.press(PGDN)
+        self.settle(0.3)
+        before = self.body()
+        self.assertNotIn("first line of the Issue", before)
+        self.press("g")
+        self.wait_screen("Open Lazygit?")
+        self.press("g")
+        self.expect("FAKE-LAZYGIT ready")
+        self.press("\r")
+        self.expect("back from Lazygit in #5")
+        self.wait_screen("Issue", self.header)
+        self.settle(0.5)
+        self.assertEqual(self.body(), before, "the reader did not come back where it was")
+        self.assertEqual((self.lg / "cwd").read_text().strip(), str(self.wt.resolve()))
+        self.press("\x1b")
+        self.wait_screen(" Board ")
+        self.assertIn("▶ #5", self.screen.text())
+        self.assertEqual(self.quit(), 0)
+        self.assert_no_gh_and_read_only()
 
 
 if __name__ == "__main__":

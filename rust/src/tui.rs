@@ -1,10 +1,12 @@
 //! `task-rs tui`: a live, read-only view of the local board, the runs on this machine, and the events.
+//! Two screens: the board, to choose a task, and the reader, its Issue, diff or log over the whole terminal.
 //! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`.
 //! `g` lends the terminal to Lazygit in the selected task's worktree: Lazygit is not read only, the board is.
 
 use super::{alive, ago, board_config, epoch, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
             tilde, Task};
-use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event,
+                                KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::crossterm::terminal::{enable_raw_mode, Clear as ClearScreen, ClearType, EnterAlternateScreen};
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -24,7 +26,11 @@ use std::{fs, thread};
 
 /// Columns in the order a person acts on them: what needs you first.
 const ORDER: [&str; 7] = ["In review", "Blocked", "In progress", "Ready", "wait for merge", "Backlog", "Done"];
-const KEYS: &str = "↑↓ move  ⏎ issue  d diff  l log  b browser  o open  g lazygit  f fetch  q quit";
+const KEYS: &str = "↑↓ jk task  ⏎ issue  d diff  l log  PgUp/PgDn details  b browser  o open  g lazygit  f fetch  q quit";
+const LOG_TAIL: u64 = 1 << 20; // the log's last 1 MB, when the reader opens it and while it follows new output
+const LOG_MAX: u64 = 4 << 20; // the most it grows to while the reader stays on older output
+const WHEEL: isize = 3; // rows per notch of the mouse wheel
+const SIDEWAYS: usize = 8; // columns per ← or → in the diff
 
 fn color(status: &str) -> Color {
     match status {
@@ -92,11 +98,22 @@ fn local_time(stamp: &str, offset: i64) -> String {
     format!("{m:02}-{d:02} {hm}")
 }
 
-/// The last lines of a run's log, without the terminal's color codes.
-fn log_tail(path: &str, lines: usize) -> Vec<String> {
-    let Ok(mut f) = fs::File::open(path) else { return vec![format!("no log at {path}")] };
+/// The log's size and time: the reader reads it again when they change.
+fn log_stamp(path: &str) -> Option<(u64, Option<SystemTime>)> {
+    fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+/// A run's log from byte `from` to its end, without the terminal's color codes; from its last LOG_TAIL bytes when
+/// `from` is None or no longer fits. Returns the lines and where they start: a reader kept on older output reads
+/// from the same place again, so that new output only adds lines at the bottom.
+fn log_lines(path: &str, from: Option<u64>) -> (Vec<String>, u64) {
+    let Ok(mut f) = fs::File::open(path) else { return (vec![format!("no log at {path}")], 0) };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let _ = f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)));
+    let start = match from {
+        Some(at) if at <= len && len - at <= LOG_MAX => at,
+        _ => len.saturating_sub(LOG_TAIL),
+    };
+    let _ = f.seek(SeekFrom::Start(start));
     let mut bytes = vec![];
     let _ = f.read_to_end(&mut bytes);
     let mut clean = String::new();
@@ -121,8 +138,12 @@ fn log_tail(path: &str, lines: usize) -> Vec<String> {
             c => clean.push(c),
         }
     }
-    let all: Vec<&str> = clean.lines().collect();
-    all[all.len().saturating_sub(lines)..].iter().map(|l| l.to_string()).collect()
+    // a start in the middle of the file cuts its first line
+    let text = match clean.split_once('\n') {
+        Some((_, rest)) if start > 0 && !rest.is_empty() => rest,
+        _ => &clean, // unless it is all there is
+    };
+    (text.lines().map(str::to_string).collect(), start)
 }
 
 fn open_url(url: &str) -> String {
@@ -144,18 +165,109 @@ fn open_url(url: &str) -> String {
     }
 }
 
-/// What the right pane shows for the selected card.
+/// What the reader shows of its task, over the whole screen.
 #[derive(Clone, Copy, PartialEq)]
 enum View {
-    Details,
     Issue,
     Diff,
     Log,
 }
 
+impl View {
+    fn name(self) -> &'static str {
+        match self {
+            View::Issue => "Issue",
+            View::Diff => "Diff",
+            View::Log => "Log",
+        }
+    }
+
+    /// The diff keeps its columns (←→ scroll it); the Issue and the log wrap.
+    fn wraps(self) -> bool {
+        self != View::Diff
+    }
+}
+
+/// Where the reader is in a view: its top row on screen, its first column (the diff), and whether it follows new
+/// output (the log, while it is at the bottom).
+#[derive(Clone, Copy, Default)]
+struct Pos {
+    top: usize,
+    left: usize,
+    follow: bool,
+    width: u16, // the width `top` was counted at
+}
+
+/// Rows on screen of each line at this width: a wrapped line wider than the screen takes more than one.
+fn screen_rows(lines: &[Line<'static>], width: u16, wrap: bool) -> Vec<usize> {
+    lines.iter().map(|l| {
+        if !wrap || l.width() <= width as usize {
+            1
+        } else {
+            Paragraph::new(l.clone()).wrap(Wrap { trim: false }).line_count(width).max(1)
+        }
+    }).collect()
+}
+
+/// The line that holds screen row `top`, and how many of its rows are above it.
+fn locate(rows: &[usize], top: usize) -> (usize, usize) {
+    let (mut line, mut skip) = (0, top);
+    while line < rows.len() && skip >= rows[line] {
+        skip -= rows[line];
+        line += 1;
+    }
+    (line, skip)
+}
+
+/// The same place in lines wrapped at another width: the line that was at the top, as far into it.
+fn same_place(old: &[usize], new: &[usize], top: usize) -> usize {
+    let (line, skip) = locate(old, top);
+    let within = match (old.get(line), new.get(line)) {
+        (Some(&o), Some(&n)) => (skip * n / o.max(1)).min(n.saturating_sub(1)),
+        _ => 0,
+    };
+    new.iter().take(line).sum::<usize>() + within
+}
+
+/// Draws the lines that fit in area from screen row `top` and, unwrapped, from column `left`. Only those lines are
+/// laid out, from the line that holds the top row.
+fn draw_rows(f: &mut Frame, area: Rect, lines: &[Line<'static>], rows: &[usize], wrap: bool, top: usize, left: usize) {
+    let (first, skip) = locate(rows, top);
+    let (mut last, mut shown) = (first, 0);
+    while last < lines.len() && shown < skip + area.height as usize {
+        shown += rows[last];
+        last += 1;
+    }
+    let p = Paragraph::new(Text::from(lines[first..last].to_vec()));
+    let at = |n: usize| n.min(u16::MAX as usize) as u16;
+    f.render_widget(if wrap { p.wrap(Wrap { trim: false }).scroll((at(skip), 0)) } else { p.scroll((0, at(left))) }, area);
+}
+
 fn git(wt: &str, args: &[&str]) -> String {
-    Command::new("git").arg("-C").arg(wt).args(args).stdin(Stdio::null()).output().ok()
-        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    git_with(wt, args, None).unwrap_or_default()
+}
+
+/// git in the worktree, on another index file when one is given; None when it fails.
+fn git_with(wt: &str, args: &[&str], index: Option<&Path>) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(wt).args(args).stdin(Stdio::null());
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    cmd.output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// A copy of an index file in the temporary directory, made as a new file: never through a link someone left there.
+fn index_copy(index: &Path) -> Option<PathBuf> {
+    let mut from = fs::File::open(index).ok()?;
+    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let copy = std::env::temp_dir().join(format!("task-rs-{}-{nanos}.index", std::process::id()));
+    let mut to = fs::OpenOptions::new().write(true).create_new(true).open(&copy).ok()?;
+    if std::io::copy(&mut from, &mut to).is_err() {
+        let _ = fs::remove_file(&copy);
+        return None;
+    }
+    Some(copy)
 }
 
 /// What the agent changed in the task's worktree since it left its base, committed or not. Reads only: unlike
@@ -175,13 +287,22 @@ fn diff_lines(t: &Task) -> Vec<Line<'static>> {
     let fork = Some(git(wt, &["merge-base", &base, "HEAD"]).trim().to_string())
         .filter(|f| !f.is_empty()).unwrap_or_else(|| "HEAD".into());
     let short: String = fork.chars().take(7).collect();
+    // git diff refreshes the file times in the index and writes it back, under index.lock, where a running agent's
+    // own git add or commit could fail: it reads a copy of the index (the index itself when no copy can be made)
+    let index = git(wt, &["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+    let copy = index_copy(Path::new(index.trim()));
+    let copied = copy.as_deref();
+    let read = |args: &[&str]| git_with(wt, args, copied).or_else(|| git_with(wt, args, None)).unwrap_or_default();
     let mut lines = vec![Line::from(format!("changes since {base} ({short}) in {}", tilde(&PathBuf::from(wt)))).dim()];
-    lines.extend(git(wt, &["diff", "--stat", &fork, "--"]).lines().map(|l| Line::from(l.to_string())));
-    let untracked = git(wt, &["ls-files", "--others", "--exclude-standard"]);
+    lines.extend(read(&["diff", "--stat", &fork, "--"]).lines().map(|l| Line::from(l.to_string())));
+    let untracked = read(&["ls-files", "--others", "--exclude-standard"]);
     let new: Vec<&str> = untracked.lines().filter(|f| !f.starts_with(".task-")).collect();
     lines.extend(new.iter().map(|f| Line::from(format!(" new, not added yet: {f}")).yellow()));
     lines.push(Line::default());
-    let diff = git(wt, &["diff", &fork, "--"]);
+    let diff = read(&["diff", &fork, "--"]);
+    if let Some(copy) = copied {
+        let _ = fs::remove_file(copy);
+    }
     if diff.trim().is_empty() && new.is_empty() {
         lines.push(Line::from("no changes").dim());
     }
@@ -318,6 +439,151 @@ fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
     lines
 }
 
+/// The full-screen reader: one task's Issue, diff or log. It stays on the task it opened on, by id: the arrows scroll
+/// it, and a task that leaves the local board stays shown from its last copy, never replaced by another.
+struct Reader {
+    task: Task, // as last seen on the local board
+    gone: bool, // the task is no longer on the local board
+    view: View,
+    pos: [Pos; 3], // each view's place, kept when switching between them, on reloads and across Lazygit
+    lines: Vec<Line<'static>>,
+    rows: Option<(u16, Vec<usize>, usize)>, // screen rows of each line at a width, and the widest line
+    stale: bool,                            // the lines changed since: rows are of the ones before
+    log_path: String,                       // the log file read last
+    log_from: u64,                          // where its lines start in it
+    log_seen: Option<(u64, Option<SystemTime>)>,
+    page: usize,   // the body's height at the last draw
+    bottom: usize, // the last top row that still fills the body, at the last draw
+    right: usize,  // the last first column (the diff), at the last draw
+    size: (u16, u16), // the body's width and height at the last draw
+}
+
+impl Reader {
+    fn new(task: Task, view: View) -> Self {
+        let log = Pos { follow: true, ..Pos::default() }; // the log opens at its end
+        Reader { task, gone: false, view, pos: [Pos::default(), Pos::default(), log], lines: vec![], rows: None, stale: true,
+                 log_path: String::new(), log_from: 0, log_seen: None, page: 1, bottom: 0, right: 0, size: (0, 0) }
+    }
+
+    /// Makes the view's lines again from the task as it is now: the local Issue, the worktree, the log file.
+    fn fill(&mut self, age: f64) {
+        let t = &self.task;
+        self.lines = match self.view {
+            View::Issue => issue_lines(t, age),
+            View::Diff => diff_lines(t),
+            View::Log if t.log.is_empty() => vec![Line::from("no run of this task on this machine").dim()],
+            View::Log => {
+                // another log file than the one read last starts again from its end
+                let from = (!self.pos[View::Log as usize].follow && self.log_path == t.log).then_some(self.log_from);
+                let (lines, start) = log_lines(&t.log, from);
+                if from.is_some_and(|at| at != start) {
+                    // it grew past LOG_MAX, or was cut or replaced: what was on screen is not there, go to the end
+                    self.pos[View::Log as usize].follow = true;
+                }
+                (self.log_path, self.log_from, self.log_seen) = (t.log.clone(), start, log_stamp(&t.log));
+                lines.into_iter().map(Line::from).collect()
+            }
+        };
+        self.stale = true;
+    }
+
+    fn switch(&mut self, view: View, age: f64) {
+        if self.view != view {
+            self.view = view;
+            self.rows = None;
+            self.fill(age);
+        }
+    }
+
+    /// Moves `by` rows. The log follows new output while it is at the bottom, and only then.
+    fn scroll(&mut self, by: isize) {
+        let (bottom, log) = (self.bottom, self.view == View::Log);
+        let p = &mut self.pos[self.view as usize];
+        p.top = p.top.saturating_add_signed(by).min(bottom);
+        p.follow = log && p.top >= bottom;
+    }
+
+    fn sideways(&mut self, by: isize) {
+        let right = self.right;
+        let p = &mut self.pos[self.view as usize];
+        p.left = p.left.saturating_add_signed(by).min(right);
+    }
+
+    fn key(&mut self, code: KeyCode, age: f64) {
+        let page = self.page as isize;
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => self.scroll(1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll(-1),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll(page),
+            KeyCode::PageUp => self.scroll(-page),
+            KeyCode::Home => {
+                self.pos[self.view as usize].left = 0;
+                self.scroll(isize::MIN);
+            }
+            KeyCode::End => self.scroll(isize::MAX),
+            KeyCode::Right => self.sideways(SIDEWAYS as isize),
+            KeyCode::Left => self.sideways(-(SIDEWAYS as isize)),
+            KeyCode::Enter => self.switch(View::Issue, age),
+            KeyCode::Char('d') => self.switch(View::Diff, age),
+            KeyCode::Char('l') => self.switch(View::Log, age),
+            _ => {}
+        }
+    }
+
+    fn draw(&mut self, f: &mut Frame, head: Rect, body: Rect) {
+        let (width, height, wrap) = (body.width, body.height as usize, self.view.wraps());
+        let p = &mut self.pos[self.view as usize];
+        // a new size keeps the reader at the end when it was there, else on the line it showed at the top
+        let resized = (width, body.height) != self.size;
+        let at_end = resized && self.bottom > 0 && p.top >= self.bottom;
+        if self.stale || self.rows.as_ref().map_or(true, |(w, _, _)| *w != width) {
+            let rows = screen_rows(&self.lines, width, wrap);
+            if p.width != 0 && p.width != width {
+                // its rows at the width it was last shown at: kept, or counted again after a switch
+                p.top = match &self.rows {
+                    Some((w, old, _)) if *w == p.width => same_place(old, &rows, p.top),
+                    _ => same_place(&screen_rows(&self.lines, p.width, wrap), &rows, p.top),
+                };
+            }
+            let widest = if wrap { 0 } else { self.lines.iter().map(Line::width).max().unwrap_or(0) };
+            (self.rows, self.stale) = (Some((width, rows, widest)), false);
+        }
+        let Some((_, rows, widest)) = &self.rows else { return };
+        let total: usize = rows.iter().sum();
+        // kept within the text: it may have shrunk, or the terminal may have changed size
+        (self.page, self.bottom) = (height.max(1), total.saturating_sub(height));
+        self.right = widest.saturating_sub(width as usize);
+        self.size = (width, body.height);
+        p.top = if p.follow || at_end { self.bottom } else { p.top.min(self.bottom) };
+        p.follow = self.view == View::Log && p.top >= self.bottom; // at the bottom, however it got there
+        p.left = p.left.min(self.right);
+        p.width = width;
+        let p = *p;
+
+        let mut right = vec![];
+        if self.gone {
+            right.push(" no longer on the local board (Done?) ".bold().yellow());
+        }
+        right.push(match total {
+            0 => " empty ".dim(),
+            _ => format!(" {}-{} of {} ", p.top + 1, (p.top + height).min(total), total).dim(),
+        });
+        if self.view == View::Log {
+            right.push(if p.follow { " following ".green() } else { " paused, End follows ".yellow() });
+        }
+        if self.right > 0 {
+            right.push(format!(" col {} of {} ", p.left + 1, widest).dim());
+        }
+        let right = Line::from(right);
+        let [left, right_area] = Layout::horizontal([Constraint::Min(0), Constraint::Length(right.width() as u16)])
+            .areas(head);
+        let title = format!(" #{} {}", self.task.id, self.task.title);
+        f.render_widget(Line::from(vec![format!(" {} ", self.view.name()).bold().reversed(), title.bold()]), left);
+        f.render_widget(right, right_area);
+        draw_rows(f, body, &self.lines, rows, wrap, p.top, p.left);
+    }
+}
+
 struct App {
     board: Vec<Task>,
     age: f64,
@@ -325,9 +591,9 @@ struct App {
     error: String,
     events: Vec<Value>,
     selected: ListState,
-    view: View,
-    scroll: u16, // u16::MAX: the bottom (the log starts there)
-    diff: Option<(String, Vec<Line<'static>>)>, // the selected card's diff, made when shown
+    details: usize,         // the details pane's top row
+    details_page: usize,    // its height at the last draw
+    reader: Option<Reader>, // None: the overview (the board, the details, the events)
     status: String,
     alert: bool, // the status is a Lazygit failure: shown in yellow until the next key
     offset: i64,
@@ -343,7 +609,7 @@ impl App {
     fn new() -> Self {
         let mut app = App {
             board: vec![], age: 0.0, changed: false, error: String::new(), events: vec![],
-            selected: ListState::default(), view: View::Details, scroll: 0, diff: None,
+            selected: ListState::default(), details: 0, details_page: 1, reader: None,
             status: "read only: GitHub is read only when you press f".into(), alert: false,
             offset: utc_offset(), seen: (None, None, None), loaded_at: 0.0, fetching: None, confirm: None, launch: None,
             quit: false,
@@ -356,7 +622,7 @@ impl App {
         (mtime(&state("board-cache.json")), mtime(&state("events.jsonl")), mtime(&state("runs")))
     }
 
-    /// Reads the board, the runs and the events again, keeping the selected card.
+    /// Reads the board, the runs and the events again, keeping the selected card, and the reader's task and place.
     fn reload(&mut self) {
         let keep = self.current().map(|t| t.id.clone());
         let (_, _, issues) = board_config();
@@ -377,11 +643,25 @@ impl App {
         self.selected.select(at.map(|i| i.min(self.board.len().saturating_sub(1))));
         self.seen = Self::files();
         self.loaded_at = now();
-        self.diff = None; // made again, from the worktree as it is now
+        if let Some(r) = &mut self.reader {
+            match self.board.iter().find(|t| t.id == r.task.id) {
+                Some(t) => (r.task, r.gone) = (t.clone(), false),
+                None => r.gone = true,
+            }
+            r.fill(self.age); // made again, from the worktree and the log as they are now
+        }
     }
 
     fn current(&self) -> Option<&Task> {
         self.selected.selected().and_then(|i| self.board.get(i))
+    }
+
+    /// The task the keys act on: the reader's, or the selected card.
+    fn focused(&self) -> Option<&Task> {
+        match &self.reader {
+            Some(r) => Some(&r.task),
+            None => self.current(),
+        }
     }
 
     /// The newest event of a task, and its newest event that carries a digest.
@@ -404,17 +684,31 @@ impl App {
         if Self::files() != self.seen || now() - self.loaded_at >= 15.0 {
             self.reload();
         }
+        // the log on screen, as soon as it grows
+        if let Some(r) = &mut self.reader {
+            if r.view == View::Log && !r.task.log.is_empty() && log_stamp(&r.task.log) != r.log_seen {
+                r.fill(self.age);
+            }
+        }
     }
 
-    /// Shows a view in the right pane, or the details again when it is already shown.
-    fn show(&mut self, view: View) {
-        self.view = if self.view == view { View::Details } else { view };
-        self.top();
+    /// Opens the reader on the selected card.
+    fn read(&mut self, view: View) {
+        let Some(t) = self.current().cloned() else {
+            return self.warn("no card selected".into());
+        };
+        let mut r = Reader::new(t, view);
+        r.fill(self.age);
+        self.reader = Some(r);
     }
 
-    fn top(&mut self) {
-        self.scroll = if self.view == View::Log { u16::MAX } else { 0 };
-        self.diff = None;
+    /// Back to the overview, on the reader's card while it is on the board.
+    fn close(&mut self) {
+        if let Some(r) = self.reader.take() {
+            if let Some(i) = self.board.iter().position(|t| t.id == r.task.id) {
+                self.selected.select(Some(i));
+            }
+        }
     }
 
     /// A failure in the status line, in yellow.
@@ -433,26 +727,13 @@ impl App {
         }
         match code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.show(View::Details),
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected.select_next();
-                self.top();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected.select_previous();
-                self.top();
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Enter => self.show(View::Issue),
-            KeyCode::Char('d') => self.show(View::Diff),
-            KeyCode::Char('l') => self.show(View::Log),
+            KeyCode::Esc => self.close(),
             KeyCode::Char('b') => {
-                let url = self.current().map(|t| self.pr_of(t).unwrap_or_else(|| t.url.clone())).unwrap_or_default();
+                let url = self.focused().map(|t| self.pr_of(t).unwrap_or_else(|| t.url.clone())).unwrap_or_default();
                 self.status = open_url(&url);
             }
             KeyCode::Char('o') => {
-                if let Some(id) = self.current().map(|t| t.id.clone()) {
+                if let Some(id) = self.focused().map(|t| t.id.clone()) {
                     self.status = match Command::new("task").args(["open", &id]).stdin(Stdio::null()).output() {
                         Ok(o) => String::from_utf8_lossy(&o.stdout).lines().find(|l| !l.trim().is_empty())
                             .unwrap_or("task open: no output").trim().to_string(),
@@ -460,7 +741,7 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char('g') => match self.current().map(|t| (t.id.clone(), t.title.clone())) {
+            KeyCode::Char('g') => match self.focused().map(|t| (t.id.clone(), t.title.clone())) {
                 None => self.warn("no card selected: Lazygit not opened".into()),
                 Some((id, title)) => match lazygit_target(&id) {
                     Ok(t) => self.confirm = Some((t, title)),
@@ -475,6 +756,38 @@ impl App {
                 self.fetching = Some(rx);
                 self.status = "fetching from GitHub (read only)…".into();
             }
+            // in the reader, the other keys move in it and never change the task
+            code if self.reader.is_some() => {
+                let age = self.age;
+                if let Some(r) = &mut self.reader {
+                    r.key(code, age);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected.select_next();
+                self.details = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected.select_previous();
+                self.details = 0;
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => self.details = self.details.saturating_add(self.details_page),
+            KeyCode::PageUp => self.details = self.details.saturating_sub(self.details_page),
+            KeyCode::Enter => self.read(View::Issue),
+            KeyCode::Char('d') => self.read(View::Diff),
+            KeyCode::Char('l') => self.read(View::Log),
+            _ => {}
+        }
+    }
+
+    /// The wheel scrolls the reader (the terminal reports it only there), not behind the Lazygit confirmation.
+    fn mouse(&mut self, kind: MouseEventKind) {
+        let Some(r) = self.reader.as_mut().filter(|_| self.confirm.is_none()) else { return };
+        match kind {
+            MouseEventKind::ScrollDown => r.scroll(WHEEL),
+            MouseEventKind::ScrollUp => r.scroll(-WHEEL),
+            MouseEventKind::ScrollRight => r.sideways(SIDEWAYS as isize),
+            MouseEventKind::ScrollLeft => r.sideways(-(SIDEWAYS as isize)),
             _ => {}
         }
     }
@@ -489,12 +802,44 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let status = if self.error.is_empty() { self.status.clone() } else { format!("error: {}", self.error) };
+        let keys = match &self.reader {
+            None => KEYS.to_string(),
+            Some(r) => {
+                let sideways = if r.view == View::Diff { "←→ sideways  " } else { "" };
+                format!("↑↓ jk scroll  {sideways}PgUp/PgDn/Space page  Home/End  ⏎ issue  d diff  l log  g lazygit  \
+                         b browser  Esc back  q quit")
+            }
+        };
         // the keys, then the status; up to 3 lines, so that a long error and its help are not cut off
-        let width = (KEYS.chars().count() + status.chars().count() + 4).max(1);
+        let width = (keys.chars().count() + status.chars().count() + 4).max(1);
         let foot_rows = width.div_ceil((f.area().width as usize).saturating_sub(10).max(1)).clamp(1, 3) as u16;
-        let [head, body, feed, foot] = Layout::vertical([
-            Constraint::Length(1), Constraint::Min(6), Constraint::Length(9), Constraint::Length(foot_rows),
-        ]).areas(f.area());
+        let [head, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(foot_rows)])
+            .areas(f.area());
+        match &mut self.reader {
+            Some(r) => r.draw(f, head, body),
+            None => self.draw_overview(f, head, body),
+        }
+
+        let status = if self.alert { format!("  {status}").yellow() } else { format!("  {status}").dim() };
+        let foot_line = Line::from(vec![format!(" {keys} ").reversed(), status]);
+        f.render_widget(Paragraph::new(foot_line).wrap(Wrap { trim: false }), foot);
+
+        if let Some((t, title)) = &self.confirm {
+            let area = f.area();
+            let (w, h) = (area.width.saturating_sub(4).min(90), area.height.saturating_sub(2).min(22));
+            let popup = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+            f.render_widget(Clear, popup);
+            let block = Block::bordered().title(" Open Lazygit? It can change Git ").border_style(Style::new().yellow())
+                .title_bottom(Line::from(" g or ⏎ open Lazygit · any other key cancels ").bold());
+            f.render_widget(Paragraph::new(handoff_lines(t, title)).block(block).wrap(Wrap { trim: false }), popup);
+        }
+    }
+
+    /// The overview, for choosing a task: the board, the selected card's details, and the newest events.
+    fn draw_overview(&mut self, f: &mut Frame, head: Rect, body: Rect) {
+        // the events give up rows first in a short terminal
+        let [body, feed] = Layout::vertical([Constraint::Min(6), Constraint::Length((f.area().height / 4).clamp(3, 9))])
+            .areas(body);
         // side by side when wide, the details under the board in a narrow pane
         let [left, right] = if body.width >= 110 {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body)
@@ -515,43 +860,8 @@ impl App {
         f.render_widget(Line::from(head_spans), head);
 
         self.draw_board(f, left);
-        match self.view {
-            View::Details => self.draw_details(f, right),
-            View::Issue => {
-                let (title, lines) = match self.current() {
-                    Some(t) => (format!(" Issue #{} (⏎ back, PgUp/PgDn) ", t.id), issue_lines(t, self.age)),
-                    None => (" Issue ".into(), vec![]),
-                };
-                self.draw_pane(f, right, title, lines, true);
-            }
-            View::Diff => {
-                let Some((id, title)) = self.current().map(|t| (t.id.clone(), format!(" Diff #{} (d back, PgUp/PgDn) ", t.id))) else {
-                    return self.draw_pane(f, right, " Diff ".into(), vec![], false);
-                };
-                if self.diff.as_ref().map_or(true, |(had, _)| *had != id) {
-                    let lines = self.current().map(diff_lines).unwrap_or_default();
-                    self.diff = Some((id, lines));
-                }
-                let lines = self.diff.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
-                self.draw_pane(f, right, title, lines, false);
-            }
-            View::Log => self.draw_log(f, right),
-        }
+        self.draw_details(f, right);
         self.draw_events(f, feed);
-
-        let status = if self.alert { format!("  {status}").yellow() } else { format!("  {status}").dim() };
-        let foot_line = Line::from(vec![format!(" {KEYS} ").reversed(), status]);
-        f.render_widget(Paragraph::new(foot_line).wrap(Wrap { trim: false }), foot);
-
-        if let Some((t, title)) = &self.confirm {
-            let area = f.area();
-            let (w, h) = (area.width.saturating_sub(4).min(90), area.height.saturating_sub(2).min(22));
-            let popup = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-            f.render_widget(Clear, popup);
-            let block = Block::bordered().title(" Open Lazygit? It can change Git ").border_style(Style::new().yellow())
-                .title_bottom(Line::from(" g or ⏎ open Lazygit · any other key cancels ").bold());
-            f.render_widget(Paragraph::new(handoff_lines(t, title)).block(block).wrap(Wrap { trim: false }), popup);
-        }
     }
 
     fn draw_board(&mut self, f: &mut Frame, area: Rect) {
@@ -617,29 +927,14 @@ impl App {
                 lines.extend(report.lines().map(|l| Line::from(l.to_string())));
             }
         }
-        self.draw_pane(f, area, " Details ".into(), lines, true);
-    }
-
-    /// The right pane: lines from the scroll position, which is kept within the text.
-    fn draw_pane(&mut self, f: &mut Frame, area: Rect, title: String, lines: Vec<Line<'static>>, wrap: bool) {
-        let height = area.height.saturating_sub(2) as usize;
-        // wrapped text can be longer on screen than in lines: let it scroll up to its last line
-        let max = if wrap { lines.len().saturating_sub(1) } else { lines.len().saturating_sub(height) };
-        self.scroll = self.scroll.min(max.min(u16::MAX as usize) as u16);
-        let mut p = Paragraph::new(Text::from(lines)).block(Block::bordered().title(title)).scroll((self.scroll, 0));
-        if wrap {
-            p = p.wrap(Wrap { trim: false });
-        }
-        f.render_widget(p, area);
-    }
-
-    fn draw_log(&mut self, f: &mut Frame, area: Rect) {
-        let (title, lines) = match self.current() {
-            Some(t) if !t.log.is_empty() => (format!(" Log #{} (l back, PgUp/PgDn) ", t.id), log_tail(&t.log, 2000)),
-            Some(t) => (format!(" Log #{} ", t.id), vec!["no run of this task on this machine".into()]),
-            None => (" Log ".into(), vec![]),
-        };
-        self.draw_pane(f, area, title, lines.into_iter().map(Line::from).collect(), false);
+        let block = Block::bordered().title(" Details ");
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        // PgUp and PgDn scroll it, kept within the wrapped text
+        let rows = screen_rows(&lines, inner.width, true);
+        self.details_page = (inner.height as usize).max(1);
+        self.details = self.details.min(rows.iter().sum::<usize>().saturating_sub(inner.height as usize));
+        draw_rows(f, inner, &lines, &rows, true, self.details, 0);
     }
 
     fn draw_events(&self, f: &mut Frame, area: Rect) {
@@ -689,6 +984,7 @@ fn lazygit(terminal: &mut DefaultTerminal, app: &mut App, id: &str) -> std::io::
     };
     let wt = tilde(&t.worktree);
     terminal.show_cursor()?;
+    execute!(std::io::stdout(), DisableMouseCapture)?; // the reader's wheel reports: Lazygit asks for its own
     ratatui::try_restore()?; // the normal screen, in cooked mode: Lazygit sets up the terminal its own way
     let mode = stty(&["-g"]); // that mode, put back even if Lazygit dies in raw mode
     println!("task-rs: Lazygit in #{id}, {wt}. Quit Lazygit to return to the board.");
@@ -712,7 +1008,7 @@ fn lazygit(terminal: &mut DefaultTerminal, app: &mut App, id: &str) -> std::io::
     while event::poll(Duration::ZERO)? {
         event::read()?; // keys meant for Lazygit, typed as it ended
     }
-    app.reload(); // keeps the selected card by its id
+    app.reload(); // keeps the selected card by its id, and the reader where it was
     match result {
         Ok(s) if s.success() => app.status = format!("back from Lazygit in #{id}; board reloaded (read only)"),
         Ok(s) => app.warn(match s.code() {
@@ -726,17 +1022,30 @@ fn lazygit(terminal: &mut DefaultTerminal, app: &mut App, id: &str) -> std::io::
 
 fn main_loop(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     let mut app = App::new();
+    // the terminal reports the wheel in the reader only: on the board it keeps its own mouse selection
+    let mut mouse = false;
     while !app.quit {
+        if mouse != app.reader.is_some() {
+            mouse = !mouse;
+            if mouse {
+                execute!(std::io::stdout(), EnableMouseCapture)?;
+            } else {
+                execute!(std::io::stdout(), DisableMouseCapture)?;
+            }
+        }
         terminal.draw(|f| app.draw(f))?;
         if event::poll(Duration::from_millis(500))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
-                    app.key(k.code);
-                }
+            match event::read()? {
+                // Ctrl-D or Ctrl-L is not d or l
+                Event::Key(k) if k.kind == KeyEventKind::Press
+                    && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => app.key(k.code),
+                Event::Mouse(m) => app.mouse(m.kind),
+                _ => {}
             }
         }
         if let Some(id) = app.launch.take() {
             lazygit(terminal, &mut app, &id)?;
+            mouse = false; // lazygit() turned the reports off
         }
         app.tick();
     }
@@ -745,7 +1054,14 @@ fn main_loop(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
 
 pub fn run() {
     board_config(); // a missing config stops here, before the screen is taken over
-    if let Err(e) = ratatui::run(main_loop) {
+    let hook = std::panic::take_hook(); // ratatui's hook restores the screen, then this one turns the wheel reports off
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
+    let result = ratatui::run(main_loop);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture); // ratatui does not turn the wheel reports off
+    if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }

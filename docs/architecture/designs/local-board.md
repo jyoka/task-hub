@@ -174,7 +174,7 @@ sequenceDiagram
     else 読んでいる間に task-hub がボードを変えた
         TUI->>TUI: 書かない(今は「synced」と出る。下の失敗の表)
     end
-    You->>TUI: Enter、i、o キー
+    You->>TUI: b、o キー(Enter、d、l は下の「読む画面」)
     TUI->>TUI: ブラウザで PR か Issue を開く。o は task open N を呼ぶ
 ```
 
@@ -260,7 +260,7 @@ sequenceDiagram
 | `state/board-meta.json` | `project` | `sync` で Project の id と欄の名前。`key` が合えば古さを問わず使う |
 | `state/runs/<id>.json` | `tasks` | `pr`、`log`、`started`、`stage`、`pid` |
 | `state/events.jsonl` | `cmd_events`、`App::reload` | `events` は最後の 20 行、TUI は最後の 300 行 |
-| `state/logs/<id>.log` | `log_tail` | TUI の `l` キー。パスは `runs/<id>.json` の `log` から取る。最後の 64 KB |
+| `state/logs/<id>.log` | `log_lines` | TUI の `l` キー(読む画面)。パスは `runs/<id>.json` の `log` から取る。最後の 1 MB。古いところを読んでいる間は読み始めの位置を変えず、4 MB まで |
 
 ### 書くファイル(1 つ)
 
@@ -279,11 +279,12 @@ sequenceDiagram
 | `gh api graphql`(`PROJECT_QUERY`) | `sync` で `board-meta.json` がない、または別のボードのとき | 1 ポイント |
 | `ps -p <pid> -o command=` | 一覧のたび、pid のある実行ごと | - |
 | `date` | `list --watch` の見出し、TUI の起動時(時差) | - |
-| `open`(macOS)、`xdg-open`、`cmd /C start` | TUI の Enter、`i` | - |
+| `open`(macOS)、`xdg-open`、`cmd /C start` | TUI の `b` | - |
 | `task open <id>` | TUI の `o` | - |
 | `lazygit`(PATH にあるもの、引数なし、作業ディレクトリはタスクの worktree) | TUI の `g` を確かめたあと。端末を渡し、終わるまで待つ | - |
 | `git rev-parse --show-toplevel`、`--git-dir --git-common-dir`、`--abbrev-ref HEAD` | TUI の `g`。worktree がそれ自身の作業ツリーで、`git worktree add` で作ったもの(本体の checkout でない)か、ブランチは何か | - |
 | `stty -g`、`stty <前の設定>` | TUI の `g`。Lazygit の前の端末の設定を取り、あとで戻す(Unix) | - |
+| `git symbolic-ref`、`merge-base`、`diff --stat`、`ls-files --others`、`diff` | TUI の `d`。読む画面で diff を開いたときと、開いている間の読み直しのたび。`git diff` は index のファイルの時刻を直して書き戻す(`index.lock` を取る)ので、`rev-parse --git-path index` の index を一時ディレクトリにコピーし、`GIT_INDEX_FILE` でそれを読ませる。コピーできないときだけ index そのもの | - |
 
 `gh` は `TASK_GH` で差し替えられます(`bin/task` と同じ。テストの偽物の `gh` が使える)。
 
@@ -304,6 +305,8 @@ sequenceDiagram
 | `g`: カードがない、記録に worktree がない、worktree が消えた、Git でない、本体の checkout、またはその中 | Lazygit を開かない。下の行に黄色で理由を出す。リポジトリの本体など、ほかの checkout では開かない |
 | `g`: `lazygit` が PATH にない | 端末を渡さない。下の行に黄色で `brew install lazygit` と出す |
 | `g`: Lazygit を起動できない、0 以外で終わった、シグナルで止まった | 端末を取り戻す(`stty` で前の設定、取れなければ `stty sane`。マウス、貼り付け、フォーカスの報告を切る。raw モード、代替画面)。0 以外とシグナルのときは、Lazygit の出力を読めるよう Enter を待ってから戻る。ボードを読み直し、下の行に黄色で出す |
+| 読む画面: タスクがボードから消えた(Done) | 最後の写しを出したまま、見出しに `no longer on the local board` と出す。別のタスクに切り替えない。Esc でボードに戻ると、残っているカードを選ぶ |
+| 読む画面: worktree、ログ、実行の記録がない | 本文にそう出す(`no worktree for this task on this machine`、`no log at <パス>`、`no run of this task on this machine`)。キーはそのまま使える |
 
 通知、キャッシュ、表示の失敗で止めない、という決まり(lld.md 8 章)に沿っています。止まるのは設定がないときと、
 人が頼んだ `sync` が失敗したときだけです。
@@ -345,6 +348,45 @@ sequenceDiagram
 - delta は Lazygit の設定(`git.diffRenderers`)で使うもので、task-rs は呼びません。設定は利用者が自分で書きます
 - `Ctrl-C` は Lazygit が raw モードで受けます。raw モードにしない別のプログラムを `lazygit` の名前で置いた場合は、
   task-rs も同じプロセスグループなので止まります(画面はその前に返してあります)
+
+### 読む画面(task 170)
+
+TUI の画面は 2 つだけです。ボード(タスクを選ぶ)と、読む画面(1 つのタスクの Issue、diff、ログを読む)です。
+小さい端末でボードの右の枠が数行しかなく、長い Issue や diff を読めなかったために足しました。枠を増やしたり、
+枠の間でフォーカスを移したりする作りにはしません。
+
+```mermaid
+stateDiagram-v2
+    [*] --> ボード
+    ボード --> 読む画面: Enter(Issue)、d(diff)、l(ログ)
+    読む画面 --> 読む画面: Enter、d、l で切り替え(それぞれの位置を保つ)
+    読む画面 --> ボード: Esc(同じカードを選ぶ)
+    ボード --> Lazygit: g、確かめて g か Enter
+    読む画面 --> Lazygit: g、確かめて g か Enter
+    Lazygit --> ボード: 終わる(ボードから開いたとき)
+    Lazygit --> 読む画面: 終わる(同じ画面、同じ位置)
+```
+
+- 読む画面は端末の全体を使います。残すのは 1 行の見出し(画面の名前、タスク、何行目か、ログの追従)と、下の
+  キーの説明と状態の行だけです。ボードと出来事は隠し、読み直しは裏で続けます
+- 読む画面はタスクを番号で持ちます(`Reader`)。↑↓、j k、PgUp、PgDn、Space、Home、End、ホイールは画面の中を
+  動くだけで、選んだカードは変えません。←→ は diff を横に動かします。diff は折り返さず、切りもしません
+- 位置(`Pos`)は画面ごとに持ちます。上の行は「画面の何行目か」で数えます。折り返した行は
+  `Paragraph::line_count`(ratatui の `unstable-rendered-line-info`。依存は増えない)で画面の行数を数えるので、
+  1 行がとても長い Issue も最後まで動けます。描くのは見える行だけです
+- 読み直し(ファイルの変化、15 秒ごと、Lazygit の後)は位置を変えません。内容が短くなったら、端末が小さく
+  なったら、範囲の中に収めます。幅が変わったら上にあった行を保ち、最後にいたなら最後に留めます。読み直しと
+  幅の変化が同じ描画の間に起きても同じです(行ごとの画面の行数は次に描くまで前のものを持つ)
+- Ctrl や Alt を押しながらのキーは無視します(Ctrl-L や Ctrl-D で画面が変わらないように)
+- ログは開いたとき最後にいて、新しい出力を追います(`following`)。上に動くと追うのをやめ(`paused`)、
+  読み始めの位置(`log_from`)を変えずに読み直すので、下に足されるだけで見ている行は動きません。最後に戻ると
+  また追います。ログが読み始めから 4 MB を超えた、短くなった、置き換わったときは、見ていた行がもうないので
+  最後に移って追います。ログのファイルは 0.5 秒ごとに大きさと時刻を見ます。開いているのがログのときだけです
+- ホイールのために、読む画面の間だけ端末のマウスの報告を有効にします(`EnableMouseCapture`)。ボードでは切って、
+  端末の選択をそのまま使えるようにします。Lazygit に渡す前と終了の後にも切ります
+- `g` は #169 の確かめと貸し出し(`lazygit_target`、`lazygit`)をそのまま使います。読む画面からはそのタスクの
+  worktree を開き、戻ると `reload` が読む画面と位置を保ちます
+- 読む画面も GitHub を呼びません。Issue はボードの写し、diff は worktree、ログは手元のファイルです
 
 ### bin/task と違うところ
 
