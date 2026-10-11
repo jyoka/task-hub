@@ -1,6 +1,7 @@
 // The task-hub board in Kiro IDE (or VS Code): a view in its own activity bar container, and a status bar entry.
 // No LLM: it runs `task list` (read only) every minute and shows what it printed, with what task-hub's own files
 // (events.jsonl, metrics.jsonl) say about the cards. Above the list, the Claude Code mod's ship and its badges.
+// A card's Goal, Changes and Log open in read-only editor tabs (src/tabs.ts).
 import * as vscode from 'vscode'
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
@@ -12,6 +13,7 @@ import type { Board, Details } from '../../../claude/task-board/types'
 import type { Files, Node, Outcome } from './board.ts'
 import { badge, detailsOf, statusBar, toBoard, tree } from './board.ts'
 import { FRAMES, shipHtml, shipState, unlock } from './picture.ts'
+import { registerTabs } from './tabs.ts'
 
 const VIEW = 'taskHub.board'
 const REFRESH = 'taskHub.board.refresh'
@@ -93,6 +95,7 @@ class BoardView implements vscode.TreeDataProvider<Node> {
       item.iconPath = new vscode.ThemeIcon(node.icon, node.color ? new vscode.ThemeColor(node.color) : undefined)
     }
     if (node.link) item.command = { command: OPEN, title: 'PR を開く', arguments: [node.link] }
+    if (node.task) item.contextValue = 'taskHub.card' // the Goal, Changes and Log actions (package.json menus)
     return item
   }
 
@@ -231,6 +234,7 @@ export function activate(context: vscode.ExtensionContext, run: Run = runTaskLis
     vscode.commands.registerCommand(OPEN, (url: string) => vscode.env.openExternal(vscode.Uri.parse(url))),
     vscode.window.registerWebviewViewProvider(SHIP, ship),
     { dispose: () => { clearInterval(timer); clearInterval(frames) } })
+  registerTabs(context, () => provider.board?.cards ?? [])
   void refresh()
 }
 

@@ -8,7 +8,8 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-export const SOURCES = ['src/extension.ts', 'src/board.ts', 'src/picture.ts', '../../claude/task-board/hooks/parse.ts',
+export const SOURCES = ['src/extension.ts', 'src/board.ts', 'src/picture.ts', 'src/tabs.ts', 'src/inspect.ts',
+  '../../claude/task-board/hooks/parse.ts',
   '../../claude/task-board/hooks/panel.ts', '../../claude/task-board/hooks/ship.ts',
   '../../claude/task-board/hooks/badges.ts'].map(f => join(ROOT, f))
 

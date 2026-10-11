@@ -113,7 +113,7 @@ test('共有のしかた: out/ に mod の ship.ts と badges.ts から作った
   try {
     build(dir)
     assert.deepEqual(readdirSync(dir).sort(),
-      ['badges.js', 'board.js', 'extension.js', 'panel.js', 'parse.js', 'picture.js', 'ship.js'])
+      ['badges.js', 'board.js', 'extension.js', 'inspect.js', 'panel.js', 'parse.js', 'picture.js', 'ship.js', 'tabs.js'])
     const built = readFileSync(join(dir, 'picture.js'), 'utf8')
     assert.match(built, /require\("\.\/badges\.js"\)/)
     assert.match(built, /require\("\.\/ship\.js"\)/)

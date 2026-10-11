@@ -46,7 +46,7 @@ flowchart LR
 - **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
 - **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications. No LLM is used.
-- **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`.
+- **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.
 - **Light.** Python standard library only. You install one clone.
 
 ## Get started

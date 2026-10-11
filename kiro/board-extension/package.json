@@ -1,7 +1,7 @@
 {
   "name": "task-hub-board",
   "displayName": "task-hub board",
-  "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す。船の絵と実績バッジつき(LLM を使わない)",
+  "description": "task-hub のボードを task list から読んで、サイドバーとステータスバーに出す。カードの Goal、変更、ログを読み取り専用のタブで開く。船の絵と実績バッジつき(LLM を使わない)",
   "version": "0.1.0",
   "publisher": "jyoka",
   "license": "MIT",
@@ -9,7 +9,12 @@
   "engines": { "vscode": "^1.90.0" },
   "main": "./out/extension.js",
   "activationEvents": ["onStartupFinished"],
-  "capabilities": { "untrustedWorkspaces": { "supported": true } },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "信頼していないワークスペースでは、カードの変更(git を動かす)を出しません。ボード、Goal、ログは出します。"
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [{ "id": "taskHub", "title": "task-hub", "icon": "media/board.svg" }]
@@ -18,10 +23,33 @@
       "taskHub": [{ "type": "webview", "id": "taskHub.ship", "name": "船" }, { "id": "taskHub.board", "name": "ボード" }]
     },
     "commands": [
-      { "command": "taskHub.board.refresh", "title": "更新", "category": "task-hub", "icon": "$(refresh)" }
+      { "command": "taskHub.board.refresh", "title": "更新", "category": "task-hub", "icon": "$(refresh)" },
+      { "command": "taskHub.task.goal", "title": "Goal を開く", "category": "task-hub", "icon": "$(book)" },
+      { "command": "taskHub.task.changes", "title": "変更を見る", "category": "task-hub", "icon": "$(diff)" },
+      { "command": "taskHub.task.log", "title": "ログを開く", "category": "task-hub", "icon": "$(output)" },
+      { "command": "taskHub.log.follow", "title": "ログを追う", "category": "task-hub", "icon": "$(arrow-down)" },
+      { "command": "taskHub.log.pause", "title": "ログを止める", "category": "task-hub", "icon": "$(debug-pause)" },
+      { "command": "taskHub.board.show", "title": "ボードに戻る", "category": "task-hub", "icon": "$(checklist)" }
     ],
     "menus": {
-      "view/title": [{ "command": "taskHub.board.refresh", "when": "view == taskHub.board", "group": "navigation" }]
+      "view/title": [{ "command": "taskHub.board.refresh", "when": "view == taskHub.board", "group": "navigation" }],
+      "view/item/context": [
+        { "command": "taskHub.task.goal", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "inline@1" },
+        { "command": "taskHub.task.changes", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "inline@2" },
+        { "command": "taskHub.task.log", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "inline@3" },
+        { "command": "taskHub.task.goal", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "task@1" },
+        { "command": "taskHub.task.changes", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "task@2" },
+        { "command": "taskHub.task.log", "when": "view == taskHub.board && viewItem == taskHub.card", "group": "task@3" }
+      ],
+      "editor/title": [
+        { "command": "taskHub.log.pause", "when": "resourceScheme == taskhub-log && taskHub.logFollowing", "group": "navigation@1" },
+        { "command": "taskHub.log.follow", "when": "resourceScheme == taskhub-log && !taskHub.logFollowing", "group": "navigation@1" },
+        { "command": "taskHub.board.show", "when": "resourceScheme =~ /^taskhub-(goal|diff|log)$/", "group": "navigation@2" }
+      ],
+      "commandPalette": [
+        { "command": "taskHub.log.follow", "when": "resourceScheme == taskhub-log && !taskHub.logFollowing" },
+        { "command": "taskHub.log.pause", "when": "resourceScheme == taskhub-log && taskHub.logFollowing" }
+      ]
     }
   },
   "scripts": {
