@@ -27,11 +27,14 @@ task-hub を使いはじめるために、このリポジトリを開いて「�
 ## 確かめ方
 
 ```sh
-python3 tests/run.py                       # Python のテスト全部(並列、約 3.5 分)
-python3 tests/run.py <名前の一部>          # 一部だけ
+python3 tests/run.py                       # Python のテスト全部(2 並列、約 8 分。1 台に同時に 1 つ)
+python3 tests/run.py <名前の一部>          # 一部だけ(待たない)
 claude plugin test claude/task-board       # Claude Code の mod
 (cd kiro/board-extension && npm test)      # Kiro の拡張
 ```
+
+作業中は変えたところに関係するテストだけを動かし、全部のテストは最後に 1 回だけ動かす。
+テストは低い優先度で動き、並べる数は `-j 4` のように変えられる。
 
 不具合は、利用者から見た動きを再現するテストを先に書いてから直す。
 

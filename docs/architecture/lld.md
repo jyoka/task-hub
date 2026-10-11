@@ -336,5 +336,7 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)
+- `tests/test_run.py`: `tests/run.py` そのもの(既定の並べる数、低い優先度、全部のテストのロック)。Windows の CI でも動く
 - `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`)
-- `python3 tests/run.py`: テストを 1 件ずつ別プロセスで並べて動かす(約 3.5 分)
+- `python3 tests/run.py`: テストを 1 件ずつ別プロセスで 2 つずつ、低い優先度で動かす(約 8 分)。全部のテストは 1 台に同時に 1 つ
+  (一時ディレクトリの `task-hub-tests.lock`、持ち主の pid が死んでいれば取り直す)
