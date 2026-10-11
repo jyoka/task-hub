@@ -281,6 +281,9 @@ sequenceDiagram
 | `date` | `list --watch` の見出し、TUI の起動時(時差) | - |
 | `open`(macOS)、`xdg-open`、`cmd /C start` | TUI の Enter、`i` | - |
 | `task open <id>` | TUI の `o` | - |
+| `lazygit`(PATH にあるもの、引数なし、作業ディレクトリはタスクの worktree) | TUI の `g` を確かめたあと。端末を渡し、終わるまで待つ | - |
+| `git rev-parse --show-toplevel`、`--git-dir --git-common-dir`、`--abbrev-ref HEAD` | TUI の `g`。worktree がそれ自身の作業ツリーで、`git worktree add` で作ったもの(本体の checkout でない)か、ブランチは何か | - |
+| `stty -g`、`stty <前の設定>` | TUI の `g`。Lazygit の前の端末の設定を取り、あとで戻す(Unix) | - |
 
 `gh` は `TASK_GH` で差し替えられます(`bin/task` と同じ。テストの偽物の `gh` が使える)。
 
@@ -298,9 +301,50 @@ sequenceDiagram
 | 読んでいる間に task-hub がボードを変えた | 書かない。ただし「synced: N open card(s)」と成功のように出る(直すべき点) |
 | `ps`、`date` が失敗 | 動いていない扱い、時差 0(UTC で表示) |
 | ログがない | 「no log at <パス>」 |
+| `g`: カードがない、記録に worktree がない、worktree が消えた、Git でない、本体の checkout、またはその中 | Lazygit を開かない。下の行に黄色で理由を出す。リポジトリの本体など、ほかの checkout では開かない |
+| `g`: `lazygit` が PATH にない | 端末を渡さない。下の行に黄色で `brew install lazygit` と出す |
+| `g`: Lazygit を起動できない、0 以外で終わった、シグナルで止まった | 端末を取り戻す(`stty` で前の設定、取れなければ `stty sane`。マウス、貼り付け、フォーカスの報告を切る。raw モード、代替画面)。0 以外とシグナルのときは、Lazygit の出力を読めるよう Enter を待ってから戻る。ボードを読み直し、下の行に黄色で出す |
 
 通知、キャッシュ、表示の失敗で止めない、という決まり(lld.md 8 章)に沿っています。止まるのは設定がないときと、
 人が頼んだ `sync` が失敗したときだけです。
+
+### `g`: Lazygit に端末を渡す(task 169)
+
+`g` は、選んだカードの worktree で Lazygit を開きます。task-rs の中に端末や画面の分割は作りません。同じ端末を
+Lazygit に渡し、終わったらボードに戻します。
+
+```mermaid
+sequenceDiagram
+    participant You as あなた
+    participant TUI as task-rs tui
+    participant F as 手元のファイル
+    participant LG as lazygit(外のプログラム)
+
+    You->>TUI: g
+    TUI->>F: runs/N.json を読み直す(worktree、repo、pid)
+    TUI->>TUI: worktree があり、それ自身の Git の作業ツリーか(git rev-parse)
+    TUI-->>You: 確かめの箱(タスク、repo、ブランチ、worktree、Lazygit は書ける。動いているなら警告)
+    You->>TUI: g か Enter
+    TUI->>F: runs/N.json をもう一度読み、確かめ直す
+    TUI->>TUI: 画面と raw モードを返す。stty -g で設定を取る
+    TUI->>LG: 作業ディレクトリ = worktree、引数なし、標準入出力はそのまま
+    LG-->>TUI: 終わる(0、0 以外、起動の失敗)
+    TUI->>TUI: stty で設定を戻す。0 以外なら Enter を待つ
+    TUI->>TUI: raw モード、代替画面。残ったキーを捨てる
+    TUI->>F: ボード、実行、出来事を読み直す(選んだカードは番号で保つ)
+```
+
+- task-rs が書くものは増えません。開く、閉じるで、Status、実行の記録、worktree、GitHub は変わりません
+- Lazygit は書けます(stage、commit、reset、checkout、rebase、push)。確かめの箱と README で、ボードは読むだけ、
+  Lazygit は書ける、と分けて書きます。箱は警告で、止めはしません
+- エージェントが動いているタスクでも開けます(利用者が見たいため)。箱は「見るだけに。stage、commit、reset、
+  checkout、rebase はエージェントの邪魔になる」と警告します。競合はなくなりません
+- `task watch` は Done で worktree を消します。Lazygit を開いている間でも消えます。task-rs は貸し出しの印を
+  作らず、task-hub の流れも変えません。次に `g` を押したとき「gone」と出すだけです
+- Lazygit のファイルの一覧はコミットしていない変更だけです。タスクの変更の全部は、これまでどおり `d` です
+- delta は Lazygit の設定(`git.diffRenderers`)で使うもので、task-rs は呼びません。設定は利用者が自分で書きます
+- `Ctrl-C` は Lazygit が raw モードで受けます。raw モードにしない別のプログラムを `lazygit` の名前で置いた場合は、
+  task-rs も同じプロセスグループなので止まります(画面はその前に返してあります)
 
 ### bin/task と違うところ
 
@@ -509,6 +553,7 @@ task-rs を main に入れる PR で入れます。入れないなら不要で�
 | 3 | `sync` の名前 | `fetch`。v0.2 で改めた。TUI のキーも `s` から `f` |
 | 5 | main に入れるか、配り方 | 入れた(#40)。バイナリは `task-rs-v*` の pre-release に付ける。`task update` は `v1.2.3` の形のタグしか見ないので入れない。使うのは当面、利用者だけ |
 | 7 | Windows | 今はしない。利用者が手元と仕事の Mac で試す |
+| 新 | TUI から Git を見る(task 169) | `g` を 1 つだけ足す。同じ端末を Lazygit に渡し、終わったら戻る。ツールの選択、画面の分割、task-rs の中の Git の操作は足さない。エージェントが動いていても開け、警告だけ出す。決まったこと 1 の「キーを増やさない」の例外で、タスクを動かす操作ではなく、見るための外のプログラムだから |
 | 新 | 手元で下書きを作り、あとで GitHub に送るか | しない。Backlog が下書きの役をする(Ready に移すまで始まらない)。下書きと送る仕組みは、手元の番号と Issue の番号の対応、途中の失敗、二重の防止、複数のマシンが要り、得は 1 件 2 秒ほど。正本は 1 つ(個人の Project)、読むのは手元の写し、書くのは正本、のまま。オフラインで登録したくなったら、そのときに「送れなかった `task new` をためて後で送る」だけを足す |
 
 v0.2 でメモのタスク 1A の直しも入れました。一時ファイルに pid を付けて失敗したら消す、`board-meta.json` を 1 時間で

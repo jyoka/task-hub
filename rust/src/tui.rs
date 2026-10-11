@@ -1,17 +1,22 @@
 //! `task-rs tui`: a live, read-only view of the local board, the runs on this machine, and the events.
 //! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`.
+//! `g` lends the terminal to Lazygit in the selected task's worktree: Lazygit is not read only, the board is.
 
-use super::{ago, board_config, epoch, fetch, fetched_line, load_local, now, shown_status, state, tasks, text, tilde, Task};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use super::{alive, ago, board_config, epoch, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
+            tilde, Task};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::terminal::{enable_raw_mode, Clear as ClearScreen, ClearType, EnterAlternateScreen};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::backend::CrosstermBackend;
+use ratatui::{DefaultTerminal, Frame, Terminal};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
@@ -19,7 +24,7 @@ use std::{fs, thread};
 
 /// Columns in the order a person acts on them: what needs you first.
 const ORDER: [&str; 7] = ["In review", "Blocked", "In progress", "Ready", "wait for merge", "Backlog", "Done"];
-const KEYS: &str = "↑↓ move  ⏎ issue  d diff  l log  b browser  o open  f fetch  q quit";
+const KEYS: &str = "↑↓ move  ⏎ issue  d diff  l log  b browser  o open  g lazygit  f fetch  q quit";
 
 fn color(status: &str) -> Color {
     match status {
@@ -199,6 +204,93 @@ fn diff_lines(t: &Task) -> Vec<Line<'static>> {
     lines
 }
 
+/// Where `g` would open Lazygit: the worktree that task-hub recorded for the task, read again from runs/<id>.json.
+struct Target {
+    id: String,
+    repo: String,
+    branch: String,
+    worktree: PathBuf,
+    running: Option<String>, // the stage of the agent running in it, if one is
+}
+
+/// The task's own worktree, or why Lazygit is not opened. Never another checkout: no fallback to the repository.
+fn lazygit_target(id: &str) -> Result<Target, String> {
+    let run = read_json(&state(&format!("runs/{id}.json")));
+    let wt = text(&run, "worktree");
+    if wt.is_empty() {
+        return Err(format!("no worktree recorded for #{id} on this machine: Lazygit not opened"));
+    }
+    let worktree = PathBuf::from(&wt);
+    if !worktree.is_dir() {
+        return Err(format!("the worktree of #{id} is gone ({}): task-hub removes it when the task is Done. \
+                            Lazygit not opened", tilde(&worktree)));
+    }
+    let top = git(&wt, &["rev-parse", "--show-toplevel"]);
+    let same = |a: &Path, b: &Path| matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b);
+    if top.trim().is_empty() {
+        return Err(format!("{} is not a Git worktree: Lazygit not opened", tilde(&worktree)));
+    }
+    if !same(Path::new(top.trim()), &worktree) {
+        return Err(format!("{} is inside another checkout ({}), not the task's own worktree: Lazygit not opened",
+                           tilde(&worktree), tilde(&PathBuf::from(top.trim()))));
+    }
+    // task-hub makes its worktrees with `git worktree add`: a main checkout (a clone) is never the task's
+    let dirs = git(&wt, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
+    let dirs: Vec<&str> = dirs.lines().collect();
+    if dirs.len() != 2 || same(Path::new(dirs[0]), Path::new(dirs[1])) {
+        return Err(format!("{} is a main checkout, not a task worktree: Lazygit not opened", tilde(&worktree)));
+    }
+    let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
+    let stage = text(&run, "stage");
+    let running = alive(id, &run).then(|| if stage.is_empty() { "starting".into() } else { stage });
+    Ok(Target { id: id.into(), repo: text(&run, "repo"), branch, worktree, running })
+}
+
+/// `lazygit` on PATH, found before the screen is handed over. Only absolute directories: a relative one would be
+/// looked up in the worktree, where the agent writes.
+fn lazygit_path() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "lazygit.exe" } else { "lazygit" };
+    std::env::split_paths(&std::env::var_os("PATH")?).filter(|d| d.is_absolute()).map(|d| d.join(name))
+        .find(|p| executable(p))
+}
+
+#[cfg(unix)]
+fn executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// The confirmation shown before Lazygit opens: which task, where, and what Lazygit can do there.
+fn handoff_lines(t: &Target, title: &str) -> Vec<Line<'static>> {
+    let field = |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<9}"), Style::new().dim()), v.into()]);
+    let mut lines = vec![
+        field("task", format!("#{} {title}", t.id)),
+        field("repo", if t.repo.is_empty() { "-".into() } else { t.repo.clone() }),
+        field("branch", if t.branch.is_empty() { "-".into() } else { t.branch.clone() }),
+        field("worktree", tilde(&t.worktree)),
+        Line::default(),
+    ];
+    if let Some(stage) = &t.running {
+        lines.push(Line::from(format!("An agent is running in this worktree ({stage}). Inspect only: staging, committing, \
+                                       reset, checkout and rebase can interfere with it.")).bold().yellow());
+        lines.push(Line::default());
+    }
+    lines.extend([
+        Line::from("The board stays read only. Lazygit is not: it can stage, commit, reset, check out, rebase and push. \
+                    This note does not stop it."),
+        Line::default(),
+        Line::from("Lazygit lists uncommitted files only; d shows all the task changed since its base.").dim(),
+        Line::default(),
+        Line::from("Quit Lazygit to come back to the board."),
+    ]);
+    lines
+}
+
 /// The Issue (its Goal) from the local copy of the board: no browser, no network.
 fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
     let mut lines = vec![
@@ -237,10 +329,13 @@ struct App {
     scroll: u16, // u16::MAX: the bottom (the log starts there)
     diff: Option<(String, Vec<Line<'static>>)>, // the selected card's diff, made when shown
     status: String,
+    alert: bool, // the status is a Lazygit failure: shown in yellow until the next key
     offset: i64,
     seen: (Option<SystemTime>, Option<SystemTime>, Option<SystemTime>),
     loaded_at: f64,
     fetching: Option<Receiver<Result<(usize, bool), String>>>,
+    confirm: Option<(Target, String)>, // `g` asks first: the target and the card's title
+    launch: Option<String>,            // the task whose worktree main_loop hands the terminal to Lazygit in
     quit: bool,
 }
 
@@ -249,8 +344,9 @@ impl App {
         let mut app = App {
             board: vec![], age: 0.0, changed: false, error: String::new(), events: vec![],
             selected: ListState::default(), view: View::Details, scroll: 0, diff: None,
-            status: "read only: GitHub is read only when you press f".into(),
-            offset: utc_offset(), seen: (None, None, None), loaded_at: 0.0, fetching: None, quit: false,
+            status: "read only: GitHub is read only when you press f".into(), alert: false,
+            offset: utc_offset(), seen: (None, None, None), loaded_at: 0.0, fetching: None, confirm: None, launch: None,
+            quit: false,
         };
         app.reload();
         app
@@ -321,7 +417,20 @@ impl App {
         self.diff = None;
     }
 
+    /// A failure in the status line, in yellow.
+    fn warn(&mut self, message: String) {
+        (self.status, self.alert) = (message, true);
+    }
+
     fn key(&mut self, code: KeyCode) {
+        self.alert = false;
+        if let Some((t, _)) = self.confirm.take() {
+            match code {
+                KeyCode::Char('g') | KeyCode::Enter => self.launch = Some(t.id),
+                _ => self.status = "Lazygit not opened".into(),
+            }
+            return;
+        }
         match code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => self.show(View::Details),
@@ -351,6 +460,13 @@ impl App {
                     };
                 }
             }
+            KeyCode::Char('g') => match self.current().map(|t| (t.id.clone(), t.title.clone())) {
+                None => self.warn("no card selected: Lazygit not opened".into()),
+                Some((id, title)) => match lazygit_target(&id) {
+                    Ok(t) => self.confirm = Some((t, title)),
+                    Err(e) => self.warn(e),
+                },
+            },
             KeyCode::Char('f') if self.fetching.is_none() => {
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
@@ -372,8 +488,12 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        let status = if self.error.is_empty() { self.status.clone() } else { format!("error: {}", self.error) };
+        // the keys, then the status; up to 3 lines, so that a long error and its help are not cut off
+        let width = (KEYS.chars().count() + status.chars().count() + 4).max(1);
+        let foot_rows = width.div_ceil((f.area().width as usize).saturating_sub(10).max(1)).clamp(1, 3) as u16;
         let [head, body, feed, foot] = Layout::vertical([
-            Constraint::Length(1), Constraint::Min(6), Constraint::Length(9), Constraint::Length(1),
+            Constraint::Length(1), Constraint::Min(6), Constraint::Length(9), Constraint::Length(foot_rows),
         ]).areas(f.area());
         // side by side when wide, the details under the board in a narrow pane
         let [left, right] = if body.width >= 110 {
@@ -419,8 +539,19 @@ impl App {
         }
         self.draw_events(f, feed);
 
-        let status = if self.error.is_empty() { self.status.clone() } else { format!("error: {}", self.error) };
-        f.render_widget(Line::from(vec![format!(" {KEYS} ").reversed(), format!("  {status}").dim()]), foot);
+        let status = if self.alert { format!("  {status}").yellow() } else { format!("  {status}").dim() };
+        let foot_line = Line::from(vec![format!(" {KEYS} ").reversed(), status]);
+        f.render_widget(Paragraph::new(foot_line).wrap(Wrap { trim: false }), foot);
+
+        if let Some((t, title)) = &self.confirm {
+            let area = f.area();
+            let (w, h) = (area.width.saturating_sub(4).min(90), area.height.saturating_sub(2).min(22));
+            let popup = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+            f.render_widget(Clear, popup);
+            let block = Block::bordered().title(" Open Lazygit? It can change Git ").border_style(Style::new().yellow())
+                .title_bottom(Line::from(" g or ⏎ open Lazygit · any other key cancels ").bold());
+            f.render_widget(Paragraph::new(handoff_lines(t, title)).block(block).wrap(Wrap { trim: false }), popup);
+        }
     }
 
     fn draw_board(&mut self, f: &mut Frame, area: Rect) {
@@ -532,6 +663,67 @@ impl App {
     }
 }
 
+/// `stty` on the terminal (Unix): its output, or None when it fails.
+fn stty(args: &[&str]) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let o = Command::new("stty").args(args).stdin(Stdio::inherit()).stderr(Stdio::null()).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Lends the terminal to Lazygit in the task's worktree, waits for it, then takes the terminal back and reloads.
+/// Checks the worktree again first: the run may have ended, or task watch removed it, since the confirmation.
+/// Opening and quitting Lazygit change nothing: no task status, run file, fetch or Git command of task-rs.
+fn lazygit(terminal: &mut DefaultTerminal, app: &mut App, id: &str) -> std::io::Result<()> {
+    let t = match lazygit_target(id) {
+        Ok(t) => t,
+        Err(e) => {
+            app.warn(e);
+            return Ok(());
+        }
+    };
+    let Some(program) = lazygit_path() else {
+        app.warn("lazygit is not on PATH: install it (brew install lazygit, see rust/README.md). Nothing opened".into());
+        return Ok(());
+    };
+    let wt = tilde(&t.worktree);
+    terminal.show_cursor()?;
+    ratatui::try_restore()?; // the normal screen, in cooked mode: Lazygit sets up the terminal its own way
+    let mode = stty(&["-g"]); // that mode, put back even if Lazygit dies in raw mode
+    println!("task-rs: Lazygit in #{id}, {wt}. Quit Lazygit to return to the board.");
+    let result = Command::new(&program).current_dir(&t.worktree).status(); // inherits stdin, stdout and stderr
+    // take the terminal back even when Lazygit failed or left it in another state
+    match mode.filter(|m| !m.is_empty()) {
+        Some(mode) => stty(&[&mode]),
+        None => stty(&["sane"]),
+    };
+    execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, DisableFocusChange)?;
+    if matches!(&result, Ok(s) if !s.success()) {
+        // keep what Lazygit printed (a config error, say) on the screen until it is read
+        print!("task-rs: Lazygit did not end normally (see above). Press Enter to return to the board.");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        std::io::stdin().read_line(&mut String::new())?;
+    }
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen, ClearScreen(ClearType::All))?;
+    // a new Terminal draws everything again; terminal.clear() would ask the terminal where its cursor is
+    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    while event::poll(Duration::ZERO)? {
+        event::read()?; // keys meant for Lazygit, typed as it ended
+    }
+    app.reload(); // keeps the selected card by its id
+    match result {
+        Ok(s) if s.success() => app.status = format!("back from Lazygit in #{id}; board reloaded (read only)"),
+        Ok(s) => app.warn(match s.code() {
+            Some(code) => format!("Lazygit exited with code {code} in #{id} ({wt}); board reloaded"),
+            None => format!("Lazygit was stopped by a signal in #{id} ({wt}); board reloaded"),
+        }),
+        Err(e) => app.warn(format!("cannot start Lazygit ({}) in {wt}: {e}", program.display())),
+    }
+    Ok(())
+}
+
 fn main_loop(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     let mut app = App::new();
     while !app.quit {
@@ -542,6 +734,9 @@ fn main_loop(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                     app.key(k.code);
                 }
             }
+        }
+        if let Some(id) = app.launch.take() {
+            lazygit(terminal, &mut app, &id)?;
         }
         app.tick();
     }
