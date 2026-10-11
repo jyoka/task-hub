@@ -12,7 +12,7 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 
 | 名前 | task-hub が実行するコマンド | 補足 |
 |---|---|---|
-| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています |
+| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
 | `codex` | `codex exec -s workspace-write {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません |
 | `pi` | `pi -p {prompt}` | Pi の print モード |
 | `kiro` | `kiro-cli chat --no-interactive --trust-all-tools {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`) |
@@ -92,7 +92,7 @@ v1 のデータベースは読み取り専用で開き、ロックされてい�
 ```ini
 [agents]
 ; stricter Claude: allow only edits and test commands
-claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --allowedTools 'Edit,Write,Bash(npm test:*)' {prompt}
+claude = env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --output-format stream-json --verbose --allowedTools 'Edit,Write,Bash(npm test:*)' {prompt}
 ; a new agent
 aider = aider --yes-always --message {prompt}
 ```
@@ -100,6 +100,8 @@ aider = aider --yes-always --message {prompt}
 `{prompt}` 以外の、自分で書く引数に空白が含まれるときは、`'Edit,Write,Bash(npm test:*)'` のように引用符で囲んでください。コマンドは `shlex` の規則で引数に分けます。
 
 `claude` を上書きするときも、組み込みと同じ `env ...` の 3 つの環境変数を付けてください。付けないと、長いテストが Bash ツールの時間の上限(既定 2 分、最大 10 分)を超えたときにバックグラウンドへ回され、`claude -p` はその終わりを待たずにレポートなしで終わります。
+
+途中の手順もログに出したいときは、`--output-format stream-json --verbose` も付けてください。task-hub は、コマンド(プロンプトを除く)に `--output-format stream-json` があるエージェントの出力を、手順ごとの短い 1 行に直してログに書きます。付けなければ、出力をそのまま書きます(`claude -p` なら最後の結果の文だけ)。
 
 コマンドが動くための条件:
 

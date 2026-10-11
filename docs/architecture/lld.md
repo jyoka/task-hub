@@ -13,7 +13,7 @@ flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、build_prompt、<br/>run_agent_process、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、build_prompt、<br/>run_agent_process、stream_json_lines、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -263,7 +263,7 @@ sequenceDiagram
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
-| `state/logs/<id>.log` | `task _run` | `task log` | テキスト |
+| `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail` | テキスト。エージェントの出力は 1 行ずつ。コマンドに `--output-format stream-json` があるエージェント(組み込みの claude)は、`stream_json_lines` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
 | `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list` | `{key, fetched_at, items}` |
@@ -318,8 +318,16 @@ sequenceDiagram
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
+
+組み込みの claude は `claude -p ... --output-format stream-json --verbose` で、手順ごとに JSON の 1 行を出します。
+`agent_process` はコマンドに `--output-format stream-json` があるときだけ、`stream_json_lines` でそれを直します。
+`assistant` の `tool_use` は `· <名前>: <入力の 1 つ>`(`tool_step`。パスは worktree からの相対)、`text` は先頭の 1 行、
+`result` の `result` は全文(`is_error` なら `== claude ended with <subtype>` も)。`system`、`user`(ツールの結果)、
+`rate_limit_event`、`stream_event` は書きません。JSON でない行はそのまま、知らない種類や形の JSON は `LOG_LINE_MAX` 字に切って書きます。使った量はこの出力からは読まず、
+今までどおり `agent_usage` が手元の記録から読みます。
 
 ## 8. 失敗の扱い
 

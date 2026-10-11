@@ -60,11 +60,12 @@ SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
 HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # tests: a dead pane fails in seconds
 DEFAULT_AGENTS = {
     "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
-              " claude -p --dangerously-skip-permissions {prompt}",
+              " claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}",
     "codex": "codex exec -s workspace-write {prompt}",
     "pi": "pi -p {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools {prompt}",
 }
+LOG_LINE_MAX = 200  # a step of a stream-json agent, as one log line (docs/operations.md)
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
@@ -1644,8 +1645,10 @@ def agent_process(agent, prompt, wt, say):
         argv, env = windows_command(agent_command(agent, prompt))
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
+        steps = streams_json(agent)
         for line in proc.stdout:
-            say(line.rstrip("\n"))
+            for shown in stream_json_lines(line.rstrip("\n"), wt) if steps else [line.rstrip("\n")]:
+                say(shown)
         return proc.wait()
     except KeyboardInterrupt:  # Ctrl-C in the pane stops the agent; still push what it did
         if proc:
@@ -1661,6 +1664,68 @@ def agent_process(agent, prompt, wt, say):
     except (RuntimeError, OSError) as e:  # windows_command: a batch file it cannot run; Windows: the command line
         say(f"agent cannot run: {e}")     # is over 32,767 characters (a long goal or report)
         return 127
+
+
+def streams_json(name):
+    """Whether the agent's command asks Claude Code for --output-format stream-json, as the built-in claude does.
+    Only the command is looked at, never the prompt: a goal may well mention stream-json."""
+    parts = shlex.split(config()["agents"].get(name, ""))
+    return "--output-format=stream-json" in parts or any(
+        a == "--output-format" and b == "stream-json" for a, b in zip(parts, parts[1:]))
+
+
+def stream_json_lines(line, wt):
+    """The log lines for one line of Claude Code's stream-json: one per tool call and per text (its first line), the
+    final result in full, and nothing for the rest (tool results, hooks, system). A line that is not JSON stays as
+    it is. No tool result and no input beyond the one shown reaches the log, and no step is over LOG_LINE_MAX.
+    JSON of another type or shape (a newer Claude Code, another CLI's stream-json) is kept, cut to LOG_LINE_MAX."""
+    try:
+        d = json.loads(line)
+    except ValueError:
+        return [line]
+    if not isinstance(d, dict) or "type" not in d:
+        return [line]
+    if d["type"] in ("system", "user", "rate_limit_event", "stream_event"):  # hooks, tool results, partial messages
+        return []
+    clip = lambda s: s if len(s) <= LOG_LINE_MAX else s[:LOG_LINE_MAX - 3] + "..."
+    try:
+        if d["type"] == "result":
+            text = d.get("result") if isinstance(d.get("result"), str) else ""
+            ended = [f"== claude ended with {d.get('subtype') or 'an error'}"] if d.get("is_error") else []
+            return text.splitlines() + ended
+        if d["type"] != "assistant":
+            return [clip(line)]
+        indent = "  " if d.get("parent_tool_use_id") else ""  # a subagent's step
+        shown = []
+        for block in d["message"]["content"]:
+            if block.get("type") == "tool_use":
+                shown.append(f"{indent}· {tool_step(block.get('name') or 'tool', block.get('input') or {}, wt)}")
+            elif block.get("type") == "text":
+                first = next((t.strip() for t in block["text"].splitlines() if t.strip()), "")
+                shown += [indent + first] if first else []
+        return [clip(s) for s in shown]
+    except (KeyError, TypeError, AttributeError):  # a shape we do not know
+        return [clip(line)]
+
+
+def tool_step(name, args, wt):
+    """`Bash: cargo test`, `Edit: src/x.rs`, `Grep: "pattern"`: the tool and the one input that says what it does."""
+    for key in ("command", "file_path", "notebook_path", "pattern", "url", "query", "description", "skill", "path"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            break
+    else:
+        return name
+    lines = value.strip().splitlines()
+    value = lines[0] + " ..." * (len(lines) > 1)
+    if key in ("file_path", "notebook_path", "path"):
+        for base in (os.path.realpath(wt), str(wt)):  # Claude Code gives the real path (/private/var on macOS)
+            try:
+                value = Path(value).relative_to(base).as_posix()
+                break
+            except ValueError:
+                continue
+    return f'{name}: "{value}"' if key == "pattern" else f"{name}: {value}"
 
 
 def build_review_prompt(t, report, diff):
