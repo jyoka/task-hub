@@ -7,33 +7,36 @@ of task-hub and is not installed by `task update`.
 |---|---|
 | `task-rs list` | The open cards from the local board, the same lines as `task list`. Never calls GitHub |
 | `task-rs list --watch` | The same, redrawn every 60 seconds from the local board, like `task list --watch` |
-| `task-rs sync` | Reads the open cards from GitHub into the local board, once. The only GitHub call |
-| `task-rs list --sync` | `sync`, then `list`. If the sync fails, it shows the local board |
+| `task-rs fetch` | Copies the open cards from GitHub to the local board, once. Reads only. The only GitHub call |
+| `task-rs list --fetch` | `fetch`, then `list`. If the fetch fails, it shows the local board |
 | `task-rs events [--only "In review,Blocked"]` | The last 20 events, like `task events` |
 | `task-rs tui` | A live terminal view: the board, the selected card's details or log, and the events |
 
 The local board is `~/.local/state/task-hub/board-cache.json`, the file `bin/task` also reads and writes. So:
 
 - `task-rs list` shows it at any age, and prints its age on stderr.
-- GitHub is read only when you ask: `task-rs sync` or `list --sync`. Both only read.
+- GitHub is read only when you ask: `task-rs fetch` or `list --fetch`. Both only read. (`sync`, the 0.1 name, still works.)
+- Nothing syncs to GitHub, and nothing needs to: the local board is only a copy. Change the board on GitHub or with
+  `task new`, `task start` and `task done`.
 - `task list` (when its copy is old) and `task` also refresh it, and a running `task watch` refreshes it every minute.
 - `task-rs` never moves cards or changes anything on GitHub.
 
 ## The TUI
 
-`task-rs tui` (ratatui) shows the board with what needs you first, the selected card's details and last digest,
+`task-rs tui` (ratatui) shows the board with what needs you first, the selected card's details, Issue, diff or log,
 and the newest events. It redraws when the local files change. It is read only.
 
 | Key | What it does |
 |---|---|
-| ↑ ↓ (or j k), g G | Move, first, last |
-| Enter (or p) | Open the PR in the browser (the Issue when there is no PR) |
-| i | Open the Issue |
-| l | Switch the right pane between details and the run's log |
-| o | `task open <id>`: the worktree in your IDE |
-| s | Sync from GitHub (reads only) |
-| r | Read the local files again |
-| q, Esc | Quit |
+| ↑ ↓ | Move between cards |
+| Enter | The Issue (its Goal) in the right pane, from the local copy |
+| d | The diff: what the agent changed in its worktree since its base branch (while the worktree exists) |
+| l | The run's log |
+| PgUp, PgDn (or Space) | Scroll the right pane. Esc, or the same key again, goes back to the details |
+| b | Open the PR in the browser (the Issue when there is no PR) |
+| o | `task open <id>`: the worktree in your IDE (`[ide] open` in config.ini) |
+| f | Fetch from GitHub (reads only) |
+| q | Quit |
 
 In a pane narrower than 110 columns, the details go under the board.
 
@@ -44,10 +47,10 @@ installs it: it follows only `v1.2.3` tags, so other task-hub users do not get t
 
 ```sh
 uname -m    # must print arm64
-gh release download task-rs-v0.1.0 -R jyoka/task-hub -p 'task-rs-aarch64-apple-darwin' \
+gh release download task-rs-v0.2.0 -R jyoka/task-hub -p 'task-rs-aarch64-apple-darwin' \
   -O ~/.local/bin/task-rs --clobber
 chmod +x ~/.local/bin/task-rs
-task-rs sync && task-rs tui
+task-rs fetch && task-rs tui
 ```
 
 To update, run the same `gh release download` with the newer tag. If macOS refuses to open it, run

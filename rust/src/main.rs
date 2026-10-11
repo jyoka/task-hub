@@ -1,6 +1,6 @@
 //! task-rs: a local-first Rust copy of `task list`, `task list --watch` and `task events`, for comparing speed and
 //! memory with bin/task. It reads the same local files (config.ini, board-cache.json, runs/, events.jsonl) and
-//! prints the same lines. It calls GitHub only when the user asks (`task-rs sync`, `list --sync`), and then only
+//! prints the same lines. It calls GitHub only when the user asks (`task-rs fetch`, `list --fetch`), and then only
 //! reads. Experimental: not part of task-hub, see rust/README.md.
 
 use serde_json::Value;
@@ -12,12 +12,13 @@ use std::{env, fs, thread};
 
 mod tui;
 
-const VERSION: &str = "0.9.0";
+const VERSION: &str = env!("CARGO_PKG_VERSION"); // task-rs's own version, not task-hub's
 const STATUSES: [&str; 7] = ["Backlog", "Ready", "In progress", "In review", "wait for merge", "Blocked", "Done"];
 const NEEDS_USER: [&str; 3] = ["Backlog", "In review", "Blocked"];
 const IN_PROGRESS: &str = "In progress";
 const WATCH_SECONDS: u64 = 60;
-const LIST_USAGE: &str = "task-rs list [--sync] [--watch]";
+const LIST_USAGE: &str = "task-rs list [--fetch] [--watch]";
+const META_MAX_AGE: f64 = 3600.0; // as bin/task: field names renamed on the board are read again within the hour
 // bin/task's PROJECT_QUERY and ITEMS_QUERY: "@<field>" is replaced by the field's name as spelled on the board
 const PROJECT_QUERY: &str = r#"query($owner: String!, $number: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner {
   projectV2(number: $number) { id url fields(first: 50) { nodes {
@@ -153,11 +154,11 @@ fn ago(seconds: f64) -> String {
     }
 }
 
-/// The open items of the local board (board-cache.json), at any age: GitHub is read only by `sync`.
+/// The open items of the local board (board-cache.json), at any age: GitHub is read only by `fetch`.
 fn local_items() -> Result<Vec<Value>, String> {
     let (items, age, changed) = load_local()?;
     let changed = if changed { ", task-hub changed the board since" } else { "" };
-    eprintln!("board: local copy from {} ago{changed} (`task-rs sync` reads GitHub)", ago(age));
+    eprintln!("board: local copy from {} ago{changed} (`task-rs fetch` reads GitHub)", ago(age));
     Ok(items)
 }
 
@@ -166,10 +167,10 @@ fn load_local() -> Result<(Vec<Value>, f64, bool), String> {
     let (owner, number, issues) = board_config();
     let mut data = read_json(&state("board-cache.json"));
     let (Some(at), Some(Value::Array(_))) = (data.get("fetched_at").and_then(Value::as_f64), data.get("items")) else {
-        return Err("no local board yet: run `task-rs sync` to read it from GitHub".into());
+        return Err("no local board yet: run `task-rs fetch` to read it from GitHub".into());
     };
     if data.get("key") != Some(&serde_json::json!([owner, number, issues])) {
-        return Err("the local board is of another board: run `task-rs sync`".into());
+        return Err("the local board is of another board: run `task-rs fetch`".into());
     }
     let changed = at <= read_number(&state("board-cache.stale"));
     match data["items"].take() {
@@ -178,7 +179,7 @@ fn load_local() -> Result<(Vec<Value>, f64, bool), String> {
     }
 }
 
-// ---------- sync: the only GitHub calls, and only when asked ----------
+// ---------- fetch: the only GitHub calls, and only when asked ----------
 
 fn graphql(query: &str, vars: &[(&str, &str, bool)]) -> Result<Value, String> {
     let gh = env::var("TASK_GH").unwrap_or_else(|_| "gh".into());
@@ -199,7 +200,8 @@ fn graphql(query: &str, vars: &[(&str, &str, bool)]) -> Result<Value, String> {
 /// The Project's id and the field names as spelled on the board: from board-meta.json (bin/task's), else GitHub.
 fn project(owner: &str, number: &str, issues: &str) -> Result<(String, HashMap<String, String>), String> {
     let saved = read_json(&state("board-meta.json"));
-    if saved.get("key") == Some(&serde_json::json!([owner, number, issues])) {
+    let fresh = saved.get("at").and_then(Value::as_f64).map_or(false, |at| (0.0..META_MAX_AGE).contains(&(now() - at)));
+    if fresh && saved.get("key") == Some(&serde_json::json!([owner, number, issues])) {
         if let (Some(id), Some(names)) = (saved["board"]["id"].as_str(), saved["board"]["names"].as_object()) {
             let names = names.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or(k).to_string())).collect();
             return Ok((id.to_string(), names));
@@ -216,7 +218,8 @@ fn project(owner: &str, number: &str, issues: &str) -> Result<(String, HashMap<S
 }
 
 /// Reads the open cards from GitHub into board-cache.json, the same file bin/task writes and reads.
-fn sync() -> Result<usize, String> {
+/// Returns how many cards were read, and whether they were saved (not when task-hub changed the board meanwhile).
+fn fetch() -> Result<(usize, bool), String> {
     let (owner, number, issues) = board_config();
     let (id, names) = project(&owner, &number, &issues)?;
     let mut query = ITEMS_QUERY.to_string();
@@ -240,19 +243,32 @@ fn sync() -> Result<usize, String> {
         }
     }
     let n = items.len();
-    if fetched_at > read_number(&state("board-cache.stale")) { // else bin/task would never use it
-        let text = serde_json::json!({"key": [owner, number, issues], "fetched_at": fetched_at, "items": items});
-        let (path, tmp) = (state("board-cache.json"), state("board-cache.json.rs-tmp"));
-        fs::write(&tmp, text.to_string()).and_then(|_| fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
+    if fetched_at <= read_number(&state("board-cache.stale")) { // bin/task would never use it
+        return Ok((n, false));
     }
-    Ok(n)
+    let text = serde_json::json!({"key": [owner, number, issues], "fetched_at": fetched_at, "items": items});
+    // a temp file of this process only: two fetches at once never write the same one
+    let (path, tmp) = (state("board-cache.json"), state(&format!("board-cache.json.{}.rs-tmp", process::id())));
+    fs::write(&tmp, text.to_string()).and_then(|_| fs::rename(&tmp, &path)).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("cannot save the local board: {e}")
+    })?;
+    Ok((n, true))
 }
 
-fn cmd_sync() {
-    let began = now();
-    match sync() {
-        Ok(n) => println!("synced: {n} open card(s) from GitHub in {:.1}s", now() - began),
-        Err(e) => fail(&e, "check `gh auth status`; the local board is unchanged", 1),
+fn fetched_line(result: &Result<(usize, bool), String>) -> String {
+    match result {
+        Ok((n, true)) => format!("fetched {n} open card(s) from GitHub (read only)"),
+        Ok((n, false)) => format!("read {n} open card(s), but not saved: task-hub changed the board meanwhile; fetch again"),
+        Err(e) => format!("fetch failed: {e} (the local board is unchanged)"),
+    }
+}
+
+fn cmd_fetch() {
+    let result = fetch();
+    match result {
+        Ok((_, true)) => println!("{}", fetched_line(&result)),
+        _ => fail(&fetched_line(&result), "check `gh auth status`, then run `task-rs fetch` again", 1),
     }
 }
 
@@ -268,6 +284,9 @@ struct Blocker {
 struct Task {
     id: String,
     url: String,
+    body: String,
+    base: String,
+    worktree: String,
     pr: String,
     log: String,
     started: String,
@@ -387,6 +406,9 @@ fn tasks(items: &[Value], issues: &str) -> Vec<Task> {
         let run = read_json(&state(&format!("runs/{id}.json")));
         result.push(Task {
             url: text(content, "url"),
+            body: text(content, "body"),
+            base: value("base"),
+            worktree: text(&run, "worktree"),
             pr: text(&run, "pr"),
             log: text(&run, "log"),
             started: text(&run, "started"),
@@ -458,9 +480,10 @@ fn local_now() -> String {
 }
 
 fn cmd_list(flags: &HashMap<String, String>) {
-    if flags.contains_key("sync") {
-        if let Err(e) = sync() {
-            eprintln!("sync: {e}; showing the local board");
+    if flags.contains_key("fetch") || flags.contains_key("sync") {
+        let result = fetch();
+        if !matches!(result, Ok((_, true))) {
+            eprintln!("{}; showing the local board", fetched_line(&result));
         }
     }
     if !flags.contains_key("watch") {
@@ -549,8 +572,8 @@ fn main() {
         Some("-v" | "-V" | "--version") => return println!("{VERSION}"),
         None | Some("-h" | "--help" | "help") => {
             return out(&["commands (read only, a Rust prototype of bin/task):".into(),
-                         format!("  {LIST_USAGE}  # the open cards from the local board; --sync reads GitHub first"),
-                         "  task-rs sync  # read the open cards from GitHub into the local board, once".into(),
+                         format!("  {LIST_USAGE}  # the open cards from the local board; --fetch reads GitHub first"),
+                         "  task-rs fetch  # copy the open cards from GitHub to the local board (reads only)".into(),
                          "  task-rs events [--only \"In review,Blocked\"]  # the last 20 events".into(),
                          "  task-rs tui  # a live, read-only terminal view of the board, runs and events".into()]);
         }
@@ -558,11 +581,11 @@ fn main() {
     }
     let (name, rest) = (argv[0].as_str(), &argv[1..]);
     let known: &[(&str, bool)] = match name {
-        "list" => &[("watch", false), ("sync", false)],
-        "sync" => &[],
+        "list" => &[("watch", false), ("fetch", false), ("sync", false)], // --sync, sync: the 0.1 names
+        "fetch" | "sync" => &[],
         "tui" => &[],
         "events" => &[("only", true), ("digest", false), ("follow", false), ("next", false)],
-        _ => fail(&format!("unknown command {}", serde_json::to_string(name).unwrap()), "commands: list, sync, events, tui", 2),
+        _ => fail(&format!("unknown command {}", serde_json::to_string(name).unwrap()), "commands: list, fetch, events, tui", 2),
     };
     let mut flags = HashMap::new();
     let mut i = 0;
@@ -585,7 +608,7 @@ fn main() {
     }
     match name {
         "list" => cmd_list(&flags),
-        "sync" => cmd_sync(),
+        "fetch" | "sync" => cmd_fetch(),
         "tui" => tui::run(),
         _ => cmd_events(&flags),
     }
