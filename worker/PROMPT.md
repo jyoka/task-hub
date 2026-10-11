@@ -55,7 +55,31 @@ What you did not do, or could not verify.
 
 A short list of the exact places the human must check: files or functions, decisions you
 made on their behalf, risks. Be specific. "Review the changes" is not acceptable.
+
+- Learning route:
+  - Question: what the human should find out about the most important behavior you changed
+  - Entry point: `path/to/file` `function_name`
+  - Search: `rg -n "pattern" path` (ran it: what it matched, e.g. `file:line`)
+  - Trace: `a` in `file` -> `b` in `file` -> `c` in `file`
+  - Check: `test name`: what it proves (ran it: passed / not run: recommended)
+  - Explain yourself: one question for the human to answer
 ```
+
+The learning route helps the human understand the change by searching the code themselves.
+Write exactly one, for the most important behavior you changed, as the **last** item of
+Please review: one top-level `- Learning route:` bullet with its six lines indented under it.
+Keep the review items above it: the route does not replace them. Add no other headings.
+
+- Name only files, functions, tests, and documents that exist and that you opened in this run.
+- Search: a read-only `rg` command that you ran in this run and that found useful matches.
+  Never a command that changes anything or reads credentials (`.env`, keys, tokens). If `rg`
+  is not installed, say so and give the read-only search you ran instead (`git grep -n`,
+  `grep -rn`). Do not install anything, and do not start interactive tools such as `fzf`.
+- Trace: at most three steps, in reading order.
+- Check: say whether you ran the test in this run and its result, or that you only recommend it.
+- Explain yourself: do not give the answer anywhere in the report.
+- If an item does not apply (a research task, a docs-only change, no tests), write `n/a` and why,
+  and point to the evidence that does exist (a doc section, a source). Never invent one.
 
 ## If you are stuck
 
