@@ -58,9 +58,9 @@ PowerShell を開き、次のコマンドを 1 つずつ貼り付けて、結果
 |---|---|---|---|---|
 | 1 | Windows の版 | `winver` | Windows 11(10 でも task-hub は動きます) | kiro-cli は Windows 11 で動くとされています。Windows 10 で kiro-cli を使うなら手順 10 で確かめます |
 | 2 | PowerShell の機能が制限されていない | `$ExecutionContext.SessionState.LanguageMode` | `FullLanguage` | `ConstrainedLanguage` なら情シスに相談します(手順 11 の「制約付き言語モード」) |
-| 3 | git | `git --version` | `git version 2.xx.x.windows.x` | 手順 3 |
-| 4 | GitHub CLI | `gh --version` | `gh version 2.xx.x` | 手順 3 |
-| 5 | Python 3.10 以上 | `py -3 --version` | `Python 3.12.x` など(3.10 以上) | 手順 3。`python --version` で Microsoft Store が開くときも、入っていません |
+| 3 | git | `git --version` | `git version 2.xx.x.windows.x` | 手順 4 のインストーラが入れます |
+| 4 | GitHub CLI | `gh --version` | `gh version 2.xx.x` | 手順 4 のインストーラが入れます |
+| 5 | Python 3.10 以上 | `py -3 --version` | `Python 3.12.x` など(3.10 以上) | 手順 4 のインストーラが入れます。`python --version` で Microsoft Store が開くときも、入っていません |
 | 6 | GitHub にログイン済み | `gh auth status` | `Logged in to github.com` と、`Token scopes:` の行に `'project'` | 手順 3 の「GitHub にログインする」 |
 | 7 | エージェント | `kiro-cli whoami`(Claude Code なら `claude --version`) | ログイン中のアカウントが出る | エージェントを入れてログインする(下の注) |
 
@@ -71,17 +71,22 @@ PowerShell を開き、次のコマンドを 1 つずつ貼り付けて、結果
 
 ### ソフトを入れる
 
-会社の PC では、ソフトを入れる権限がないことがあります。そのときは、下の表の「名前」を情シスに伝えて入れてもらいます。
-自分で入れられるなら、PowerShell で次を実行します(`winget` は Windows に標準で入っているソフト管理ツールです)。
+git、GitHub CLI(gh)、Python は、自分で入れる必要はありません。無ければ、手順 4 のインストーラが自分のフォルダー
+(`~\.local`)に入れます。管理者権限は使いません(winget や MSI のインストーラは、入れるときや消すときに管理者権限を
+求めることがあるため使いません)。
 
-| 名前 | コマンド |
+ただし、手順 4-1 の `git clone` には git が要ります(インストーラは、取ってきたリポジトリの中にあるため)。git が
+無い PC での始め方は、かんたんセットアップ(準備中)で扱います。それまでは、Git for Windows を入れてから始めます。
+
+gh が無い人は、下の「GitHub にログインする」を、手順 4-2 のインストーラのあとに、新しい PowerShell で行います。
+
+入れたものは、GitHub の公開されているファイルを、公開されているチェックサム(SHA-256)で確かめてから置きます。
+
+| 名前 | 置く場所 |
 |---|---|
-| Git for Windows | `winget install --id Git.Git -e` |
-| GitHub CLI | `winget install --id GitHub.cli -e` |
-| Python 3.12 | `winget install --id Python.Python.3.12 -e` |
-
-**入れたら、PowerShell をいったん閉じて開き直します。** 開いたままの画面からは、新しく入れたソフトが見えません。
-開き直したら、手順 2 の表をもう一度確かめます。
+| git(Git for Windows の MinGit) | `~\.local\lib\git` |
+| GitHub CLI | `~\.local\bin\gh.exe` |
+| Python 3.12(uv で取る) | `~\.local\bin\uv.exe` と、uv の Python の場所 |
 
 ### GitHub にログインする
 
@@ -123,9 +128,11 @@ cd $HOME\task-hub-setup
 powershell -ExecutionPolicy Bypass -File windows\install.ps1
 ```
 
-インストーラは次を行います。何度実行しても安全です。
+インストーラは次を行います。何度実行しても安全です。管理者権限は使いません。
 
-1. git、gh、Python 3.10 以上があるかを確かめます。何も入れません(無ければ入れ方を出して止まります)
+1. git、Python 3.10 以上、gh があるかを確かめ、無いものを自分のフォルダーに入れます(手順 3 の表)。開いたあとに
+   入ったソフトも見つけます(PowerShell を開き直さなくてかまいません)。入れたものは
+   `~\.local\state\task-hub\install-manifest.json` に記録します
 2. 動かす用の task-hub を `~\.local\lib\task-hub` に取ってきます(すでにあれば最新にします)。
    4-1 のフォルダーとは別にするのは、そちらを書き換えても、動いている task-hub が変わらないようにするためです
 3. `task` コマンドを `~\.local\bin` に置き、そのフォルダーを PATH(コマンドを探す場所)に足します。
@@ -134,14 +141,18 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1
 うまくいくと、最後のほうに次のように出ます(パスは人によって違います)。
 
 ```
-task-hub: python: C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe
+task-hub をセットアップします(管理者権限は使いません)
+1. 前提の確認: 済み(Windows 11 x64、git、GitHub に接続)
+2. Python: 済み(C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe を使います)
+3. gh: 済み(C:\Program Files\GitHub CLI\gh.exe)
 task-hub: cloned https://github.com/jyoka/task-hub.git to C:\Users\you\.local\lib\task-hub
 task-hub: added C:\Users\you\.local\bin to your PATH (new terminals see it)
 0.6.0
 task-hub: done. Next: docs/windows.md (config, then `task list`). ...
 ```
 
-`error:` で始まる行が出て止まったら、手順 11 の「インストールのとき」を見ます。
+無いものを入れたときは「入れました」と出ます。`止まりました。` の行と `次にすること:` が出て止まったら、
+その「次にすること」に従います。`error:` で始まる行が出て止まったら、手順 11 の「インストールのとき」を見ます。
 
 ### 4-3. 新しい PowerShell で確かめる
 
@@ -363,9 +374,10 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 |---|---|---|
 | `このシステムではスクリプトの実行が無効になっているため…` | `.ps1` を直接実行した | 手順どおり `powershell -ExecutionPolicy Bypass -File windows\install.ps1` の形で実行する |
 | `-ExecutionPolicy Bypass` を付けても上の表示が出る | 会社のポリシーで、スクリプトの実行そのものが禁止されている | 情シスに「PowerShell スクリプトを実行したい(ExecutionPolicy を RemoteSigned 以上に)」と相談する |
-| `error: git is not installed` | git がない、または PowerShell を開き直していない | 手順 3 で入れて、PowerShell を開き直す |
-| `error: gh (GitHub CLI) is not installed` | gh がない | 同上 |
-| `error: Python 3.10 or later is not installed` | Python がない、古い、または Microsoft Store の偽の `python` しかない | 手順 3 で Python 3.12 を入れて、開き直す |
+| `ダウンロードできませんでした` または `GitHub(https://github.com)に届きません` | ネットワークに出られない(会社のプロキシ) | ブラウザで https://github.com が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
+| `… のチェックサムが合いません … 入れていません` | ダウンロードしたファイルが、GitHub の公開しているものと違う(途中で壊れた、または書き換えられた) | 何も入れていません。時間をおいてもう一度実行する。続くときは担当者に伝える |
+| `入れた git が動きません`、`入れた gh が動きません` | 会社のセキュリティ(AppLocker など)が、ユーザーフォルダーの下のプログラムを止めている | 情シスに相談する |
+| `この PC の PowerShell は機能が制限されています` | 制約付き言語モード | 表示された依頼文を情シスに送る |
 | `error: could not clone ...` | ネットワークに出られない(会社のプロキシ)、または URL の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
 | `error: could not update C:\Users\...\.local\lib\task-hub` | 本体のフォルダーを手で書き換えた | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
 | `error: ...task.cmd does not run` | Python か本体のフォルダーが壊れている | 表示された help のコマンドを実行して、出たエラーを担当者に伝える |
