@@ -1094,6 +1094,84 @@ class SetupTest(unittest.TestCase):
                 self.assertTrue(data.startswith(b"\xef\xbb\xbf"), f)
 
 
+# kiro-vN's installer, in the releases of UpdateTest: says how it was run, then does what the real one does to the
+# clone (switches it to its own tag), or stops as the real one does when the file "stop" is there
+FAKE_RELEASE_INSTALLER = r'''
+param([switch]$Watch)
+$lib = Join-Path $env:USERPROFILE '.local\lib\task-hub'
+$me = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+Write-Host "fake installer of @TAG@ from $me$(if ($Watch) { ' -Watch' })"
+if (Test-Path (Join-Path $env:USERPROFILE 'stop')) { Write-Host '次にすること: もう一度'; exit 1 }
+git -C $lib checkout -q --detach @TAG@
+'''
+
+
+@unittest.skipUnless(WINDOWS, "Windows only")
+class UpdateTest(unittest.TestCase):
+    """task update on Windows: an installer's clone (on a kiro-v* tag) is updated by the newest release's own
+    windows\\install.ps1, run from a copy of that release, with -Watch when the watch is installed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.home = root / "ユーザー"
+        self.lib = self.home / ".local/lib/task-hub"
+        self.origin, self.seed = root / "task-hub.git", root / "seed"
+        git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
+                  "GIT_COMMITTER_EMAIL": "t@e"}
+        self.env = {**os.environ, **git_id, "USERPROFILE": str(self.home), "HOME": str(self.home),
+                    "TASK_NO_UPDATE_NOTIFIER": "1"}
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING"):
+            self.env.pop(k, None)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.seed)], check=True, capture_output=True)
+        self.release("kiro-v1")
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.lib)], check=True, capture_output=True)
+        self.git(self.lib, "checkout", "-q", "--detach", "kiro-v1")  # where the installer keeps its clone
+
+    def git(self, where, *args):
+        return subprocess.run(["git", "-C", str(where), *args], check=True, capture_output=True, text=True,
+                              env=self.env).stdout.strip()
+
+    def release(self, tag):
+        """A release of task-hub: this checkout's bin/task, and a stand-in windows\\install.ps1"""
+        (self.seed / "bin").mkdir(exist_ok=True)
+        (self.seed / "windows").mkdir(exist_ok=True)
+        shutil.copy(BIN, self.seed / "bin/task")
+        (self.seed / "windows/install.ps1").write_text(FAKE_RELEASE_INSTALLER.replace("@TAG@", tag), encoding="utf-8-sig")
+        (self.seed / "release.txt").write_text(tag)
+        self.git(self.seed, "add", ".")
+        self.git(self.seed, "commit", "-qm", f"release {tag}")
+        self.git(self.seed, "tag", tag)
+        self.git(self.seed, "push", "-q", "origin", "main", tag)
+
+    def update(self, code=0):
+        r = subprocess.run([sys.executable, str(self.lib / "bin/task"), "update"], env=self.env, capture_output=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        return r.stdout + r.stderr
+
+    def test_an_installers_clone_is_updated_by_the_new_releases_installer(self):
+        self.assertIn("up_to_date: kiro-v1 (newest release kiro-v1)", self.update())
+        self.release("kiro-v2")
+        manifest = self.home / ".local/state/task-hub/install-manifest.json"  # its folder: update.json is there
+        manifest.write_text(json.dumps({"version": 1, "installed": {"watch": "scheduled-task:task-hub watch"}}))
+        out = self.update()
+        self.assertIn("update: kiro-v1 -> kiro-v2, by kiro-v2's installer", out)
+        self.assertIn("fake installer of kiro-v2 from task-hub -Watch", out)  # the new one, from a copy, with -Watch
+        self.assertIn("updated: kiro-v1 -> kiro-v2 (kiro-v2)", out)
+        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+        self.assertEqual(list(Path(tempfile.gettempdir()).glob("task-hub-update-*")), [])  # the copy is gone
+
+        self.release("kiro-v3")
+        (self.home / "stop").touch()
+        out = self.update(code=1)
+        self.assertIn("kiro-v3's installer stopped (exit 1)", out)
+        self.assertIn("次にすること: もう一度", out)  # the installer's own next step, as it said it
+        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+
+
 SLACK_APP = REPO / "slack-triage" / "app"
 SLACK_THREAD = ("山田 太郎 12:36\n@佐藤 花子 社内ツールの README に Windows の手順を足してほしい & 急ぎではないです\n"
                 "https://example.slack.com/archives/C0123ABC/p1727840000123456")
@@ -1379,6 +1457,21 @@ class InstallTest(unittest.TestCase):
             time.sleep(1)
         self.assertIn("starting task watch", log.read_text(errors="replace"))
         self.assertTrue(set(self.watch_loops()) - {bystander.pid})  # the loop itself
+        # task update starts the watch again with the new code: a new loop, the bystander left alone
+        before = set(self.watch_loops()) - {bystander.pid}
+        code = ("import importlib.machinery, importlib.util\n"
+                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(self.home / '.local/lib/task-hub/bin/task')!r})\n"
+                "task = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
+                "loader.exec_module(task)\n"
+                "print(task.restart_windows_watch())\n")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
+        self.assertIn("watch: restarted the scheduled task 'task-hub watch'", r.stdout, r.stderr)
+        end = time.time() + 30
+        while time.time() < end and not (set(self.watch_loops()) - {bystander.pid} - before):
+            time.sleep(1)
+        self.assertTrue(set(self.watch_loops()) - {bystander.pid} - before)  # a new loop
+        self.assertFalse(before & set(self.watch_loops()))  # the old one is gone
+        self.assertIsNone(bystander.poll())
         r = self.ps("-Uninstall")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(shim.exists())

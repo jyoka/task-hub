@@ -1,0 +1,19 @@
+# task-hub on macOS: task update and its notice (tests/test_task.py, -k update), on every push.
+# The rest of the Mac tests are run by hand (python3 tests/run.py, CONTRIBUTING.md)
+name: macos
+on:
+  push:  # every branch: a PR's branch is pushed here too
+  workflow_dispatch:
+jobs:
+  update:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+      - run: python -m unittest -k update -k kiro_release tests.test_task -v
