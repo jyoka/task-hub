@@ -418,6 +418,31 @@ test('実行するのは ~/.local/bin/task list だけ(ホームを展開した�
   })
 })
 
+// Windows: windows\install.ps1's ~\.local\bin\task.cmd, which Node runs only through cmd.exe, from a home with a space
+// and Japanese in its name (as C:\Users\<名前>). Run by .github/workflows/windows.yml.
+// The stand-in writes its arguments by (echo %*)>>: `echo list --max-age 0>>` would redirect stream 0.
+test('Windows: ~\\.local\\bin\\task.cmd list を cmd.exe で動かす', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const { vscode } = fakeVscode()
+  const ext = load(vscode)
+  const saved = process.env.USERPROFILE
+  const home = join(temp(), 'ユー ザー')
+  const bin = join(home, '.local', 'bin')
+  process.env.USERPROFILE = home
+  try {
+    mkdirSync(bin, { recursive: true })
+    assert.deepEqual(await ext.runTaskList(), { reason: `${join(bin, 'task.cmd')} がありません` })
+    writeFileSync(join(bin, 'task'), '#!/bin/sh\necho wrong\n')  // Git Bash's, not run
+    writeFileSync(join(bin, 'task.cmd'), '@echo off\r\n(echo %*)>> "%USERPROFILE%\\argv"\r\necho counts: Blocked=1\r\n')
+    assert.deepEqual(await ext.runTaskList(), { exitCode: 0, stdout: 'counts: Blocked=1\r\n', stderr: '' })
+    assert.deepEqual(await ext.runTaskList(true), { exitCode: 0, stdout: 'counts: Blocked=1\r\n', stderr: '' })
+    assert.equal(readFileSync(join(home, 'argv'), 'utf8'), 'list\r\nlist --max-age 0\r\n')
+    writeFileSync(join(bin, 'task.cmd'), '@echo off\r\necho error: no board\r\nexit /b 1\r\n')
+    assert.deepEqual(await ext.runTaskList(), { exitCode: 1, stdout: 'error: no board\r\n', stderr: '' })
+  } finally {
+    process.env.USERPROFILE = saved
+  }
+})
+
 test('読むファイルは ~/.local/state/task-hub/ の events.jsonl と metrics.jsonl と config.ini、ないものは空', async () => {
   const { vscode } = fakeVscode()
   const ext = load(vscode)
@@ -459,12 +484,15 @@ test('素の task を呼ぶコードがない: プロセスを起動するのは
     ...readdirSync(dir).map(f => join(dir, f))]
   const calls = sources.flatMap(f => readFileSync(f, 'utf8').match(/\b(execFile|execFileSync|exec|execSync|spawn|spawnSync|fork)\(.*/g) ?? [])
   assert.equal(calls.length, 4) // src/extension.ts, src/inspect.ts and their out/*.js
-  assert.deepEqual(calls.filter(c => /^execFile\(task, \['list', \.\.\.\(fresh \? \['--max-age', '0'\] : \[\]\)\], /.test(c)).length, 2)
+  // the shell only on Windows, for task.cmd (cmd.exe), with the fixed words list and --max-age 0
+  assert.deepEqual(calls.filter(c => /^execFile\(WINDOWS \? `"\$\{task\}"` : task, \['list', \.\.\.\(fresh \? \['--max-age', '0'\] : \[\]\)\], \{$/.test(c)).length, 2)
   assert.deepEqual(calls.filter(c => /^execFile\('git', \[\.\.\.SAFE, '-C', wt, \.\.\.args\], \{$/.test(c)).length, 2)
   for (const f of sources) {
     const text = readFileSync(f, 'utf8')
     if (/const task = /.test(text)) assert.match(text, /const task = taskPath\(\)/)
     assert.doesNotMatch(text, /shell: true/)
+    assert.equal((text.match(/shell:/g) ?? []).length, /const task = /.test(text) ? 1 : 0)
+    if (/shell:/.test(text)) assert.match(text, /shell: WINDOWS,/)
   }
   // git: only subcommands that read, and never one that writes
   const { vscode } = fakeVscode()

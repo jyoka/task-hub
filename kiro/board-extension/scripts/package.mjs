@@ -1,5 +1,6 @@
 // Builds, then zips the VSIX (no vsce): the manifest files VS Code and Kiro read, and extension/ with what runs.
-// Writes task-hub-board-<version>.vsix next to package.json. Needs `zip` (macOS has /usr/bin/zip).
+// Writes task-hub-board-<version>.vsix next to package.json. Needs `zip` (macOS has /usr/bin/zip); on Windows, its own
+// tar.exe (bsdtar, which writes zip too).
 import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,7 +45,12 @@ export const pack = () => {
     writeFileSync(join(stage, '[Content_Types].xml'), CONTENT_TYPES)
     const vsix = join(ROOT, `${p.name}-${p.version}.vsix`)
     rmSync(vsix, { force: true })
-    execFileSync('zip', ['-q', '-X', '-r', vsix, '.'], { cwd: stage })
+    if (process.platform === 'win32') {  // the entries by name: `.` would put ./ before each
+      execFileSync('tar.exe', ['--format', 'zip', '-cf', vsix, '[Content_Types].xml', 'extension.vsixmanifest', 'extension'],
+        { cwd: stage })
+    } else {
+      execFileSync('zip', ['-q', '-X', '-r', vsix, '.'], { cwd: stage })
+    }
     return vsix
   } finally {
     rmSync(stage, { recursive: true, force: true })
