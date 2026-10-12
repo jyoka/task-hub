@@ -15,7 +15,8 @@ You make two decisions:
 task-hub and your agents do the rest: implement, test, review, open the PR, sort out why a task stopped, wait in
 line, and clean up. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.
 
-> **Kiro IDE users: see [docs/kiro-quickstart.md](docs/kiro-quickstart.md).** Open this repository in Kiro IDE and
+> **Kiro IDE users: see [docs/kiro-quickstart.md](docs/kiro-quickstart.md) (Mac) or
+> [docs/windows-quickstart.md](docs/windows-quickstart.md) (Windows).** Open this repository in Kiro IDE and
 > say "セットアップして" ("set it up") in the chat. You need no terminal and no admin rights.
 
 The detailed docs in `docs/` are in Japanese.
@@ -150,7 +151,7 @@ The docs are in Japanese.
 | [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) Operations and troubleshooting | [architecture/lld.md](docs/architecture/lld.md) Low-level design | [architecture/feature-design.md](docs/architecture/feature-design.md) Designing a feature |
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) Agents | [design.md](docs/design.md) Design decisions | [release.md](docs/release.md) Releases |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
-| | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
+| [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
 
 ## Bug reports and feature requests

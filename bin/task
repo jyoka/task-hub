@@ -2850,8 +2850,10 @@ def cmd_update(_):
         fail(f"{lib} is not a git clone of task-hub; nothing changed", "install it as docs/setup.md says")
     branch = lib_branch()
     if not branch:
-        fail(f"{lib} is not on a branch (kiro/install.sh keeps its clone on a kiro-v* tag); nothing changed",
-             "the Kiro installer's clone is updated by running kiro/install.sh again (docs/kiro-ide.md)")
+        installer, doc = (r"windows\install.ps1", "docs/windows-quickstart.md") if WINDOWS \
+            else ("kiro/install.sh", "docs/kiro-ide.md")
+        fail(f"{lib} is not on a branch ({installer} keeps its clone on a kiro-v* tag); nothing changed",
+             f"the installer's clone is updated by running {installer} again ({doc})")
     dirty = run("git", "-C", LIB, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
     if dirty:
         fail(f"{lib} has uncommitted changes ({', '.join(line[3:] for line in dirty[:5])}); nothing changed",

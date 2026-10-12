@@ -217,7 +217,10 @@ flowchart TB
 ```
 
 - 動かす用の clone はリリースのタグだけを使います。開発用の clone のブランチで本物のタスクは動きません
-- Windows は Task Scheduler で `task watch` を常駐させます([windows.md](../windows.md))
+- Windows は、Kiro IDE のチャット(「セットアップして」)から `windows\install.ps1` が入れ、`-Watch` で Task Scheduler に
+  `task watch` を常駐させます([windows-quickstart.md](../windows-quickstart.md)、[windows.md](../windows.md))。
+  動かす用の clone は、Mac と同じく `kiro-v*` のタグを使います。診断は `windows\doctor.ps1`、アンインストールは
+  `windows\uninstall.ps1`(インストーラが記録したものだけを消す)
 - 複数マシンで同じボードを動かすことは想定していません(実行の記録が手元にしかないため)
 
 ## 8. 品質の目標
@@ -229,6 +232,7 @@ flowchart TB
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |
 | 軽い | Python 標準ライブラリだけ。依存のインストールは要らない |
+| 管理者権限なし | インストーラ(Mac、Windows)は UAC や sudo の要ることをしない。CI が Windows の標準のユーザーで確かめる |
 | トークン | 会話のエージェントを起こすのは出来事だけ。task-hub の指示書は合わせて約 4 KB |
 
 ## 9. 拡張の入口

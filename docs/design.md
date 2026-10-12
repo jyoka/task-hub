@@ -190,6 +190,15 @@
    `kiro-cli` があるかで分けます。text のままにしなかった理由は 3 つです。`pi -p` は最後の答えしか出しません。
    codex の text はプロンプト全体とツールの出力をそのまま stderr に出します。kiro の text は手順を出しますが、形が
    ほかと違い、長さの上限もありません。
+21. **Windows のセットアップも Kiro IDE のチャットから行い、管理者権限を使いません。** 同僚の多くは Windows で、
+    IT に詳しくない人でも Mac と同じく「セットアップして」と「続けて」だけで入れられるようにしました。インストーラ
+    (`windows\install.ps1`)は PowerShell 5.1 で、Mac と同じ段階の番号で進み、ボードと設定は Mac と同じ Python の
+    helper(`kiro/install-board`)を使います。無いものは自分のフォルダーに入れます: git は MinGit の zip、gh と uv は
+    Releases の zip(公開されている SHA-256 で確かめる)、Kiro CLI は公式の MSI を `msiexec /a` で展開だけ(公式の
+    手順は Program Files に入れるので管理者権限が要る)。winget と、MSI をふつうに入れることは使いません(実機で、
+    winget の GitHub CLI を消すのに UAC が要った)。入れたものは記録し、アンインストールはそれだけを消します。
+    Windows の実機を毎回借りなくてよいように、CI が標準のユーザーでもインストーラを通し、版を出す前に本物のボードで
+    1 枚を PR まで進めます([windows-easy-setup.md](architecture/designs/windows-easy-setup.md))。
 
 ## Status の遷移
 

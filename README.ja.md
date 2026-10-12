@@ -15,7 +15,8 @@
 その間の実装、テスト、レビュー、PR、止まったときの仕分け、順番待ち、後片付けは、task-hub とエージェントが進めます。
 エージェントは Claude Code、Codex、Pi、Kiro など、非対話モードを持つ CLI なら何でも使えます。
 
-> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md) へ。** このリポジトリを Kiro IDE で開き、
+> **Kiro IDE で使う人は [docs/kiro-quickstart.md](docs/kiro-quickstart.md)(Mac)か
+> [docs/windows-quickstart.md](docs/windows-quickstart.md)(Windows)へ。** このリポジトリを Kiro IDE で開き、
 > チャットに「セットアップして」と言うだけで入ります(ターミナルも管理者権限も要りません)。
 
 ## しくみ
@@ -142,7 +143,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) 運用とトラブル | [architecture/lld.md](docs/architecture/lld.md) 詳細設計 | [architecture/feature-design.md](docs/architecture/feature-design.md) 機能の設計 |
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) エージェント | [design.md](docs/design.md) なぜこの作りか | [release.md](docs/release.md) リリース |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
-| | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
+| [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
 
 ## バグ報告と要望
