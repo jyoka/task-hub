@@ -458,7 +458,7 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | `could not start: agent "kiro" is not ready: ...` | `[check]` のコマンドが失敗した(ログインが切れている) | `kiro-cli whoami` を手で実行し、切れていれば `kiro-cli login` |
 | ログに `agent not found` | エージェントのコマンドが見つからない | `Get-Command kiro-cli` で場所を確かめる。常駐で動かしているなら、エージェントを入れたあとにサインインし直したか確かめる |
 | ログに `agent cannot run: ... is a batch file ...` | エージェントがバッチファイル(.cmd / .bat)で、task-hub が中身を読めなかった | 設定の `[agents]` に、そのバッチファイルが動かしている .exe を、`/` 区切りのパスで書く |
-| ログに `agent cannot run:` と `The filename or extension is too long`(日本語の Windows では `ファイル名または拡張子が長すぎます`) | プロンプト(Goal や前回のレポート)が長すぎて、Windows のコマンドの長さの上限(約 32,000 文字)を超えた | Goal を短くするか、タスクを分ける |
+| ログに `agent cannot run: its command line is over Windows' 32,767 characters` | プロンプト(Goal や前回のレポート)が長すぎて、Windows のコマンドの長さの上限(約 32,000 文字)を超えた | Goal を短くするか、タスクを分ける |
 | `setup failed (exit N), see task log N` | `[setup]` のコマンドが失敗した | `task log <番号> --full` で `== setup:` のあとを読む。作業フォルダー(`task open <番号>` で場所が出る)で、同じコマンドを手で動かして確かめる |
 | `setup left files git would commit (...)` | 準備で作ったファイルが、git に無視されていない | そのファイルをリポジトリの `.gitignore` に足すか、`[setup]` を変える |
 | `the run stopped unexpectedly` | 作業のプロセスが止まった(PC の再起動やシャットダウン、タスク スケジューラで「終了」を押した) | Ready に戻せば、続きからやり直します |
@@ -525,8 +525,12 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 偽物(代わりのスクリプト)で、git、作業フォルダー、プロセスは本物です。
 
 - 日本語のタスクが PR まで進むこと(複数行のプロンプトが切れずに届く)
-- 作業中の判定(動いている間は In progress のまま、殺すと Blocked)
-- `env NAME=値` の置き換え、npm の .cmd(node のスクリプトと .exe の両方)
+- 作業中の判定(動いている間は In progress のまま、殺すと Blocked。同じ番号のプロセス ID が別のプロセスに
+  使い回されても、作業中とは見なさない)
+- 見張りを入れたジョブ(タスク スケジューラが常駐を動かす入れ物)を閉じても、作業は抜け出していて続くこと
+- `env NAME=値` の置き換え、npm の .cmd(node のスクリプトと .exe の両方。node は .cmd の隣のものを使う)
+- npm の .cmd ではないバッチファイルや、Windows のコマンドの長さの上限を超える Goal は、理由をログに出して
+  Blocked になること
 - PowerShell での `[setup]` と、その失敗で Blocked になること
 - メモ帳の BOM 付き UTF-8 の設定ファイルを読めること、UTF-16 のときに直し方を出すこと
 - `install.ps1 -Watch` でタスク スケジューラに登録され、見張りが動くこと。Git Bash から `task` が動くこと。
@@ -536,6 +540,16 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
   GitHub、Releases、Kiro のダウンロード、MSI、ログインの窓は偽物です
 
 実機でしか確かめられないことは、手順 10 の表にまとめています。
+
+手元の Windows で同じテストを動かすには、git と Python を入れて(手順 3)、このリポジトリで次を実行します。
+本物のボードや設定には触れません(偽物の GitHub と一時フォルダーで動きます)。
+
+```
+py -3 -m unittest tests.test_windows -v
+```
+
+`InstallTest` は、ユーザーの PATH とタスク スケジューラを書き換えるので、`TASK_TEST_WINDOWS_INSTALL=1` のとき
+(CI)だけ動きます。Node.js が入っていない PC では、node を使う npm の .cmd のテストが 1 つ skip になります。
 
 ### Windows に対応していないもの
 
