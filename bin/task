@@ -1178,22 +1178,26 @@ def env_files(repo):
 
 def copy_env_files(t, wt):
     """Copy, never link: the agent may change its copy, not your checkout's. Never committed."""
-    pairs, dests = env_files(t["repo"]), set()
-    for src, dest in pairs:
+    copies = {}
+    for src, dest in env_files(t["repo"]):
         if not src.is_file():
             raise RuntimeError(f"env file {src} for {t['repo']} is missing; fix [env] in {home(CONFIG)}")
         target = (wt / dest).resolve()
         if Path(dest).is_absolute() or not target.is_relative_to(wt.resolve()) or target == wt.resolve():
             raise RuntimeError(f"env destination {dest} is outside the worktree; fix [env] in {home(CONFIG)}")
-        if dest in dests:
+        # the path as git spells it: ./voice/.env, voice//.env and voice\.env (Windows) are all voice/.env, and an
+        # exclude line spelled any other way matches nothing, so the secret would be committed
+        rel = target.relative_to(wt.resolve()).as_posix()
+        if rel in copies:
             raise RuntimeError(f"env destination {dest} is given twice; fix [env] in {home(CONFIG)}")
-        dests.add(dest)
-        if run("git", "-C", wt, "ls-files", "--error-unmatch", dest).returncode == 0:
-            raise RuntimeError(f"env file {dest} is tracked in {t['repo']}; copying it would change the PR")
-    for src, dest in pairs:
-        (wt / dest).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, wt / dest)
-    ensure_internal_excludes(wt, [f"/{dest}" for _, dest in pairs])  # anchored: this path only
+        copies[rel] = src
+        if run("git", "-C", wt, "ls-files", "--error-unmatch", rel).returncode == 0:
+            raise RuntimeError(f"env file {rel} is tracked in {t['repo']}; copying it would change the PR")
+    for rel, src in copies.items():
+        (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, wt / rel)
+    # anchored: this path only; a wildcard character in a file name is matched as itself
+    ensure_internal_excludes(wt, ["/" + re.sub(r"([*?\[\\])", r"\\\1", rel) for rel in copies])
 
 
 def setup_command(repo):

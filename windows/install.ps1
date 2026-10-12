@@ -350,11 +350,14 @@ function Stage-Python {
   # trust Windows' certificate store (a company's SSL inspection), not only uv's own list; the name changed in uv 0.9
   $env:UV_NATIVE_TLS = '1'
   $env:UV_SYSTEM_CERTS = '1'
+  # one of uv's own already (not on PATH as python): used, but not recorded, so uninstall.ps1 never removes a
+  # Python the user's virtualenvs are built on
+  $had = Runs $uv @('python', 'find', '--python-preference', 'only-managed', '3.12')
   if (-not (Runs $uv @('python', 'install', '3.12'))) {
     Die "uv で Python を入れられませんでした($($script:Out | Select-Object -Last 1))" `
       'ネットワーク(releases.astral.sh に届くか)を確かめて、もう一度実行してください'
   }
-  Set-Record 'uv-python' '3.12'
+  if (-not $had) { Set-Record 'uv-python' '3.12' }
   $p = if (Runs $uv @('python', 'find', '--managed-python', '3.12')) {
     @($script:Out | Where-Object { $_ -match '\.exe$' })[0]
   }
@@ -476,6 +479,12 @@ function Test-GitUsesGh {  # gh is git's credential helper for GitHub (gh auth s
   return [bool]($script:Out | Where-Object { $_ -match 'auth git-credential' })
 }
 
+function Save-GitCredential {  # git asks this installer's gh.exe for the login: uninstall.ps1 takes that away with it
+  if ($script:M.installed.gh -eq $script:Gh -and $script:M.installed.'git-credential' -ne $script:Gh) {
+    Set-Record 'git-credential' $script:Gh
+  }
+}
+
 function Open-LoginWindow($name, [string[]]$command) {
   # A login asks its questions in a window of its own: Kiro's chat cannot answer them. The window gets this
   # process's environment (the proxy included); the script removes itself when it starts.
@@ -503,12 +512,14 @@ function Stage-GhLogin {
     Remove-Item -LiteralPath (Join-Path $State 'gh-login.ps1') -ErrorAction SilentlyContinue
     # git (task-hub's clones and pushes) uses the same login; a login in a window does not set that up
     if (Test-GitUsesGh) {
+      Save-GitCredential  # set up by an earlier version, which did not record it
       Ok 済み $script:GhUser
       return
     }
     if (-not (Runs $script:Gh @('auth', 'setup-git', '-h', 'github.com'))) {
       Die "git に GitHub のログインを設定できませんでした($($script:Out | Select-Object -Last 1))" 'もう一度実行してください'
     }
+    Save-GitCredential
     $script:changed = $true
     Ok 設定しました "$($script:GhUser)、git も gh のログインを使います"
     return

@@ -1372,6 +1372,31 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn("voice/.env", tree)
         self.assertNotIn(".env", tree)
 
+    def test_env_destination_however_spelled_is_never_committed(self):
+        # git reads `/./voice/.env` in info/exclude as no path at all: the secret went into the PR
+        voice_env = self.root / "co" / "voice" / ".env"
+        voice_env.parent.mkdir(parents=True)
+        voice_env.write_text("VOICE=2\n")
+        for dest in ("./voice/.env", "voice//.env", "voice/../voice/.env"):
+            self.write_config(f"\n[env]\njyoka/app = {voice_env} -> {dest}\n")
+            tid = self.new("env")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review", dest)
+            bare = self.root / "origins" / "jyoka/app.git"
+            tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", f"task/{tid}"],
+                                  capture_output=True, text=True).stdout.split()
+            self.assertNotIn("voice/.env", tree, dest)
+            seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                                  capture_output=True, text=True).stdout
+            self.assertEqual(seen, "key seen: VOICE=2\n", dest)
+        src = self.root / "co" / "dup.env"
+        src.write_text("K=1\n")
+        self.write_config(f"\n[env]\njyoka/app = {src} -> .env, {src} -> ./.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("twice", self.comments(tid)[-1])
+
     def test_env_destination_must_stay_in_the_worktree_and_be_unique(self):
         src = self.root / "co" / ".env"
         src.parent.mkdir()

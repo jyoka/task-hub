@@ -33,7 +33,24 @@ $Again = 'powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes'
 # uv last, after the Python it installed. PATH entries go before the folders they name.
 $Keys = 'watch', 'slack-triage-autostart', 'slack-triage', 'kiro-hook', 'kiro-workflow', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'kiro-settings',
   'config', 'task', 'task-sh', 'user-path',
-  'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'gh', 'uv-python', 'uv', 'git'
+  'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'git-credential', 'gh', 'uv-python', 'uv', 'git'
+
+function Find-Git {  # the installer's MinGit (it goes last), else the one on PATH
+  if ($installed.git) {
+    $g = Join-Path $installed.git 'cmd\git.exe'
+    if ([IO.File]::Exists($g)) { return $g }
+  }
+  Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.Source }
+}
+
+function Get-GhHelperKeys($git, $gh) {  # the credential.<url>.helper keys in ~\.gitconfig that run this gh.exe
+  $ErrorActionPreference = 'Continue'
+  $want = $gh.Replace('\', '/')  # as gh writes it, or with / (git reads a \ there as an escape)
+  @(& $git config --global --get-regexp '^credential\..*\.helper$' 2>$null) | ForEach-Object {
+    $key, $value = "$_" -split ' ', 2
+    if ($value -and $value.Replace('\', '/').IndexOf($want, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $key }
+  } | Select-Object -Unique
+}
 
 function Tilde($p) { if ("$p".StartsWith("$Root\")) { '~' + "$p".Substring($Root.Length) } else { "$p" } }
 function Mine($p) { "$p".StartsWith("$Root\") -and "$p".Length -gt $Root.Length + 1 }  # never outside the user folder
@@ -233,6 +250,22 @@ else { Remove-Item -LiteralPath '$($v -replace "'", "''")' }
       if (-not (Mine $v) -or -not (Test-Path -LiteralPath (Join-Path $v $mark))) { continue }
       $what = @{ 'task-hub' = 'task-hub の clone'; 'kiro-cli' = 'kiro-cli'; 'git' = 'git(MinGit)' }[$k]
       Remove-Thing "$(Tilde $v)($what)" ([scriptblock]::Create("Remove-Item -LiteralPath '$($v -replace "'", "''")' -Recurse -Force"))
+    }
+    'git-credential' {  # git asking the installer's gh.exe for GitHub's login (gh auth setup-git): before gh.exe goes
+      if ($v -ne $installed.gh) { continue }  # a gh of the user's stays, and git may go on using it
+      $git = Find-Git
+      if (-not $git) { continue }
+      $helpers = @(Get-GhHelperKeys $git $v)
+      if (-not $helpers) { continue }
+      # all of a key's lines: setup-git also wrote an empty one that turns off the helper before it (Git Credential
+      # Manager), which is then used again
+      Remove-Thing "git が GitHub のログインに $(Tilde $v) を使う設定(~\.gitconfig)" ({
+        $ErrorActionPreference = 'Continue'
+        foreach ($h in $helpers) {
+          $o = & $git config --global --unset-all $h 2>&1
+          if ($LASTEXITCODE) { throw ((@($o) | Select-Object -Last 1) -join '') }
+        }
+      }.GetNewClosure())
     }
     'uv-python' {  # a version, where uv keeps its Pythons
       $uv = if ($installed.uv -and (Test-Path -LiteralPath $installed.uv)) { $installed.uv } else {

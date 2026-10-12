@@ -398,6 +398,18 @@ class WindowsTest(unittest.TestCase):
         self.assertIn("agent cannot run: its command line is over Windows' 32,767 characters", log)
         self.assertNotIn("agent not found", log)  # what Windows says, and the wrong lead for the human
 
+    def test_an_env_destination_with_backslashes_is_never_committed(self):
+        # `/voice\.env` in info/exclude is voice.env to git, not voice/.env: the secret went into the PR
+        voice = self.root / "co" / "voice.env"
+        voice.parent.mkdir()
+        voice.write_text("VOICE=2\n")
+        self.write_config(f"\n[env]\njyoka/app = {voice.as_posix()} -> voice\\.env\n")
+        tid = self.new("env")
+        self.task("start", tid)
+        self.finish(tid, "In review")
+        self.assertEqual(self.branch_file(tid, "hello.txt"), "key seen: VOICE=2\n")
+        self.assertEqual(self.branch_file(tid, "voice/.env"), "")  # not on the branch
+
     def test_setup_runs_in_powershell(self):
         self.write_config("\n[setup]\njyoka/app = New-Item -ItemType Directory .venv | Out-Null\n"
                           "  Set-Content .venv/.gitignore '*'\n  Set-Content .venv/marker ready\n")
@@ -717,12 +729,14 @@ class SetupTest(unittest.TestCase):
                   lib / "task-hub/bin/task", bindir / "task.cmd", bindir / "task"):
             self.assertTrue(f.exists(), f)
         self.assertIn("task-hub: made by windows/install.ps1", (bindir / "task.cmd").read_text(encoding="mbcs"))
-        self.assertEqual(json.loads(self.uv_log.read_text().splitlines()[0]), ["python", "install", "3.12"])
+        self.assertEqual([json.loads(x) for x in self.uv_log.read_text().splitlines()][:2],
+                         [["python", "find", "--python-preference", "only-managed", "3.12"], ["python", "install", "3.12"]])
         m = self.manifest()
         self.assertEqual(m["python"], sys.executable)
         self.assertEqual(m["installed"], {
             "git": str(lib / "git"), "git-path": str(lib / "git/cmd"), "uv": str(bindir / "uv.exe"), "uv-python": "3.12",
-            "gh": str(bindir / "gh.exe"), "kiro-cli": str(lib / "kiro-cli"), "kiro-cli-path": str(lib / "kiro-cli"),
+            "gh": str(bindir / "gh.exe"), "git-credential": str(bindir / "gh.exe"),
+            "kiro-cli": str(lib / "kiro-cli"), "kiro-cli-path": str(lib / "kiro-cli"),
             "task-hub": str(lib / "task-hub"), "task": str(bindir / "task.cmd"), "task-sh": str(bindir / "task"),
             "user-path": str(bindir), "config": str(self.home / ".config/task-hub/config.ini"),
             "kiro-skill-task": str(kiro / "skills/task"), "kiro-skill-chief": str(kiro / "skills/chief"),
@@ -748,6 +762,26 @@ class SetupTest(unittest.TestCase):
             self.assertIn(line, out)
         self.assertEqual(self.srv.log, ["/", "/"])  # only "does GitHub answer", the installer's and the diagnosis'
         self.assertEqual(self.manifest(), m)
+
+    def test_a_python_uv_already_had_is_used_and_left_at_uninstall(self):
+        # uv's own 3.12, which is not python on PATH: uninstall.ps1 must not remove it, and with it the virtualenvs
+        # built on it
+        uvbin = self.root / "uvbin"
+        uvbin.mkdir()
+        write_exe(uvbin / "uv.exe", FAKE_UV)
+        Path(str(self.uv_log) + ".installed").touch()
+        self.set_path("machine", Path(shutil.which("git")).parent)
+        self.set_path("user", uvbin, self.kirobin)
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.kiro_logged_in.touch()
+        self.install()
+        m = self.manifest()
+        self.assertEqual(m["python"], sys.executable)
+        self.assertNotIn("uv-python", m["installed"])
+        self.assertNotIn("uv", m["installed"])  # nor the user's uv
+        out = self.uninstall("-Yes")
+        self.assertNotIn("uv で入れた Python", out)
+        self.assertNotIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
 
     def test_finds_what_was_installed_after_the_window_opened(self):
         self.ready()
@@ -1024,16 +1058,25 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(r.returncode, code, r.stdout + r.stderr)
         return r.stdout
 
+    def git_credentials(self):
+        r = subprocess.run(["git", "config", "--global", "--get-regexp", r"^credential\."], env=self.env,
+                           capture_output=True, text=True)
+        return r.stdout.splitlines()
+
     def test_uninstall_lists_then_removes_only_what_was_recorded(self):
         self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
         self.kiro_logged_in.touch()
+        (self.home / ".gitconfig").write_text('[credential]\n\thelper = manager\n'  # the user's own
+                                              '[credential "https://example.com"]\n\thelper = store\n', encoding="utf-8")
         self.install()  # a bare PC: everything comes from the installer
+        self.assertTrue([c for c in self.git_credentials() if "gh.exe auth git-credential" in c])
         lib, bindir, kiro = self.home / ".local/lib", self.home / ".local/bin", self.home / ".kiro"
         (kiro / "skills/other").mkdir()  # someone's own
         before = self.files()
         out = self.uninstall()
         for line in (r"- ~\.kiro\skills\task(ジャンクション)", r"- ~\.local\lib\task-hub(task-hub の clone)",
                      r"- ~\.local\lib\kiro-cli(kiro-cli)", r"- ~\.local\lib\git(git(MinGit))", "- uv で入れた Python 3.12",
+                     r"- git が GitHub のログインに ~\.local\bin\gh.exe を使う設定(~\.gitconfig)",
                      r"- ユーザーの PATH の ~\.local\bin", "https://github.com/alice/tasks/settings"):
             self.assertIn(line, out)
         self.assertEqual(out.splitlines()[-1], "次にすること: 消してよければ、powershell -ExecutionPolicy Bypass -File "
@@ -1054,6 +1097,8 @@ class SetupTest(unittest.TestCase):
         self.assertIn(r"~\AppData\Roaming\Kiro\User\settings.json の Workflows の設定(インストーラは有効にしただけです)", out)
         self.assertEqual([p for p in self.user_path() if p], [])
         self.assertIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
+        # git no longer asks the removed gh.exe for the login (every fetch and push would fail); the user's own stay
+        self.assertEqual(self.git_credentials(), ["credential.helper manager", "credential.https://example.com.helper store"])
         self.assertEqual(out.splitlines()[-1], "次にすること: Kiro を再起動してください(/task と /chief が外れます)")
 
     def test_uninstall_keeps_a_clone_it_did_not_make_and_never_empties_it_through_a_junction(self):

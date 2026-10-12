@@ -385,6 +385,10 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 - 消すのは、インストーラが入れたと記録したもの(`~\.local\state\task-hub\install-manifest.json`)だけです。
   常駐、Slackトリアージの起動キーとコマンド、Kiro のスキルと steering、フックとワークフロー、`task.cmd`、ユーザーの PATH に足した項目、本体(`~\.local\lib\task-hub`)、
   インストーラが入れた git、gh、kiro-cli、Python と uv、インストーラが作った設定ファイル。もとからあったものは消しません
+  (uv にもとからあった Python 3.12 も消しません。その上に作った仮想環境が動かなくなるためです)
+- インストーラが入れた gh を消すときは、git がその gh で GitHub にログインする設定(`~\.gitconfig` の
+  `credential.<URL>.helper`)も外します。残すと、消した gh を探して、GitHub への fetch や push が失敗するためです。
+  ほかの credential の設定には触れません
 - 作業中のタスクがあるときは、常駐(見張り)だけを止めて、ほかは残します。作業は最後まで動きます。作業が終わったら、
   もう一度実行します
 - 消さないもの: GitHub のボードとログイン、kiro-cli のログイン、`~\.local\state\task-hub` と `~\.local\share\task-hub`

@@ -41,8 +41,8 @@ MARK='task-hub: made by kiro/install.sh'
 STAGES="prereq python gh kiro_cli gh_login kiro_login task_hub board config kiro launchd slack_triage"
 # What the manifest records: "python" (the one ~/.local/bin/task uses) and, under "installed", what this script
 # put there (only that: an existing gh or Python is used, not recorded). Shell variable M_<key>, "_" for "-".
-MANIFEST_KEYS="uv uv_python gh kiro_cli kiro_cli_app task_hub task zprofile config kiro_skill_task kiro_skill_chief
-  kiro_steering kiro_hook kiro_workflow kiro_settings launchd slack_triage slack_triage_launchd"
+MANIFEST_KEYS="uv uv_python gh git_credential kiro_cli kiro_cli_app task_hub task zprofile config kiro_skill_task
+  kiro_skill_chief kiro_steering kiro_hook kiro_workflow kiro_settings launchd slack_triage slack_triage_launchd"
 COPY_KEYS="kiro_hook kiro_workflow"  # fingerprints of copies this installer owns, before updating or removing them
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -222,13 +222,17 @@ stage_python() {
     uv=$BIN_DIR/uv M_uv=$BIN_DIR/uv
     write_manifest
   fi
+  # one of uv's own already (uv before 0.8 puts none on PATH as python3.12): used, but not recorded, so the
+  # uninstaller never removes a Python the user's virtualenvs are built on
+  had=
+  "$uv" python find --python-preference only-managed 3.12 >/dev/null 2>&1 && had=1
   say "$label: uv で Python 3.12 を取っています…"
   # UV_SYSTEM_CERTS: trust the keychain (a company's SSL inspection root), not only uv's own list.
   if ! UV_SYSTEM_CERTS=1 UV_PYTHON_BIN_DIR=$BIN_DIR "$uv" python install 3.12 >"$work/uv.log" 2>&1; then
     die "uv で Python を入れられませんでした($(tail -n 1 "$work/uv.log"))" \
       "ネットワーク(releases.astral.sh に届くか)を確かめて、もう一度実行してください"
   fi
-  M_uv_python=3.12
+  [ -n "$had" ] || M_uv_python=3.12
   python_ok "$BIN_DIR/python3.12" || die "入れた Python($(tilde "$BIN_DIR/python3.12"))が動きません" \
     "もう一度実行してください。続くときは task-hub の担当者に知らせてください"
   PY=$BIN_DIR/python3.12 M_python=$BIN_DIR/python3.12
@@ -349,6 +353,12 @@ gh_user() {  # sets GH_USER and GH_SCOPES from the token gh uses; fails when gh 
 
 # gh is git's credential helper for GitHub (`gh auth setup-git`): git can read the private repos the login can
 git_uses_gh() { "$GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null | grep -q 'auth git-credential'; }
+# git asks this installer's gh for the login: kiro/uninstall.sh takes that away with it
+save_git_credential() {
+  [ -n "$M_gh" ] && [ "$M_git_credential" != "$M_gh" ] || return 0
+  M_git_credential=$M_gh
+  write_manifest
+}
 
 open_terminal() {  # $1: file name, rest: the command. Writes it to a .command file and opens that in Terminal
   file=$STATE_DIR/$1
@@ -382,11 +392,13 @@ stage_gh_login() {
     rm -f "$STATE_DIR/gh-login.command"
     # git (task-hub's clones and pushes) uses the same login; non-interactive `gh auth login` does not set that up
     if git_uses_gh; then
+      save_git_credential  # set up by an earlier version, which did not record it
       ok 済み "$GH_USER"
       return
     fi
     gh auth setup-git -h github.com >"$work/gh.log" 2>&1 \
       || die "git に GitHub のログインを設定できませんでした($(tail -n 1 "$work/gh.log"))" "もう一度実行してください"
+    save_git_credential
     changed=1
     ok 設定しました "${GH_USER}、git も gh のログインを使います"
     return
