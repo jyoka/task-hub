@@ -29,6 +29,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -2465,6 +2466,20 @@ def lib_version():
     return m.group(1) if m else "unknown"
 
 
+def kiro_newest(names):
+    """The newest kiro-v<number> tag among names (numbers compared as numbers), or ""."""
+    tags = [(int(n[6:]), n) for n in names if re.fullmatch(r"kiro-v\d+", n)]
+    return max(tags)[1] if tags else ""
+
+
+def lib_kiro_tag():
+    """The kiro-v<number> tag LIB is on, or "": the easy setup's installers (kiro/install.sh, windows\\install.ps1)
+    keep their clone on the newest one, not on a branch (docs/kiro-ide.md, 「配布する版を出す」)."""
+    if lib_branch():
+        return ""
+    return kiro_newest(run("git", "-C", LIB, "tag", "--points-at", "HEAD").stdout.split())
+
+
 def read_update():
     try:
         d = json.loads(UPDATE.read_text())
@@ -2490,16 +2505,20 @@ class UpdateCheck:
 
     origin is asked (`git ls-remote`: the clone's own access, no GitHub token) at most once a day, while the command
     does its own work, and waited for at most UPDATE_TIMEOUT. When it cannot be reached, nothing is said and it is
-    asked again after UPDATE_RETRY. Nothing for a clone that is not on a branch: `task update` could not move it.
+    asked again after UPDATE_RETRY. A clone on a kiro-v* tag (an installer's) is told of a newer kiro-v* tag, which
+    `task update` installs by that release's installer; nothing for another clone that is not on a branch.
     """
 
     def __init__(self):
         self.proc = None
-        self.wanted = not os.environ.get("TASK_NO_UPDATE_NOTIFIER") and bool(lib_branch())
+        quiet = os.environ.get("TASK_NO_UPDATE_NOTIFIER")
+        self.kiro = "" if quiet else lib_kiro_tag()  # the installer's release this clone is on
+        self.wanted = not quiet and (bool(self.kiro) or bool(lib_branch()))
         if not self.wanted or not self.due():
             return
         try:
-            self.proc = subprocess.Popen(["git", "-C", str(LIB), "ls-remote", "--tags", "--refs", "origin", "v*"],
+            self.proc = subprocess.Popen(["git", "-C", str(LIB), "ls-remote", "--tags", "--refs", "origin",
+                                          "kiro-v*" if self.kiro else "v*"],
                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                          text=True, env=quiet_git_env(), **DETACHED)
             self.began = time.monotonic()
@@ -2531,13 +2550,17 @@ class UpdateCheck:
                 stdout, ok = "", False
             self.proc = None
             names = [line.split("\trefs/tags/", 1)[1] for line in stdout.splitlines() if "\trefs/tags/" in line]
-            write_update(checked=now(), ok=ok, **({"newest": newest_release(names)} if ok else {}))
+            found = {"newest_kiro": kiro_newest(names)} if self.kiro else {"newest": newest_release(names)}
+            write_update(checked=now(), ok=ok, **(found if ok else {}))
+        if self.kiro:
+            newest = read_update().get("newest_kiro") or ""
+            return newest if newest and int(newest[6:]) > int(self.kiro[6:]) else ""
         newest = read_update().get("newest") or ""
         return newest if version_key(newest) and version_key(newest) > version_key(VERSION) else ""
 
 
-def update_line(newest):
-    return f"update: {newest} が出ています。`task update` で更新(今は v{VERSION})"
+def update_line(newest, current=""):
+    return f"update: {newest} が出ています。`task update` で更新(今は {current or 'v' + VERSION})"
 
 
 def update_notice(check):
@@ -2546,8 +2569,8 @@ def update_notice(check):
     if not newest or read_update().get("notified") == newest:
         return []
     write_update(notified=newest)
-    notify({"event": "update", "version": newest, "reason": update_line(newest).removeprefix("update: ")})
-    return [update_line(newest)]
+    notify({"event": "update", "version": newest, "reason": update_line(newest, check.kiro).removeprefix("update: ")})
+    return [update_line(newest, check.kiro)]
 
 
 def releases_url(tag):
@@ -2558,8 +2581,8 @@ def releases_url(tag):
 
 def restart_watch():
     """Restart the `task watch` launchd keeps running, so it runs the new code. Runs in progress keep theirs."""
-    if WINDOWS:  # no launchd: the watch is a scheduled task of windows/install.ps1
-        return "watch: if `task watch` runs, start it again (install.ps1 -Watch, docs/windows.md)"
+    if WINDOWS:  # no launchd: the watch is windows/install.ps1 -Watch's scheduled task (or Startup shortcut)
+        return restart_windows_watch()
     job = f"gui/{os.getuid()}/{WATCH_LABEL}"
     if not shutil.which("launchctl") or run("launchctl", "print", job).returncode != 0:
         return "watch: not under launchd; if `task watch` runs in a pane, stop it (Ctrl-C) and start it again"
@@ -2600,6 +2623,50 @@ def kiro_copy_bytes(key, python=None):
         text = text.replace(json.dumps(f"$HOME/.local/lib/task-hub/kiro/{name}"),
                             json.dumps(f"{py} {windows_command_path(LIB / 'kiro' / name)}", ensure_ascii=False))
     return text.replace(HERDR_STOP, WINDOWS_STOP).encode("utf-8")
+
+
+# The loop of windows/task-watch.ps1 and the `task watch` it started, stopped (runs in progress go on: they left its
+# job), then started again as windows/install.ps1 -Watch registered it. The loop is found by its script's long or
+# short name (a shortcut keeps the short one, windows/install.ps1)
+WINDOWS_RESTART_WATCH = r"""
+$found = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -and
+  ($_.CommandLine.Contains($env:TASK_HUB_WATCH) -or $_.CommandLine.Contains($env:TASK_HUB_WATCH_SHORT)) })
+foreach ($p in $found) {
+  Get-CimInstance Win32_Process -Filter "ParentProcessId = $($p.ProcessId)" |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+}
+$task = Get-ScheduledTask -TaskName 'task-hub watch' -ErrorAction SilentlyContinue
+$lnk = [IO.Path]::Combine([Environment]::GetFolderPath('Startup'), 'task-hub watch.lnk')
+if ($task) {
+  for ($i = 0; $i -lt 20 -and (Get-ScheduledTask -TaskName 'task-hub watch').State -eq 'Running'; $i++) { Start-Sleep -Milliseconds 250 }
+  Start-ScheduledTask -TaskName 'task-hub watch'
+  'scheduled'
+} elseif ([IO.File]::Exists($lnk)) {
+  Invoke-Item -LiteralPath $lnk
+  'startup'
+} else {
+  'none'
+}
+"""
+
+
+def restart_windows_watch():
+    import ctypes
+    script = str(LIB / "windows" / "task-watch.ps1")
+    buf = ctypes.create_unicode_buffer(1024)
+    short = buf.value if ctypes.windll.kernel32.GetShortPathNameW(script, buf, len(buf)) else script
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_RESTART_WATCH],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       env={**os.environ, "TASK_HUB_WATCH": script, "TASK_HUB_WATCH_SHORT": short})
+    how = (r.stdout.strip().splitlines() or [""])[-1]
+    if how == "scheduled":
+        return "watch: restarted the scheduled task 'task-hub watch'"
+    if how == "startup":
+        return "watch: restarted from the Startup folder"
+    if how == "none":
+        return "watch: not set up; windows\\install.ps1 -Watch starts Ready cards without a terminal (docs/windows.md)"
+    return f"watch: could not restart it ({(r.stderr or r.stdout).strip()[-200:]}); run windows\\install.ps1 -Watch"
 
 
 def copy_kiro():
@@ -2682,7 +2749,7 @@ def cmd_list(a):
     check = UpdateCheck()  # asks origin while GitHub is read
     lines = list_lines(tasks(max_age=max_age))
     newest = check.newer()
-    out(*lines, *([update_line(newest)] if newest else []))
+    out(*lines, *([update_line(newest, check.kiro)] if newest else []))
 
 
 def list_lines(board_):
@@ -2850,24 +2917,17 @@ def cmd_update(_):
         fail(f"{lib} is not a git clone of task-hub; nothing changed", "install it as docs/setup.md says")
     branch = lib_branch()
     if not branch:
-        installer, doc = (r"windows\install.ps1", "docs/windows-quickstart.md") if WINDOWS \
-            else ("kiro/install.sh", "docs/kiro-ide.md")
-        fail(f"{lib} is not on a branch ({installer} keeps its clone on a kiro-v* tag); nothing changed",
-             f"the installer's clone is updated by running {installer} again ({doc})")
+        current = lib_kiro_tag()
+        if not current:
+            fail(f"{lib} is not on a branch or on a kiro-v* tag; nothing changed",
+                 f"see `git -C {lib} status`, or install it again as docs/setup.md says")
+        return update_by_installer(current)
     dirty = run("git", "-C", LIB, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
     if dirty:
         fail(f"{lib} has uncommitted changes ({', '.join(line[3:] for line in dirty[:5])}); nothing changed",
              f"see them with `git -C {lib} status`; commit them or `git -C {lib} stash` them, "
              "then run `task update` again")
-    try:
-        r = subprocess.run(["git", "-C", str(LIB), "fetch", "-q", "--tags", "origin"], stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, env=quiet_git_env(), timeout=120)
-        why = "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["git fetch failed"])[-1]
-    except subprocess.TimeoutExpired:
-        why = "timed out"
-    if why:
-        fail(f"could not fetch from origin: {why}; nothing changed",
-             f"check the network (VPN, proxy) and that `git -C {lib} fetch` works, then run `task update` again")
+    fetch_lib()
     newest = newest_release(run("git", "-C", LIB, "tag", "-l", "v*").stdout.split())
     if not newest:
         fail("origin has no v<MAJOR>.<MINOR>.<PATCH> tag yet; nothing changed", "releases: docs/release.md")
@@ -2891,6 +2951,65 @@ def cmd_update(_):
              f"keep them on a branch and take {branch} back to where it left the releases, then run `task update` "
              f"again: git -C {lib} branch local-changes && git -C {lib} reset -q --hard {base[:12]}")
     out(*lines, *copy_kiro(), f"release_notes: {releases_url(newest)}")
+
+
+def fetch_lib():
+    """origin's commits and tags into LIB, or fail: nothing is changed then."""
+    lib = home(LIB)
+    try:
+        r = subprocess.run(["git", "-C", str(LIB), "fetch", "-q", "--tags", "origin"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, env=quiet_git_env(), timeout=120)
+        why = "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["git fetch failed"])[-1]
+    except subprocess.TimeoutExpired:
+        why = "timed out"
+    if why:
+        fail(f"could not fetch from origin: {why}; nothing changed",
+             f"check the network (VPN, proxy) and that `git -C {lib} fetch` works, then run `task update` again")
+
+
+def update_by_installer(current):
+    """An installer's clone (on the kiro-v* tag current): the newest kiro-v* release's own installer does the update,
+    as 「セットアップして」 again would. It runs from a copy of that release (a shared clone of LIB, nothing
+    downloaded), not from LIB, which it changes while it runs. The watch is kept as it was (the installer starts it
+    again with the new code). Its lines are the person's to read; it says itself what to do when it stops."""
+    lib = home(LIB)
+    fetch_lib()
+    newest = kiro_newest(run("git", "-C", LIB, "tag", "-l", "kiro-v*").stdout.split()) or current
+    write_update(checked=now(), ok=True, newest_kiro=newest)
+    if int(newest[6:]) <= int(current[6:]):
+        out(f"up_to_date: {current} (newest release {newest})")
+        return
+    try:
+        installed = json.loads(INSTALL_MANIFEST.read_text()).get("installed") or {}
+    except (OSError, ValueError, AttributeError):
+        installed = {}
+    snapshot = Path(tempfile.mkdtemp(prefix="task-hub-update-"))
+    try:
+        copy = snapshot / "task-hub"
+        for args in (["clone", "-q", "--shared", "--no-checkout", str(LIB), str(copy)],
+                     ["-C", str(copy), "checkout", "-q", "--detach", f"refs/tags/{newest}"]):
+            r = run("git", *args)
+            if r.returncode:
+                fail(f"could not take {newest} out of {lib}: {(r.stderr or r.stdout).strip()[-300:]}; nothing changed",
+                     "run `task update` again; if it goes on, say 「セットアップして」 in Kiro's chat")
+        if WINDOWS:
+            cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                   str(copy / "windows" / "install.ps1"), *(["-Watch"] if installed.get("watch") else [])]
+        else:
+            cmd = ["sh", str(copy / "kiro" / "install.sh"),
+                   *(["--with-launchd", "--start-launchd"] if installed.get("launchd") else [])]
+        print(f"update: {current} -> {newest}, by {newest}'s installer", flush=True)
+        code = subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode
+    finally:
+        shutil.rmtree(snapshot, onerror=lambda f, path, _: (os.chmod(path, 0o700), f(path)) if WINDOWS else None)
+    after = lib_kiro_tag() or lib_version()
+    if code:
+        fail(f"{newest}'s installer stopped (exit {code}); {lib} is at {after}",
+             "do what its 次にすること line says, then run `task update` again")
+    lines = [f"updated: {current} -> {after} ({newest})"]
+    if not WINDOWS and installed.get("launchd"):  # the plist may be unchanged, but the code it runs is not
+        lines.append(restart_watch())
+    out(*lines)
 
 
 def cmd_show(a):
@@ -3222,7 +3341,8 @@ COMMANDS = {
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),
-    "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release, restart the launchd "
+    "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release (an installer's clone: by "
+               "that release's installer), restart the launchd "
                "`task watch`, copy Kiro's hook and workflow again"),
     "feedback": (cmd_feedback, [], {"feature": False},
                  "task feedback [--feature]  # report a bug (or ask for a feature) on task-hub's GitHub: opens the "
