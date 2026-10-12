@@ -35,7 +35,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
