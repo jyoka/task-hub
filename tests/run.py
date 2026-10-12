@@ -114,8 +114,9 @@ def ids(suite):
 def run(test_id):
     began = time.time()
     # low priority (Unix: main's nice, which they inherit), so the person and their agents stay responsive
-    r = subprocess.run([sys.executable, "-m", "unittest", test_id], cwd=TESTS, capture_output=True, text=True,
-                       stdin=subprocess.DEVNULL,
+    # not the code page: a Windows in Chinese (gbk) cannot read the Japanese a failing test prints
+    r = subprocess.run([sys.executable, "-m", "unittest", test_id], cwd=TESTS, capture_output=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
                        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if WINDOWS else 0)
     return test_id, r.returncode, r.stderr, time.time() - began
 

@@ -18,12 +18,15 @@ The board and config.ini are found from the GitHub API and the files each time, 
 
 Prints the stage's lines as install.sh does. Exit status: 0 = nothing changed, 3 = changed something, 1 = stopped
 (the last line says what to do next). What is left to do by hand goes to <work folder>/todo.
+windows/install.ps1 runs `board`, `config` and `check` too: on Windows config.ini has no [ide] open (`kiro {path}` is
+the Mac's), `task list` runs as task.cmd, and what it prints is UTF-8 whatever the console's code page.
 """
 import configparser
 import datetime
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,7 +49,9 @@ STATE_QUERY = """query($id: ID!) { node(id: $id) { ... on ProjectV2 { url items 
 SET_OPTIONS = """mutation($field: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
   updateProjectV2Field(input: {fieldId: $field, singleSelectOptions: $options}) { clientMutationId } }"""
 DELETE_WORKFLOW = """mutation($id: ID!) { deleteProjectV2Workflow(input: {workflowId: $id}) { deletedWorkflowId } }"""
-CONFIG_HEADER = "; task-hub の設定。kiro/install.sh が作りました(書き方は docs/setup.md)\n"
+WINDOWS = os.name == "nt"
+INSTALLER = r"windows\install.ps1" if WINDOWS else "kiro/install.sh"
+CONFIG_HEADER = f"; task-hub の設定。{INSTALLER} が作りました(書き方は docs/setup.md)\n"
 KIRO_SETTINGS = Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json"
 WORKFLOWS_KEY = "kiroAgent.workflows.enabled"  # boolean, false by default; read by each new chat
 
@@ -71,11 +76,11 @@ def load_task():
 
 def tilde(p):
     p, home = str(p), str(Path.home())
-    return "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
+    return "~" + p[len(home):] if p == home or p.startswith((home + "/", home + os.sep)) else p
 
 
 def gh(*args, stdin=None):
-    r = subprocess.run(["gh", *map(str, args)], input=stdin, capture_output=True, text=True)
+    r = subprocess.run(["gh", *map(str, args)], input=stdin, capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         last = ((r.stderr or r.stdout).strip().splitlines() or [f"exit {r.returncode}"])[-1]
         raise GhError(f"gh {' '.join(map(str, args[:2]))}: {last}")
@@ -119,7 +124,7 @@ def board(label, login, work):
         try:
             gh("repo", "view", issues, "--json", "name")
         except GhError:
-            gh("repo", "create", issues, "--private", "--description", "task-hub のタスク(kiro/install.sh が作りました)")
+            gh("repo", "create", issues, "--private", "--description", f"task-hub のタスク({INSTALLER} が作りました)")
             made.append(f"private の {issues}")
         found = [p for p in gh_json("project", "list", "--owner", owner, "--format", "json", "--limit", "200")["projects"]
                  if p.get("title") == TITLE]
@@ -241,7 +246,7 @@ def config(label, work):
     task = load_task()
     b = json.loads((Path(work) / "board").read_text())
     want = [("board", "project", b["project"]), ("board", "issues", b["issues"]), ("runner", "agent", "kiro"),
-            ("check", "kiro", "kiro-cli whoami"), ("ide", "open", "kiro {path}")]
+            ("check", "kiro", "kiro-cli whoami"), *([] if WINDOWS else [("ide", "open", "kiro {path}")])]
     path = task.CONFIG
     if not path.exists():
         write(path, CONFIG_HEADER + add_options("", want).lstrip("\n"))
@@ -259,8 +264,9 @@ def config(label, work):
             result, detail = "済み", tilde(path)
 
     try:  # what the user runs: the wrapper, with the board just made
-        r = subprocess.run([str(Path.home() / ".local" / "bin" / "task"), "list"], stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, timeout=180)
+        r = subprocess.run([str(Path.home() / ".local" / "bin" / ("task.cmd" if WINDOWS else "task")), "list"],
+                           stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=180)
         lines = (r.stdout + r.stderr).strip().splitlines()
         error = None if r.returncode == 0 else \
             next((line for line in lines if line.startswith("error:")), lines[-1] if lines else f"exit {r.returncode}")
@@ -320,7 +326,8 @@ def kiro_settings(label, work):
 
 # ---------- kiro/doctor.sh: the same things, only looked at ----------
 
-INSTALL = "sh kiro/install.sh を実行してください(Kiro のチャットなら「セットアップして」)"
+INSTALL = ("powershell -ExecutionPolicy Bypass -File " if WINDOWS else "sh ") + INSTALLER \
+    + " を実行してください(Kiro のチャットなら「セットアップして」)"
 
 
 def check_board():
@@ -358,7 +365,8 @@ def check_config():
         return False, f"{tilde(path)} がありません", INSTALL
     c = read_config(path)
     lacks = [f"[{s}] {k}" for s, k in (("board", "project"), ("board", "issues"), ("runner", "agent"),
-                                        ("check", "kiro"), ("ide", "open")) if not c.has_option(s, k)]
+                                        ("check", "kiro"), *([] if WINDOWS else [("ide", "open")]))
+             if not c.has_option(s, k)]
     if lacks:
         return False, f"{tilde(path)} に {'、'.join(lacks)} がありません", INSTALL
     return True, f"{tilde(path)}、agent = {c.get('runner', 'agent').strip()}", ""
@@ -409,4 +417,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")  # not the console's code page: install.ps1 reads it as UTF-8
     sys.exit(main(sys.argv[1:]))
