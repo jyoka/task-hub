@@ -1,21 +1,30 @@
 """slack-triage: Slackのスレッドを読んで、task-hub に登録するタスクを提案する（docs/slack-triage.md）。
-  slack-triage            クリップボードのスレッドを整理して、タスクにするかを聞く（⌃⌥S で呼ばれる。初めてなら先に名前を聞く）
+  slack-triage            クリップボードのスレッドを整理して、タスクにするかを聞く（⌃⌥S、Windows は Ctrl+Alt+S で呼ばれる。
+                          初めてなら先に名前を聞く）
   slack-triage practice   練習用のスレッドで試す（登録はしない）
   slack-triage setup      名前と登録先リポジトリを設定し直す
-  slack-triage key t      起動キーを ⌃⌥T にする（a〜z。修飾キーも変えるなら: key t ctrl,opt,cmd）
-  slack-triage off        起動キーを止める（kiro/install.sh をもう一度実行しても止めたまま）
+  slack-triage key t      起動キーを ⌃⌥T にする（a〜z。修飾キーも変えるなら: key t ctrl,opt,cmd。Windows は ctrl,alt,shift,win）
+  slack-triage off        起動キーを止める（インストーラをもう一度実行しても止めたまま）
   slack-triage on         起動キーを再開する
   slack-triage check      動くための条件がそろっているか確かめる
 """
 import datetime
+import getpass
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
-from . import core, macui
+from . import core
+
+WINDOWS = os.name == "nt"
+if WINDOWS:  # tkinter の画面(Python に付いてくる)
+    from . import winui as dialogs
+else:  # macOS 標準のダイアログ(AppleScript)
+    from . import macui as dialogs
 
 HOME = os.path.expanduser("~")
 LIB = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # slack-triage/（.kiro/agents がある）
@@ -23,16 +32,22 @@ STATE = os.path.join(HOME, ".local", "state", "task-hub")
 CONFIG = os.path.join(HOME, ".config", "task-hub", "slack-triage.json")
 LOG = os.path.join(STATE, "slack-triage.log")
 HOTKEY_STATUS = os.path.join(STATE, "slack-triage-hotkey.status")
-LOCK = os.path.join(tempfile.gettempdir(), "slack-triage-%d.lock" % os.getuid())
+LOCK = os.path.join(tempfile.gettempdir(), "slack-triage-%s.lock" % (getpass.getuser() if WINDOWS else os.getuid()))
 AGENT_FILE = os.path.join(LIB, ".kiro", "agents", "slack-triage.json")
 LAUNCHD_LABEL = os.environ.get("SLACK_TRIAGE_LABEL") or "com.task-hub.slack-triage"
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist")
 TASK_HUB_CONFIG = os.path.join(HOME, ".config", "task-hub", "config.ini")
 DEFAULT_KEY, DEFAULT_MODS = "s", "ctrl,opt"
-INSTALL = "sh kiro/install.sh を実行してください(Kiro のチャットなら「セットアップして」)"
+INSTALL = ("powershell -ExecutionPolicy Bypass -File windows\\install.ps1" if WINDOWS else "sh kiro/install.sh") \
+    + " を実行してください(Kiro のチャットなら「セットアップして」)"
 
-# ⌃⌥S から起動すると PATH がほぼ空なので、よくある置き場所を足す
+# 起動キーから起動すると PATH がほぼ空なので(Windows は、入れたあとにサインインし直していないと古いので)、
+# よくある置き場所を足す
 EXTRA_PATH = [
+    os.path.join(HOME, ".local", "bin"),
+    os.path.join(HOME, ".local", "lib", "kiro-cli"),  # windows/install.ps1 が入れた kiro-cli
+    os.path.join(os.environ.get("ProgramFiles") or "C:\\Program Files", "Kiro-Cli"),  # 公式の Windows のインストーラ
+] if WINDOWS else [
     os.path.join(HOME, ".local", "bin"),
     os.path.join(HOME, "Applications", "Kiro CLI.app", "Contents", "MacOS"),
     "/Applications/Kiro CLI.app/Contents/MacOS",
@@ -41,18 +56,17 @@ EXTRA_PATH = [
 
 
 def _setup_env():
-    parts = EXTRA_PATH + [p for p in os.environ.get("PATH", "").split(":") if p and p not in EXTRA_PATH]
-    os.environ["PATH"] = ":".join(parts)
+    parts = EXTRA_PATH + [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p not in EXTRA_PATH]
+    os.environ["PATH"] = os.pathsep.join(parts)
+    if WINDOWS:
+        os.environ["PYTHONUTF8"] = "1"  # task(bin/task)の出力を UTF-8 で読む
+        return
     os.environ.setdefault("LANG", "ja_JP.UTF-8")
     os.environ["LC_ALL"] = os.environ.get("LC_ALL") or "ja_JP.UTF-8"
 
 
 def which(name):
-    for d in os.environ.get("PATH", "").split(":"):
-        p = os.path.join(d, name)
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
-    return None
+    return shutil.which(name)  # Windows では .exe や .cmd も(PATHEXT)
 
 
 def kiro_bin():
@@ -90,8 +104,13 @@ def save_config(cfg):
 
 
 def key_label(key, mods):
-    """ctrl,opt + s → ⌃⌥S"""
+    """ctrl,opt + s → ⌃⌥S(Windows は Ctrl+Alt+S。opt は Alt、cmd は Win のキー)"""
     ms = [m.strip() for m in (mods or "").split(",")]
+    if WINDOWS:
+        names = [label for names, label in ((("ctrl", "control"), "Ctrl"), (("opt", "option", "alt"), "Alt"),
+                                            (("shift",), "Shift"), (("cmd", "command", "win"), "Win"))
+                 if any(n in ms for n in names)]
+        return "+".join(names + [(key or "").upper()])
     out = "".join(sym for names, sym in ((("ctrl", "control"), "⌃"), (("opt", "option", "alt"), "⌥"),
                                          (("shift",), "⇧"), (("cmd", "command"), "⌘")) if any(n in ms for n in names))
     return out + (key or "").upper()
@@ -125,15 +144,27 @@ def ask_kiro(prompt):
     return core.extract_json(p.stdout)
 
 
+def task_command():
+    """task を動かすコマンド。Windows では task.cmd を通さずに Python で bin/task を(バッチファイルは、引数の & や % を
+    命令として読むことがある)"""
+    if os.environ.get("TASK_BIN"):
+        return [os.environ["TASK_BIN"]]
+    if WINDOWS:
+        task = os.path.join(os.path.dirname(LIB), "bin", "task")  # slack-triage は task-hub の clone の中にある
+        return [sys.executable, task] if os.path.isfile(task) else None
+    tb = which("task")
+    return [tb] if tb else None
+
+
 def run_task(task):
-    tb = os.environ.get("TASK_BIN") or which("task")
+    tb = task_command()
     if not tb:
         raise RuntimeError("task コマンドが見つかりません。" + INSTALL)
     with tempfile.TemporaryDirectory(prefix="slack-task-") as d:
         goal_file = os.path.join(d, "goal.md")
         with open(goal_file, "w", encoding="utf-8") as f:
             f.write(task["goal"])
-        args = [tb, "new", "--title", task["title"], "--repo", task["repo"], "--goal-file", goal_file]
+        args = tb + ["new", "--title", task["title"], "--repo", task["repo"], "--goal-file", goal_file]
         if task.get("research"):
             args.append("--research")
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -147,22 +178,68 @@ def run_task(task):
 
 
 def read_clipboard():
+    if WINDOWS:
+        return read_windows_clipboard()
     p = subprocess.run(["pbpaste"], capture_output=True, env=dict(os.environ, LANG="ja_JP.UTF-8", LC_ALL="ja_JP.UTF-8"))
     return p.stdout.decode("utf-8", errors="replace")
 
 
+def read_windows_clipboard():
+    """Windows のクリップボードの文字(Unicode のまま。コードページを通さない)。文字がなければ空"""
+    import ctypes
+    from ctypes import wintypes
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    CF_UNICODETEXT = 13
+    for _ in range(10):  # ほかのアプリが開いている間は開けない
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("クリップボードを開けませんでした。もう一度試してください")
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        p = kernel32.GlobalLock(handle)
+        try:
+            return ctypes.wstring_at(p) if p else ""
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
 # ---- 二重起動の防止 ----
+
+def alive(pid):
+    if WINDOWS:  # os.kill(pid, 0) は Windows では Ctrl+C を送ってしまう
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
 
 def acquire_lock():
     try:
         with open(LOCK) as f:
             pid = int(f.read().strip() or 0)
-        if pid and pid != os.getpid():
-            try:
-                os.kill(pid, 0)
-                return False  # 前のが動いている
-            except OSError:
-                pass
+        if pid and pid != os.getpid() and alive(pid):
+            return False  # 前のが動いている
     except (OSError, ValueError):
         pass
     with open(LOCK, "w") as f:
@@ -242,6 +319,16 @@ def fill_repo_settings(cfg):
 
 
 def default_name():
+    if WINDOWS:  # Windows のアカウントの表示名(会社の PC なら、たいてい氏名)
+        try:
+            import ctypes
+            size = ctypes.c_ulong(256)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if ctypes.windll.secur32.GetUserNameExW(3, buf, ctypes.byref(size)):  # NameDisplay
+                return buf.value.strip()
+        except (OSError, AttributeError):
+            pass
+        return ""
     try:
         return subprocess.run(["id", "-F"], capture_output=True, text=True).stdout.strip()
     except OSError:
@@ -255,7 +342,7 @@ def setup(first_time=False):
     name = os.environ.get("SLACK_TRIAGE_OWNER_NAME")
     if name is None:
         intro = "Slackトリアージを初めて使うので、2つだけ設定します。\n\n" if first_time else ""
-        name = macui.ask_text(
+        name = dialogs.ask_text(
             intro + "Slackでの あなたの表示名を入れてください。\n"
             "（スレッドの中で、あなた宛ての依頼を見分けるのに使います。例: 山田 太郎）\n\n"
             "あだ名や別の書き方もあれば、読点（、）で区切って続けて書けます。例: 山田 太郎、やまだ、山田さん",
@@ -278,7 +365,7 @@ def setup(first_time=False):
         items = current + [r for r in found if r not in current and r != research]
         chosen = current
         if items:
-            picked = macui.choose_many(
+            picked = dialogs.choose_many(
                 "コードを直すタスクの作業先になりそうなリポジトリを選んでください（⌘ を押しながらクリックで複数選べます）。\n"
                 "出てくるのは %s のリポジトリだけです。\n"
                 "調査や回答のまとめのタスクは、選ばなくても %s に登録します。"
@@ -315,7 +402,7 @@ def practice_thread(name):
 
 
 def cmd_run(text_source, dry_run=False):
-    ui = macui.MacUI(dry_run=dry_run)
+    ui = dialogs.WinUI(dry_run=dry_run) if WINDOWS else dialogs.MacUI(dry_run=dry_run)
     if not acquire_lock():
         ui.notify("前のスレッドを整理中です。終わってからもう一度押してください。")
         return 0
@@ -356,6 +443,8 @@ def domain():
 
 
 def loaded():
+    if WINDOWS:  # launchd はない。起動キーを待つ常駐は、インストーラの段階 11 で入れる(まだ)
+        return False
     return launchctl("print", "%s/%s" % (domain(), LAUNCHD_LABEL)).returncode == 0
 
 
@@ -416,15 +505,17 @@ def cmd_on():
 
 def cmd_key(args):
     if not args or len(args[0]) != 1 or not args[0].isalpha() or not args[0].isascii():
-        print("使い方: slack-triage key t(a〜z)。修飾キーも変えるなら: slack-triage key t ctrl,opt,cmd")
+        print("使い方: slack-triage key t(a〜z)。修飾キーも変えるなら: slack-triage key t %s"
+              % ("ctrl,alt,shift" if WINDOWS else "ctrl,opt,cmd"))
         return 2
     key = args[0].lower()
     mods = args[1].lower() if len(args) > 1 else None
     if mods is not None:
         ms = [m.strip() for m in mods.split(",") if m.strip()]
-        allowed = {"ctrl", "control", "opt", "option", "alt", "cmd", "command", "shift"}
+        allowed = {"ctrl", "control", "opt", "option", "alt", "cmd", "command", "shift"} | ({"win"} if WINDOWS else set())
         if not ms or any(m not in allowed for m in ms):
-            print("修飾キーは ctrl / opt / cmd / shift を , で区切って書いてください(例: ctrl,opt)")
+            print("修飾キーは %s を , で区切って書いてください(例: %s)"
+                  % (("ctrl / alt / shift / win", "ctrl,alt") if WINDOWS else ("ctrl / opt / cmd / shift", "ctrl,opt")))
             return 2
         mods = ",".join(ms)
     cfg = load_config()

@@ -851,6 +851,186 @@ class SetupTest(unittest.TestCase):
                 self.assertTrue(data.startswith(b"\xef\xbb\xbf"), f)
 
 
+SLACK_APP = REPO / "slack-triage" / "app"
+SLACK_THREAD = ("山田 太郎 12:36\n@佐藤 花子 社内ツールの README に Windows の手順を足してほしい & 急ぎではないです\n"
+                "https://example.slack.com/archives/C0123ABC/p1727840000123456")
+# Kiro's answer, as kiro-cli chat prints it
+FAKE_SLACK_KIRO = r'''
+import json, sys
+if sys.argv[1:2] == ["whoami"]:
+    sys.exit(0)
+answer = {"summary": {"overview": "README に Windows の手順がない", "requests": ["山田さん → 佐藤さん: 手順を足す"],
+                      "decided": [], "open": []},
+          "tasks": [{"title": "README に Windows の手順を足す & 確かめる", "repo": "alice/app", "research": False,
+                     "goal": "README.md に Windows のセットアップ手順を足す。100% 動くこと"}]}
+sys.stdout.buffer.write(("<<<JSON\n" + json.dumps(answer, ensure_ascii=False) + "\nJSON>>>\n").encode("utf-8"))
+'''
+# task new: keeps its arguments and the goal file
+FAKE_SLACK_TASK = r'''
+import json, os, sys
+a = sys.argv[1:]
+goal = open(a[a.index("--goal-file") + 1], encoding="utf-8").read()
+with open(os.environ["SLACK_TEST_TASK_CALLS"], "w", encoding="utf-8") as f:
+    json.dump({"args": a, "goal": goal}, f, ensure_ascii=False)
+print("task:\n  id: 42\n  status: Backlog\n  url: https://github.com/alice/tasks/issues/42")
+'''
+# runs slack-triage with its screens replaced: `run` registers the first draft; `dialogs` presses the buttons of each
+# real tkinter dialog, as a person would
+SLACK_RUNNER = r'''
+import json, os, sys
+sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, os.environ["SLACK_APP"])
+from slack_triage import cli, winui
+calls = []
+if sys.argv[1] == "run":
+    class UI(winui.WinUI):
+        def review_task(self, task, i, total, summary):
+            calls.append(["review", task["title"], summary["overview"]])
+            return "register"
+        def registered(self, task, url): calls.append(["registered", url])
+        def alert(self, m): calls.append(["alert", m])
+        def notify(self, m): calls.append(["notify", m])
+    winui.WinUI = UI
+    cli.read_clipboard = lambda: os.environ["SLACK_TEST_THREAD"]
+    print(json.dumps({"code": cli.main(["run"]), "calls": calls}, ensure_ascii=False))
+elif sys.argv[1] == "clipboard":
+    print(json.dumps({"text": cli.read_windows_clipboard()}, ensure_ascii=False))
+elif sys.argv[1] == "dialogs":
+    try:
+        import tkinter
+        tkinter.Tk().destroy()
+    except Exception as e:  # no desktop to draw on
+        print(json.dumps({"skip": str(e)}))
+        sys.exit(0)
+    actions = []
+    def fake_run(root):
+        root.after(100, lambda: actions.pop(0)(root))
+        root.mainloop()
+        return root.answer
+    winui._run = fake_run
+    def text_of(root):  # every Text widget's words, to see what the person would read
+        return "".join(w.get("1.0", "end") for w in root.winfo_children()[1].winfo_children() if w.winfo_class() == "Text")
+    seen = {}
+    def press(label, before=None):
+        def act(root):
+            if before:
+                before(root)
+            seen.setdefault(label, text_of(root) if len(root.winfo_children()) > 1 else "")
+            root.buttons[label].invoke()
+        return act
+    task = {"title": "日本語のタイトル & 記号", "goal": "1 行目\n2 行目", "repo": "alice/app"}
+    summary = {"overview": "概要です", "requests": [], "decided": [], "open": []}
+    ui = winui.WinUI()
+    actions.append(press("登録"))
+    out = {"review": ui.review_task(task, 0, 1, summary)}
+    out["review_text"] = seen.get("登録", "")
+    def edit(root):
+        root.edit[0].delete(0, "end")
+        root.edit[0].insert(0, "直したタイトル")
+        root.edit[1].insert("end", "\n3 行目")
+    actions.append(press("登録へ", edit))
+    out["edit"] = ui.edit_task(task)
+    actions.append(press("キャンセル"))
+    out["edit_cancel"] = ui.edit_task(task)
+    actions.append(press("OK", lambda root: root.entry.insert("end", "bob/tool")))
+    out["ask"] = winui.ask_text("リポジトリ", "")
+    def pick(root):
+        root.box.selection_clear(0, "end")
+        root.box.selection_set(1)
+        root.box.selection_set(2)
+    actions.append(press("OK", pick))
+    out["many"] = winui.choose_many("⌘ を押しながら選ぶ", ["alice/a", "alice/b", "alice/c"], ["alice/a"])
+    actions.append(press("はい"))
+    out["confirm"] = winui.confirm("よいですか")
+    print(json.dumps(out, ensure_ascii=False))
+else:
+    print(json.dumps({"code": cli.main(sys.argv[1:])}, ensure_ascii=False))
+'''
+
+
+@unittest.skipUnless(WINDOWS, "Windows only")
+class SlackTriageTest(unittest.TestCase):
+    """slack-triage on Windows (docs/slack-triage.md): the clipboard, the tkinter screens, task new with no batch file
+    between, and the commands that do not need the key yet (check, key)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        root = self.root = Path(self.tmp.name)
+        self.home = root / "ユーザー"
+        (self.home / ".config/task-hub").mkdir(parents=True)
+        write_exe(root / "kiro-cli.exe", FAKE_SLACK_KIRO)
+        write_exe(root / "task.exe", FAKE_SLACK_TASK)
+        (root / "runner.py").write_text(SLACK_RUNNER, encoding="utf-8")
+        self.calls = root / "task-calls.json"
+        self.env = {**os.environ, "USERPROFILE": str(self.home), "HOME": str(self.home), "SLACK_APP": str(SLACK_APP),
+                    "KIRO_BIN": str(root / "kiro-cli.exe"), "TASK_BIN": str(root / "task.exe"),
+                    "SLACK_TEST_TASK_CALLS": str(self.calls), "SLACK_TEST_THREAD": SLACK_THREAD}
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING"):
+            self.env.pop(k, None)
+
+    def config(self, **c):
+        (self.home / ".config/task-hub/slack-triage.json").write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+
+    def runner(self, *args, env=None):
+        r = subprocess.run([sys.executable, str(self.root / "runner.py"), *args], env=env or self.env,
+                           capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_a_thread_on_the_clipboard_becomes_a_task(self):
+        self.config(owner_name="佐藤 花子", aliases=[], candidates=["alice/app"], allowed_owner="alice")
+        out = json.loads(self.runner("run").stdout.splitlines()[-1])
+        self.assertEqual(out["code"], 0, out)
+        self.assertIn(["review", "README に Windows の手順を足す & 確かめる", "README に Windows の手順がない"], out["calls"])
+        self.assertNotIn("alert", [c[0] for c in out["calls"]], out["calls"])
+        self.assertEqual(out["calls"][-1], ["registered", "https://github.com/alice/tasks/issues/42"])
+        sent = json.loads(self.calls.read_text(encoding="utf-8"))
+        a = sent["args"]
+        self.assertEqual(a[:5], ["new", "--title", "README に Windows の手順を足す & 確かめる", "--repo", "alice/app"])
+        self.assertTrue(sent["goal"].startswith("README.md に Windows のセットアップ手順を足す。100% 動くこと"))
+        self.assertIn("- Slackスレッド: https://example.slack.com/archives/C0123ABC/p1727840000123456", sent["goal"])
+
+    def test_the_screens_are_tkinter_dialogs(self):
+        out = json.loads(self.runner("dialogs").stdout.splitlines()[-1])
+        if "skip" in out:
+            self.skipTest(f"no desktop: {out['skip']}")
+        self.assertEqual(out["review"], "register")
+        self.assertIn("■ 日本語のタイトル & 記号", out["review_text"])
+        self.assertEqual((out["edit"]["title"], out["edit"]["goal"]), ("直したタイトル", "1 行目\n2 行目\n3 行目"))
+        self.assertIsNone(out["edit_cancel"])
+        self.assertEqual(out["ask"], "bob/tool")
+        self.assertEqual(out["many"], ["alice/b", "alice/c"])
+        self.assertTrue(out["confirm"])
+
+    def test_the_clipboard_is_read_as_unicode(self):
+        text = "日本語のスレッド\r\n2 行目 ✓"
+
+        def ps(command, value=""):  # the text goes in as a variable, never into the command
+            return subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                                   "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command],
+                                  capture_output=True, encoding="utf-8", errors="replace",
+                                  env={**os.environ, "SLACK_TEST_CLIP": value})
+        before = ps("Get-Clipboard -Raw").stdout
+        if ps("Set-Clipboard -Value $env:SLACK_TEST_CLIP", text).returncode != 0:
+            self.skipTest("no clipboard here")
+        self.addCleanup(ps, "Set-Clipboard -Value $env:SLACK_TEST_CLIP", before or " ")  # what the person had copied
+        self.assertEqual(json.loads(self.runner("clipboard").stdout.splitlines()[-1])["text"], text)
+
+    def test_check_and_the_key_on_windows(self):
+        self.config(owner_name="佐藤 花子", candidates=[])
+        env = {**self.env, "KIRO_BIN": "", "PATH": str(Path(os.environ["SystemRoot"]) / "System32")}
+        r = self.runner("check", env=env)
+        self.assertIn("× 起動キー: 常駐していません", r.stdout)
+        self.assertIn("powershell -ExecutionPolicy Bypass -File windows\\install.ps1 を実行してください", r.stdout)
+        r = self.runner("key", "t", "ctrl,shift", env=env)
+        self.assertIn("起動キーを Ctrl+Shift+T にしました", r.stdout)
+        c = json.loads((self.home / ".config/task-hub/slack-triage.json").read_text(encoding="utf-8"))
+        self.assertEqual((c["hotkey_key"], c["hotkey_mods"]), ("t", "ctrl,shift"))
+        r = self.runner("key", "t", "ctrl,cmd", env=env)  # cmd is a Mac name: Win on Windows
+        self.assertIn("Ctrl+Win+T", r.stdout)
+
+
 @unittest.skipUnless(WINDOWS and os.environ.get("TASK_TEST_WINDOWS_INSTALL") == "1",
                      "changes the user PATH and Task Scheduler: CI only")
 class InstallTest(unittest.TestCase):
