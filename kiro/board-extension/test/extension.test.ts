@@ -420,6 +420,7 @@ test('実行するのは ~/.local/bin/task list だけ(ホームを展開した�
 
 // Windows: windows\install.ps1's ~\.local\bin\task.cmd, which Node runs only through cmd.exe, from a home with a space
 // and Japanese in its name (as C:\Users\<名前>). Run by .github/workflows/windows.yml.
+// The stand-in writes its arguments by (echo %*)>>: `echo list --max-age 0>>` would redirect stream 0.
 test('Windows: ~\\.local\\bin\\task.cmd list を cmd.exe で動かす', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
   const { vscode } = fakeVscode()
   const ext = load(vscode)
@@ -431,7 +432,7 @@ test('Windows: ~\\.local\\bin\\task.cmd list を cmd.exe で動かす', { skip: 
     mkdirSync(bin, { recursive: true })
     assert.deepEqual(await ext.runTaskList(), { reason: `${join(bin, 'task.cmd')} がありません` })
     writeFileSync(join(bin, 'task'), '#!/bin/sh\necho wrong\n')  // Git Bash's, not run
-    writeFileSync(join(bin, 'task.cmd'), '@echo off\r\necho %*>> "%USERPROFILE%\\argv"\r\necho counts: Blocked=1\r\n')
+    writeFileSync(join(bin, 'task.cmd'), '@echo off\r\n(echo %*)>> "%USERPROFILE%\\argv"\r\necho counts: Blocked=1\r\n')
     assert.deepEqual(await ext.runTaskList(), { exitCode: 0, stdout: 'counts: Blocked=1\r\n', stderr: '' })
     assert.deepEqual(await ext.runTaskList(true), { exitCode: 0, stdout: 'counts: Blocked=1\r\n', stderr: '' })
     assert.equal(readFileSync(join(home, 'argv'), 'utf8'), 'list\r\nlist --max-age 0\r\n')
