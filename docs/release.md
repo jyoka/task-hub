@@ -33,6 +33,9 @@ Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別�
    構成は [CONTRIBUTING.md](../CONTRIBUTING.md#readme-の構成))。
    弱い PC で重くなっていないかを `python3 tests/bench.py` で測り、結果を PR の本文に貼ります
    ([benchmark.md](benchmark.md))。
+   Windows は、下の「Windows を本物のボードで確かめる」のボタンを 1 回押し、成功を PR の本文に書きます。
+   画面を見ないと分からないこと([windows.md の 10 章](windows.md#10-実機で確かめること要確認事項))は、
+   Windows を毎日使う人に 10 分ほど試してもらいます。
 2. **main にタグを付けて push します。** タグを付ける前に、main の `VERSION` が新しい版になっていることを確かめます。
 
    ```
@@ -56,6 +59,31 @@ Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別�
    git ls-remote --tags origin 'v*'                      # v0.7.0 が出ること
    gh release view v0.7.0 -R jyoka/task-hub              # ノートが読めること
    ```
+
+## Windows を本物のボードで確かめる
+
+Windows の PC を借りなくても、GitHub Actions の Windows で、本物の GitHub のボードのカードを 1 枚、PR まで進められます
+(エージェントは代わりのもので、AI は使いません)。ふだんの push のたびのテスト(偽物の GitHub)に加えて、版を出す前に
+1 回押します。
+
+**はじめに 1 回だけ用意するもの**
+
+1. 試験用のボード: 試験用の Project と、カードの Issue を作るリポジトリ、PR を出してよいリポジトリ(壊れても困らない
+   もの。中身は空でかまいません)。Project の列と欄は [setup.md](setup.md#github-側の準備1-回だけ) のとおり
+2. トークン: GitHub の Settings → Developer settings → Personal access tokens (classic) で、`repo` と `project` の
+   権限のものを作ります
+3. このリポジトリ(jyoka/task-hub)の Settings → Secrets and variables → Actions に入れます
+
+   | 種類 | 名前 | 値の例 |
+   |---|---|---|
+   | Secret | `TASK_HUB_LIVE_TOKEN` | 2 のトークン |
+   | Variable | `TASK_HUB_LIVE_PROJECT` | `jyoka/3`(試験用の Project) |
+   | Variable | `TASK_HUB_LIVE_ISSUES` | `jyoka/task-sandbox` |
+   | Variable | `TASK_HUB_LIVE_REPO` | `jyoka/task-sandbox`(PR を出す先) |
+
+**押すとき**: GitHub の Actions → windows → Run workflow で、「live」に印を付けて Run workflow を押します。
+`live` のジョブが緑なら成功です。カードを 1 枚作って PR まで進め、終わると PR を閉じてブランチを消し、カードを Done にします。
+ふだんのテスト(`test`)と、管理者でないユーザーでのテスト(`standard-user`)も、同じときに動きます。
 
 ## リリースノートの型
 
