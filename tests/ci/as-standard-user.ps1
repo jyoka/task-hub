@@ -48,13 +48,15 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minu
 Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -User "$env:COMPUTERNAME\$name" `
   -Password $password -RunLevel Limited | Out-Null
 Start-ScheduledTask -TaskName $taskName
+# until it has run and ended: Task Scheduler says 267011 (0x41303, "has not run yet") until it starts, then 267009
+# (0x41301, "running")
 $end = (Get-Date).AddMinutes($Minutes + 1)
 do {
   Start-Sleep -Seconds 5
-  $info = Get-ScheduledTaskInfo -TaskName $taskName
+  $code = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
   $state = (Get-ScheduledTask -TaskName $taskName).State
-} while ($state -eq 'Running' -and (Get-Date) -lt $end)
-$code = $info.LastTaskResult
+} while (($state -eq 'Running' -or $code -in 267009, 267011) -and (Get-Date) -lt $end)
+if ($code -in 267009, 267011) { Write-Host "== the task did not end in $Minutes minutes (state $state, result $code)"; $code = 1 }
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 if (Test-Path $log) { Get-Content $log -Encoding Default }
 Write-Host "== ran as the standard user $name (not an administrator): exit $code"
