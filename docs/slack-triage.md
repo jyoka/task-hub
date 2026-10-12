@@ -75,6 +75,22 @@ Slack のスレッドをコピーして **⌃⌥S**(control + option + S)を押�
 
 アンインストール(`kiro/uninstall.sh`)は、コマンドと常駐を消します。あなたの設定は残します。
 
+## Windows では
+
+使い方は同じで、違うのは次のところです。
+
+| こと | Mac | Windows |
+|---|---|---|
+| 起動キー | ⌃⌥S | **Ctrl+Alt+S**(`slack-triage key t` で変えられる。修飾キーの名前は ctrl、alt、shift、win) |
+| 画面 | macOS のダイアログ。ゴールは TextEdit で直す | 1 枚の画面(Python に付いてくる tkinter)。タイトルとゴールを、その画面の中で直す |
+| 複数選ぶとき | ⌘ を押しながらクリック | Ctrl を押しながらクリック |
+| 通知 | macOS の通知 | Windows の通知(画面の右下) |
+| 登録 | `task new` | `bin/task` を Python で直接動かす(タイトルの `&` や `%` が、バッチファイルで命令として読まれないように) |
+
+起動キーを待つ常駐と、インストーラで入れる段階(Windows の段階 11)は準備中です。それまでは、PowerShell で
+`py -3 $HOME\.local\lib\task-hub\slack-triage\app\main.py practice` のように動かせます(`practice` を外すと、
+クリップボードのスレッドを整理します)。
+
 ## しくみ(開発する人向け)
 
 - 起動キーは `slack-triage/hotkey/main.swift`(macOS の `RegisterEventHotKey`)。アクセシビリティや入力監視の
@@ -85,6 +101,9 @@ Slack のスレッドをコピーして **⌃⌥S**(control + option + S)を押�
   swiftc は Xcode の Command Line Tools(前提の git と同じもの)に入っています。`main.swift` が変わった版になると、
   次にインストーラを実行したときにビルドし直します
 - 本体は Python の標準ライブラリだけ(`slack-triage/app/slack_triage/`)。整理とタスク案の指示は `core.py` の `build_prompt`、
-  ダイアログは AppleScript(`macui.py`。表示する文章は引数で渡し、スクリプトに埋め込みません)
+  ダイアログは AppleScript(`macui.py`。表示する文章は引数で渡し、スクリプトに埋め込みません)。Windows は tkinter
+  (`winui.py`。同じ関数を持つ)で、クリップボードは Windows の API で Unicode のまま読みます(`cli.py` の
+  `read_windows_clipboard`)
 - テスト: `python3 -m unittest tests.test_slack_triage`(整理から登録までの流れを偽の画面で)、インストーラの段階は
-  `tests/test_install.py`
+  `tests/test_install.py`。Windows は `tests/test_windows.py` の `SlackTriageTest`(クリップボードから登録まで、
+  本物の tkinter の画面のボタンをプログラムで押す、クリップボードの往復、check と key)
