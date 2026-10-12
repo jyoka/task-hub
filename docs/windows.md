@@ -342,8 +342,9 @@ Get-Content $HOME\.local\state\task-hub\watch.log -Tail 20
 
 - サインインのたびに自動で始まります。その直後に PowerShell の窓が一瞬出て、すぐ隠れます
 - 見張りが何かで止まっても、1 分後に自分で始め直します
-- 常駐から始めた作業は、見張りとは別に動きます。止めるときは、タスク スケジューラの画面で「終了」を押さずに、
-  手順 9 の `-Uninstall` を使います(「終了」は、動いている作業まで止めることがあります)
+- 常駐から始めた作業は、見張りとは別に動きます。常駐をやめるときは、タスク スケジューラの画面で「終了」を押さずに、
+  手順 9 のアンインストールを使います(「終了」は、動いている作業まで止めることがあります)。アンインストールは、
+  作業中のタスクがあれば見張りだけを止めます
 - 止まった作業のカードは、次の確認で `the run stopped unexpectedly` として Blocked になります。Ready に戻せばやり直せます
 - task-hub は日本語を正しく扱うために、自分を UTF-8 モード(`PYTHONUTF8=1`)で動かします。エージェントや、
   エージェントが動かす Python のテストも UTF-8 モードになります
@@ -359,16 +360,27 @@ git pull
 powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Watch
 ```
 
-**やめる**: 常駐と `task` コマンドを外します。
+**やめる**: インストーラが入れたものを外します。まず、消すものの一覧を見ます(何も消しません)。
 
 ```
-powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
+powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1
 ```
 
-- 止めるのは見張りだけです。動いている作業は最後まで動きます
-- `~\.local\lib\task-hub`(本体)、`~\.config\task-hub`(設定)、`~\.local\state\task-hub` と `~\.local\share\task-hub`
-  (ログと作業フォルダー)は残します。要らなければ手で消します
-- GitHub のボードとログインは変えません
+よければ `-Yes` を付けて消します(`install.ps1 -Uninstall` も同じです)。
+
+```
+powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
+```
+
+- 消すのは、インストーラが入れたと記録したもの(`~\.local\state\task-hub\install-manifest.json`)だけです。
+  常駐、Kiro のスキルと steering、`task.cmd`、ユーザーの PATH に足した項目、本体(`~\.local\lib\task-hub`)、
+  インストーラが入れた git、gh、kiro-cli、Python と uv、インストーラが作った設定ファイル。もとからあったものは消しません
+- 作業中のタスクがあるときは、常駐(見張り)だけを止めて、ほかは残します。作業は最後まで動きます。作業が終わったら、
+  もう一度実行します
+- 消さないもの: GitHub のボードとログイン、kiro-cli のログイン、`~\.local\state\task-hub` と `~\.local\share\task-hub`
+  (ログと作業フォルダー)。ボードの消し方は、最後に出ます
+- 消し終えたら Kiro を再起動します(`/task` と `/chief` が外れます)
+- 以前の入れ方(記録のないもの)では、常駐と `task.cmd` だけを外します
 
 ## 10. 実機で確かめること(要確認事項)
 
@@ -383,7 +395,7 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 | 4 | 通知が出る | 手順 6 の作業が In review になったとき | 画面の右下に `#12 In review: ...` の通知が出る。出なければ、手順 11 の「通知が出ない」も試す |
 | 5 | 本物のエージェントで PR まで進む | 手順 6 | カードが In review になり、PR ができる。使ったエージェント(kiro / claude / codex)も伝える |
 | 6 | 日本語が化けない | 手順 6 のタイトルとログ | `task list` と `task log` の日本語が読める。PR の本文も読める |
-| 7 | 作業中に見張りを外しても、作業が続く | 作業中(In progress)に `install.ps1 -Uninstall` を実行する | 作業が最後まで進み、In review になる。確かめたら `install.ps1 -Watch` で常駐を戻す |
+| 7 | 作業中に見張りを外しても、作業が続く | 作業中(In progress)に `install.ps1 -Uninstall` を実行する | `作業中のタスクがあります` と出て見張りだけが止まり、作業が最後まで進み、In review になる。確かめたら `install.ps1 -Watch` で常駐を戻す |
 | 8 | PowerShell の機能が制限されていない | 手順 2 の #2 | `FullLanguage`。× なら情シスへの相談が要る |
 | 9 | スキルが使える | エージェントの会話で `/task` と打つ(手順 7 のあと) | `/task` が候補に出て、カードが Backlog にできる |
 | 10 | 使用量の記録 | 作業が終わったあと `task stats` | 使ったクレジットが出る(kiro-cli)。出なくても、作業には影響しない |
@@ -513,6 +525,9 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 - メモ帳の BOM 付き UTF-8 の設定ファイルを読めること、UTF-16 のときに直し方を出すこと
 - `install.ps1 -Watch` でタスク スケジューラに登録され、見張りが動くこと。Git Bash から `task` が動くこと。
   `-Uninstall` で見張りが止まって外れ、無関係のプロセスは止めないこと
+- インストーラ(何もない PC から段階 1〜10、2 回目は何も変えない、ログインで止まって続きから、チェックサムの不一致)、
+  診断(何も変えない)、アンインストール(記録したものだけを消す、ジャンクションの先を消さない、作業中は見張りだけ)。
+  GitHub、Releases、Kiro のダウンロード、MSI、ログインの窓は偽物です
 
 実機でしか確かめられないことは、手順 10 の表にまとめています。
 
