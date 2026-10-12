@@ -49,8 +49,9 @@ icacls $work /grant "${name}:(OI)(CI)M" /Q | Out-Null
 $log = Join-Path $work 'output.log'
 $script = Join-Path $work 'run.cmd'
 Remove-Item $log -ErrorAction SilentlyContinue
-# the command, in the checkout, with this job's PATH (Python from setup-python) and its output in the log
-[IO.File]::WriteAllText($script, "@echo off`r`nset PATH=$env:Path`r`ncd /d `"$repo`"`r`n$Command > `"$log`" 2>&1`r`nexit /b %ERRORLEVEL%`r`n",
+# the command, in the checkout, with this job's PATH (Python from setup-python) and its output in the log. Session 0 has no
+# desktop: what needs one (a hotkey: RegisterHotKey fails with 1459) is skipped, by TASK_TEST_NO_DESKTOP
+[IO.File]::WriteAllText($script, "@echo off`r`nset PATH=$env:Path`r`nset TASK_TEST_NO_DESKTOP=1`r`ncd /d `"$repo`"`r`n$Command > `"$log`" 2>&1`r`nexit /b %ERRORLEVEL%`r`n",
   [Text.Encoding]::Default)
 
 $taskName = 'task-hub ci as standard user'
