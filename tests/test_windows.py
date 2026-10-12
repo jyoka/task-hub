@@ -588,9 +588,14 @@ class SetupTest(unittest.TestCase):
         write_exe(root / "open-window.exe", FAKE_OPEN_WINDOW)
         self.db = root / "gh.json"
         self.set_gh_auth(None)
-        # task-hub's origin: release tags are added by the tests that want them
+        # task-hub's origin, without this checkout's own release tags: the tests that want one add it, and a real
+        # release (v0.12.0 and later) would be the clone the installer takes
         self.origin = root / "task-hub.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(REPO), str(self.origin)], check=True, capture_output=True)
+        tags = subprocess.run(["git", "-C", str(self.origin), "tag", "-l"], check=True, capture_output=True,
+                              text=True).stdout.split()
+        if tags:
+            subprocess.run(["git", "-C", str(self.origin), "tag", "-d", *tags], check=True, capture_output=True)
 
         srv = self.srv = test_install.Releases()
         threading.Thread(target=srv.serve_forever, daemon=True).start()
