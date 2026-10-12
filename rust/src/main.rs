@@ -281,6 +281,7 @@ struct Blocker {
     reason: String,
 }
 
+#[derive(Clone)]
 struct Task {
     id: String,
     url: String,

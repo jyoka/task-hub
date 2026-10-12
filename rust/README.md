@@ -10,7 +10,7 @@ of task-hub and is not installed by `task update`.
 | `task-rs fetch` | Copies the open cards from GitHub to the local board, once. Reads only. The only GitHub call |
 | `task-rs list --fetch` | `fetch`, then `list`. If the fetch fails, it shows the local board |
 | `task-rs events [--only "In review,Blocked"]` | The last 20 events, like `task events` |
-| `task-rs tui` | A live terminal view: the board, the selected card's details or log, and the events. `g` opens Lazygit in a task's worktree |
+| `task-rs tui` | A live terminal view: the board, the selected card's details, and the events. Enter, `d` and `l` read a task's Issue, diff or log full screen. `g` opens Lazygit in a task's worktree |
 
 The local board is `~/.local/state/task-hub/board-cache.json`, the file `bin/task` also reads and writes. So:
 
@@ -23,31 +23,79 @@ The local board is `~/.local/state/task-hub/board-cache.json`, the file `bin/tas
 
 ## The TUI
 
-`task-rs tui` (ratatui) shows the board with what needs you first, the selected card's details, Issue, diff or log,
-and the newest events. It redraws when the local files change. The board is read only. `g` hands the terminal to
-Lazygit, which is not read only (see below).
+`task-rs tui` (ratatui) has two screens:
+
+- **The board**, for choosing a task: the cards with what needs you first, the selected card's details, and the
+  newest events.
+- **The reader**, for reading one task: its Issue (the Goal), its diff, or its agent's log, over the whole terminal.
+  Only a one-line header (the view, the task, where you are) and the keys at the bottom stay.
+
+Both redraw when the local files change. The board is read only. `g` hands the terminal to Lazygit, which is not
+read only (see below).
+
+### Keys on the board
 
 | Key | What it does |
 |---|---|
-| ↑ ↓ | Move between cards |
-| Enter | The Issue (its Goal) in the right pane, from the local copy |
-| d | The diff: what the agent changed in its worktree since its base branch (while the worktree exists) |
-| l | The run's log |
-| PgUp, PgDn (or Space) | Scroll the right pane. Esc, or the same key again, goes back to the details |
+| ↑ ↓ (or j k) | Move between cards |
+| Enter | Read the Issue (its Goal), from the local copy |
+| d | Read the diff: all the task changed in its worktree since its base branch, committed or not (while the worktree exists) |
+| l | Read the run's log |
+| PgUp, PgDn (or Space) | Scroll the details |
 | b | Open the PR in the browser (the Issue when there is no PR) |
 | o | `task open <id>`: the worktree in your IDE (`[ide] open` in config.ini) |
 | g | Lazygit in the task's worktree, in this terminal. It asks first; `g` or Enter opens it. Quit Lazygit to come back |
 | f | Fetch from GitHub (reads only) |
 | q | Quit |
 
-In a pane narrower than 110 columns, the details go under the board.
+In a terminal narrower than 110 columns, the details go under the board. In a short one, the events take fewer rows.
+
+### Keys in the reader
+
+The reader stays on the task you opened it on. No key in it selects another card.
+
+| Key | What it does |
+|---|---|
+| ↑ ↓ (or j k), mouse wheel | Scroll one row (the wheel: three) |
+| PgUp, PgDn (or Space) | Scroll one screen |
+| Home, End | The beginning, the end |
+| ← → | Scroll the diff sideways. Its lines are not wrapped or cut: the header shows the column |
+| Enter, d, l | Switch to the Issue, the diff, the log. Each keeps its place while the reader is open |
+| g | Lazygit in this task's worktree, as on the board. Quitting it brings back the same view at the same place |
+| b, o, f | As on the board, for this task |
+| Esc | Back to the board, on the same card |
+| q | Quit task-rs, as on the board |
+
+The Issue and the log wrap long lines, and every row of a long line can be scrolled to. The header shows the rows on
+screen and how many there are.
+
+The reader turns on the terminal's mouse reports so that the wheel scrolls. To select text with the mouse there, hold
+Option (Terminal, iTerm2) or Shift (most other terminals). The board leaves the mouse to the terminal.
+
+### Live updates in the reader
+
+The reader reads its task again when the local files change, as the board does, and never calls GitHub for it. Your
+place stays where it is: a reload does not move it.
+
+- **The log** opens at its end and follows new output while you are at the bottom (the header says `following`).
+  Scroll up and it stops following (`paused, End follows`): new output is added below without moving what you read.
+  Go back to the bottom (End, or scroll down) and it follows again. It shows the log's last 1 MB, and up to 4 MB
+  while you read older output. If the log grows past that, or is cut or replaced, the reader goes to its end.
+- **The diff** is made again from the worktree on each reload (at least every 15 seconds). Git reads a copy of the
+  worktree's index, so task-rs does not write the index or take its lock while an agent works there.
+- **The Issue** is the local copy of the board. `f` fetches a newer one.
+- When the terminal changes size, the reader keeps the line that was at the top, or stays at the end.
+- If the task leaves the board (Done), the reader says `no longer on the local board` and keeps its last copy. It
+  never shows another task instead. Esc goes back to the board, on a card that is still there. A missing worktree or
+  log is said in the reader.
 
 ## Lazygit in a task's worktree (g)
 
 `g` lends this terminal to [Lazygit](https://github.com/jesseduffield/lazygit) in the worktree that task-hub recorded
 for the selected task (`runs/<id>.json`, read again when you press `g` and again when you confirm). It is for looking
-at what an agent did: its commits, files and diffs. When you quit Lazygit, the board comes back, reloaded, on the same
-card. If the card is gone (Done), another card is selected.
+at what an agent did: its commits, files and diffs. When you quit Lazygit, task-rs comes back, reloaded, on the same
+card: the board, or the reader in the same view at the same place when you pressed `g` there. If the card is gone
+(Done), the board selects another card, and the reader says the task is no longer on the board.
 
 Before Lazygit opens, a box shows the task, repository, branch and worktree, and asks you to confirm. Press `g` or
 Enter to open Lazygit. Any other key cancels.
