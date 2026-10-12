@@ -92,8 +92,9 @@ function Test-Runs($commandLine, $path) {  # the command line names $path, by it
   $commandLine -and ($commandLine.Contains($path) -or $commandLine.Contains((ConvertTo-AsciiPath $path)))
 }
 
-function Get-NewestKiroTag($names) {
-  $names | Where-Object { $_ -match '^kiro-v\d+$' } | Sort-Object { [int]$_.Substring(6) } | Select-Object -Last 1
+function Get-NewestRelease($names) {  # as install.ps1's
+  $names | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' -and [version]$_.Substring(1) -ge [version]'0.12.0' } |
+    Sort-Object { [version]$_.Substring(1) } | Select-Object -Last 1
 }
 
 function Invoke-Check($what, $before = '') {  # kiro/install-board check: "ok<TAB>detail" or "ng<TAB>detail<TAB>next step"
@@ -227,8 +228,9 @@ if (-not (Test-Path (Join-Path $Lib '.git'))) {
 } elseif (-not (($userPath -split ';') -contains $BinDir)) {
   Ng "$(Tilde $BinDir) がユーザーの PATH にありません" $Install
 } else {
-  # the version, and whether there is a newer kiro-v* (as install.ps1 decides: its clone, in the manifest or not on a
-  # branch, follows the newest kiro-v*; a clone on a branch made by hand is only pulled). ls-remote: no fetch
+  # the version, and whether there is a newer release (as install.ps1 decides: its clone, in the manifest or not on a
+  # branch, follows the newest release from v0.12.0; a clone on a branch made by hand is only pulled). ls-remote: no
+  # fetch
   $note = ''
   $ver = ''
   if ($git) {
@@ -240,18 +242,18 @@ if (-not (Test-Path (Join-Path $Lib '.git'))) {
       $ver = "$branch $($script:Out[0])"
     } else {
       & $g tag --points-at HEAD | Out-Null
-      $current = Get-NewestKiroTag $script:Out
+      $current = Get-NewestRelease $script:Out
       $ver = $current
       if (-not $ver) { & $g rev-parse --short HEAD | Out-Null; $ver = $script:Out[0] }
     }
     if (-not ($m -and $m.installed.'task-hub') -and $branch) {
       $note = "ブランチ $branch の上の clone です。インストーラはタグに切り替えず、pull だけします"
-    } elseif (-not (& $g ls-remote --tags origin 'kiro-v*')) {
+    } elseif (-not (& $g ls-remote --tags origin 'v*')) {
       $note = '新しい版があるかは確かめられませんでした(origin に届きません)'
     } else {
-      $newest = Get-NewestKiroTag ($script:Out | ForEach-Object { ($_ -split 'refs/tags/')[-1] } | Where-Object { $_ -notmatch '\^\{\}$' })
+      $newest = Get-NewestRelease ($script:Out | ForEach-Object { ($_ -split 'refs/tags/')[-1] } | Where-Object { $_ -notmatch '\^\{\}$' })
       if ($newest -and $current) {
-        if ([int]$newest.Substring(6) -gt [int]$current.Substring(6)) { $note = "新しい版 $newest があります。$Install" }
+        if ([version]$newest.Substring(1) -gt [version]$current.Substring(1)) { $note = "新しい版 $newest があります。$Install" }
         else { $ver = "$ver、最新" }
       } elseif ($newest) {
         $note = "配布版 $newest ではない版です。次にインストーラを実行すると $newest に切り替わります"

@@ -175,8 +175,8 @@ In review と Done の間に `wait for merge` の列を足せます。レビュ�
 `task watch` の再起動と Kiro IDE の定義のコピーし直しもまとめて行います。[docs/setup.md](setup.md#インストール))。
 Windows でも同じで、常駐(タスク スケジューラ)の `task watch` も新しい版で始め直します。
 
-かんたんセットアップ(Mac の `kiro/install.sh`、Windows の `windows\install.ps1`)で入れた人の clone は、`kiro-v<番号>` の
-タグの上にあります。そのときの `task update` は、一番新しい `kiro-v*` の版のインストーラを、その版の写し(手元の clone
+かんたんセットアップ(Mac の `kiro/install.sh`、Windows の `windows\install.ps1`)で入れた人の clone は、リリースの
+タグ(v0.12.0 以上)の上にあります。そのときの `task update` は、一番新しいリリースのインストーラを、その版の写し(手元の clone
 から作るので、ダウンロードはしない)から動かします。Kiro のチャットで「セットアップして」ともう一度言うのと同じで、
 スキル、フック、Slackトリアージの起動キーまで新しい版になります。常駐を入れていれば、そのまま新しい版で動きます。
-知らせの行も `kiro-v*` の新しい版を知らせます(例 `update: kiro-v3 が出ています。`task update` で更新(今は kiro-v2)`)。
+知らせの行は、ブランチの上の clone と同じです(例 `update: v0.13.0 が出ています。`task update` で更新(今は v0.12.0)`)。

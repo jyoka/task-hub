@@ -22,8 +22,9 @@ task-hub の変更は、1 コミットごとではなく 1 リリースごとに
 **タグは消したり、付け替えたりしません。** 利用者の clone は、手元にあるタグを信じています。直したいときは、
 直したコミットで次の版を出します。
 
-Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別の決まりです([kiro-ide.md](kiro-ide.md#9-配布する版を出す))。
-インストーラが見るのは `kiro-v*` だけなので、`v*` のタグを付けても Kiro IDE 版の配布は変わりません。
+かんたんセットアップ(Mac の `kiro/install.sh`、Windows の `windows\install.ps1`)も、このタグの版を入れます。
+選ぶのは `v0.12.0` 以上で一番新しいものです([kiro-ide.md の 9 章](kiro-ide.md#9-配布する版を出す))。
+タグを付けるとすぐ利用者に届くので、付ける前に 9 章の確認をします。
 
 ## リリースの手順
 
@@ -33,6 +34,7 @@ Kiro IDE 版の配布に使う `kiro-v<数字>` のタグは、これとは別�
    構成は [CONTRIBUTING.md](../CONTRIBUTING.md#readme-の構成))。
    弱い PC で重くなっていないかを `python3 tests/bench.py` で測り、結果を PR の本文に貼ります
    ([benchmark.md](benchmark.md))。
+   かんたんセットアップで入れた Mac で、[kiro-ide.md の 9 章](kiro-ide.md#9-配布する版を出す)の通しの確認をします。
    Windows は、下の「Windows を本物のボードで確かめる」のボタンを 1 回押し、成功を PR の本文に書きます。
    画面を見ないと分からないこと([windows.md の 10 章](windows.md#10-実機で確かめること要確認事項))は、
    Windows を毎日使う人に 10 分ほど試してもらいます。
