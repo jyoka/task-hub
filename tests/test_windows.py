@@ -337,32 +337,88 @@ if a[:2] == ["python", "find"] and os.path.exists(log + ".installed"):
     sys.exit(0)
 sys.exit(2)
 '''
+# logged in while the file TASK_TEST_KIRO_LOGGED_IN is there
+FAKE_KIRO_CLI = r'''
+import os, sys
+a = sys.argv[1:]
+if a == ["--version"]:
+    print("kiro-cli 2.29.1 (fake)")
+    sys.exit(0)
+if a == ["whoami"]:
+    sys.exit(0 if os.path.exists(os.environ["TASK_TEST_KIRO_LOGGED_IN"]) else 1)
+sys.exit(2)
+'''
+# msiexec /a <msi> /qn TARGETDIR=<dir>: the test's "MSI" is a zip
+FAKE_MSIEXEC = r'''
+import sys, zipfile
+a = sys.argv[1:]
+zipfile.ZipFile(a[a.index("/a") + 1]).extractall(next(x.split("=", 1)[1] for x in a if x.startswith("TARGETDIR=")))
+'''
+# opens no window: keeps the login script it was given
+FAKE_OPEN_WINDOW = r'''
+import os, sys
+with open(os.environ["TASK_TEST_WINDOWS"], "a", encoding="utf-8") as f:
+    f.write(open(sys.argv[1], encoding="utf-8-sig").read() + "----\n")
+'''
+
+
+def delete_key(path):
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+            subs = []
+            while True:
+                try:
+                    subs.append(winreg.EnumKey(k, len(subs)))
+                except OSError:
+                    break
+        for sub in subs:
+            delete_key(rf"{path}\{sub}")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+    except FileNotFoundError:
+        pass
 
 
 @unittest.skipUnless(WINDOWS and os.environ.get("PROCESSOR_ARCHITECTURE") == "AMD64", "Windows on x64 only")
 class SetupTest(unittest.TestCase):
-    """windows/install.ps1, stages 1 to 3, as a person with no admin rights runs it: what is missing comes from GitHub
-    Releases (a local server), checked by its SHA-256, into the user folder, and is recorded."""
+    """windows/install.ps1, stages 1 to 6, as a person with no admin rights runs it: what is missing comes from GitHub
+    Releases and Kiro's download server (a local server), checked by its SHA-256, into the user folder, and is
+    recorded. GitHub is test_install.py's fake gh; a login opens no window, its script is kept in windows.log."""
     GH_TAG, UV_TAG, GIT_TAG = "v2.0.0", "0.9.0", "v2.56.0.windows.2"
     GH_ZIP, UV_ZIP, GIT_ZIP = "gh_2.0.0_windows_amd64.zip", "uv-x86_64-pc-windows-msvc.zip", "MinGit-2.56.0.2-64-bit.zip"
+    KIRO_MSI = "2.29.1/kiro-cli-x86_64-pc-windows-msvc.msi"
 
     def setUp(self):
         import test_install
-        import winreg
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
-        root = Path(self.tmp.name)
+        root = self.root = Path(self.tmp.name)
         self.home = root / "ユーザー"
         self.home.mkdir()
-        self.uv_log = root / "uv.log"
+        self.uv_log, self.windows = root / "uv.log", root / "windows.log"
+        self.kiro_logged_in = root / "kiro-logged-in"
+        fakes, self.kirobin, self.program_files = root / "fakes", root / "kirobin", root / "Program Files"
+        for d in (fakes, self.kirobin, self.program_files):
+            d.mkdir()
+        (fakes / "fcntl.py").write_text(FCNTL)
+        write_exe(self.kirobin / "kiro-cli.exe", FAKE_KIRO_CLI)
+        write_exe(root / "msiexec.exe", FAKE_MSIEXEC)
+        write_exe(root / "open-window.exe", FAKE_OPEN_WINDOW)
+        self.db = root / "gh.json"
+        self.set_gh_auth(None)
+        # task-hub's origin: kiro-v* tags are added by the tests that want them
+        self.origin = root / "task-hub.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(REPO), str(self.origin)], check=True, capture_output=True)
+
         srv = self.srv = test_install.Releases()
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        gh = test_install.zip_bytes({"LICENSE": "MIT", "bin/gh.exe": exe_bytes('print("gh version 2.0.0 (fake)")\n')})
+        gh = test_install.zip_bytes({"LICENSE": "MIT", "bin/gh.exe": exe_bytes(test_install.fake_gh("2.0.0"))})
         uv = test_install.zip_bytes({"uv.exe": exe_bytes(FAKE_UV)})
         git = test_install.zip_bytes({"cmd/git.exe": exe_bytes(
             f"import subprocess, sys\nsys.exit(subprocess.call([{shutil.which('git')!r}, *sys.argv[1:]]))\n")})
+        msi = test_install.zip_bytes({"LocalApp/Kiro-Cli/kiro-cli.exe": exe_bytes(FAKE_KIRO_CLI)})
         sha = test_install.sha256
         srv.redirects.update({"/cli/cli/releases/latest": f"/cli/cli/releases/tag/{self.GH_TAG}",
                               "/astral-sh/uv/releases/latest": f"/astral-sh/uv/releases/tag/{self.UV_TAG}",
@@ -377,32 +433,30 @@ class SetupTest(unittest.TestCase):
             f"/api/repos/git-for-windows/git/releases/tags/{self.GIT_TAG}": json.dumps(
                 {"tag_name": self.GIT_TAG, "body": "",
                  "assets": [{"name": "MinGit-2.56.0.2-arm64.zip", "digest": "sha256:" + "0" * 64},
-                            {"name": self.GIT_ZIP, "digest": "sha256:" + sha(git)}]}).encode()})
+                            {"name": self.GIT_ZIP, "digest": "sha256:" + sha(git)}]}).encode(),
+            f"/kiro/stable/{self.KIRO_MSI}": msi,
+            "/kiro/stable/latest/manifest.json": json.dumps({"version": "2.29.1", "packages": [
+                {"os": "macos", "kind": "dmg", "fileType": "dmg", "architecture": "universal",
+                 "download": "2.29.1/Kiro CLI.dmg", "sha256": "0" * 64},
+                {"os": "windows", "kind": "msi", "fileType": "msi", "architecture": "x86_64",
+                 "download": self.KIRO_MSI, "sha256": sha(msi)}]}).encode()})
         # this test's "registry": the user's and the machine's environment
         self.reg = rf"Software\task-hub-test\{os.getpid()}-{id(self)}"
-        self.addCleanup(self.delete_key, winreg.HKEY_CURRENT_USER, self.reg)
+        self.addCleanup(delete_key, self.reg)
         system = Path(os.environ["SystemRoot"]) / "System32"
         self.env = {**os.environ, "USERPROFILE": str(self.home), "HOME": str(self.home),
-                    "PATH": f"{system};{system / 'WindowsPowerShell' / 'v1.0'}",  # no git, Python or gh
+                    "PATH": f"{system};{system / 'WindowsPowerShell' / 'v1.0'}",  # no git, Python, gh or kiro-cli
                     "TASK_INSTALL_GITHUB": srv.url, "TASK_INSTALL_GITHUB_API": srv.url + "/api",
+                    "TASK_INSTALL_KIRO_CLI": srv.url + "/kiro", "TASK_INSTALL_MSIEXEC": str(root / "msiexec.exe"),
+                    "TASK_INSTALL_PROGRAM_FILES": str(self.program_files),
+                    "TASK_INSTALL_OPEN_WINDOW": str(root / "open-window.exe"),
                     "TASK_INSTALL_USER_ENV": self.reg + r"\user", "TASK_INSTALL_MACHINE_ENV": self.reg + r"\machine",
-                    "TASK_TEST_UV_LOG": str(self.uv_log)}
-        for k in ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONHOME", "VIRTUAL_ENV"):
+                    "TASK_TEST_UV_LOG": str(self.uv_log), "TASK_TEST_GH_DB": str(self.db),
+                    "TASK_TEST_KIRO_LOGGED_IN": str(self.kiro_logged_in), "TASK_TEST_WINDOWS": str(self.windows),
+                    "PYTHONPATH": str(fakes)}
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONHOME", "VIRTUAL_ENV", "GH_TOKEN", "GITHUB_TOKEN",
+                  "GIT_CONFIG_GLOBAL"):
             self.env.pop(k, None)
-
-    def delete_key(self, hive, path):
-        import winreg
-        try:
-            with winreg.OpenKey(hive, path) as k:
-                while True:
-                    try:
-                        sub = winreg.EnumKey(k, 0)
-                    except OSError:
-                        break
-                    self.delete_key(hive, rf"{path}\{sub}")
-            winreg.DeleteKey(hive, path)
-        except FileNotFoundError:
-            pass
 
     def set_path(self, which, *dirs):
         import winreg
@@ -414,9 +468,23 @@ class SetupTest(unittest.TestCase):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{self.reg}\user") as k:
             return winreg.QueryValueEx(k, "Path")[0].split(";")
 
-    def install(self, code=0):
+    def set_gh_auth(self, auth):
+        self.db.write_text(json.dumps({"auth": auth, "code": "ABCD-1234", "approve": None, "repos": {},
+                                       "projects": [], "calls": []}))
+
+    def ready(self):
+        """A PC with git, Python and kiro-cli (installed after this window opened), logged in to GitHub and Kiro."""
+        self.set_path("machine", Path(shutil.which("git")).parent)
+        self.set_path("user", Path(sys.executable).parent, self.kirobin)
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.kiro_logged_in.touch()
+
+    def tag(self, name, rev="HEAD"):
+        subprocess.run(["git", "-C", str(self.origin), "tag", name, rev], check=True)
+
+    def install(self, *args, code=0):
         r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                            str(REPO / "windows" / "install.ps1"), "-From", str(REPO)],
+                            str(REPO / "windows" / "install.ps1"), "-From", str(self.origin), *args],
                            env=self.env, capture_output=True, encoding="utf-8", errors="replace",
                            stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, code, r.stdout + r.stderr)
@@ -425,48 +493,78 @@ class SetupTest(unittest.TestCase):
     def manifest(self):
         return json.loads((self.home / ".local/state/task-hub/install-manifest.json").read_text(encoding="utf-8"))
 
-    def test_a_bare_pc_gets_git_python_and_gh_then_nothing_twice(self):
+    def lib_git(self, *args):
+        return subprocess.run(["git", "-C", str(self.home / ".local/lib/task-hub"), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def test_a_bare_pc_gets_everything_then_nothing_twice(self):
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.kiro_logged_in.touch()
         out = self.install()
         self.assertIn("task-hub をセットアップします(管理者権限は使いません)", out)
-        self.assertIn(r"git 2.56.0.2(MinGit、~\.local\lib\git)", out)
         self.assertIn("1. 前提の確認: 入れました(", out)
+        self.assertIn(r"git 2.56.0.2(MinGit、~\.local\lib\git)", out)
         self.assertIn("2. Python: 入れました(uv で Python 3.12", out)
         self.assertIn(r"3. gh: 入れました(gh 2.0.0、~\.local\bin\gh.exe)", out)
-        git_cmd, bindir = self.home / ".local/lib/git/cmd", self.home / ".local/bin"
-        for f in (git_cmd / "git.exe", bindir / "uv.exe", bindir / "gh.exe", bindir / "task.cmd"):
+        self.assertIn(r"4. kiro-cli: 入れました(~\.local\lib\kiro-cli\kiro-cli.exe)", out)
+        self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", out)
+        self.assertIn("5. kiro-cli のログイン: 済み", out)
+        self.assertIn("6. task-hub 本体: 入れました(clone(", out)
+        self.assertIn(r"~\.local\bin\task.cmd、~\.local\bin\task、ユーザーの PATH に ~\.local\bin)", out)
+        lib, bindir = self.home / ".local/lib", self.home / ".local/bin"
+        for f in (lib / "git/cmd/git.exe", bindir / "uv.exe", bindir / "gh.exe", lib / "kiro-cli/kiro-cli.exe",
+                  lib / "task-hub/bin/task", bindir / "task.cmd", bindir / "task"):
             self.assertTrue(f.exists(), f)
+        self.assertIn("task-hub: made by windows/install.ps1", (bindir / "task.cmd").read_text(encoding="mbcs"))
         self.assertEqual(json.loads(self.uv_log.read_text().splitlines()[0]), ["python", "install", "3.12"])
         m = self.manifest()
         self.assertEqual(m["python"], sys.executable)
-        self.assertEqual(m["installed"], {"git": str(self.home / ".local/lib/git"), "git-path": str(git_cmd),
-                                          "uv": str(bindir / "uv.exe"), "uv-python": "3.12",
-                                          "gh": str(bindir / "gh.exe"), "user-path": str(bindir)})
-        self.assertEqual(self.user_path()[:2], [str(bindir), str(git_cmd)])
+        self.assertEqual(m["installed"], {
+            "git": str(lib / "git"), "git-path": str(lib / "git/cmd"), "uv": str(bindir / "uv.exe"), "uv-python": "3.12",
+            "gh": str(bindir / "gh.exe"), "kiro-cli": str(lib / "kiro-cli"), "kiro-cli-path": str(lib / "kiro-cli"),
+            "task-hub": str(lib / "task-hub"), "task": str(bindir / "task.cmd"), "task-sh": str(bindir / "task"),
+            "user-path": str(bindir)})
+        self.assertEqual(self.user_path(), [str(bindir), str(lib / "kiro-cli"), str(lib / "git/cmd")])
+        self.assertFalse(self.windows.exists())  # no login was needed
         r = subprocess.run([str(bindir / "task.cmd"), "--version"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
         self.srv.log.clear()
         out = self.install()
-        for line in ("1. 前提の確認: 済み(", f"2. Python: 済み({sys.executable})", r"3. gh: 済み(~\.local\bin\gh.exe)"):
+        for line in ("1. 前提の確認: 済み(", f"2. Python: 済み({sys.executable})", r"3. gh: 済み(~\.local\bin\gh.exe)",
+                     r"4. kiro-cli: 済み(~\.local\lib\kiro-cli\kiro-cli.exe)", "5. GitHub のログイン: 済み(alice)",
+                     "5. kiro-cli のログイン: 済み", r"6. task-hub 本体: 済み(~\.local\lib\task-hub("):
             self.assertIn(line, out)
         self.assertEqual(self.srv.log, ["/"])  # only "does GitHub answer"
         self.assertEqual(self.manifest(), m)
 
     def test_finds_what_was_installed_after_the_window_opened(self):
-        # git and Python are in the registry's PATH, not in this process's (Kiro was started before)
-        self.set_path("machine", Path(shutil.which("git")).parent)
-        self.set_path("user", Path(sys.executable).parent)
+        self.ready()
         out = self.install()
         self.assertIn("1. 前提の確認: 済み(", out)
         self.assertIn(f"2. Python: 済み({sys.executable} を使います)", out)
+        self.assertIn(f"4. kiro-cli: 済み({self.kirobin / 'kiro-cli.exe'})", out)
         self.assertNotIn("/git-for-windows/git/releases/latest", self.srv.log)
         self.assertFalse(self.uv_log.exists())
         self.assertEqual(self.manifest()["python"], sys.executable)
-        self.assertNotIn("uv", self.manifest()["installed"])
+        for key in ("uv", "git", "kiro-cli", "kiro-cli-path"):
+            self.assertNotIn(key, self.manifest()["installed"])
+
+    def test_a_kiro_cli_from_the_official_installer_is_put_on_path(self):
+        self.ready()
+        self.set_path("user", Path(sys.executable).parent)  # kiro-cli is only where the official MSI puts it
+        official = self.program_files / "Kiro-Cli"
+        official.mkdir()
+        write_exe(official / "kiro-cli.exe", FAKE_KIRO_CLI)
+        out = self.install()
+        self.assertIn(f"4. kiro-cli: PATH に足しました({official / 'kiro-cli.exe'})", out)
+        self.assertNotIn(f"/kiro/stable/{self.KIRO_MSI}", self.srv.log)
+        self.assertIn(str(official), self.user_path())
+        self.assertEqual(self.manifest()["installed"]["kiro-cli-path"], str(official))
+        self.assertNotIn("kiro-cli", self.manifest()["installed"])
 
     def test_a_checksum_that_does_not_match_installs_nothing(self):
-        self.set_path("machine", Path(shutil.which("git")).parent)
-        self.set_path("user", Path(sys.executable).parent)
+        self.ready()
         self.srv.files[f"/cli/cli/releases/download/{self.GH_TAG}/gh_2.0.0_checksums.txt"] = \
             f"{'1' * 64}  {self.GH_ZIP}\n".encode()
         out = self.install(code=1)
@@ -474,6 +572,72 @@ class SetupTest(unittest.TestCase):
         self.assertIn("次にすること: 時間をおいてもう一度実行してください", out)
         self.assertFalse((self.home / ".local/bin/gh.exe").exists())
         self.assertNotIn("gh", self.manifest().get("installed", {}))
+
+    def test_stops_for_each_login_in_a_window_and_goes_on_from_there(self):
+        self.ready()
+        self.set_gh_auth(None)
+        self.kiro_logged_in.unlink()
+        out = self.install(code=1)
+        self.assertIn("5. GitHub のログイン: 止まりました。GitHub にログインしていません。開いた窓で、案内に沿って"
+                      "ブラウザで承認してください", out)
+        self.assertIn("次にすること: 承認が終わったら、もう一度実行してください", out)
+        script = self.windows.read_text(encoding="utf-8")
+        self.assertEqual(script.count("'auth' 'login' '--web' '-s' 'project' '-h' 'github.com' '-p' 'https'"), 1)
+        self.assertIn("Remove-Item -LiteralPath $PSCommandPath", script)
+        self.assertFalse((self.home / ".local/lib/task-hub").exists())  # nothing is cloned before the login
+
+        self.set_gh_auth({"login": "alice", "scopes": "repo"})  # logged in, without the project scope
+        out = self.install(code=1)
+        self.assertIn("5. GitHub のログイン: 止まりました。Projects の権限(project)が要ります。", out)
+        self.assertIn("'auth' 'refresh' '-h' 'github.com' '-s' 'project'", self.windows.read_text(encoding="utf-8"))
+
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.windows.unlink()
+        out = self.install(code=1)
+        self.assertIn("5. GitHub のログイン: 設定しました(alice、git も gh のログインを使います)", out)
+        self.assertIn("5. kiro-cli のログイン: 止まりました。kiro-cli にログインしていません。", out)
+        self.assertIn(f"'{self.kirobin / 'kiro-cli.exe'}' 'login'", self.windows.read_text(encoding="utf-8"))
+        self.assertFalse((self.home / ".local/state/task-hub/gh-login.ps1").exists())
+
+        self.kiro_logged_in.touch()
+        out = self.install()
+        self.assertIn("5. kiro-cli のログイン: 済み", out)
+        self.assertIn("6. task-hub 本体: 入れました(clone(", out)
+        self.assertFalse((self.home / ".local/state/task-hub/kiro-login.ps1").exists())
+
+    def test_the_clone_follows_the_newest_release_tag(self):
+        self.ready()
+        self.tag("kiro-v1", "HEAD~1")
+        out = self.install()
+        self.assertIn("6. task-hub 本体: 入れました(clone(kiro-v1)", out)
+        self.tag("kiro-v2")
+        self.tag("kiro-v10", "HEAD~1")  # numbers compared as numbers: v10 is the newest
+        out = self.install()
+        self.assertIn("6. task-hub 本体: 入れました(kiro-v1 → kiro-v10)", out)
+
+    def test_an_earlier_manual_install_is_taken_over_and_its_branch_kept(self):
+        self.ready()
+        self.tag("kiro-v1", "HEAD~1")
+        lib, shim = self.home / ".local/lib/task-hub", self.home / ".local/bin/task.cmd"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(lib)], check=True, capture_output=True)
+        branch = self.lib_git("symbolic-ref", "--short", "HEAD")
+        shim.parent.mkdir(parents=True)
+        shim.write_text(f'@setlocal\r\n@set PYTHONUTF8=1\r\n@"{sys.executable}" "{lib / "bin/task"}" %*\r\n',
+                        encoding="mbcs", newline="")  # as docs/windows.md's install wrote it, unmarked
+        out = self.install()
+        self.assertEqual(self.lib_git("symbolic-ref", "--short", "HEAD"), branch)  # not switched to kiro-v1
+        self.assertIn("task-hub: made by windows/install.ps1", shim.read_text(encoding="mbcs"))
+        self.assertIn(r"6. task-hub 本体: 入れました(~\.local\bin\task.cmd", out)
+        self.assertNotIn("task-hub", self.manifest()["installed"])  # not the installer's clone
+
+    def test_someone_elses_task_cmd_is_left_alone(self):
+        self.ready()
+        shim = self.home / ".local/bin/task.cmd"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("@echo another task\r\n", newline="")
+        out = self.install(code=1)
+        self.assertIn(r"6. task-hub 本体: 止まりました。~\.local\bin\task.cmd がすでにあります", out)
+        self.assertEqual(shim.read_bytes(), b"@echo another task\r\n")
 
     def test_scripts_with_japanese_are_saved_with_a_bom(self):
         # Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code page: the Japanese would be garbled
@@ -486,13 +650,35 @@ class SetupTest(unittest.TestCase):
 @unittest.skipUnless(WINDOWS and os.environ.get("TASK_TEST_WINDOWS_INSTALL") == "1",
                      "changes the user PATH and Task Scheduler: CI only")
 class InstallTest(unittest.TestCase):
+    """The real install: this user's profile, PATH and Task Scheduler. GitHub's login and kiro-cli are fakes found
+    first on PATH (the runner's own gh is on the machine's PATH, which the test hides); git's global config is a
+    temporary file."""
+
     def ps(self, *args):
         return subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                str(REPO / "windows" / "install.ps1"), *args],
-                              capture_output=True, encoding="utf-8", errors="replace")
+                              env=self.env, capture_output=True, encoding="utf-8", errors="replace")
 
     def setUp(self):
+        import test_install
         self.home = Path.home()
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        fakes = root / "fakes"
+        fakes.mkdir()
+        (fakes / "fcntl.py").write_text(FCNTL)
+        write_exe(fakes / "gh.exe", test_install.fake_gh("2.0.0"))
+        write_exe(fakes / "kiro-cli.exe", FAKE_KIRO_CLI)
+        (root / "kiro-logged-in").touch()
+        db = root / "gh.json"
+        db.write_text(json.dumps({"auth": {"login": "alice", "scopes": "gist, project, read:org, repo"},
+                                  "code": "ABCD-1234", "approve": None, "repos": {}, "projects": [], "calls": []}))
+        self.env = {**os.environ, "PATH": f"{fakes};{os.environ['PATH']}", "PYTHONPATH": str(fakes),
+                    "TASK_INSTALL_MACHINE_ENV": rf"Software\task-hub-test\{os.getpid()}\machine",
+                    "TASK_TEST_GH_DB": str(db), "TASK_TEST_KIRO_LOGGED_IN": str(root / "kiro-logged-in"),
+                    "HOME": str(root), "GIT_CONFIG_GLOBAL": str(root / ".gitconfig")}
+        self.addCleanup(delete_key, rf"Software\task-hub-test\{os.getpid()}")
         self.addCleanup(self.ps, "-Uninstall")
 
     def watch_loops(self):

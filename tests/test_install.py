@@ -119,11 +119,13 @@ def handle(db):
         return (f"HTTP/2.0 200 OK\r\nContent-Type: application/json\r\nX-Oauth-Scopes: {auth['scopes']}\r\n\r\n"
                 + json.dumps({"login": auth["login"], "id": 1}, separators=(",", ":")))
     if a[:2] == ["auth", "setup-git"]:
-        # for github.com, and for the test's GitHub (TASK_INSTALL_GITHUB), which plays it
+        # for github.com, and for the test's GitHub (TASK_INSTALL_GITHUB), which plays it. With / as git config
+        # wants it on Windows too (tests/test_windows.py): a \ there is an escape
+        me = sys.argv[0].replace(os.sep, "/")
         with open(os.path.join(os.environ["HOME"], ".gitconfig"), "a") as f:
             for host in ("https://github.com", os.environ.get("TASK_INSTALL_GITHUB")):
                 if host:
-                    f.write(f'[credential "{host}"]\n\thelper =\n\thelper = !{sys.argv[0]} auth git-credential\n')
+                    f.write(f'[credential "{host}"]\n\thelper =\n\thelper = !{me} auth git-credential\n')
         return ""
     if a[:2] == ["auth", "git-credential"]:  # git asks for the login (get), or tells how it went (store, erase)
         sys.stdin.read()

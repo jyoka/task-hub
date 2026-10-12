@@ -504,6 +504,12 @@ task new --title "Windows かんたんセットアップ 3: 段階 4〜6" --repo
    (`~\.local\lib\kiro-cli` など)に置き、記録して、アンインストールで外す。公式の Windows の配布物の形式、
    チェックサム、管理者なしで置けるかは、タスク 3 の最初に確かめる。管理者なしで置けない形なら、そのとき止まって
    相談する
+   - 確かめた(2026-10-12、2.29.1): 公式の配布は MSI だけ(`stable/latest/manifest.json` の `os: windows`、
+     `kind: msi`、x86_64 のみ、`sha256` つき、約 300 MB)。公式のスクリプト(`cli.kiro.dev/install.ps1`)は
+     `msiexec /i` で `C:\Program Files\Kiro-Cli` に入れるので、管理者権限が要る。`msiexec /a <msi> /qn TARGETDIR=<dir>`
+     (管理用インストール = 展開だけ)は、管理者でない(Medium の)プロセスで終了コード 0 で通り、
+     `<dir>\LocalApp\Kiro-Cli\kiro-cli.exe`(1 つのファイル、414 MB)ができ、そのまま動いた。インストーラはこれを
+     `~\.local\lib\kiro-cli\kiro-cli.exe` に置く。arm64 の PC は x64 のものをエミュレーションで動かす(未確認)
 3. **git がないとき**: インストーラが入れる(利用者 2026-10-12: 社内では皆 git を使っている)。Git for Windows の
    Releases の MinGit の zip(管理者なし、`~\.local\lib\git` に展開)を、Release のチェックサムで確かめて置き、
    ユーザーの PATH に足し、記録して、アンインストールで外す(タスク 2)。ただし Kiro IDE の「Clone Repository」は
