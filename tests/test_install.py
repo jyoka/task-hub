@@ -1791,6 +1791,49 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(link.is_symlink(), "uninstall must preserve a repointed kiro-cli link")
         self.assertEqual(os.readlink(link), str(mine))
 
+    def test_a_skill_link_to_a_clone_that_is_gone_is_replaced(self):
+        # it served nothing: kept, the installer said "someone's own" and the diagnosis "missing", round and round
+        self.use_python3()
+        link = self.home / ".kiro/skills/task"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.home / "old-checkout/skills/task")  # moved or removed since
+        self.install()
+        self.assertEqual(os.path.realpath(link), os.path.realpath(self.home / ".local/lib/task-hub/skills/task"))
+        self.assertEqual(self.manifest()["installed"]["kiro-skill-task"], str(link))
+        self.assertEqual(self.marks(self.doctor(0))["9. Kiro との連携"], "○")
+
+    def test_a_config_from_a_run_that_stopped_is_still_the_installers(self):
+        # stage 8 wrote config.ini, then `task list` failed: the next run finds it there, yet it is the installer's
+        fails = self.root / "task-list-fails"
+        fails.touch()
+        python = self.fakebin / "python3"  # the Python 3.10+ on PATH, whose `task list` fails while `fails` is there
+        python.write_text(f'#!/bin/sh\ncase "$*" in *"bin/task list"*) [ -e "{fails}" ] && '
+                          '{ echo "error: cannot read GitHub Project alice/1"; exit 1; } ;; esac\n'
+                          f'exec "{sys.executable}" "$@"\n')
+        python.chmod(0o755)
+        lines = self.install(code=1)
+        self.assertTrue(any("task list が動きませんでした" in line for line in lines), lines)
+        config = self.home / ".config/task-hub/config.ini"
+        self.assertTrue(config.exists())
+        fails.unlink()
+        self.install()
+        self.assertEqual(self.manifest()["installed"]["config"], str(config))
+        self.uninstall(yes=True)
+        self.assertFalse(config.exists())
+
+    def test_uninstall_edits_a_zprofile_kept_as_a_link_through_the_link(self):
+        # dotfiles kept with stow or yadm: the PATH line went into the file the link points to; it comes out of it
+        self.use_python3()
+        dotfiles = self.home / "dotfiles/zprofile"
+        dotfiles.parent.mkdir()
+        dotfiles.write_text("export EDITOR=vi\n")
+        (self.home / ".zprofile").symlink_to(dotfiles)
+        self.install()
+        self.assertIn(ZPROFILE_LINE, dotfiles.read_text())
+        self.uninstall(yes=True)
+        self.assertTrue((self.home / ".zprofile").is_symlink())
+        self.assertEqual(dotfiles.read_text(), "export EDITOR=vi\n")
+
     def test_install_does_not_adopt_a_matching_manual_skill_link(self):
         self.use_python3()
         link = self.home / ".kiro/skills/task"

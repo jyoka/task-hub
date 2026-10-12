@@ -1085,6 +1085,7 @@ class SetupTest(unittest.TestCase):
 
         out = self.uninstall("-Yes")
         self.assertNotIn("消せませんでした", out)
+        self.assertIn("https://github.com/alice/tasks/settings", out)  # read before config.ini was removed
         for gone in (bindir / "gh.exe", bindir / "uv.exe", bindir / "task.cmd", bindir / "task", lib / "git",
                      lib / "kiro-cli", lib / "task-hub", kiro / "skills/task", kiro / "skills/chief",
                      kiro / "steering/task-hub.md", kiro / "hooks/task-hub-events.json",

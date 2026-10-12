@@ -67,7 +67,9 @@ unzprofile() {  # the comment and the line after it that the installer added (wi
     END {
       for (i = 1; i <= NR; i++) if (line[i] == c && line[i + 1] == l) { drop[i] = drop[i + 1] = 1; if (line[i - 1] == "") drop[i - 1] = 1 }
       for (i = 1; i <= NR; i++) if (!drop[i]) print line[i]
-    }' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" && mv -f "$HOME/.zprofile.tmp" "$HOME/.zprofile"
+    }' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || return
+  # written back through it, not moved over it: a ~/.zprofile kept as a link (dotfiles, stow) stays one
+  cat "$HOME/.zprofile.tmp" > "$HOME/.zprofile" && rm -f "$HOME/.zprofile.tmp"
 }
 gh_helpers() {  # $1: a gh. The credential.<url>.helper keys in ~/.gitconfig that run it, one per line
   git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null \

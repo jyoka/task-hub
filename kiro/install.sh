@@ -590,9 +590,13 @@ stage_config() {
   label="8. 設定"
   new=
   [ -e "$CONFIG" ] || new=1
+  if [ -n "$new" ]; then  # recorded first: the stage can stop after writing it (task list failed), and the next run,
+    M_config=$CONFIG      # which finds it there, would never record it; the uninstaller would then leave it
+    write_manifest
+  fi
   helper config "$label" "$work"
-  if [ -n "$new" ] && [ -f "$CONFIG" ]; then
-    M_config=$CONFIG
+  if [ -n "$new" ] && [ ! -f "$CONFIG" ]; then
+    M_config=
     write_manifest
   fi
 }
@@ -601,6 +605,9 @@ real() { "$PY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 link_into() {  # $1: in the clone, $2: the link Kiro reads, $3: manifest key. Adds to $did, or to $kept
   [ -e "$1" ] || die "$(tilde "$1") がありません" "task-hub を更新できているか確かめて、もう一度実行してください"
+  if [ -L "$2" ] && [ ! -e "$2" ]; then  # a link to a clone moved or removed since: it serves nothing, so replaced
+    rm -f "$2" || die "$(tilde "$2") を消せませんでした" "そのリンクを手で消して、もう一度実行してください"
+  fi
   if [ -e "$2" ] || [ -L "$2" ]; then
     if [ "$(real "$2")" = "$(real "$1")" ]; then  # also through another link (docs/setup.md's ~/.agents/skills)
       :  # an existing manual link is the user's; only newly created links are recorded

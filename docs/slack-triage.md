@@ -82,6 +82,8 @@ Slack のスレッドをコピーして **⌃⌥S**(control + option + S)を押�
 | こと | Mac | Windows |
 |---|---|---|
 | 起動キー | ⌃⌥S | **Ctrl+Alt+S**(`slack-triage key t` で変えられる。修飾キーの名前は ctrl、alt、shift、win) |
+| コピー | ⌘C | Ctrl+C |
+| 長いスレッド | 新しい側の 40,000 文字を Kiro に渡す | 新しい側の 28,000 文字(Windows のコマンドの長さの上限、約 32,000 文字に収めるため) |
 | 画面 | macOS のダイアログ。ゴールは TextEdit で直す | 1 枚の画面(Python に付いてくる tkinter)。タイトルとゴールを、その画面の中で直す |
 | 複数選ぶとき | ⌘ を押しながらクリック | Ctrl を押しながらクリック |
 | 通知 | macOS の通知 | Windows の通知(画面の右下) |

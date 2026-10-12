@@ -714,9 +714,15 @@ function Stage-Board {
 function Stage-Config {
   $script:label = '8. 設定'
   $config = Join-Path $Root '.config\task-hub\config.ini'
-  $new = -not (Test-Path $config)
+  $new = -not (Test-Path -LiteralPath $config)
+  # recorded first: the stage can stop after writing it (task list failed), and the next run, which finds it there,
+  # would never record it; uninstall.ps1 would then leave it
+  if ($new) { Set-Record 'config' $config }
   Invoke-Helper config $script:label $script:Work
-  if ($new -and (Test-Path $config)) { Set-Record 'config' $config }
+  if ($new -and -not (Test-Path -LiteralPath $config)) {
+    $script:M.installed.PSObject.Properties.Remove('config')
+    Save-Manifest
+  }
 }
 
 function Get-RealPath($p) {  # where a junction (or a link) leads, else the path itself

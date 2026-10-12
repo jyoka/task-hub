@@ -138,22 +138,25 @@ function Get-JunctionTarget($p) {  # where a junction leads, or $null when it is
   return $null
 }
 
+function Read-Board {  # [board] of config.ini, for the guide at the end: read before -Yes may remove the file
+  $config = Join-Path $Root '.config\task-hub\config.ini'
+  $script:project, $script:issues = '', ''
+  if (-not (Test-Path -LiteralPath $config)) { return }
+  $board = $false
+  foreach ($line in [IO.File]::ReadAllLines($config)) {
+    if ($line -match '^\s*\[(.+)\]') { $board = $Matches[1] -eq 'board' }
+    elseif ($board -and $line -match '^\s*(project|issues)\s*[=:]\s*([^;#\s]+)') {
+      if ($Matches[1] -eq 'project') { $script:project = $Matches[2] } else { $script:issues = $Matches[2] }
+    }
+  }
+}
+
 function Show-Kept {
   Write-Host '消さないもの:'
   Write-Host '- GitHub のログイン(gh)と kiro-cli のログイン'
   Write-Host '- task-hub のデータ: ~\.local\share\task-hub(worktree)、~\.local\state\task-hub(ログ、出来事)'
   if ($script:settings) { Write-Host "- $(Tilde $script:settings) の Workflows の設定(インストーラは有効にしただけです)" }
-  $config = Join-Path $Root '.config\task-hub\config.ini'
-  $project, $issues = '', ''
-  if (Test-Path -LiteralPath $config) {
-    $board = $false
-    foreach ($line in [IO.File]::ReadAllLines($config)) {
-      if ($line -match '^\s*\[(.+)\]') { $board = $Matches[1] -eq 'board' }
-      elseif ($board -and $line -match '^\s*(project|issues)\s*[=:]\s*([^;#\s]+)') {
-        if ($Matches[1] -eq 'project') { $project = $Matches[2] } else { $issues = $Matches[2] }
-      }
-    }
-  }
+  $project, $issues = $script:project, $script:issues
   if ($project -or $issues) {
     Write-Host "- GitHub のボード($(if ($issues) { $issues } else { '?' }) と Project $(if ($project) { $project } else { '?' }))。要らなければ、GitHub の画面で消します:"
     if ($issues) { Write-Host "    リポジトリ: https://github.com/$issues/settings の一番下「Delete this repository」" }
@@ -199,6 +202,7 @@ if ($runs -and $Yes) {
 }
 
 $installed = $m.installed
+Read-Board
 foreach ($k in $Keys) {
   $v = if ($installed) { $installed.$k } else { $null }
   if (-not $v) { continue }

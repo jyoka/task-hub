@@ -210,6 +210,71 @@ class Flow(unittest.TestCase):
         self.assertTrue(any(c[0] == "alert" and "auth error" in c[1] for c in ui.calls))
 
 
+class Windows(unittest.TestCase):
+    """What the Windows port says and sends (docs/slack-triage.md)"""
+
+    def test_the_empty_clipboard_alert_names_the_copy_key_of_this_os(self):
+        ui = FakeUI()
+        core.triage("  ", ui, never, never, {"hotkey_label": "Ctrl+Alt+S", "copy_label": "Ctrl+C"})
+        self.assertIn("Ctrl+C でコピー", ui.calls[0][1])
+        self.assertNotIn("⌘C", ui.calls[0][1])
+
+    def test_a_long_thread_still_fits_a_windows_command_line(self):
+        # the whole prompt goes to kiro-cli as one argument: CreateProcess takes 32,767 characters at most
+        import subprocess
+        thread = core.sanitize_thread_text("発言 " * 30_000, core.WINDOWS_MAX_THREAD_CHARS)
+        prompt = core.build_prompt(thread, "佐藤 花子", ["alice/task-hub"] * 20, "alice/task-hub", ("佐藤",) * 5)
+        line = subprocess.list2cmdline([r"C:\Users\佐藤 花子\AppData\Local\Kiro-Cli\kiro-cli.exe", "chat",
+                                        "--no-interactive", "--agent", "slack-triage", "--trust-tools=", prompt])
+        self.assertLess(len(line), 32_767)
+
+
+class Cli(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from slack_triage import cli
+        self.cli = cli
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_board_repo_is_read_from_a_config_saved_with_a_bom(self):
+        # Notepad's "UTF-8 (BOM 付き)", which docs/windows.md says works
+        path = os.path.join(self.tmp.name, "config.ini")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write("[board]\nproject = me/1\nissues = me/tasks\n")
+        old, self.cli.TASK_HUB_CONFIG = self.cli.TASK_HUB_CONFIG, path
+        self.addCleanup(setattr, self.cli, "TASK_HUB_CONFIG", old)
+        self.assertEqual(self.cli.board_repo(), "me/tasks")
+
+    def test_the_log_keeps_no_titles(self):
+        # the titles are written from the thread, and docs/slack-triage.md says the log keeps none of it
+        result = {"status": "done", "task_count": 2,
+                  "results": [{"title": "社外秘の件", "outcome": "skipped"},
+                              {"title": "顧客Aの障害", "outcome": "registered", "url": "https://github.com/a/b/issues/1"}]}
+        logged = self.cli.loggable(result)
+        self.assertNotIn("社外秘", logged)
+        self.assertNotIn("顧客A", logged)
+        self.assertIn('"outcome": "registered"', logged)
+
+    def test_a_kiro_login_check_that_hangs_is_a_failed_check(self):
+        import subprocess
+        run = self.cli.subprocess.run
+
+        def hangs(args, **kw):
+            if args[1:] == ["whoami"]:
+                raise subprocess.TimeoutExpired(args, 60)
+            return run(args, **kw)
+        old_kiro, self.cli.kiro_bin = self.cli.kiro_bin, lambda: "/opt/kiro-cli"
+        old_loaded, self.cli.loaded = self.cli.loaded, lambda: False  # the key's rows: launchctl, macOS only
+        self.addCleanup(setattr, self.cli, "loaded", old_loaded)
+        self.cli.subprocess.run = hangs
+        self.addCleanup(setattr, self.cli, "kiro_bin", old_kiro)
+        self.addCleanup(setattr, self.cli.subprocess, "run", run)
+        row = next(r for r in self.cli.checks() if r[0] == "Kiro CLI のログイン")
+        self.assertFalse(row[1])
+        self.assertIn("返事がありません", row[2])
+
+
 class OwnRepos(unittest.TestCase):
     """登録できるのは allowed_owner（gh のアカウント）配下のリポジトリだけ"""
     CFG = {"allowed_owner": "alice", "candidates": ["alice/task-hub", "acme-inc/prod-app"],
