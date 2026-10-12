@@ -249,6 +249,71 @@ class WindowsTest(unittest.TestCase):
         self.assertIn("setup failed (exit 129)", self.gh()["issues"][tid]["comments"][-1]["body"])
 
 
+@unittest.skipUnless(WINDOWS, "Windows only")
+class InstallBoardTest(unittest.TestCase):
+    """kiro/install-board, the board and config.ini stages, as windows/install.ps1 runs it: GitHub is
+    test_install.py's fake gh, `task` is the task.cmd install.ps1 writes, and the user folder has a Japanese name."""
+
+    def setUp(self):
+        import test_install
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = root / "ユーザー"
+        bindir, fakes, self.work = root / "bin", root / "fakes", root / "work"
+        for d in (self.home / ".local" / "bin", bindir, fakes, self.work):
+            d.mkdir(parents=True)
+        (fakes / "fcntl.py").write_text(FCNTL)
+        write_exe(bindir / "gh.exe", test_install.fake_gh("2.0.0"))
+        self.db = root / "gh.json"
+        self.db.write_text(json.dumps({"auth": {"login": "alice", "scopes": "gist, project, read:org, repo"},
+                                       "code": "ABCD-1234", "approve": None, "repos": {}, "projects": [],
+                                       "calls": []}))
+        # as install.ps1 writes it: in the console's code page
+        (self.home / ".local" / "bin" / "task.cmd").write_text(
+            f'@setlocal\r\n@set PYTHONUTF8=1\r\n@"{sys.executable}" "{BIN}" %*\r\n', encoding="mbcs")
+        self.env = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home),
+                    "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "PYTHONPATH": str(fakes),
+                    "TASK_TEST_GH_DB": str(self.db), "TASK_NO_UPDATE_NOTIFIER": "1"}
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING", "TASK_GH"):  # the helper and bin/task must not need them
+            self.env.pop(k, None)
+
+    def helper(self, *args):
+        return subprocess.run([sys.executable, str(REPO / "kiro" / "install-board"), *map(str, args)],
+                              env=self.env, capture_output=True, encoding="utf-8", stdin=subprocess.DEVNULL)
+
+    def test_board_then_config_then_again(self):
+        r = self.helper("board", "7. ボード", "alice", self.work)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("7. ボード: 作りました", r.stdout)
+        self.assertIn("private の alice/tasks", r.stdout)
+        r = self.helper("config", "8. 設定", self.work)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn(r"8. 設定: 作りました(~\.config\task-hub\config.ini。task list で確かめました)", r.stdout)
+        config = (self.home / ".config" / "task-hub" / "config.ini").read_text(encoding="utf-8")
+        self.assertIn("windows\\install.ps1", config)
+        for line in ("project = alice/1", "issues = alice/tasks", "agent = kiro", "kiro = kiro-cli whoami"):
+            self.assertIn(line, config)
+        self.assertNotIn("[ide]", config)  # `kiro {path}` is the Mac's
+
+        r = self.helper("board", "7. ボード", "alice", self.work)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("7. ボード: 済み", r.stdout)
+        r = self.helper("config", "8. 設定", self.work)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("8. 設定: 済み", r.stdout)
+        for what in ("board", "config"):
+            r = self.helper("check", what)
+            self.assertTrue(r.stdout.startswith("ok\t"), r.stdout + r.stderr)
+
+    def test_check_says_what_to_run_on_windows(self):
+        r = self.helper("check", "config")
+        self.assertTrue(r.stdout.startswith("ng\t"), r.stdout + r.stderr)
+        self.assertIn(r"~\.config\task-hub\config.ini がありません", r.stdout)
+        self.assertIn("windows\\install.ps1", r.stdout)
+        self.assertNotIn("sh kiro/install.sh", r.stdout)
+
+
 @unittest.skipUnless(WINDOWS and os.environ.get("TASK_TEST_WINDOWS_INSTALL") == "1",
                      "changes the user PATH and Task Scheduler: CI only")
 class InstallTest(unittest.TestCase):
