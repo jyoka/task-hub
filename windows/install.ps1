@@ -17,7 +17,7 @@
      newer one; a clone someone made on a branch is only pulled), writes ~\.local\bin\task.cmd, which runs bin\task
      with that Python, and `task` for Git Bash, and puts ~\.local\bin on the user PATH.
   With -Watch it also starts `task watch` at every logon (Task Scheduler; the Startup folder when that is refused)
-  and starts it now. -Uninstall stops and removes the watch and task.cmd; the clone, config and data stay.
+  and starts it now. -Uninstall removes what it recorded (windows\uninstall.ps1 -Yes); the board, logins and data stay.
   Downloads are checked against the release's SHA-256. Safe to run again.
   For tests: TASK_INSTALL_GITHUB replaces https://github.com, TASK_INSTALL_GITHUB_API https://api.github.com,
   TASK_INSTALL_KIRO_CLI https://prod.download.cli.kiro.dev, TASK_INSTALL_MSIEXEC msiexec.exe,
@@ -854,11 +854,9 @@ function Stop-Watch {
   if (Test-Path $Startup) { Remove-Item $Startup; Say "removed $Startup" }
 }
 
-if ($Uninstall) {
-  Stop-Watch
-  foreach ($f in $Shim, $ShShim) { if (Test-Path $f) { Remove-Item $f; Say "removed $f" } }
-  Say "left in place: $Lib, ~\.config\task-hub, ~\.local\state\task-hub, ~\.local\share\task-hub"
-  exit 0
+if ($Uninstall) {  # what windows\uninstall.ps1 -Yes does: removes what this script recorded, and only that
+  & (Join-Path $PSScriptRoot 'uninstall.ps1') -Yes
+  exit $LASTEXITCODE
 }
 
 # --- main ---

@@ -335,6 +335,9 @@ if a == ["python", "install", "3.12"]:
 if a[:2] == ["python", "find"] and os.path.exists(log + ".installed"):
     print(sys.executable)  # "uv's Python" is this one
     sys.exit(0)
+if a == ["python", "uninstall", "3.12"] and os.path.exists(log + ".installed"):
+    os.remove(log + ".installed")
+    sys.exit(0)
 sys.exit(2)
 '''
 # logged in while the file TASK_TEST_KIRO_LOGGED_IN is there
@@ -714,6 +717,75 @@ class SetupTest(unittest.TestCase):
         self.assertIn("足りないものが 3 つあります。", out)
         self.assertEqual(out.splitlines()[-1], "次にすること: powershell -ExecutionPolicy Bypass -File windows\\install.ps1 "
                                               "を実行し、開いた窓でブラウザでログインしてください")
+
+    def uninstall(self, *args, code=0):
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                            str(REPO / "windows" / "uninstall.ps1"), *args],
+                           env=self.env, capture_output=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_uninstall_lists_then_removes_only_what_was_recorded(self):
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.kiro_logged_in.touch()
+        self.install()  # a bare PC: everything comes from the installer
+        lib, bindir, kiro = self.home / ".local/lib", self.home / ".local/bin", self.home / ".kiro"
+        (kiro / "skills/other").mkdir()  # someone's own
+        before = self.files()
+        out = self.uninstall()
+        for line in (r"- ~\.kiro\skills\task(ジャンクション)", r"- ~\.local\lib\task-hub(task-hub の clone)",
+                     r"- ~\.local\lib\kiro-cli(kiro-cli)", r"- ~\.local\lib\git(git(MinGit))", "- uv で入れた Python 3.12",
+                     r"- ユーザーの PATH の ~\.local\bin", "https://github.com/alice/tasks/settings"):
+            self.assertIn(line, out)
+        self.assertEqual(out.splitlines()[-1], "次にすること: 消してよければ、powershell -ExecutionPolicy Bypass -File "
+                                              "windows\\uninstall.ps1 -Yes を実行してください")
+        self.assertEqual(self.files(), before)  # only listed
+
+        out = self.uninstall("-Yes")
+        self.assertNotIn("消せませんでした", out)
+        for gone in (bindir / "gh.exe", bindir / "uv.exe", bindir / "task.cmd", bindir / "task", lib / "git",
+                     lib / "kiro-cli", lib / "task-hub", kiro / "skills/task", kiro / "skills/chief",
+                     kiro / "steering/task-hub.md", self.home / ".config/task-hub/config.ini",
+                     self.home / ".local/state/task-hub/install-manifest.json"):
+            self.assertFalse(os.path.lexists(gone), gone)
+        self.assertTrue((kiro / "skills/other").is_dir())
+        self.assertEqual([p for p in self.user_path() if p], [])
+        self.assertIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
+        self.assertEqual(out.splitlines()[-1], "次にすること: Kiro を再起動してください(/task と /chief が外れます)")
+
+    def test_uninstall_keeps_a_clone_it_did_not_make_and_never_empties_it_through_a_junction(self):
+        self.ready()
+        lib = self.home / ".local/lib/task-hub"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(lib)], check=True, capture_output=True)
+        self.install()  # takes the clone over, but does not record it
+        out = self.uninstall("-Yes")
+        self.assertIn(r"消しました: ~\.kiro\skills\task(ジャンクション)", out)
+        self.assertNotIn("task-hub の clone", out)
+        self.assertTrue((lib / "skills/task/SKILL.md").exists())  # the junction went, not what it led to
+        self.assertTrue((lib / ".git").is_dir())
+
+    def test_uninstall_waits_while_a_task_runs(self):
+        self.ready()
+        self.install()
+        lib = self.home / ".local/lib/task-hub"
+        run = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", str(lib / "bin" / "task"), "_run", "7"])
+        self.addCleanup(run.wait)
+        self.addCleanup(run.kill)
+        out = self.uninstall("-Yes", code=1)
+        self.assertIn("作業中のタスクがあります(#7)", out)
+        self.assertTrue((self.home / ".local/bin/task.cmd").exists())
+        self.assertTrue((self.home / ".local/state/task-hub/install-manifest.json").exists())
+        self.assertIsNone(run.poll())
+
+    def test_uninstall_of_an_install_from_before_the_easy_setup(self):
+        shim = self.home / ".local/bin/task.cmd"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("@setlocal\r\n", newline="")
+        out = self.uninstall("-Yes")
+        self.assertIn("の記録(~\\.local\\state\\task-hub\\install-manifest.json)がありません", out)
+        self.assertIn(r"消しました: ~\.local\bin\task.cmd", out)
+        self.assertFalse(shim.exists())
 
     def test_scripts_with_japanese_are_saved_with_a_bom(self):
         # Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code page: the Japanese would be garbled
