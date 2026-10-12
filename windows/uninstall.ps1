@@ -12,7 +12,7 @@
   Running it again is safe: what is gone already is skipped.
   Without a manifest (an install from before the easy setup) it stops the watch and removes task.cmd and `task`, as
   install.ps1 -Uninstall did.
-  For tests: TASK_INSTALL_USER_ENV, as windows/install.ps1.
+  For tests: TASK_INSTALL_USER_ENV and TASK_INSTALL_MACHINE_ENV, as windows/install.ps1.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1
@@ -118,6 +118,15 @@ function Remove-UserPath($dir) {
   if (-not $hook) { [Environment]::SetEnvironmentVariable('TASK_HUB_PATH_CHANGED', $null, 'User') }  # tells Explorer
 }
 
+function Read-EnvPath($which) {  # as in install.ps1, read only
+  $hook = if ($which -eq 'User') { $env:TASK_INSTALL_USER_ENV } else { $env:TASK_INSTALL_MACHINE_ENV }
+  $k = if ($hook) { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($hook) }
+       elseif ($which -eq 'User') { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment') }
+       else { [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment') }
+  if (-not $k) { return '' }
+  try { return [string]$k.GetValue('Path', '') } finally { $k.Close() }
+}
+
 function Test-OnUserPath($dir) {
   $hook = $env:TASK_INSTALL_USER_ENV
   $k = if ($hook) { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($hook) }
@@ -202,6 +211,9 @@ if ($runs -and $Yes) {
 }
 
 $installed = $m.installed
+# as the installer and the diagnosis see them: what is on the registry's PATH, though this window may have been opened
+# before it changed. Else the user's own uv (for the Python it installed) or git would not be found
+$env:Path = (@((Read-EnvPath 'Machine'), (Read-EnvPath 'User'), $env:Path) | Where-Object { $_ }) -join ';'
 Read-Board
 foreach ($k in $Keys) {
   $v = if ($installed) { $installed.$k } else { $null }
