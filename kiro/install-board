@@ -52,7 +52,11 @@ DELETE_WORKFLOW = """mutation($id: ID!) { deleteProjectV2Workflow(input: {workfl
 WINDOWS = os.name == "nt"
 INSTALLER = r"windows\install.ps1" if WINDOWS else "kiro/install.sh"
 CONFIG_HEADER = f"; task-hub の設定。{INSTALLER} が作りました(書き方は docs/setup.md)\n"
-KIRO_SETTINGS = Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json"
+# where Kiro (a VS Code) keeps its user settings; on Windows %APPDATA%\Kiro, as VS Code's %APPDATA%\Code (not yet seen on
+# a real Windows: docs/architecture/designs/windows-easy-setup.md)
+KIRO_SETTINGS = (Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Kiro" / "User" / "settings.json" if WINDOWS
+                 else Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json")
+PALETTE = "Ctrl+Shift+P" if WINDOWS else "⌘⇧P"  # Kiro's command palette
 WORKFLOWS_KEY = "kiroAgent.workflows.enabled"  # boolean, false by default; read by each new chat
 
 
@@ -205,7 +209,7 @@ def board(label, login, work):
     if by_hand:
         todo = f"{url}/workflows を開き、{'、'.join(by_hand)}してください(task-hub が動かす Status を変えないため)"
         print(f"{label}: 画面での操作が残っています。{todo}")
-        (Path(work) / "todo").write_text(todo)
+        (Path(work) / "todo").write_text(todo, encoding="utf-8")
     return bool(made or changes)
 
 
@@ -309,7 +313,8 @@ def kiro_settings(label, work):
                 "Kiro のコマンドパレットで「Enable Workflows」を実行してください")
         todo = Path(work) / "todo"
         if not todo.exists():  # the board's step, if any, comes first
-            todo.write_text("Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください")
+            todo.write_text(f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください",
+                            encoding="utf-8")
     elif not text.strip():
         write(path, json.dumps({WORKFLOWS_KEY: True}, indent=4) + "\n")
         kind, what = "changed", f"{tilde(path)}(Workflows を有効に)"
@@ -320,7 +325,8 @@ def kiro_settings(label, work):
         data[WORKFLOWS_KEY] = True  # the other settings keep their order
         write(path, json.dumps(data, indent=indent.group(1) if indent else 4, ensure_ascii=False) + "\n")
         kind, what = "changed", f"{tilde(path)}(Workflows を有効に。元の内容は {tilde(backup)})"
-    (Path(work) / "kiro-settings").write_text(f"{kind}\t{what}\n{path}\n")  # the file, for the manifest
+    # the file, for the manifest. UTF-8, as the installers read it (not the code page of a Windows)
+    (Path(work) / "kiro-settings").write_text(f"{kind}\t{what}\n{path}\n", encoding="utf-8")
     return kind == "changed"
 
 
@@ -378,7 +384,7 @@ def check_kiro_settings():
         return True, "Workflows は有効", ""
     if data is None:
         return False, "Workflows が有効になっていません", \
-            "Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください"
+            f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください"
     return False, "Workflows が有効になっていません", INSTALL
 
 

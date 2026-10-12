@@ -48,6 +48,7 @@ def replaced(poll):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # what Kiro reads, whatever the console's code page
     try:
         poll = json.loads(sys.stdin.read() or "null")
         cursor = poll.get("cursor")
@@ -58,9 +59,11 @@ def main():
     if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
         cursor = None  # first poll (or a broken cursor)
     task = shutil.which("task") or os.path.expanduser("~/.local/lib/task-hub/bin/task")
+    run = [sys.executable, task] if os.name == "nt" and not shutil.which("task") else [task]  # Windows runs no #!
     try:
-        r = subprocess.run([task, "events", "--after", str(cursor or 0), "--digest", "--only", WANTED],
-                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        # task prints UTF-8 (on Windows, task.cmd sets PYTHONUTF8), whatever the console's code page
+        r = subprocess.run([*run, "events", "--after", str(cursor or 0), "--digest", "--only", WANTED],
+                           capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
     except OSError as e:
         r = subprocess.CompletedProcess(e.filename, 127, "", str(e))
     lines = r.stdout.splitlines()

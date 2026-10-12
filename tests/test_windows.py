@@ -456,7 +456,7 @@ class SetupTest(unittest.TestCase):
                     "TASK_INSTALL_USER_ENV": self.reg + r"\user", "TASK_INSTALL_MACHINE_ENV": self.reg + r"\machine",
                     "TASK_TEST_UV_LOG": str(self.uv_log), "TASK_TEST_GH_DB": str(self.db),
                     "TASK_TEST_KIRO_LOGGED_IN": str(self.kiro_logged_in), "TASK_TEST_WINDOWS": str(self.windows),
-                    "PYTHONPATH": str(fakes)}
+                    "PYTHONPATH": str(fakes), "APPDATA": str(self.home / "AppData" / "Roaming")}  # Kiro's settings.json
         for k in ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONHOME", "VIRTUAL_ENV", "GH_TOKEN", "GITHUB_TOKEN",
                   "GIT_CONFIG_GLOBAL"):
             self.env.pop(k, None)
@@ -517,7 +517,9 @@ class SetupTest(unittest.TestCase):
         self.assertIn("7. ボード: 作りました(", out)
         self.assertIn(r"8. 設定: 作りました(~\.config\task-hub\config.ini。task list で確かめました)", out)
         self.assertIn(r"9. Kiro との連携: 入れました(~\.kiro\skills\task(ジャンクション)、~\.kiro\skills\chief(ジャンクション)、"
-                      r"~\.kiro\steering\task-hub.md(コピー)。Kiro を再起動すると読み込まれます)", out)
+                      r"~\.kiro\steering\task-hub.md(コピー)、~\.kiro\hooks\task-hub-events.json(コピー)、"
+                      r"~\.kiro\workflows\task-hub-events.workflow.json(コピー)、"
+                      r"~\AppData\Roaming\Kiro\User\settings.json(Workflows を有効に)。Kiro を再起動すると読み込まれます)", out)
         self.assertIn("10. 常駐: 飛ばしました(", out)
         self.assertIn("\n診断:\n○ 1. 前提の確認: ", out)
         self.assertNotIn("× ", out)
@@ -541,8 +543,10 @@ class SetupTest(unittest.TestCase):
             "task-hub": str(lib / "task-hub"), "task": str(bindir / "task.cmd"), "task-sh": str(bindir / "task"),
             "user-path": str(bindir), "config": str(self.home / ".config/task-hub/config.ini"),
             "kiro-skill-task": str(kiro / "skills/task"), "kiro-skill-chief": str(kiro / "skills/chief"),
-            "kiro-steering": str(kiro / "steering/task-hub.md")})
-        self.assertEqual(set(m["sha256"]), {"kiro-steering"})
+            "kiro-steering": str(kiro / "steering/task-hub.md"), "kiro-hook": str(kiro / "hooks/task-hub-events.json"),
+            "kiro-workflow": str(kiro / "workflows/task-hub-events.workflow.json"),
+            "kiro-settings": str(self.home / "AppData/Roaming/Kiro/User/settings.json")})
+        self.assertEqual(set(m["sha256"]), {"kiro-steering", "kiro-hook", "kiro-workflow"})
         self.assertEqual(self.user_path(), [str(bindir), str(lib / "kiro-cli"), str(lib / "git/cmd")])
         self.assertFalse(self.windows.exists())  # no login was needed
         r = subprocess.run([str(bindir / "task.cmd"), "--version"], env=self.env, capture_output=True, text=True)
@@ -553,7 +557,8 @@ class SetupTest(unittest.TestCase):
         for line in ("1. 前提の確認: 済み(", f"2. Python: 済み({sys.executable})", r"3. gh: 済み(~\.local\bin\gh.exe)",
                      r"4. kiro-cli: 済み(~\.local\lib\kiro-cli\kiro-cli.exe)", "5. GitHub のログイン: 済み(alice)",
                      "5. kiro-cli のログイン: 済み", r"6. task-hub 本体: 済み(~\.local\lib\task-hub(", "7. ボード: 済み(",
-                     "8. 設定: 済み(", "9. Kiro との連携: 済み(スキル、steering)", "すべて済みです。変えたものはありません。",
+                     "8. 設定: 済み(", "9. Kiro との連携: 済み(スキル、steering、フック、ワークフロー、Workflows の設定)",
+                     "すべて済みです。変えたものはありません。",
                      "次にすること: Kiro の新しいチャットで /task を試してください"):
             self.assertIn(line, out)
         self.assertEqual(self.srv.log, ["/", "/"])  # only "does GitHub answer", the installer's and the diagnosis'
@@ -701,7 +706,7 @@ class SetupTest(unittest.TestCase):
                      f"○ 4. kiro-cli: {self.kirobin / 'kiro-cli.exe'}", "○ 5. GitHub のログイン: alice",
                      "○ 5. kiro-cli のログイン: ログイン済み", r"○ 6. task-hub 本体: ~\.local\lib\task-hub(",
                      "○ 7. ボード: ", r"○ 8. 設定: ~\.config\task-hub\config.ini、agent = kiro",
-                     "○ 9. Kiro との連携: スキル、steering", "○ 10. 常駐: 使っていません"):
+                     "○ 9. Kiro との連携: スキル、steering、フック、ワークフロー、Workflows は有効", "○ 10. 常駐: 使っていません"):
             self.assertIn(line, out)
         self.assertEqual(out.splitlines()[-2:], ["すべて揃っています。", "次にすること: Kiro の新しいチャットで /task を試してください"])
         self.assertEqual(self.files(), before)
@@ -717,6 +722,54 @@ class SetupTest(unittest.TestCase):
         self.assertIn("足りないものが 3 つあります。", out)
         self.assertEqual(out.splitlines()[-1], "次にすること: powershell -ExecutionPolicy Bypass -File windows\\install.ps1 "
                                               "を実行し、開いた窓でブラウザでログインしてください")
+
+    def test_the_hook_and_the_workflow_run_from_cmd_and_powershell(self):
+        # Kiro runs a hook's command line in a shell: which one is not known yet on Windows, so both must run it
+        self.ready()
+        self.install()
+        kiro = self.home / ".kiro"
+        hook = json.loads((kiro / "hooks/task-hub-events.json").read_text(encoding="utf-8"))["hooks"][0]["action"]["command"]
+        flow = json.loads((kiro / "workflows/task-hub-events.workflow.json").read_text(encoding="utf-8"))
+        watch = flow["steps"][0]["steps"][0]["config"]["command"]
+        self.assertNotIn("$HOME", hook + watch)
+        self.assertNotIn("herdr", json.dumps(flow, ensure_ascii=False))  # no herdr tabs on Windows
+        events = self.home / ".local/state/task-hub/events.jsonl"
+        shells = {"cmd": lambda c: ["cmd.exe", "/d", "/c", c],
+                  "powershell": lambda c: ["powershell.exe", "-NoProfile", "-Command", c]}
+        for n, (name, shell) in enumerate(shells.items()):
+            run = lambda c, stdin=None: subprocess.run(shell(c), env=self.env, capture_output=True, input=stdin,
+                                                       encoding="utf-8", errors="replace")
+            (self.home / ".local/state/task-hub/kiro-cursor").unlink(missing_ok=True)
+            r = run(hook)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), f"{name}: {r.stdout}{r.stderr}")  # the past is not news
+            with events.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"time": "2026-10-12T00:00:00Z", "id": str(5 + n), "title": "日本語のタスク",
+                                    "repo": "alice/app", "event": "In review", "digest": {"verdict": "pass"}},
+                                   ensure_ascii=False) + "\n")
+            r = run(hook)
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stdout}{r.stderr}")
+            self.assertIn("task-hub: new events since your last message:", r.stdout, name)
+            self.assertIn(f"event: #{5 + n} In review | 日本語のタスク", r.stdout, name)
+            r = run(watch, stdin=json.dumps({"cursor": None, "config": {}}))
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stdout}{r.stderr}")
+            self.assertEqual(json.loads(r.stdout)["outcome"], "idle", name)
+
+    def test_a_command_path_with_a_space_still_runs_unquoted(self):
+        spaced = self.root / "with space"
+        spaced.mkdir()
+        (spaced / "x.exe").write_bytes(b"")
+        code = ("import importlib.machinery, importlib.util, sys\n"
+                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(BIN)!r})\n"
+                "task = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
+                "loader.exec_module(task)\n"
+                "print(task.windows_command_path(sys.argv[1]))\n")
+        p = subprocess.run([sys.executable, "-X", "utf8", "-c", code, str(spaced / "x.exe")], env=self.env,
+                           capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        if p.startswith('"'):  # no 8.3 names on this volume: quoted, which cmd.exe still runs
+            self.assertEqual(p, f'"{(spaced / "x.exe").as_posix()}"')
+        else:
+            self.assertNotIn(" ", p)
+            self.assertTrue(os.path.samefile(p, spaced / "x.exe"))
 
     def uninstall(self, *args, code=0):
         r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -746,10 +799,13 @@ class SetupTest(unittest.TestCase):
         self.assertNotIn("消せませんでした", out)
         for gone in (bindir / "gh.exe", bindir / "uv.exe", bindir / "task.cmd", bindir / "task", lib / "git",
                      lib / "kiro-cli", lib / "task-hub", kiro / "skills/task", kiro / "skills/chief",
-                     kiro / "steering/task-hub.md", self.home / ".config/task-hub/config.ini",
+                     kiro / "steering/task-hub.md", kiro / "hooks/task-hub-events.json",
+                     kiro / "workflows/task-hub-events.workflow.json", self.home / ".config/task-hub/config.ini",
                      self.home / ".local/state/task-hub/install-manifest.json"):
             self.assertFalse(os.path.lexists(gone), gone)
         self.assertTrue((kiro / "skills/other").is_dir())
+        self.assertTrue((self.home / "AppData/Roaming/Kiro/User/settings.json").exists())  # the user's: said, not removed
+        self.assertIn(r"~\AppData\Roaming\Kiro\User\settings.json の Workflows の設定(インストーラは有効にしただけです)", out)
         self.assertEqual([p for p in self.user_path() if p], [])
         self.assertIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
         self.assertEqual(out.splitlines()[-1], "次にすること: Kiro を再起動してください(/task と /chief が外れます)")

@@ -1,33 +1,71 @@
-#!/bin/sh
-# Kiro IDE Prompt Submit hook: adds what task-hub did since the last prompt (In review, Blocked, replan, Done, slow)
-# to the agent's context. Install: mkdir -p ~/.kiro/hooks &&
-#   ln -sfn ~/.local/lib/task-hub/kiro/hooks/task-hub-events.json ~/.kiro/hooks/task-hub-events.json
-# It always exits 0: a failing Prompt Submit hook would block the prompt. On failure it prints one note at most.
-state="$HOME/.local/state/task-hub"
-cursor_file="$state/kiro-cursor"
-task=$(command -v task 2>/dev/null) || task="$HOME/.local/lib/task-hub/bin/task"
+#!/usr/bin/env python3
+"""Kiro IDE Prompt Submit hook: adds what task-hub did since the last prompt (In review, Blocked, replan, Done, slow)
+to the agent's context. Installed by kiro/install.sh and windows/install.ps1 (a copy of kiro/hooks/task-hub-events.json
+in ~/.kiro/hooks; on Windows its command is Python and this file, as `task _kiro-copy` writes it).
+It always exits 0: a failing Prompt Submit hook would block the prompt. On failure it prints one note at most.
+Python, not sh, so that it runs on Windows too; as old a Python as macOS's own /usr/bin/python3 (3.9) runs it.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
 
-cursor=$(cat "$cursor_file" 2>/dev/null)
-case "$cursor" in
-  ''|*[!0-9]*) first=1; cursor=0 ;;  # first prompt (or a broken cursor): start from now, not from the past
-  *) first= ;;
-esac
+WANTED = "In review,Blocked,replan,Done,slow"
+STATE = os.path.expanduser(os.path.join("~", ".local", "state", "task-hub"))
+CURSOR = os.path.join(STATE, "kiro-cursor")
 
-if ! out=$("$task" events --after "$cursor" --digest --only "In review,Blocked,replan,Done,slow" 2>/dev/null); then
-  echo "task-hub: could not read events (\`$task events\` failed)"
-  exit 0
-fi
-next=$(printf '%s\n' "$out" | sed -n 's/^next: task events.* --after \([0-9][0-9]*\).*/\1/p' | tail -n 1)
-if [ -z "$next" ]; then
-  echo "task-hub: could not read events (no \`next:\` line from \`$task events\`)"
-  exit 0
-fi
-mkdir -p "$state" 2>/dev/null && printf '%s\n' "$next" > "$cursor_file.tmp" 2>/dev/null \
-  && mv "$cursor_file.tmp" "$cursor_file" 2>/dev/null
-[ -n "$first" ] && exit 0
-events=$(printf '%s\n' "$out" | grep -v '^next: ')
-if [ -n "$events" ]; then
-  echo "task-hub: new events since your last message:"
-  printf '%s\n' "$events"
-fi
-exit 0
+
+def task_command():
+    """`task` on PATH (the installer's wrapper, with its Python), else bin/task of the installer's clone."""
+    task = shutil.which("task")
+    if task:
+        return [task]
+    lib = os.path.expanduser(os.path.join("~", ".local", "lib", "task-hub", "bin", "task"))
+    return [sys.executable, lib] if os.name == "nt" else [lib]  # Windows runs no #! line
+
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # what Kiro reads, whatever the console's code page
+    try:
+        with open(CURSOR) as f:
+            cursor = f.read().strip()
+    except OSError:
+        cursor = ""
+    first = not cursor.isdigit()  # first prompt (or a broken cursor): start from now, not from the past
+    if first:
+        cursor = "0"
+    task = task_command()
+    try:
+        r = subprocess.run([*task, "events", "--after", cursor, "--digest", "--only", WANTED], capture_output=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+        ok, out = r.returncode == 0, r.stdout
+    except OSError:
+        ok, out = False, ""
+    if not ok:
+        print(f"task-hub: could not read events (`{task[-1]} events` failed)")
+        return
+    nexts = [m.group(1) for m in (re.match(r"next: task events.* --after (\d+)", line) for line in out.splitlines()) if m]
+    if not nexts:
+        print(f"task-hub: could not read events (no `next:` line from `{task[-1]} events`)")
+        return
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        with open(CURSOR + ".tmp", "w") as f:
+            f.write(nexts[-1] + "\n")
+        os.replace(CURSOR + ".tmp", CURSOR)
+    except OSError:
+        pass
+    if first:
+        return
+    events = "\n".join(line for line in out.splitlines() if not line.startswith("next: ")).strip("\n")
+    if events.strip():
+        print("task-hub: new events since your last message:")
+        print(events)
+
+
+try:
+    main()
+except Exception:  # never a traceback, never a non-zero exit: that would block the prompt
+    print("task-hub: could not read events")
+sys.exit(0)
