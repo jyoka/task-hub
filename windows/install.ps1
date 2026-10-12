@@ -886,9 +886,14 @@ Stage-Kiro
 Stage-Watch
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 
+# 12. the diagnosis: the list only; the one next step is said below
+& (Join-Path $PSScriptRoot 'doctor.ps1') -InInstall
+$doctorOk = $LASTEXITCODE -eq 0
 if ($changed) { Write-Host 'ここまで終わりました。' } else { Write-Host 'すべて済みです。変えたものはありません。' }
 if ($Todo) {
   Write-Host "次にすること: $Todo"
+} elseif (-not $doctorOk) {
+  Write-Host '次にすること: 診断の × の行の → のとおりにしてください'
 } elseif ($Restart) {
   Write-Host '次にすること: Kiro を再起動し(開いているチャットには、少なくともウィンドウの再読み込みが要ります)、新しいチャットで /task を試してください'
 } else {

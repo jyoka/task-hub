@@ -516,6 +516,8 @@ class SetupTest(unittest.TestCase):
         self.assertIn(r"9. Kiro との連携: 入れました(~\.kiro\skills\task(ジャンクション)、~\.kiro\skills\chief(ジャンクション)、"
                       r"~\.kiro\steering\task-hub.md(コピー)。Kiro を再起動すると読み込まれます)", out)
         self.assertIn("10. 常駐: 飛ばしました(", out)
+        self.assertIn("\n診断:\n○ 1. 前提の確認: ", out)
+        self.assertNotIn("× ", out)
         self.assertEqual(out.splitlines()[-2:], ["ここまで終わりました。", "次にすること: Kiro を再起動し(開いているチャットには、"
                                                  "少なくともウィンドウの再読み込みが要ります)、新しいチャットで /task を試してください"])
         lib, bindir, kiro = self.home / ".local/lib", self.home / ".local/bin", self.home / ".kiro"
@@ -551,7 +553,7 @@ class SetupTest(unittest.TestCase):
                      "8. 設定: 済み(", "9. Kiro との連携: 済み(スキル、steering)", "すべて済みです。変えたものはありません。",
                      "次にすること: Kiro の新しいチャットで /task を試してください"):
             self.assertIn(line, out)
-        self.assertEqual(self.srv.log, ["/"])  # only "does GitHub answer"
+        self.assertEqual(self.srv.log, ["/", "/"])  # only "does GitHub answer", the installer's and the diagnosis'
         self.assertEqual(self.manifest(), m)
 
     def test_finds_what_was_installed_after_the_window_opened(self):
@@ -673,6 +675,45 @@ class SetupTest(unittest.TestCase):
         self.assertIn(r"9. Kiro との連携: 止まりました。~\.kiro\steering\task-hub.md は、このインストーラが入れた内容と"
                       "確認できないので書き換えていません", out)
         self.assertEqual(steering.read_text(), "edited\n")
+
+    def doctor(self, code=0):
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                            str(REPO / "windows" / "doctor.ps1")],
+                           env=self.env, capture_output=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        return r.stdout
+
+    def files(self):  # every file and folder under the user folder, with its size and time
+        return {str(p): (p.stat().st_size, p.stat().st_mtime_ns) for p in self.home.rglob("*")
+                if not p.is_symlink() and not (p.is_dir() and os.path.realpath(p) != str(p))}
+
+    def test_the_diagnosis_lists_every_stage_and_changes_nothing(self):
+        self.ready()
+        self.install()
+        before = self.files()
+        out = self.doctor()
+        self.assertTrue(out.startswith("task-hub の診断です(何も変えません)\n"), out)
+        for line in ("○ 1. 前提の確認: git、GitHub に接続", f"○ 2. Python: {sys.executable}", r"○ 3. gh: ~\.local\bin\gh.exe",
+                     f"○ 4. kiro-cli: {self.kirobin / 'kiro-cli.exe'}", "○ 5. GitHub のログイン: alice",
+                     "○ 5. kiro-cli のログイン: ログイン済み", r"○ 6. task-hub 本体: ~\.local\lib\task-hub(",
+                     "○ 7. ボード: ", r"○ 8. 設定: ~\.config\task-hub\config.ini、agent = kiro",
+                     "○ 9. Kiro との連携: スキル、steering", "○ 10. 常駐: 使っていません"):
+            self.assertIn(line, out)
+        self.assertEqual(out.splitlines()[-2:], ["すべて揃っています。", "次にすること: Kiro の新しいチャットで /task を試してください"])
+        self.assertEqual(self.files(), before)
+
+        self.set_gh_auth(None)
+        (self.home / ".kiro/skills/chief").rmdir()  # the junction itself, not the clone's folder
+        out = self.doctor(code=1)
+        self.assertIn("× 5. GitHub のログイン: GitHub にログインしていません\n    → powershell -ExecutionPolicy Bypass "
+                      "-File windows\\install.ps1 を実行し、開いた窓でブラウザでログインしてください", out)
+        self.assertIn("× 7. ボード: gh が Projects の権限でログインできていないので確かめていません", out)
+        self.assertIn(r"× 9. Kiro との連携: ~\.kiro\skills\chief がありません", out)
+        self.assertTrue((self.home / ".local/lib/task-hub/skills/chief").is_dir())
+        self.assertIn("足りないものが 3 つあります。", out)
+        self.assertEqual(out.splitlines()[-1], "次にすること: powershell -ExecutionPolicy Bypass -File windows\\install.ps1 "
+                                              "を実行し、開いた窓でブラウザでログインしてください")
 
     def test_scripts_with_japanese_are_saved_with_a_bom(self):
         # Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code page: the Japanese would be garbled
