@@ -73,6 +73,25 @@ function Get-RealPath($p) {
   return [IO.Path]::GetFullPath($p).TrimEnd('\')
 }
 
+function ConvertTo-AsciiPath($p) {
+  # A shortcut (.lnk, the Startup folder) keeps its arguments in the code page: a path with letters it lacks (a Japanese
+  # user folder on an English Windows) would come back as ?. Its short 8.3 name has none of those. A process started that way
+  # has the short name on its command line, so it is looked for by both names
+  $ansi = [Text.Encoding]::Default  # the code page a shortcut keeps its arguments in
+  $keeps = { param($s) $ansi.GetString($ansi.GetBytes($s)) -eq $s }
+  if (& $keeps "$p") { return "$p" }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    $s = if (Test-Path -LiteralPath $p -PathType Container) { $fso.GetFolder($p).ShortPath } else { $fso.GetFile($p).ShortPath }
+    if ($s -and (& $keeps $s)) { return $s }
+  } catch { }
+  return "$p"
+}
+
+function Test-Runs($commandLine, $path) {  # the command line names $path, by its long or its short name
+  $commandLine -and ($commandLine.Contains($path) -or $commandLine.Contains((ConvertTo-AsciiPath $path)))
+}
+
 function Get-NewestKiroTag($names) {
   $names | Where-Object { $_ -match '^kiro-v\d+$' } | Sort-Object { [int]$_.Substring(6) } | Select-Object -Last 1
 }
@@ -303,6 +322,41 @@ if ($task) {
   else { Ng 'スタートアップ フォルダーにありますが、動いていません' ('サインインし直すか、' + $again) }
 } else {
   Ok '使っていません(任意。使うなら -Watch を付けてインストーラを実行します)'
+}
+
+# 11. Slack triage (docs/slack-triage.md): the command, and the program that waits for the key (unless slack-triage off)
+$script:label = '11. Slackトリアージ'
+$stMain = Join-Path $Lib 'slack-triage\app\main.py'
+$stHotkey = Join-Path $Lib 'windows\slack-triage-hotkey.ps1'
+$stShim = Join-Path $BinDir 'slack-triage.cmd'
+$stConfig = $null
+try { $stConfig = [IO.File]::ReadAllText((Join-Path $Root '.config\task-hub\slack-triage.json')) | ConvertFrom-Json } catch { }
+$stStatusFile = Join-Path $Root '.local\state\task-hub\slack-triage-hotkey.status'
+$stStatus = if ([IO.File]::Exists($stStatusFile)) { [IO.File]::ReadAllText($stStatusFile).Trim() } else { '' }
+$stLnk = if ($env:TASK_INSTALL_AUTOSTART_DIR) { Join-Path $env:TASK_INSTALL_AUTOSTART_DIR 'task-hub slack-triage.lnk' }
+         else { [IO.Path]::Combine([Environment]::GetFolderPath('Startup'), 'task-hub slack-triage.lnk') }
+$stAuto = [IO.File]::Exists($stLnk) -or (-not $env:TASK_INSTALL_AUTOSTART_DIR -and
+  (Get-ScheduledTask -TaskName 'task-hub slack-triage' -ErrorAction SilentlyContinue))
+$stLoop = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { Test-Runs $_.CommandLine $stHotkey }
+if (-not (Test-Path (Join-Path $Lib '.git'))) {
+  Ng 'task-hub 本体がないので確かめていません' $Install
+} elseif (-not (Test-Path -LiteralPath $stMain) -or -not (Test-Path -LiteralPath $stHotkey)) {
+  Ok 'この版の task-hub にはありません'
+} elseif (-not (Test-Path -LiteralPath $stShim) -or -not ([IO.File]::ReadAllText($stShim)).Contains($Marker)) {
+  Ng "$(Tilde $stShim) がありません" $Install
+} elseif ($stConfig -and $stConfig.enabled -eq $false) {
+  Ok '止めています(slack-triage off)。使うときは slack-triage on'
+} elseif (-not $stAuto) {
+  Ng 'サインインのたびに起動キーを待つ設定がありません' $Install
+} elseif (-not $stLoop) {
+  Ng '起動キーを待つ常駐が動いていません' 'slack-triage on を実行してください'
+} elseif ($stStatus -like 'ok *') {
+  Ok "Slack のスレッドをコピーして $($stStatus.Substring(3)) で使えます"
+} elseif ($stStatus -like 'conflict *') {
+  Ng "起動キー $($stStatus.Substring(9)) は、ほかのアプリが使っています" 'slack-triage key t のように別のキーにしてください'
+} else {
+  Ng "起動キーを登録できていません($stStatus)" 'slack-triage key t のように別のキーにしてください'
 }
 
 if ($InInstall) { exit ([int]($script:missing -gt 0)) }

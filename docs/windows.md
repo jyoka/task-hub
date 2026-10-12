@@ -144,6 +144,7 @@ task-hub をセットアップします(管理者権限は使いません)
 8. 設定: 作りました(~\.config\task-hub\config.ini。task list で確かめました)
 9. Kiro との連携: 入れました(~\.kiro\skills\task(ジャンクション)、…。Kiro を再起動すると読み込まれます)
 10. 常駐: 飛ばしました(任意です。Ready のカードを自動で始めるときは -Watch を付けて実行します)
+11. Slackトリアージ: 入れました(~\.local\bin\slack-triage.cmd、…。Slack のスレッドをコピーして Ctrl+Alt+S で使えます。…)
 診断:
 ○ 1. 前提の確認: git、GitHub に接続
 …
@@ -378,7 +379,7 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 ```
 
 - 消すのは、インストーラが入れたと記録したもの(`~\.local\state\task-hub\install-manifest.json`)だけです。
-  常駐、Kiro のスキルと steering、`task.cmd`、ユーザーの PATH に足した項目、本体(`~\.local\lib\task-hub`)、
+  常駐、Slackトリアージの起動キーとコマンド、Kiro のスキルと steering、フックとワークフロー、`task.cmd`、ユーザーの PATH に足した項目、本体(`~\.local\lib\task-hub`)、
   インストーラが入れた git、gh、kiro-cli、Python と uv、インストーラが作った設定ファイル。もとからあったものは消しません
 - 作業中のタスクがあるときは、常駐(見張り)だけを止めて、ほかは残します。作業は最後まで動きます。作業が終わったら、
   もう一度実行します
@@ -405,6 +406,7 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 | 9 | スキルが使える | エージェントの会話で `/task` と打つ(手順 7 のあと) | `/task` が候補に出て、カードが Backlog にできる |
 | 10 | 使用量の記録 | 作業が終わったあと `task stats` | 使ったクレジットが出る(kiro-cli)。出なくても、作業には影響しない |
 | 11 | フックとワークフロー | Kiro を再起動し、カードが In review になったあと、Kiro のチャットに何か書く。`/chief` を開いておく | チャットに `task-hub: new events since your last message:` が入る。`/chief` のチャットに知らせが来る。Kiro がコマンドを cmd と PowerShell のどちらで動かすかは確かめていません(両方で動くように書いています) |
+| 12 | Slackトリアージ | Slack でスレッドを選んでコピー(Ctrl+C)し、Ctrl+Alt+S を押す | 30 秒ほどで「タスクにしますか？」の画面が出て、日本語が読める。「登録」で Backlog にカードができる。黒い窓が出ない。サインインし直しても Ctrl+Alt+S が効く |
 
 ## 11. 困ったとき(エラーと対処)
 

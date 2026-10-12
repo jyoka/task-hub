@@ -31,7 +31,7 @@ $Startup = [IO.Path]::Combine([Environment]::GetFolderPath('Startup'), 'task-hub
 $Again = 'powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes'
 # The order things are removed in: the watch first (it runs task), then what Kiro reads, task, and what they use;
 # uv last, after the Python it installed. PATH entries go before the folders they name.
-$Keys = 'watch', 'kiro-hook', 'kiro-workflow', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'kiro-settings',
+$Keys = 'watch', 'slack-triage-autostart', 'slack-triage', 'kiro-hook', 'kiro-workflow', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'kiro-settings',
   'config', 'task', 'task-sh', 'user-path',
   'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'gh', 'uv-python', 'uv', 'git'
 
@@ -53,12 +53,31 @@ function Remove-Thing($what, [scriptblock]$how) {  # only listed without -Yes
   }
 }
 
+function ConvertTo-AsciiPath($p) {
+  # A shortcut (.lnk, the Startup folder) keeps its arguments in the code page: a path with letters it lacks (a Japanese
+  # user folder on an English Windows) would come back as ?. Its short 8.3 name has none of those. A process started that way
+  # has the short name on its command line, so it is looked for by both names
+  $ansi = [Text.Encoding]::Default  # the code page a shortcut keeps its arguments in
+  $keeps = { param($s) $ansi.GetString($ansi.GetBytes($s)) -eq $s }
+  if (& $keeps "$p") { return "$p" }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    $s = if (Test-Path -LiteralPath $p -PathType Container) { $fso.GetFolder($p).ShortPath } else { $fso.GetFile($p).ShortPath }
+    if ($s -and (& $keeps $s)) { return $s }
+  } catch { }
+  return "$p"
+}
+
+function Test-Runs($commandLine, $path) {  # the command line names $path, by its long or its short name
+  $commandLine -and ($commandLine.Contains($path) -or $commandLine.Contains((ConvertTo-AsciiPath $path)))
+}
+
 function Stop-Watch {
   # the loop (task-watch.ps1) and the `task watch` it started, and nothing else: a run goes on, and so does an agent
   # whose prompt happens to name task-watch.ps1. Not Stop-ScheduledTask, which can end every process the task started
-  $loop = "-File `"$(Join-Path $Lib 'windows\task-watch.ps1')`""
+  $loop = Join-Path $Lib 'windows\task-watch.ps1'
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($loop) } |
+    Where-Object { Test-Runs $_.CommandLine $loop } |
     ForEach-Object {
       $id = $_.ProcessId
       Get-CimInstance Win32_Process -Filter "ParentProcessId = $id" |
@@ -177,6 +196,21 @@ foreach ($k in $Keys) {
       if ((Get-JunctionTarget $v) -ne $want) { Write-Host "残しました: $(Tilde $v)(ジャンクションの先が変わっています)"; continue }
       # the junction, never the folder it leads to (Remove-Item -Recurse would empty the clone's skills)
       Remove-Thing "$(Tilde $v)(ジャンクション)" ([scriptblock]::Create("[IO.Directory]::Delete('$($v -replace "'", "''")')"))
+    }
+    'slack-triage-autostart' {  # the program that waits for Slack triage's key, and its start at logon
+      $hotkey = Join-Path $Lib 'windows\slack-triage-hotkey.ps1'  # quoted or not on the command line
+      $how = if ($v -like 'scheduled-task:*') { "タスク スケジューラの「$($v.Substring(15))」" } else { Tilde $v }
+      if (-not ($v -like 'scheduled-task:*' -and (Get-ScheduledTask -TaskName $v.Substring(15) -ErrorAction SilentlyContinue)) -and
+          -not [IO.File]::Exists($v)) { continue }
+      Remove-Thing "Slackトリアージの起動キーを待つ常駐($how)" ([scriptblock]::Create(@"
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { Test-Runs `$_.CommandLine '$($hotkey -replace "'", "''")' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
+if ('$($v -replace "'", "''")' -like 'scheduled-task:*') { Unregister-ScheduledTask -TaskName '$($v.Substring(15) -replace "'", "''")' -Confirm:`$false }
+else { Remove-Item -LiteralPath '$($v -replace "'", "''")' }
+"@))
+    }
+    'slack-triage' {  # the command, only while it is the installer's
+      if (-not (Mine $v) -or -not (Test-Path -LiteralPath $v) -or -not ([IO.File]::ReadAllText($v)).Contains($Marker)) { continue }
+      Remove-Thing (Tilde $v) ([scriptblock]::Create("Remove-Item -LiteralPath '$($v -replace "'", "''")'"))
     }
     'kiro-settings' {  # a file of the user's that the installer changed one setting in: said, not removed
       $script:settings = $v

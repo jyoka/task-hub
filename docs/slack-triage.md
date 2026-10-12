@@ -87,9 +87,12 @@ Slack のスレッドをコピーして **⌃⌥S**(control + option + S)を押�
 | 通知 | macOS の通知 | Windows の通知(画面の右下) |
 | 登録 | `task new` | `bin/task` を Python で直接動かす(タイトルの `&` や `%` が、バッチファイルで命令として読まれないように) |
 
-起動キーを待つ常駐と、インストーラで入れる段階(Windows の段階 11)は準備中です。それまでは、PowerShell で
-`py -3 $HOME\.local\lib\task-hub\slack-triage\app\main.py practice` のように動かせます(`practice` を外すと、
-クリップボードのスレッドを整理します)。
+| 起動キーを待つ常駐 | launchd の plist(`slack-triage-hotkey`) | `windows\slack-triage-hotkey.ps1`。Windows の `RegisterHotKey` で待ち、タスク スケジューラの「task-hub slack-triage」がサインインのたびに始める(断られたらスタートアップ フォルダー)。設定を 1 秒ごとに読み直すので、`key` と `off` はすぐ効く |
+| コマンド | `~/.local/bin/slack-triage` | `~\.local\bin\slack-triage.cmd`(PowerShell でも `slack-triage check` のように打てる) |
+
+インストーラ(`windows\install.ps1` の「11. Slackトリアージ」)が、Mac と同じく全員に入れます。ほかのアプリが同じキーを
+使っていると、Windows は登録を断るので、インストーラと `slack-triage check` がそれを知らせます(Mac にはない利点)。
+そのときは `slack-triage key t` などで別のキーにします。
 
 ## しくみ(開発する人向け)
 

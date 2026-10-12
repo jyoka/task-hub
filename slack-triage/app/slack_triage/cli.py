@@ -442,9 +442,55 @@ def domain():
     return "gui/%d" % os.getuid()
 
 
-def loaded():
-    if WINDOWS:  # launchd はない。起動キーを待つ常駐は、インストーラの段階 11 で入れる(まだ)
+# Windows: 起動キーを待つのは windows/slack-triage-hotkey.ps1(インストーラの段階 11 がサインインのたびに始める)。
+# 設定のファイルを 1 秒ごとに読み直すので、key と off は設定を書くだけで伝わる
+HOTKEY_PS1 = os.path.join(os.path.dirname(LIB), "windows", "slack-triage-hotkey.ps1")
+MAIN = os.path.join(LIB, "app", "main.py")
+# Windows PowerShell 5.1 は、PATH が狭くても(起動キーから起動したとき)ここにある
+POWERSHELL = os.path.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "WindowsPowerShell", "v1.0",
+                          "powershell.exe")
+AUTOSTART = "task-hub slack-triage"  # タスク スケジューラの名前、スタートアップ フォルダーのショートカットの名前
+
+
+def windows_loops():
+    """この clone の起動キーを待つプログラム(powershell.exe)のプロセス ID"""
+    # スタートアップ フォルダーから始めたものは、日本語の名前のフォルダーを短い 8.3 の名前で書いている(install.ps1)
+    import ctypes
+    buf = ctypes.create_unicode_buffer(1024)
+    short = buf.value if ctypes.windll.kernel32.GetShortPathNameW(HOTKEY_PS1, buf, len(buf)) else HOTKEY_PS1
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name = 'powershell.exe'\" | Where-Object { $_.CommandLine -and "
+          "($_.CommandLine.Contains($env:SLACK_TRIAGE_SCRIPT) -or $_.CommandLine.Contains($env:SLACK_TRIAGE_SHORT)) } | "
+          "ForEach-Object { $_.ProcessId }")
+    p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL,
+                       env=dict(os.environ, SLACK_TRIAGE_SCRIPT=HOTKEY_PS1, SLACK_TRIAGE_SHORT=short))
+    return [int(x) for x in p.stdout.split() if x.isdigit()]
+
+
+def windows_autostart():
+    """サインインのたびに始める設定があるか(インストーラの段階 11 が置く)"""
+    shortcut = AUTOSTART + ".lnk"
+    folders = [os.environ["TASK_INSTALL_AUTOSTART_DIR"]] if os.environ.get("TASK_INSTALL_AUTOSTART_DIR") else [
+        os.path.join(os.environ.get("APPDATA") or "", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")]
+    if any(os.path.isfile(os.path.join(d, shortcut)) for d in folders):
+        return True
+    if os.environ.get("TASK_INSTALL_AUTOSTART_DIR"):
         return False
+    return subprocess.run(["schtasks", "/Query", "/TN", AUTOSTART], capture_output=True,
+                          stdin=subprocess.DEVNULL).returncode == 0
+
+
+def windows_start():
+    """起動キーを待つプログラムを、今すぐ始める(このコマンドが終わっても動き続ける)"""
+    subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy",
+                      "Bypass", "-File", HOTKEY_PS1, "-Python", sys.executable, "-Main", MAIN],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+
+def loaded():
+    if WINDOWS:
+        return bool(windows_loops())
     return launchctl("print", "%s/%s" % (domain(), LAUNCHD_LABEL)).returncode == 0
 
 
@@ -472,16 +518,24 @@ def wait_status(before_mtime=None):
 def cmd_off():
     cfg = load_config()
     cfg["enabled"] = False
+    try:
+        before = os.path.getmtime(HOTKEY_STATUS)
+    except OSError:
+        before = None
     save_config(cfg)
-    if loaded():
+    if WINDOWS:  # 設定を読み直したプログラムが、「off」と書いて自分で終わる
+        if loaded():
+            wait_status(before)
+    elif loaded():
         launchctl("bootout", "%s/%s" % (domain(), LAUNCHD_LABEL))
     print("%s を止めました。再開するときは slack-triage on" % hotkey_label(cfg))
     return 0
 
 
 def cmd_on():
-    if not os.path.isfile(PLIST):
-        print("常駐の設定(%s)がありません。%s" % (PLIST.replace(HOME, "~"), INSTALL))
+    if not (windows_autostart() if WINDOWS else os.path.isfile(PLIST)):
+        print("常駐の設定(%s)がありません。%s" % ("サインインのたびに起動キーを待つ設定" if WINDOWS else PLIST.replace(HOME, "~"),
+                                         INSTALL))
         return 1
     cfg = load_config()
     cfg["enabled"] = True
@@ -491,7 +545,9 @@ def cmd_on():
             os.remove(HOTKEY_STATUS)
         except OSError:
             pass
-        r = launchctl("bootstrap", domain(), PLIST)
+        if WINDOWS:
+            windows_start()
+        r = subprocess.CompletedProcess([], 0) if WINDOWS else launchctl("bootstrap", domain(), PLIST)
         if r.returncode != 0:
             print("起動キーを始められませんでした(%s)。時間をおいて、もう一度 slack-triage on" % r.stderr.strip())
             return 1
@@ -531,9 +587,10 @@ def cmd_key(args):
         before = os.path.getmtime(HOTKEY_STATUS)
     except OSError:
         before = None
-    launchctl("kickstart", "-k", "%s/%s" % (domain(), LAUNCHD_LABEL))  # 新しいキーで起動し直す
+    if not WINDOWS:  # Windows のプログラムは、設定を読み直して自分で登録し直す
+        launchctl("kickstart", "-k", "%s/%s" % (domain(), LAUNCHD_LABEL))  # 新しいキーで起動し直す
     s = wait_status(before)
-    if s.startswith("ok"):
+    if s.startswith("ok") and (not WINDOWS or s == "ok " + label):  # Windows の状態にはキーの名前がある
         print("起動キーを %s にしました" % label)
         return 0
     print("起動キーを %s にしましたが、登録できませんでした(%s)。別のキーを試してください" % (label, s or "応答がありません"))
