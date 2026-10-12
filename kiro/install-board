@@ -209,7 +209,7 @@ def board(label, login, work):
     if by_hand:
         todo = f"{url}/workflows を開き、{'、'.join(by_hand)}してください(task-hub が動かす Status を変えないため)"
         print(f"{label}: 画面での操作が残っています。{todo}")
-        (Path(work) / "todo").write_text(todo)
+        (Path(work) / "todo").write_text(todo, encoding="utf-8")
     return bool(made or changes)
 
 
@@ -313,7 +313,8 @@ def kiro_settings(label, work):
                 "Kiro のコマンドパレットで「Enable Workflows」を実行してください")
         todo = Path(work) / "todo"
         if not todo.exists():  # the board's step, if any, comes first
-            todo.write_text(f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください")
+            todo.write_text(f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください",
+                            encoding="utf-8")
     elif not text.strip():
         write(path, json.dumps({WORKFLOWS_KEY: True}, indent=4) + "\n")
         kind, what = "changed", f"{tilde(path)}(Workflows を有効に)"
@@ -324,7 +325,8 @@ def kiro_settings(label, work):
         data[WORKFLOWS_KEY] = True  # the other settings keep their order
         write(path, json.dumps(data, indent=indent.group(1) if indent else 4, ensure_ascii=False) + "\n")
         kind, what = "changed", f"{tilde(path)}(Workflows を有効に。元の内容は {tilde(backup)})"
-    (Path(work) / "kiro-settings").write_text(f"{kind}\t{what}\n{path}\n")  # the file, for the manifest
+    # the file, for the manifest. UTF-8, as the installers read it (not the code page of a Windows)
+    (Path(work) / "kiro-settings").write_text(f"{kind}\t{what}\n{path}\n", encoding="utf-8")
     return kind == "changed"
 
 
