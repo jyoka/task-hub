@@ -260,19 +260,19 @@ sequenceDiagram
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて | JSON(`RUN_KEYS`) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
-| `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail` | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
+| `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
-| `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list` | `{key, fetched_at, items}` |
+| `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list`、Kiro の拡張(Goal のタブ。`items[].content.body`) | `{key, fetched_at, items}` |
 | `state/board-cache.stale` | `gh()`(ボードを変える呼び出しのあと) | `cached_items` | UNIX 時刻 |
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
-| `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup` | git worktree |
+| `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 
 `state` は `~/.local/state/task-hub`、`share` は `~/.local/share/task-hub` です。
@@ -291,6 +291,26 @@ sequenceDiagram
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
 `retried`、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`。
+
+### Kiro の拡張がタスクの中身を読むところ
+
+`kiro/board-extension/src/tabs.ts`(VS Code の API)と `src/inspect.ts`(ファイルと git)。何も書きません。
+
+| タブ | URI | 読むもの | 見つからないとき |
+|---|---|---|---|
+| Goal | `taskhub-goal:/<id>/#<id> Goal · <repo>.md` | `board-cache.json` の `key[2]`(Issue のリポジトリ)の、番号が `<id>` の項目 | 知らせてタブを開かない(`task show <id> --full` を案内) |
+| 変更 | `taskhub-diff:/<id>/{base,worktree}/<path>?<分かれ目のコミット>` | `runs/<id>.json` の `worktree` を git で。base は `runs/<id>.json` の `base` を `base_ref` と同じ決め方で | `runs/<id>.json` がない、worktree が消えた: 知らせて何もしない(別の checkout を使わない) |
+| ログ | `taskhub-log:/<id>/#<id> Log · <repo>.log` | `runs/<id>.json` の `log`、なければ `state/logs/<id>.log`(片付けのあとも残る) | 「まだない」と書いて、できるまで待つ |
+
+- タブの URI がタスクの番号を持つので、ボードで別のカードを選んでも、開いているタブの中身は変わりません
+- 変更の一覧は `git diff --name-status <分かれ目>`(コミット済みと作業中)と `git ls-files --others --exclude-standard`(未追跡)。
+  `git diff` は stat の古い index を読むと index を書き直す(`GIT_OPTIONAL_LOCKS=0` でも)ので、index を一時ファイルに写して
+  `GIT_INDEX_FILE` で読ませます。`core.fsmonitor`、外部の diff、textconv は使わず、属性は空の tree から読ませて
+  (`GIT_ATTR_SOURCE`)clean フィルタも動かしません。IDE の環境の `GIT_*` は渡しません
+- 作業中の側は、worktree の外を指すシンボリックリンクの先を読みません。信頼していないワークスペースでは git を動かしません
+- ログのタブは、タブがある間だけ `fs.watchFile`(1 秒ごと)で見ます(`tabGroups.onDidChangeTabs` で閉じたことを知る)。
+  止めている間は中身を読み直しません。ログのコマンドを通らずに出てきたログのタブ(ウィンドウの復元など)は、
+  `onDidChangeTabs`、拡張の起動、「追う」「止める」のときに見つけて、見はじめます
 
 ## 6. 並行と所有
 
@@ -318,6 +338,7 @@ sequenceDiagram
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
+| `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
@@ -391,7 +412,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)
 - `tests/test_run.py`: `tests/run.py` そのもの(既定の並べる数、低い優先度、全部のテストのロック)。Windows の CI でも動く
-- `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`)
+- `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`。偽物の `vscode` と
+  一時的な git リポジトリで、Goal、変更、ログのコマンドを動かす)。`kiro/board-extension/test/host/check.mjs` は、VSIX を
+  本物の VS Code か Kiro の使い捨てのプロファイルに入れて同じ流れを確かめる(手で動かす。`npm test` には入らない)
 - `python3 tests/run.py`: テストを 1 件ずつ別プロセスで 2 つずつ、低い優先度で動かす(約 8 分)。全部のテストは 1 台に同時に 1 つ
   (一時ディレクトリの `task-hub-tests.lock`、持ち主の pid が死んでいれば取り直す)
 - `tests/bench.py`: 弱い PC 向けの計測。使い捨ての HOME と偽物の `gh` で、1 度に 1 プロセスずつ動かす([benchmark.md](../benchmark.md))。テストではない

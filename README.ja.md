@@ -43,7 +43,7 @@ flowchart LR
 - **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書いて Ready に戻すと、同じ PR で続きます
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
 - **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します(LLM は使いません)
-- **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます
+- **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
 - **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
 ## はじめる

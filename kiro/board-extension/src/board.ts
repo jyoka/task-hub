@@ -11,10 +11,10 @@ export type Outcome = { exitCode: number; stdout: string; stderr: string }
 export type Files = { events: string; metrics: string; ini: string }
 // One node of the view, a TreeItem without `vscode`: `icon` a codicon ('' for none) and `color` a theme color id for
 // it, `markdown` a tooltip in Markdown (else `tooltip` as text), `open` whether a node with children starts expanded,
-// `link` the URL a click opens.
+// `link` the URL a click opens, `task` the card's id on a card's own node (its Goal, Changes and Log open from it).
 export type Node = {
   id: string; label: string; description: string; tooltip: string; markdown?: string; icon: string; color?: string
-  children?: Node[]; open?: boolean; link?: string
+  children?: Node[]; open?: boolean; link?: string; task?: string
 }
 export type Bar = { text: string; tooltip: string; warning: boolean }
 export type Badge = { value: number; tooltip: string } | undefined
@@ -80,7 +80,7 @@ const cardNode = (c: Card, d: Detail, group: string): Node => {
     d.pr && http(d.pr) ? `[${prLabel(d.pr)}](${href(d.pr)})` : '',
   ].filter(s => s !== '').join('\n\n')
   return {
-    id, label: `#${c.id} ${c.title}`,
+    id, task: c.id, label: `#${c.id} ${c.title}`,
     description: [repoTag(c.repo).name, label, time?.text ?? '', waits].filter(s => s !== '').join(' · '),
     tooltip: '', markdown, icon: ICONS[col] ?? 'question',
     color: col === 'In progress' && time?.color ? LATE[time.color] : THEME[STATUS_COLORS[col] ?? ''],

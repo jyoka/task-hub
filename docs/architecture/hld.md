@@ -86,7 +86,8 @@ flowchart TB
     mod -- "task list" --> cli
     kext -- "task list" --> cli
     mod -. "events、metrics を読む" .-> state
-    kext -. "events、metrics を読む" .-> state
+    kext -. "events、metrics、runs、logs、<br/>board-cache を読む" .-> state
+    kext -. "worktree を git で読む" .-> data
     khook -. "task events" .-> cli
     piext -. "task events --next" .-> cli
     cli --> sync
@@ -111,7 +112,7 @@ flowchart TB
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
-| mod、Kiro の拡張 | ボードを表示する | 何も書かない(`task list` と手元のファイルを読む) |
+| mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
 
@@ -236,7 +237,7 @@ flowchart TB
 |---|---|---|
 | エージェント | `[agents]` にコマンドのひな形を足す | [agents.md](../agents.md) |
 | コマンド | `COMMANDS` の表に 1 行と `cmd_*` 関数 | [lld.md](lld.md) の 3 章 |
-| 表示 | `task list` の出力と `events.jsonl` を読む(書かない) | [lld.md](lld.md) の 5 章 |
+| 表示 | `task list` の出力と `events.jsonl` を読む(書かない)。タスクの中身は `runs/<番号>.json` から worktree とログをたどる | [lld.md](lld.md) の 5 章、[designs/task-inspection.md](designs/task-inspection.md) |
 | 出来事の種類 | `emit` を呼び、`[notify] events` と読む側のフィルタに足す | [lld.md](lld.md) の 6 章 |
 | Status の列 | `StatusLifecycle` と design.md の図を一緒に変える | [design.md](../design.md) |
 | 実行の段階 | `set_stage` を呼び、design.md の段階の表に足す | [design.md](../design.md) |
