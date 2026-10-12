@@ -9,6 +9,9 @@ from .core import format_summary, is_valid_repo
 TITLE = "Slackトリアージ"
 OTHER = "その他（入力する）"
 FONT = ("Yu Gothic UI", 10)  # Windows 10/11 の日本語の標準のフォント(無ければ tk が近いものを使う)
+# Windows PowerShell 5.1 は、PATH が狭くても(起動キーから起動したとき)ここにある
+POWERSHELL = os.path.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "WindowsPowerShell", "v1.0",
+                          "powershell.exe")
 
 TOAST = """$m = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 $x = $m::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
@@ -97,7 +100,7 @@ class WinUI:
 
     def notify(self, message):
         try:  # 通知は出なくても続ける
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", TOAST],
+            subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", TOAST],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              env=dict(os.environ, SLACK_TRIAGE_TITLE=TITLE, SLACK_TRIAGE_BODY=message),
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

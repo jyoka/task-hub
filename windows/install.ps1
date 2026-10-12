@@ -836,7 +836,8 @@ function Stage-Watch {
   # `task watch` at every logon, restarted when it ends. Started again here, so a new version of task-hub is used
   Stop-Watch
   $script = Join-Path $Lib 'windows\task-watch.ps1'
-  $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Python `"$($script:Python)`""
+  $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(ConvertTo-AsciiPath $script)`" " +
+    "-Python `"$(ConvertTo-AsciiPath $script:Python)`""
   $registered, $refused = $false, ''
   try {
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
@@ -876,12 +877,138 @@ function Stage-Watch {
   }
 }
 
+function Get-SlackHotkeyLoops {  # the hotkey programs of this clone, and nothing else
+  $script = Join-Path $Lib 'windows\slack-triage-hotkey.ps1'  # quoted or not: started by the installer or by slack-triage on
+  @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { Test-Runs $_.CommandLine $script })
+}
+
+function Register-AtLogon($name, $arguments, $lnk) {
+  # $arguments of powershell.exe at every logon: Task Scheduler, else (refused) the Startup folder, else (tests,
+  # TASK_INSTALL_AUTOSTART_DIR) a shortcut there. Returns what was registered, for the manifest
+  if ($env:TASK_INSTALL_AUTOSTART_DIR) { $lnk = Join-Path $env:TASK_INSTALL_AUTOSTART_DIR (Split-Path -Leaf $lnk) }
+  else {
+    try {
+      $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+      $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+      $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+      $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+      Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+        -Description 'task-hub: Slack triage key (docs/slack-triage.md)' -Force | Out-Null
+      return "scheduled-task:$name"
+    } catch { }  # some company PCs refuse new scheduled tasks; the Startup folder needs no permission
+  }
+  New-Item -ItemType Directory -Force (Split-Path $lnk) | Out-Null
+  $shell = New-Object -ComObject WScript.Shell
+  $link = $shell.CreateShortcut($lnk)
+  $link.TargetPath = 'powershell.exe'
+  $link.Arguments = $arguments
+  $link.WindowStyle = 7  # minimized: -WindowStyle Hidden hides it once PowerShell starts
+  $link.Save()
+  return $lnk
+}
+
+function Get-AtLogon($name, $lnk) {  # the arguments registered now, or $null
+  if ($env:TASK_INSTALL_AUTOSTART_DIR) { $lnk = Join-Path $env:TASK_INSTALL_AUTOSTART_DIR (Split-Path -Leaf $lnk) }
+  else {
+    $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($t) { return "$($t.Actions[0].Arguments)" }
+  }
+  if ([IO.File]::Exists($lnk)) { return (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).Arguments }
+  return $null
+}
+
+function Stage-SlackTriage {
+  $script:label = '11. Slackトリアージ'
+  $main = Join-Path $Lib 'slack-triage\app\main.py'
+  $hotkey = Join-Path $Lib 'windows\slack-triage-hotkey.ps1'
+  if (-not (Test-Path -LiteralPath $main) -or -not (Test-Path -LiteralPath $hotkey)) {
+    Ok 済み 'この版の task-hub にはありません'
+    return
+  }
+  $did = @()
+  # the command: slack-triage check, key, off, on, setup, practice
+  $cmdPath = { param($p) if ($p.StartsWith("$Root\")) { '%USERPROFILE%' + $p.Substring($Root.Length) } else { $p } }
+  $oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+  $shim = Join-Path $BinDir 'slack-triage.cmd'
+  if ((Test-Path -LiteralPath $shim) -and -not ([IO.File]::ReadAllText($shim, $oem)).Contains($Marker)) {
+    Die "$(Tilde $shim) がすでにあります(このインストーラが作ったものではありません)" 'それを消すか移してから、もう一度実行してください'
+  }
+  $want = "@rem $Marker`r`n@setlocal`r`n@set PYTHONUTF8=1`r`n@`"$(& $cmdPath $script:Python)`" `"$(& $cmdPath $main)`" %*`r`n"
+  if (Write-Shim $shim $want $oem 'slack-triage') { $did += Tilde $shim }
+
+  # the program that waits for the key, at every logon
+  $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(ConvertTo-AsciiPath $hotkey)`" " +
+    "-Python `"$(ConvertTo-AsciiPath $script:Python)`" -Main `"$(ConvertTo-AsciiPath $main)`""
+  $name = 'task-hub slack-triage'
+  $lnk = [IO.Path]::Combine([Environment]::GetFolderPath('Startup', 'Create'), 'task-hub slack-triage.lnk')
+  $changedRun = (Get-AtLogon $name $lnk) -ne $arguments
+  if ($changedRun) {
+    Set-Record 'slack-triage-autostart' (Register-AtLogon $name $arguments $lnk)
+    $did += 'サインインのたびに起動キーを待つ常駐'
+  }
+
+  $config = Join-Path $Root '.config\task-hub\slack-triage.json'
+  $c = $null
+  try { $c = [IO.File]::ReadAllText($config) | ConvertFrom-Json } catch { }
+  $statusFile = Join-Path $State 'slack-triage-hotkey.status'
+  $loops = Get-SlackHotkeyLoops
+  if ($c -and $c.enabled -eq $false) {  # slack-triage off: kept off, even by the installer
+    $loops | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    if ($did) { $script:changed = $true }
+    Ok $(if ($did) { '入れました' } else { '済み' }) "$(if ($did) { "$($did -join '、')。" })止めています(slack-triage off)。使うときは slack-triage on"
+    return
+  }
+  $status = if ([IO.File]::Exists($statusFile)) { [IO.File]::ReadAllText($statusFile).Trim() } else { '' }
+  if ($loops -and -not $changedRun -and $status -like 'ok *') {
+    if ($did) { $script:changed = $true }
+    Ok $(if ($did) { '入れました' } else { '済み' }) "$(if ($did) { "$($did -join '、')。" })Slack のスレッドをコピーして $($status.Substring(3)) で使えます"
+    return
+  }
+  # start it now (again, when its arguments changed: a new Python or clone)
+  $loops | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Remove-Item -LiteralPath $statusFile -ErrorAction SilentlyContinue
+  Start-Process powershell.exe -ArgumentList $arguments -WindowStyle Hidden
+  for ($i = 0; $i -lt 40 -and -not [IO.File]::Exists($statusFile); $i++) { Start-Sleep -Milliseconds 250 }
+  $status = if ([IO.File]::Exists($statusFile)) { [IO.File]::ReadAllText($statusFile).Trim() } else { '応答なし' }
+  if ($status -like 'conflict *') {
+    Die "起動キー $($status.Substring(9)) は、ほかのアプリが使っています" `
+      'slack-triage key t のように別のキーにしてから、もう一度実行してください'
+  }
+  if ($status -notlike 'ok *') {
+    Die "Slackトリアージの起動キーを登録できませんでした($status)" 'もう一度実行してください。続くときは task-hub の担当者に知らせてください'
+  }
+  $script:changed = $true
+  $first = if (-not ($c -and $c.owner_name)) { '。初めて押したときに、あなたの名前と登録先のリポジトリを聞きます' } else { '' }
+  Ok 入れました "$(if ($did) { "$($did -join '、')。" })Slack のスレッドをコピーして $($status.Substring(3)) で使えます$first。止めるときは slack-triage off"
+}
+
+function ConvertTo-AsciiPath($p) {
+  # A shortcut (.lnk, the Startup folder) keeps its arguments in the code page: a path with letters it lacks (a Japanese
+  # user folder on an English Windows) would come back as ?. Its short 8.3 name has none of those. A process started that way
+  # has the short name on its command line, so it is looked for by both names
+  $ansi = [Text.Encoding]::Default  # the code page a shortcut keeps its arguments in
+  $keeps = { param($s) $ansi.GetString($ansi.GetBytes($s)) -eq $s }
+  if (& $keeps "$p") { return "$p" }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    $s = if (Test-Path -LiteralPath $p -PathType Container) { $fso.GetFolder($p).ShortPath } else { $fso.GetFile($p).ShortPath }
+    if ($s -and (& $keeps $s)) { return $s }
+  } catch { }
+  return "$p"
+}
+
+function Test-Runs($commandLine, $path) {  # the command line names $path, by its long or its short name
+  $commandLine -and ($commandLine.Contains($path) -or $commandLine.Contains((ConvertTo-AsciiPath $path)))
+}
+
 function Stop-Watch {
   # the loop (task-watch.ps1) and the `task watch` it started, and nothing else: a run goes on, and so does an agent
   # whose prompt happens to name task-watch.ps1. Not Stop-ScheduledTask, which can end every process the task started
-  $loop = "-File `"$(Join-Path $Lib 'windows\task-watch.ps1')`""
+  $loop = Join-Path $Lib 'windows\task-watch.ps1'
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($loop) } |
+    Where-Object { Test-Runs $_.CommandLine $loop } |
     ForEach-Object {
       $id = $_.ProcessId
       Get-CimInstance Win32_Process -Filter "ParentProcessId = $id" |
@@ -924,6 +1051,7 @@ Stage-Board
 Stage-Config
 Stage-Kiro
 Stage-Watch
+Stage-SlackTriage
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 
 # 12. the diagnosis: the list only; the one next step is said below

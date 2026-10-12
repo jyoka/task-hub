@@ -556,7 +556,8 @@ class SetupTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         root = self.root = Path(self.tmp.name)
-        self.home = root / "ユーザー"
+        # a Japanese name; with a letter no code page has, for the test of what a shortcut (.lnk) keeps
+        self.home = root / ("ユーザー\U0001f600" if self._testMethodName.endswith("_no_code_page_has") else "ユーザー")
         self.home.mkdir()
         self.uv_log, self.windows = root / "uv.log", root / "windows.log"
         self.kiro_logged_in = root / "kiro-logged-in"
@@ -616,10 +617,27 @@ class SetupTest(unittest.TestCase):
                     "TASK_INSTALL_USER_ENV": self.reg + r"\user", "TASK_INSTALL_MACHINE_ENV": self.reg + r"\machine",
                     "TASK_TEST_UV_LOG": str(self.uv_log), "TASK_TEST_GH_DB": str(self.db),
                     "TASK_TEST_KIRO_LOGGED_IN": str(self.kiro_logged_in), "TASK_TEST_WINDOWS": str(self.windows),
-                    "PYTHONPATH": str(fakes), "APPDATA": str(self.home / "AppData" / "Roaming")}  # Kiro's settings.json
+                    "PYTHONPATH": str(fakes), "APPDATA": str(self.home / "AppData" / "Roaming"),  # Kiro's settings.json
+                    "TASK_INSTALL_AUTOSTART_DIR": str(root / "autostart")}  # not this PC's Task Scheduler or Startup
         for k in ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONHOME", "VIRTUAL_ENV", "GH_TOKEN", "GITHUB_TOKEN",
                   "GIT_CONFIG_GLOBAL"):
             self.env.pop(k, None)
+        # Slack triage's key off: tests run side by side, and one key can be registered once (the key's own test
+        # turns it on, with a key of its own)
+        self.slack_config(enabled=False)
+        self.addCleanup(self.stop_hotkeys)
+
+    def slack_config(self, **c):
+        f = self.home / ".config/task-hub/slack-triage.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+
+    def stop_hotkeys(self):  # this test's programs waiting for a key, whatever the test left
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name = 'powershell.exe'\" | Where-Object { "
+                        "$_.CommandLine -and $_.CommandLine.Contains($env:HOTKEY_HOME) } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+                       env={**os.environ, "HOTKEY_HOME": str(self.home)}, capture_output=True)
 
     def set_path(self, which, *dirs):
         import winreg
@@ -681,6 +699,8 @@ class SetupTest(unittest.TestCase):
                       r"~\.kiro\workflows\task-hub-events.workflow.json(コピー)、"
                       r"~\AppData\Roaming\Kiro\User\settings.json(Workflows を有効に)。Kiro を再起動すると読み込まれます)", out)
         self.assertIn("10. 常駐: 飛ばしました(", out)
+        self.assertIn(r"11. Slackトリアージ: 入れました(~\.local\bin\slack-triage.cmd、サインインのたびに起動キーを待つ常駐。"
+                      "止めています(slack-triage off)", out)
         self.assertIn("\n診断:\n○ 1. 前提の確認: ", out)
         self.assertNotIn("× ", out)
         self.assertEqual(out.splitlines()[-2:], ["ここまで終わりました。", "次にすること: Kiro を再起動し(開いているチャットには、"
@@ -705,7 +725,9 @@ class SetupTest(unittest.TestCase):
             "kiro-skill-task": str(kiro / "skills/task"), "kiro-skill-chief": str(kiro / "skills/chief"),
             "kiro-steering": str(kiro / "steering/task-hub.md"), "kiro-hook": str(kiro / "hooks/task-hub-events.json"),
             "kiro-workflow": str(kiro / "workflows/task-hub-events.workflow.json"),
-            "kiro-settings": str(self.home / "AppData/Roaming/Kiro/User/settings.json")})
+            "kiro-settings": str(self.home / "AppData/Roaming/Kiro/User/settings.json"),
+            "slack-triage": str(bindir / "slack-triage.cmd"),
+            "slack-triage-autostart": str(self.root / "autostart/task-hub slack-triage.lnk")})
         self.assertEqual(set(m["sha256"]), {"kiro-steering", "kiro-hook", "kiro-workflow"})
         self.assertEqual(self.user_path(), [str(bindir), str(lib / "kiro-cli"), str(lib / "git/cmd")])
         self.assertFalse(self.windows.exists())  # no login was needed
@@ -719,7 +741,7 @@ class SetupTest(unittest.TestCase):
                      "5. kiro-cli のログイン: 済み", r"6. task-hub 本体: 済み(~\.local\lib\task-hub(", "7. ボード: 済み(",
                      "8. 設定: 済み(", "9. Kiro との連携: 済み(スキル、steering、フック、ワークフロー、Workflows の設定)",
                      "すべて済みです。変えたものはありません。",
-                     "次にすること: Kiro の新しいチャットで /task を試してください"):
+                     "11. Slackトリアージ: 済み(止めています", "次にすること: Kiro の新しいチャットで /task を試してください"):
             self.assertIn(line, out)
         self.assertEqual(self.srv.log, ["/", "/"])  # only "does GitHub answer", the installer's and the diagnosis'
         self.assertEqual(self.manifest(), m)
@@ -866,7 +888,8 @@ class SetupTest(unittest.TestCase):
                      f"○ 4. kiro-cli: {self.kirobin / 'kiro-cli.exe'}", "○ 5. GitHub のログイン: alice",
                      "○ 5. kiro-cli のログイン: ログイン済み", r"○ 6. task-hub 本体: ~\.local\lib\task-hub(",
                      "○ 7. ボード: ", r"○ 8. 設定: ~\.config\task-hub\config.ini、agent = kiro",
-                     "○ 9. Kiro との連携: スキル、steering、フック、ワークフロー、Workflows は有効", "○ 10. 常駐: 使っていません"):
+                     "○ 9. Kiro との連携: スキル、steering、フック、ワークフロー、Workflows は有効", "○ 10. 常駐: 使っていません",
+                     "○ 11. Slackトリアージ: 止めています"):
             self.assertIn(line, out)
         self.assertEqual(out.splitlines()[-2:], ["すべて揃っています。", "次にすること: Kiro の新しいチャットで /task を試してください"])
         self.assertEqual(self.files(), before)
@@ -931,6 +954,63 @@ class SetupTest(unittest.TestCase):
             self.assertNotIn(" ", p)
             self.assertTrue(os.path.samefile(p, spaced / "x.exe"))
 
+    def slack(self, *args):
+        r = subprocess.run([str(self.home / ".local/bin/slack-triage.cmd"), *args], env=self.env, capture_output=True,
+                           encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=60)
+        return r.stdout + r.stderr
+
+    def hotkey_status(self):
+        f = self.home / ".local/state/task-hub/slack-triage-hotkey.status"
+        return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+
+    def test_slack_triage_key_from_install_to_uninstall(self):
+        self.ready()
+        self.slack_config(owner_name="佐藤 花子", hotkey_key="j", hotkey_mods="ctrl,alt,shift")  # a key of this test's
+        out = self.install()
+        self.assertIn("11. Slackトリアージ: 入れました(", out)
+        self.assertIn("Slack のスレッドをコピーして Ctrl+Alt+Shift+J で使えます。止めるときは slack-triage off", out)
+        self.assertEqual(self.hotkey_status(), "ok Ctrl+Alt+Shift+J")
+        self.assertIn("11. Slackトリアージ: 済み(Slack のスレッドをコピーして Ctrl+Alt+Shift+J で使えます)", self.install())
+        self.assertIn("○ 11. Slackトリアージ: Slack のスレッドをコピーして Ctrl+Alt+Shift+J で使えます", self.doctor())
+
+        self.assertIn("Ctrl+Alt+Shift+J を止めました", self.slack("off"))
+        self.assertEqual(self.hotkey_status(), "off")  # the program read it, and ended
+        self.assertIn("○ 11. Slackトリアージ: 止めています", self.doctor())
+        self.assertIn("Ctrl+Alt+Shift+J で起動できます", self.slack("on"))
+        self.assertIn("起動キーを Ctrl+Alt+Shift+K にしました", self.slack("key", "k"))
+        self.assertEqual(self.hotkey_status(), "ok Ctrl+Alt+Shift+K")
+
+        out = self.uninstall("-Yes")
+        self.assertIn(r"消しました: Slackトリアージの起動キーを待つ常駐(", out)
+        self.assertIn(r"消しました: ~\.local\bin\slack-triage.cmd", out)
+        self.assertFalse((self.root / "autostart/task-hub slack-triage.lnk").exists())
+        time.sleep(1)
+        self.assertIn("× 11. Slackトリアージ: task-hub 本体がないので確かめていません", self.doctor(code=1))
+
+    def test_starting_at_logon_with_a_user_folder_name_no_code_page_has(self):
+        # on an English Windows a Japanese name is such a name: the shortcut must not lose it
+        self.ready()
+        self.slack_config(owner_name="佐藤 花子", hotkey_key="m", hotkey_mods="ctrl,alt,shift")
+        out = self.install()
+        self.assertIn("Slack のスレッドをコピーして Ctrl+Alt+Shift+M で使えます", out)
+        lnk = self.root / "autostart/task-hub slack-triage.lnk"
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                            "(New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK).Arguments"],
+                           env={**os.environ, "LNK": str(lnk)}, capture_output=True, encoding="utf-8", errors="replace")
+        self.assertNotIn("?", r.stdout)  # short 8.3 names, which the shortcut keeps
+        for path in re.findall(r'"([^"]+)"', r.stdout):
+            self.assertTrue(os.path.exists(path), path)
+        self.assertIn("11. Slackトリアージ: 済み(Slack のスレッドをコピーして Ctrl+Alt+Shift+M で使えます)", self.install())
+        self.assertIn("○ 11. Slackトリアージ: Slack のスレッドをコピーして Ctrl+Alt+Shift+M で使えます", self.doctor())
+        self.assertIn("消しました: Slackトリアージの起動キーを待つ常駐(", self.uninstall("-Yes"))
+        time.sleep(1)
+        loops = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                                "@(Get-CimInstance Win32_Process -Filter \"Name = 'powershell.exe'\" | Where-Object { "
+                                "$_.CommandLine -like '*slack-triage-hotkey.ps1*' -and $_.CommandLine -like '*-Main*' -and "
+                                "$_.CommandLine.Contains($env:ROOT) }).Count"],
+                               env={**os.environ, "ROOT": str(self.root)}, capture_output=True, text=True)
+        self.assertEqual(loops.stdout.strip(), "0")  # the uninstaller found it by its short name, and stopped it
+
     def uninstall(self, *args, code=0):
         r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                             str(REPO / "windows" / "uninstall.ps1"), *args],
@@ -961,6 +1041,7 @@ class SetupTest(unittest.TestCase):
                      lib / "kiro-cli", lib / "task-hub", kiro / "skills/task", kiro / "skills/chief",
                      kiro / "steering/task-hub.md", kiro / "hooks/task-hub-events.json",
                      kiro / "workflows/task-hub-events.workflow.json", self.home / ".config/task-hub/config.ini",
+                     bindir / "slack-triage.cmd", self.root / "autostart/task-hub slack-triage.lnk",
                      self.home / ".local/state/task-hub/install-manifest.json"):
             self.assertFalse(os.path.lexists(gone), gone)
         self.assertTrue((kiro / "skills/other").is_dir())
@@ -1176,6 +1257,43 @@ class SlackTriageTest(unittest.TestCase):
             self.skipTest("no clipboard here")
         self.addCleanup(ps, "Set-Clipboard -Value $env:SLACK_TEST_CLIP", before or " ")  # what the person had copied
         self.assertEqual(json.loads(self.runner("clipboard").stdout.splitlines()[-1])["text"], text)
+
+    def test_the_key_starts_slack_triage(self):
+        # windows/slack-triage-hotkey.ps1 by itself: a key of this test's, sent with keybd_event as if typed
+        import ctypes
+        self.config(hotkey_key="q", hotkey_mods="ctrl,alt,shift")
+        mark = self.root / "pressed.txt"
+        main = self.root / "main.py"
+        main.write_text(f"open({str(mark)!r}, 'a').write('pressed\\n')\n")
+        loop = subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                 str(REPO / "windows/slack-triage-hotkey.ps1"), "-Python", sys.executable, "-Main", str(main)],
+                                env=self.env)
+        self.addCleanup(loop.wait)
+        self.addCleanup(loop.kill)
+        status = self.home / ".local/state/task-hub/slack-triage-hotkey.status"
+        end = time.time() + 30
+        while time.time() < end and not status.exists():
+            time.sleep(0.25)
+        self.assertEqual(status.read_text(encoding="utf-8").strip(), "ok Ctrl+Alt+Shift+Q")
+        keys = (0x11, 0x12, 0x10, 0x51)  # Ctrl, Alt, Shift, Q
+        for k in keys:
+            ctypes.windll.user32.keybd_event(k, 0, 0, 0)
+        for k in reversed(keys):
+            ctypes.windll.user32.keybd_event(k, 0, 2, 0)  # KEYEVENTF_KEYUP
+        end = time.time() + 10
+        while time.time() < end and not mark.exists():
+            time.sleep(0.25)
+        if not mark.exists():
+            self.skipTest("keys cannot be sent to this session")
+        # a new key, then off: the program reads the config again by itself
+        self.config(hotkey_key="w", hotkey_mods="ctrl,alt,shift")
+        end = time.time() + 10
+        while time.time() < end and "W" not in status.read_text(encoding="utf-8"):
+            time.sleep(0.25)
+        self.assertEqual(status.read_text(encoding="utf-8").strip(), "ok Ctrl+Alt+Shift+W")
+        self.config(hotkey_key="w", hotkey_mods="ctrl,alt,shift", enabled=False)
+        self.assertEqual(loop.wait(15), 0)
+        self.assertEqual(status.read_text(encoding="utf-8").strip(), "off")
 
     def test_check_and_the_key_on_windows(self):
         self.config(owner_name="佐藤 花子", candidates=[])
