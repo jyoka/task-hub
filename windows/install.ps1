@@ -171,7 +171,11 @@ function Get-ListedSum($list, $name) {  # from "<sha256>  <name>" lines
 }
 
 function Confirm-Sum($file, $want) {  # stops unless the file's SHA-256 is $want
-  $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+  # .NET, not Get-FileHash or Expand-Archive: they live in modules, and 5.1 may not load them when PSModulePath has
+  # PowerShell 7's folders (seen on GitHub Actions)
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $s = [IO.File]::OpenRead($file)
+  try { $got = -join ($sha.ComputeHash($s) | ForEach-Object { $_.ToString('x2') }) } finally { $s.Dispose(); $sha.Dispose() }
   if (-not $want -or $got -ne $want.ToLowerInvariant()) {
     Die "$(Split-Path -Leaf $file) のチェックサムが合いません(一覧: $want、実際: $got)。入れていません" `
       '時間をおいてもう一度実行してください。続くときは task-hub の担当者に知らせてください'
@@ -180,7 +184,7 @@ function Confirm-Sum($file, $want) {  # stops unless the file's SHA-256 is $want
 
 function Expand-To($zip, $dir) {
   if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
-  try { Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force }
+  try { Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($zip, $dir) }
   catch { Die "$(Split-Path -Leaf $zip) を展開できませんでした" 'もう一度実行してください' }
 }
 
