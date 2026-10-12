@@ -41,7 +41,6 @@
 - 管理者権限(UAC)が要ることは一切しません。winget も MSI も使いません。実機で、winget の GitHub CLI(MSI)は
   静かなアンインストールが 1603 で失敗し、UAC を求めました
 - WSL は使いません。`bin/task` は Python 標準ライブラリだけのままです。Windows PowerShell 5.1 で動かします
-- Slackトリアージ(段階 11)は Mac だけです(swiftc と launchd を使う)
 - herdr、Claude Code の task-board mod は今までどおり Windows では使いません
 
 ## 変わる部品(HLD)
@@ -108,7 +107,7 @@ Mac の段階の番号をそのまま使います。ドキュメントと診断�
 | 8. 設定 | `install-board config`、`task list` | 同じ(Windows の分岐あり) |
 | 9. Kiro との連携 | スキルと steering はリンク、フックとワークフローはコピー、Workflows を有効に | スキルはジャンクション、steering はコピー。フックとワークフローはコピーし、コマンドを Windows の形に書き換える。Workflows を有効に(Mac と同じ helper) |
 | 10. 常駐 | `--with-launchd`、`--start-launchd` | `-Watch`(本人が「はい」と言ってから) |
-| 11. Slackトリアージ | swiftc と launchd | なし(行を出さない) |
+| 11. Slackトリアージ | swiftc と launchd | 起動キーは Ctrl+Alt+S。PowerShell の小さな常駐が RegisterHotKey で待ち、サインインで始まる(タスク 10、11) |
 | 12. 診断 | `kiro/doctor.sh` | `windows/doctor.ps1` |
 
 各段階の中身:
@@ -430,6 +429,8 @@ Kiro IDE の上でどう見えるかです。
 | 5 | `windows/doctor.ps1` と、インストーラの最後の診断 | 4 | 再現テストの 8 が通る。何も書かない(実行の前後で `USERPROFILE` の下が同じ) |
 | 6 | `windows/uninstall.ps1` と `-Uninstall` の別名 | 4 | 再現テストの 9、11 と、記録がないときの今の動きが通る。lld.md の 9 章に約束 |
 | 9 | フックとワークフローを Windows でも: `task-events-since` を Python に、Windows のコピーのコマンドの書き換え、Workflows を有効に、`/chief` の文 | 4 | Mac の今のテスト(`tests/test_install.py` のフックとワークフロー)が変わらず通る。Windows で、偽物の出来事から `task-events-since` と `task-events-watch` が Mac と同じ出力を出す(`test_windows.py`)。置いたコピーのコマンドが、記録した python と clone のフルパス。同僚の Kiro IDE で、カードが In review になったあとの最初のチャットに出来事が入る |
+| 10 | Slackトリアージを Windows で: `winui.py`、クリップボード、`check`、`key` の Windows のキーの名前 | 4 | 偽物のダイアログとクリップボードで、スレッドから `task new` まで通る(`test_windows.py`)。Mac のテストが変わらず通る |
+| 11 | Slackトリアージの起動キーと段階 11: `windows/slack-triage-hotkey.ps1`、サインインでの開始、記録、アンインストール | 10、6 | CI で `RegisterHotKey` が成功し、`off` で止まり、アンインストールで消える。同僚の PC で Ctrl+Alt+S から登録まで |
 | 8 | CI: 管理者でないユーザーの通しと、版を出す前の手動の実行(本物の試験用ボード、Secrets のトークン、偽物のエージェント) | 4 | push のたびに標準ユーザーの通しが通る(動かせなければ理由を PR に書き、人の確認に回す)。Actions の画面のボタンで、試験用ボードのカードが PR まで進み、終わると片付く |
 | 7 | 入口の切り替え: `.kiro/steering/setup.md`、スキルの Windows の `task` の行、`bin/task` の `cmd_update` の文、`docs/windows-quickstart.md`(新規)、windows.md、README の両方、kiro-ide.md の版の出し方に Windows の確認 | 5、6 | `SteeringTest` が両方の OS の行を確かめる。README の 2 つが同じ内容。人が実機で「確かめ方」の 1〜10 を通す(この PR のマージの前) |
 
@@ -471,6 +472,25 @@ task new --title "Windows かんたんセットアップ 3: 段階 4〜6" --repo
   直します
 - windows.md 3 章は gh を winget で入れるよう勧めています。実機では、その MSI を消すときに UAC が要りました。
   手で入れる人向けの説明として残すかは、タスク 7 で決めます
+
+## Slackトリアージを Windows でも(タスク 10、11)
+
+利用者(2026-10-12): 同僚の多くが Windows で、Slackトリアージが要る。Mac だけのものは外側だけで、中身
+(`slack-triage/app/slack_triage/core.py`、Kiro の専用エージェント、`task new`)はそのまま使えます。
+
+| Mac だけのもの | Windows |
+|---|---|
+| 起動キー ⌃⌥S(`slack-triage/hotkey/main.swift` を swiftc で作り、launchd で常駐) | Ctrl+Alt+S。`windows/slack-triage-hotkey.ps1`(新規)が `Add-Type` の小さな C# で `RegisterHotKey` を呼び、押されたら `slack-triage` を起動する。サインインで始める(常駐と同じく、タスク スケジューラか、拒まれたらスタートアップ)。管理者権限は要らない |
+| クリップボード(`pbpaste`) | Windows のクリップボード(Unicode のテキスト)。Python から読む方法(tkinter か、PowerShell の `Get-Clipboard`)は実装で決める |
+| ダイアログ(`macui.py`、osascript) | `winui.py`(新規)。Python に付いてくる tkinter で、`macui.py` と同じ関数(確認、入力、複数選択、タスク案)を作る。uv の Python に tkinter があるかを最初に確かめる |
+| `slack-triage key`、`off`、`on`、`check` | 同じ名前で動くようにする。キーの名前は Ctrl、Alt、Shift、Win |
+
+- Ctrl+Alt は、キーボードの配列によっては AltGr と同じになる。日本語と英語の配列では問題ないはずだが、ほかのアプリと
+  ぶつかったときのため `slack-triage key` で変えられるようにする(Mac と同じ)。`RegisterHotKey` は、ほかのアプリが
+  同じキーを取っていると失敗するので、そのときは `check` で分かるようにする(Mac にはない利点)
+- 確かめ方: CI では、ダイアログとクリップボードの部分を偽物にして、`core` から `task new` までを通す。起動キーは
+  `RegisterHotKey` が成功することだけを確かめる。押して出るか、ダイアログが日本語で読めるかは、人が確かめる
+  (同僚の PC)
 
 ## 決めたこと
 

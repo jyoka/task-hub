@@ -274,6 +274,7 @@ sequenceDiagram
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup` | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
+| `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`user-path`(ユーザーの PATH に足した項目) |
 
 `state` は `~/.local/state/task-hub`、`share` は `~/.local/share/task-hub` です。
 
@@ -389,7 +390,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `tests/test_task.py`: `bin/task` を別プロセスで動かすブラックボックスのテスト。GitHub は 1 つの JSON ファイルを
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
-- `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)
+- `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階は、
+  一時的なユーザーフォルダー、偽物の GitHub Releases(手元の HTTP サーバー)、HKCU の下のテスト用の鍵を
+  ユーザーとマシンの環境(PATH)にして動かし、本物の PATH を変えない
 - `tests/test_run.py`: `tests/run.py` そのもの(既定の並べる数、低い優先度、全部のテストのロック)。Windows の CI でも動く
 - `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`)
 - `python3 tests/run.py`: テストを 1 件ずつ別プロセスで 2 つずつ、低い優先度で動かす(約 8 分)。全部のテストは 1 台に同時に 1 つ

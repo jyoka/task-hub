@@ -3,6 +3,8 @@
 The fakes are test_task.py's, each behind an .exe launcher as pip makes them for console scripts: Windows runs
 no #! line, and a batch file cuts a prompt of several lines at the first line break. They lock with a small
 fcntl stand-in (msvcrt), so they run unchanged.
+SetupTest runs windows/install.ps1's stages in a temporary user folder, with GitHub Releases a local server and the
+user's and machine's PATH in test keys under HKCU (TASK_INSTALL_USER_ENV, TASK_INSTALL_MACHINE_ENV).
 TASK_TEST_WINDOWS_INSTALL=1 (CI only) also runs windows/install.ps1 for real: it installs into this user's
 profile, PATH and Task Scheduler, since the scheduled watch runs as the user, whatever a test sets.
 """
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -312,6 +315,172 @@ class InstallBoardTest(unittest.TestCase):
         self.assertIn(r"~\.config\task-hub\config.ini がありません", r.stdout)
         self.assertIn("windows\\install.ps1", r.stdout)
         self.assertNotIn("sh kiro/install.sh", r.stdout)
+
+
+def exe_bytes(script):
+    with tempfile.TemporaryDirectory() as d:
+        write_exe(Path(d) / "x.exe", script)
+        return (Path(d) / "x.exe").read_bytes()
+
+
+FAKE_UV = r'''
+import json, os, sys
+log = os.environ["TASK_TEST_UV_LOG"]
+a = sys.argv[1:]
+with open(log, "a") as f:
+    f.write(json.dumps(a) + "\n")
+if a == ["python", "install", "3.12"]:
+    open(log + ".installed", "w").close()
+    sys.exit(0)
+if a[:2] == ["python", "find"] and os.path.exists(log + ".installed"):
+    print(sys.executable)  # "uv's Python" is this one
+    sys.exit(0)
+sys.exit(2)
+'''
+
+
+@unittest.skipUnless(WINDOWS and os.environ.get("PROCESSOR_ARCHITECTURE") == "AMD64", "Windows on x64 only")
+class SetupTest(unittest.TestCase):
+    """windows/install.ps1, stages 1 to 3, as a person with no admin rights runs it: what is missing comes from GitHub
+    Releases (a local server), checked by its SHA-256, into the user folder, and is recorded."""
+    GH_TAG, UV_TAG, GIT_TAG = "v2.0.0", "0.9.0", "v2.56.0.windows.2"
+    GH_ZIP, UV_ZIP, GIT_ZIP = "gh_2.0.0_windows_amd64.zip", "uv-x86_64-pc-windows-msvc.zip", "MinGit-2.56.0.2-64-bit.zip"
+
+    def setUp(self):
+        import test_install
+        import winreg
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.home = root / "ユーザー"
+        self.home.mkdir()
+        self.uv_log = root / "uv.log"
+        srv = self.srv = test_install.Releases()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        gh = test_install.zip_bytes({"LICENSE": "MIT", "bin/gh.exe": exe_bytes('print("gh version 2.0.0 (fake)")\n')})
+        uv = test_install.zip_bytes({"uv.exe": exe_bytes(FAKE_UV)})
+        git = test_install.zip_bytes({"cmd/git.exe": exe_bytes(
+            f"import subprocess, sys\nsys.exit(subprocess.call([{shutil.which('git')!r}, *sys.argv[1:]]))\n")})
+        sha = test_install.sha256
+        srv.redirects.update({"/cli/cli/releases/latest": f"/cli/cli/releases/tag/{self.GH_TAG}",
+                              "/astral-sh/uv/releases/latest": f"/astral-sh/uv/releases/tag/{self.UV_TAG}",
+                              "/git-for-windows/git/releases/latest": f"/git-for-windows/git/releases/tag/{self.GIT_TAG}"})
+        srv.files.update({
+            f"/cli/cli/releases/download/{self.GH_TAG}/{self.GH_ZIP}": gh,
+            f"/cli/cli/releases/download/{self.GH_TAG}/gh_2.0.0_checksums.txt":
+                f"{'0' * 64}  gh_2.0.0_windows_arm64.zip\n{sha(gh)}  {self.GH_ZIP}\n".encode(),
+            f"/astral-sh/uv/releases/download/{self.UV_TAG}/{self.UV_ZIP}": uv,
+            f"/astral-sh/uv/releases/download/{self.UV_TAG}/{self.UV_ZIP}.sha256": f"{sha(uv)}  {self.UV_ZIP}\n".encode(),
+            f"/git-for-windows/git/releases/download/{self.GIT_TAG}/{self.GIT_ZIP}": git,
+            f"/api/repos/git-for-windows/git/releases/tags/{self.GIT_TAG}": json.dumps(
+                {"tag_name": self.GIT_TAG, "body": "",
+                 "assets": [{"name": "MinGit-2.56.0.2-arm64.zip", "digest": "sha256:" + "0" * 64},
+                            {"name": self.GIT_ZIP, "digest": "sha256:" + sha(git)}]}).encode()})
+        # this test's "registry": the user's and the machine's environment
+        self.reg = rf"Software\task-hub-test\{os.getpid()}-{id(self)}"
+        self.addCleanup(self.delete_key, winreg.HKEY_CURRENT_USER, self.reg)
+        system = Path(os.environ["SystemRoot"]) / "System32"
+        self.env = {**os.environ, "USERPROFILE": str(self.home), "HOME": str(self.home),
+                    "PATH": f"{system};{system / 'WindowsPowerShell' / 'v1.0'}",  # no git, Python or gh
+                    "TASK_INSTALL_GITHUB": srv.url, "TASK_INSTALL_GITHUB_API": srv.url + "/api",
+                    "TASK_INSTALL_USER_ENV": self.reg + r"\user", "TASK_INSTALL_MACHINE_ENV": self.reg + r"\machine",
+                    "TASK_TEST_UV_LOG": str(self.uv_log)}
+        for k in ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONHOME", "VIRTUAL_ENV"):
+            self.env.pop(k, None)
+
+    def delete_key(self, hive, path):
+        import winreg
+        try:
+            with winreg.OpenKey(hive, path) as k:
+                while True:
+                    try:
+                        sub = winreg.EnumKey(k, 0)
+                    except OSError:
+                        break
+                    self.delete_key(hive, rf"{path}\{sub}")
+            winreg.DeleteKey(hive, path)
+        except FileNotFoundError:
+            pass
+
+    def set_path(self, which, *dirs):
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{self.reg}\{which}") as k:
+            winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(map(str, dirs)))
+
+    def user_path(self):
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{self.reg}\user") as k:
+            return winreg.QueryValueEx(k, "Path")[0].split(";")
+
+    def install(self, code=0):
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                            str(REPO / "windows" / "install.ps1"), "-From", str(REPO)],
+                           env=self.env, capture_output=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+        return r.stdout
+
+    def manifest(self):
+        return json.loads((self.home / ".local/state/task-hub/install-manifest.json").read_text(encoding="utf-8"))
+
+    def test_a_bare_pc_gets_git_python_and_gh_then_nothing_twice(self):
+        out = self.install()
+        self.assertIn("task-hub をセットアップします(管理者権限は使いません)", out)
+        self.assertIn(r"git 2.56.0.2(MinGit、~\.local\lib\git)", out)
+        self.assertIn("1. 前提の確認: 入れました(", out)
+        self.assertIn("2. Python: 入れました(uv で Python 3.12", out)
+        self.assertIn(r"3. gh: 入れました(gh 2.0.0、~\.local\bin\gh.exe)", out)
+        git_cmd, bindir = self.home / ".local/lib/git/cmd", self.home / ".local/bin"
+        for f in (git_cmd / "git.exe", bindir / "uv.exe", bindir / "gh.exe", bindir / "task.cmd"):
+            self.assertTrue(f.exists(), f)
+        self.assertEqual(json.loads(self.uv_log.read_text().splitlines()[0]), ["python", "install", "3.12"])
+        m = self.manifest()
+        self.assertEqual(m["python"], sys.executable)
+        self.assertEqual(m["installed"], {"git": str(self.home / ".local/lib/git"), "git-path": str(git_cmd),
+                                          "uv": str(bindir / "uv.exe"), "uv-python": "3.12",
+                                          "gh": str(bindir / "gh.exe"), "user-path": str(bindir)})
+        self.assertEqual(self.user_path()[:2], [str(bindir), str(git_cmd)])
+        r = subprocess.run([str(bindir / "task.cmd"), "--version"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        self.srv.log.clear()
+        out = self.install()
+        for line in ("1. 前提の確認: 済み(", f"2. Python: 済み({sys.executable})", r"3. gh: 済み(~\.local\bin\gh.exe)"):
+            self.assertIn(line, out)
+        self.assertEqual(self.srv.log, ["/"])  # only "does GitHub answer"
+        self.assertEqual(self.manifest(), m)
+
+    def test_finds_what_was_installed_after_the_window_opened(self):
+        # git and Python are in the registry's PATH, not in this process's (Kiro was started before)
+        self.set_path("machine", Path(shutil.which("git")).parent)
+        self.set_path("user", Path(sys.executable).parent)
+        out = self.install()
+        self.assertIn("1. 前提の確認: 済み(", out)
+        self.assertIn(f"2. Python: 済み({sys.executable} を使います)", out)
+        self.assertNotIn("/git-for-windows/git/releases/latest", self.srv.log)
+        self.assertFalse(self.uv_log.exists())
+        self.assertEqual(self.manifest()["python"], sys.executable)
+        self.assertNotIn("uv", self.manifest()["installed"])
+
+    def test_a_checksum_that_does_not_match_installs_nothing(self):
+        self.set_path("machine", Path(shutil.which("git")).parent)
+        self.set_path("user", Path(sys.executable).parent)
+        self.srv.files[f"/cli/cli/releases/download/{self.GH_TAG}/gh_2.0.0_checksums.txt"] = \
+            f"{'1' * 64}  {self.GH_ZIP}\n".encode()
+        out = self.install(code=1)
+        self.assertIn(f"3. gh: 止まりました。{self.GH_ZIP} のチェックサムが合いません(一覧: {'1' * 64}、", out)
+        self.assertIn("次にすること: 時間をおいてもう一度実行してください", out)
+        self.assertFalse((self.home / ".local/bin/gh.exe").exists())
+        self.assertNotIn("gh", self.manifest().get("installed", {}))
+
+    def test_scripts_with_japanese_are_saved_with_a_bom(self):
+        # Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code page: the Japanese would be garbled
+        for f in (REPO / "windows").glob("*.ps1"):
+            data = f.read_bytes()
+            if any(b > 127 for b in data):
+                self.assertTrue(data.startswith(b"\xef\xbb\xbf"), f)
 
 
 @unittest.skipUnless(WINDOWS and os.environ.get("TASK_TEST_WINDOWS_INSTALL") == "1",
