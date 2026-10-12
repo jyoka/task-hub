@@ -267,7 +267,8 @@ you/app = uv venv -q .venv
 - プログラム(uv、npm など)が失敗しても、その場では止まらず次の行に進みます。最後に残った終了コードが 0 以外なら、
   最後に失敗にします。その場で止めたい行のあとには `if ($LASTEXITCODE) { exit $LASTEXITCODE }` を書きます
 - プログラムに `2>&1` や `2>$null` を付けないでください。エラー出力が 1 行でも出ると、そこで失敗になります
-- 準備で作ったファイルは、git が無視するものでなければなりません(uv の `.venv` はそのままで大丈夫です)
+- 準備で作ったファイルは、git が無視するものでなければなりません(uv の `.venv` はそのままで大丈夫です)。
+  リポジトリのファイルを書き換えてもいけません(`npm install` が `package-lock.json` を書き換えるなど。`npm ci` なら書き換えません)
 
 ## 6. 1 件だけ手で動かして確かめる
 
@@ -385,6 +386,10 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 - 消すのは、インストーラが入れたと記録したもの(`~\.local\state\task-hub\install-manifest.json`)だけです。
   常駐、Slackトリアージの起動キーとコマンド、Kiro のスキルと steering、フックとワークフロー、`task.cmd`、ユーザーの PATH に足した項目、本体(`~\.local\lib\task-hub`)、
   インストーラが入れた git、gh、kiro-cli、Python と uv、インストーラが作った設定ファイル。もとからあったものは消しません
+  (uv にもとからあった Python 3.12 も消しません。その上に作った仮想環境が動かなくなるためです)
+- インストーラが入れた gh を消すときは、git がその gh で GitHub にログインする設定(`~\.gitconfig` の
+  `credential.<URL>.helper`)も外します。残すと、消した gh を探して、GitHub への fetch や push が失敗するためです。
+  ほかの credential の設定には触れません
 - 作業中のタスクがあるときは、常駐(見張り)だけを止めて、ほかは残します。作業は最後まで動きます。作業が終わったら、
   もう一度実行します
 - 消さないもの: GitHub のボードとログイン、kiro-cli のログイン、`~\.local\state\task-hub` と `~\.local\share\task-hub`
@@ -434,9 +439,9 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | `ログインの窓を開けませんでした` | 新しい PowerShell の窓を開けなかった | 表示されたファイルを、エクスプローラーで右クリックして「PowerShell で実行」する |
 | `GitHub にログインしていません。開いた窓で…` | ログインの途中 | 開いた窓でブラウザの承認を終え、窓を閉じて、もう一度実行する。窓が見えなければ、タスクバーを見る |
 | `環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません` | 以前の設定でトークンを環境変数に入れている | その環境変数を消してサインインし直すか、`project` の権限があるトークンにする |
-| `error: could not clone ...` | ネットワークに出られない(会社のプロキシ)、または URL の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
-| `error: could not update C:\Users\...\.local\lib\task-hub` | 本体のフォルダーを手で書き換えた | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
-| `error: ...task.cmd does not run` | Python か本体のフォルダーが壊れている | 表示された help のコマンドを実行して、出たエラーを担当者に伝える |
+| `… を clone できませんでした` | ネットワークに出られない(会社のプロキシ)、または URL や `-Ref` の版の名前の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
+| `~\.local\lib\task-hub を更新できませんでした(…)。今の版のまま進めます` | ネットワークに出られなかった、または本体のフォルダーを手で書き換えた。止まらず、今の版で続けます | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
+| `~\.local\bin\task.cmd が動きません(…)` | Python か本体のフォルダーが壊れている | 表示された内容を担当者に伝える |
 | `タスク スケジューラに断られたので(…)、スタートアップ フォルダーに置きました` | 会社のポリシーで、タスク スケジューラが使えない | エラーではありません。スタートアップ フォルダーで常駐します(手順 10 の #1 として伝える) |
 | `~\.kiro\steering\task-hub.md は、このインストーラが入れた内容と確認できないので書き換えていません` | そのファイルを手で書き換えた(または以前に手で置いた) | 中身を確かめて別の場所に移してから、もう一度実行する |
 
@@ -467,6 +472,7 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | ログに `agent cannot run: its command line is over Windows' 32,767 characters` | プロンプト(Goal や前回のレポート)が長すぎて、Windows のコマンドの長さの上限(約 32,000 文字)を超えた | Goal を短くするか、タスクを分ける |
 | `setup failed (exit N), see task log N` | `[setup]` のコマンドが失敗した | `task log <番号> --full` で `== setup:` のあとを読む。作業フォルダー(`task open <番号>` で場所が出る)で、同じコマンドを手で動かして確かめる |
 | `setup left files git would commit (...)` | 準備で作ったファイルが、git に無視されていない | そのファイルをリポジトリの `.gitignore` に足すか、`[setup]` を変える |
+| `setup changed files of the repository (...)` | 準備がリポジトリのファイルを書き換えた(`npm install` と `package-lock.json` など) | 書き換えないコマンドにする(`npm ci` など) |
 | `the run stopped unexpectedly` | 作業のプロセスが止まった(PC の再起動やシャットダウン、タスク スケジューラで「終了」を押した) | Ready に戻せば、続きからやり直します |
 | `agent exited without a report (exit N)` | エージェントが途中で落ちた、ログインが切れた、またはクレジットを使い切った | `task log <番号> --full` の最後のほうを読む |
 
@@ -533,7 +539,8 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 - 日本語のタスクが PR まで進むこと(複数行のプロンプトが切れずに届く)
 - 作業中の判定(動いている間は In progress のまま、殺すと Blocked。同じ番号のプロセス ID が別のプロセスに
   使い回されても、作業中とは見なさない)
-- 見張りを入れたジョブ(タスク スケジューラが常駐を動かす入れ物)を閉じても、作業は抜け出していて続くこと
+- 見張りを入れたジョブ(タスク スケジューラが常駐を動かす入れ物)を閉じても、作業は抜け出していて続くこと。
+  GitHub Actions ではテスト自体が抜け出せないジョブの中で動くので skip になり、手元の Windows でだけ確かめられる
 - `env NAME=値` の置き換え、npm の .cmd(node のスクリプトと .exe の両方。node は .cmd の隣のものを使う)
 - npm の .cmd ではないバッチファイルや、Windows のコマンドの長さの上限を超える Goal は、理由をログに出して
   Blocked になること

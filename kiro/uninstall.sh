@@ -18,7 +18,7 @@ MARK='task-hub: made by kiro/install.sh'
 # The order things are removed in: launchd first (it runs task watch, and the key of Slack triage), then Kiro's files,
 # then what they use; uv last, after the Python it installed.
 KEYS="launchd slack-triage-launchd slack-triage kiro-hook kiro-workflow kiro-steering kiro-skill-task kiro-skill-chief
-  kiro-settings config zprofile task task-hub kiro-cli kiro-cli-app gh uv-python uv"
+  kiro-settings config zprofile task task-hub kiro-cli kiro-cli-app git-credential gh uv-python uv"
 
 yes=
 for a in "$@"; do
@@ -67,7 +67,18 @@ unzprofile() {  # the comment and the line after it that the installer added (wi
     END {
       for (i = 1; i <= NR; i++) if (line[i] == c && line[i + 1] == l) { drop[i] = drop[i + 1] = 1; if (line[i - 1] == "") drop[i - 1] = 1 }
       for (i = 1; i <= NR; i++) if (!drop[i]) print line[i]
-    }' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" && mv -f "$HOME/.zprofile.tmp" "$HOME/.zprofile"
+    }' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || return
+  # written back through it, not moved over it: a ~/.zprofile kept as a link (dotfiles, stow) stays one
+  cat "$HOME/.zprofile.tmp" > "$HOME/.zprofile" && rm -f "$HOME/.zprofile.tmp"
+}
+gh_helpers() {  # $1: a gh. The credential.<url>.helper keys in ~/.gitconfig that run it, one per line
+  git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null \
+    | awk -v gh="$1" 'index(substr($0, length($1) + 2), gh) { print $1 }' | sort -u
+}
+ungit_credential() {  # $1: the keys. All of a key's lines: setup-git also wrote an empty one that turns off the
+  for h in $1; do       # helper before it (the keychain), which is then used again
+    git config --global --unset-all "$h" || return
+  done
 }
 unuv_python() {  # $1: uv, $2: the version. The link uv made in ~/.local/bin goes too
   UV_PYTHON_BIN_DIR=$BIN_DIR "$1" python uninstall "$2" || return
@@ -96,6 +107,12 @@ for k in $KEYS; do
     zprofile)
       grep -qxF "$ZPROFILE_COMMENT" "$HOME/.zprofile" 2>/dev/null || continue
       remove "~/.zprofile の task-hub の行($v)" unzprofile "$v"
+      ;;
+    git-credential)  # git asking the installer's gh for GitHub's login (gh auth setup-git): before gh goes
+      [ "$v" = "$(get installed.gh)" ] || continue  # a gh of the user's stays, and git may go on using it
+      helpers=$(gh_helpers "$v")
+      [ -n "$helpers" ] || continue
+      remove "git が GitHub のログインに $(tilde "$v") を使う設定(~/.gitconfig)" ungit_credential "$helpers"
       ;;
     uv-python)  # a version, in ~/.local/share/uv/python
       uv=$(get installed.uv) || uv=$(command -v uv 2>/dev/null) || uv=

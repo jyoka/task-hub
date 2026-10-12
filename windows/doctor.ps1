@@ -316,8 +316,10 @@ if ($task) {
   if ("$($task.State)" -eq 'Running') { Ok "タスク スケジューラの「$TaskName」、動いています" }
   else { Ng "タスク スケジューラの「$TaskName」はありますが、動いていません($($task.State))" $again }
 } elseif ([IO.File]::Exists($Startup)) {
+  # by its long or its short 8.3 name: a shortcut keeps the short one when the user folder has letters the code page lacks
+  $watchScript = Join-Path $Lib 'windows\task-watch.ps1'
   $loop = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains('task-watch.ps1') }
+    Where-Object { Test-Runs $_.CommandLine $watchScript }
   if ($loop) { Ok 'スタートアップ フォルダー、動いています' }
   else { Ng 'スタートアップ フォルダーにありますが、動いていません' ('サインインし直すか、' + $again) }
 } else {

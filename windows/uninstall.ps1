@@ -12,7 +12,7 @@
   Running it again is safe: what is gone already is skipped.
   Without a manifest (an install from before the easy setup) it stops the watch and removes task.cmd and `task`, as
   install.ps1 -Uninstall did.
-  For tests: TASK_INSTALL_USER_ENV, as windows/install.ps1.
+  For tests: TASK_INSTALL_USER_ENV and TASK_INSTALL_MACHINE_ENV, as windows/install.ps1.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1
@@ -33,7 +33,24 @@ $Again = 'powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes'
 # uv last, after the Python it installed. PATH entries go before the folders they name.
 $Keys = 'watch', 'slack-triage-autostart', 'slack-triage', 'kiro-hook', 'kiro-workflow', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'kiro-settings',
   'config', 'task', 'task-sh', 'user-path',
-  'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'gh', 'uv-python', 'uv', 'git'
+  'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'git-credential', 'gh', 'uv-python', 'uv', 'git'
+
+function Find-Git {  # the installer's MinGit (it goes last), else the one on PATH
+  if ($installed.git) {
+    $g = Join-Path $installed.git 'cmd\git.exe'
+    if ([IO.File]::Exists($g)) { return $g }
+  }
+  Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.Source }
+}
+
+function Get-GhHelperKeys($git, $gh) {  # the credential.<url>.helper keys in ~\.gitconfig that run this gh.exe
+  $ErrorActionPreference = 'Continue'
+  $want = $gh.Replace('\', '/')  # as gh writes it, or with / (git reads a \ there as an escape)
+  @(& $git config --global --get-regexp '^credential\..*\.helper$' 2>$null) | ForEach-Object {
+    $key, $value = "$_" -split ' ', 2
+    if ($value -and $value.Replace('\', '/').IndexOf($want, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $key }
+  } | Select-Object -Unique
+}
 
 function Tilde($p) { if ("$p".StartsWith("$Root\")) { '~' + "$p".Substring($Root.Length) } else { "$p" } }
 function Mine($p) { "$p".StartsWith("$Root\") -and "$p".Length -gt $Root.Length + 1 }  # never outside the user folder
@@ -101,6 +118,15 @@ function Remove-UserPath($dir) {
   if (-not $hook) { [Environment]::SetEnvironmentVariable('TASK_HUB_PATH_CHANGED', $null, 'User') }  # tells Explorer
 }
 
+function Read-EnvPath($which) {  # as in install.ps1, read only
+  $hook = if ($which -eq 'User') { $env:TASK_INSTALL_USER_ENV } else { $env:TASK_INSTALL_MACHINE_ENV }
+  $k = if ($hook) { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($hook) }
+       elseif ($which -eq 'User') { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment') }
+       else { [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment') }
+  if (-not $k) { return '' }
+  try { return [string]$k.GetValue('Path', '') } finally { $k.Close() }
+}
+
 function Test-OnUserPath($dir) {
   $hook = $env:TASK_INSTALL_USER_ENV
   $k = if ($hook) { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($hook) }
@@ -121,22 +147,25 @@ function Get-JunctionTarget($p) {  # where a junction leads, or $null when it is
   return $null
 }
 
+function Read-Board {  # [board] of config.ini, for the guide at the end: read before -Yes may remove the file
+  $config = Join-Path $Root '.config\task-hub\config.ini'
+  $script:project, $script:issues = '', ''
+  if (-not (Test-Path -LiteralPath $config)) { return }
+  $board = $false
+  foreach ($line in [IO.File]::ReadAllLines($config)) {
+    if ($line -match '^\s*\[(.+)\]') { $board = $Matches[1] -eq 'board' }
+    elseif ($board -and $line -match '^\s*(project|issues)\s*[=:]\s*([^;#\s]+)') {
+      if ($Matches[1] -eq 'project') { $script:project = $Matches[2] } else { $script:issues = $Matches[2] }
+    }
+  }
+}
+
 function Show-Kept {
   Write-Host '消さないもの:'
   Write-Host '- GitHub のログイン(gh)と kiro-cli のログイン'
   Write-Host '- task-hub のデータ: ~\.local\share\task-hub(worktree)、~\.local\state\task-hub(ログ、出来事)'
   if ($script:settings) { Write-Host "- $(Tilde $script:settings) の Workflows の設定(インストーラは有効にしただけです)" }
-  $config = Join-Path $Root '.config\task-hub\config.ini'
-  $project, $issues = '', ''
-  if (Test-Path -LiteralPath $config) {
-    $board = $false
-    foreach ($line in [IO.File]::ReadAllLines($config)) {
-      if ($line -match '^\s*\[(.+)\]') { $board = $Matches[1] -eq 'board' }
-      elseif ($board -and $line -match '^\s*(project|issues)\s*[=:]\s*([^;#\s]+)') {
-        if ($Matches[1] -eq 'project') { $project = $Matches[2] } else { $issues = $Matches[2] }
-      }
-    }
-  }
+  $project, $issues = $script:project, $script:issues
   if ($project -or $issues) {
     Write-Host "- GitHub のボード($(if ($issues) { $issues } else { '?' }) と Project $(if ($project) { $project } else { '?' }))。要らなければ、GitHub の画面で消します:"
     if ($issues) { Write-Host "    リポジトリ: https://github.com/$issues/settings の一番下「Delete this repository」" }
@@ -182,6 +211,10 @@ if ($runs -and $Yes) {
 }
 
 $installed = $m.installed
+# as the installer and the diagnosis see them: what is on the registry's PATH, though this window may have been opened
+# before it changed. Else the user's own uv (for the Python it installed) or git would not be found
+$env:Path = (@((Read-EnvPath 'Machine'), (Read-EnvPath 'User'), $env:Path) | Where-Object { $_ }) -join ';'
+Read-Board
 foreach ($k in $Keys) {
   $v = if ($installed) { $installed.$k } else { $null }
   if (-not $v) { continue }
@@ -233,6 +266,22 @@ else { Remove-Item -LiteralPath '$($v -replace "'", "''")' }
       if (-not (Mine $v) -or -not (Test-Path -LiteralPath (Join-Path $v $mark))) { continue }
       $what = @{ 'task-hub' = 'task-hub の clone'; 'kiro-cli' = 'kiro-cli'; 'git' = 'git(MinGit)' }[$k]
       Remove-Thing "$(Tilde $v)($what)" ([scriptblock]::Create("Remove-Item -LiteralPath '$($v -replace "'", "''")' -Recurse -Force"))
+    }
+    'git-credential' {  # git asking the installer's gh.exe for GitHub's login (gh auth setup-git): before gh.exe goes
+      if ($v -ne $installed.gh) { continue }  # a gh of the user's stays, and git may go on using it
+      $git = Find-Git
+      if (-not $git) { continue }
+      $helpers = @(Get-GhHelperKeys $git $v)
+      if (-not $helpers) { continue }
+      # all of a key's lines: setup-git also wrote an empty one that turns off the helper before it (Git Credential
+      # Manager), which is then used again
+      Remove-Thing "git が GitHub のログインに $(Tilde $v) を使う設定(~\.gitconfig)" ({
+        $ErrorActionPreference = 'Continue'
+        foreach ($h in $helpers) {
+          $o = & $git config --global --unset-all $h 2>&1
+          if ($LASTEXITCODE) { throw ((@($o) | Select-Object -Last 1) -join '') }
+        }
+      }.GetNewClosure())
     }
     'uv-python' {  # a version, where uv keeps its Pythons
       $uv = if ($installed.uv -and (Test-Path -LiteralPath $installed.uv)) { $installed.uv } else {

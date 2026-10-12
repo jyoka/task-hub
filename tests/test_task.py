@@ -222,9 +222,16 @@ if "You triage one blocked task-hub run" in prompt:  # used as the replanner; RE
                        "## Evidence\n\n- config/keys.md:3: `STRIPE=sk_test_123`\n",
            "misquoted": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
                         "## Evidence\n\n- README.md:1: `STRIPE=sk_test_123`\n",
+           "selfmade": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                       "## Evidence\n\n- __pycache__/notes.txt:1: `STRIPE=sk_test_123`\n",
+           "tiny": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                   "## Evidence\n\n- README.md:1: `a`\n",
            "human": "## Decision\n\nhuman\n\n## For the human\n\nCould you add the Stripe test key to [env]?\n",
            "conflict": "## Decision\n\ngoal-conflict\n\n## Proposed goal change\n\nDrop the hello requirement.\n",
            "edits": None, "stagededits": None}[kind]
+    if kind == "selfmade":  # its own "evidence", in a folder git ignores: never part of the repository
+        Path("__pycache__").mkdir(exist_ok=True)
+        Path("__pycache__/notes.txt").write_text("STRIPE=sk_test_123\n")
     if out is None:
         Path("README.md").write_text("changed by the replanner\n")
         if kind == "stagededits":
@@ -287,7 +294,9 @@ if mode == "route":  # review items, then the learning route worker/PROMPT.md as
                "  - Explain yourself: why is the greeting a file, not code?\n")
 if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
-if mode != "noreport":
+if mode == "utf16":  # what PowerShell 5.1's `>` and Out-File write on Windows
+    Path(".task-report.md").write_text(report, encoding="utf-16")
+elif mode != "noreport":
     Path(".task-report.md").write_text(report)
 def set_gh(key):  # under the fake gh's lock, like every other writer
     import fcntl, json
@@ -1025,13 +1034,27 @@ class TaskTest(unittest.TestCase):
 
     def fake_running(self, tid):
         """Make a task look like a live run on this machine."""
-        proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run"])
+        proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", str(tid)])  # as `task _run`
         self.addCleanup(proc.kill)
         self.move(tid, "In progress")
         self.run_file(tid).parent.mkdir(parents=True, exist_ok=True)
         self.run_file(tid).write_text(json.dumps({"pid": str(proc.pid), "started": "2026-01-01T00:00:00Z",
                                                   "repo": "jyoka/app", "branch": f"task/{tid}"}))
         return proc
+
+    def test_a_pid_now_another_tasks_run_is_not_this_run(self):
+        # pids are handed out again (the run files outlive a restart): another task's run is not this one
+        tid = self.new()
+        proc = self.fake_running(tid)
+        proc.kill()
+        proc.wait()
+        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
+        self.addCleanup(other.kill)
+        state = json.loads(self.run_file(tid).read_text())
+        self.run_file(tid).write_text(json.dumps({**state, "pid": str(other.pid)}))
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly", self.comments(tid)[-1])
 
     # --- registering ---
 
@@ -1372,6 +1395,31 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn("voice/.env", tree)
         self.assertNotIn(".env", tree)
 
+    def test_env_destination_however_spelled_is_never_committed(self):
+        # git reads `/./voice/.env` in info/exclude as no path at all: the secret went into the PR
+        voice_env = self.root / "co" / "voice" / ".env"
+        voice_env.parent.mkdir(parents=True)
+        voice_env.write_text("VOICE=2\n")
+        for dest in ("./voice/.env", "voice//.env", "voice/../voice/.env"):
+            self.write_config(f"\n[env]\njyoka/app = {voice_env} -> {dest}\n")
+            tid = self.new("env")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review", dest)
+            bare = self.root / "origins" / "jyoka/app.git"
+            tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", f"task/{tid}"],
+                                  capture_output=True, text=True).stdout.split()
+            self.assertNotIn("voice/.env", tree, dest)
+            seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                                  capture_output=True, text=True).stdout
+            self.assertEqual(seen, "key seen: VOICE=2\n", dest)
+        src = self.root / "co" / "dup.env"
+        src.write_text("K=1\n")
+        self.write_config(f"\n[env]\njyoka/app = {src} -> .env, {src} -> ./.env\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("twice", self.comments(tid)[-1])
+
     def test_env_destination_must_stay_in_the_worktree_and_be_unique(self):
         src = self.root / "co" / ".env"
         src.parent.mkdir()
@@ -1386,6 +1434,81 @@ class TaskTest(unittest.TestCase):
             self.assertIn(why, self.comments(tid)[-1])
         self.assertEqual(self.agent_calls(), [])
         self.assertFalse((self.root / ".local/share/task-hub/worktrees/outside.env").exists())
+
+    def no_traceback(self):
+        self.assertNotIn("Traceback", self.stderr[-1])
+
+    def test_a_config_that_does_not_parse_says_where_without_a_traceback(self):
+        cfg = self.root / ".config/task-hub/config.ini"
+        good = cfg.read_text()
+        cfg.write_text(good + "\n[runner]\nagent = other\n")  # [runner] twice
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn("error: ~/.config/task-hub/config.ini cannot be read: ", out)
+        self.assertIn("section 'runner' already exists", out)
+        cfg.write_text(good + "oops\n")  # no `=`
+        line = cfg.read_text().splitlines().index("oops") + 1
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn(f"error: ~/.config/task-hub/config.ini cannot be read: line {line} is not `name = value`", out)
+
+    def test_a_run_record_cut_short_does_not_stop_every_command(self):
+        # a crash or a full disk can leave runs/<id>.json empty: task list, task watch and task done must go on
+        tid = self.new()
+        runs = self.root / ".local/state/task-hub/runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / f"{tid}.json").write_text('{"pid": "12')
+        self.task("list")
+        self.no_traceback()
+        self.task("done", tid)
+        self.no_traceback()
+        self.assertFalse((runs / f"{tid}.json").exists())
+
+    def test_a_report_in_utf16_is_read(self):
+        tid = self.new("utf16")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("Added hello.txt. Ran the tests: 3 passed.", self.comments(tid)[-1])
+
+    def test_an_event_with_a_line_separator_in_its_title_is_not_lost(self):
+        # json.dumps leaves U+2028 as it is, and str.splitlines() breaks a line there
+        tid = self.new(title="Add\u2028hello")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn(f"#{tid} In review", self.task("events", "--after", "0", "--only", "In review"))
+        self.assertIn(f"#{tid} In review", self.task("events"))
+        self.no_traceback()
+
+    def test_a_start_that_fails_on_a_file_blocks_the_card_without_a_traceback(self):
+        # not a RuntimeError (here: a folder where the repo has a file): the card is blocked with why, and a watch
+        # would go on to the next card instead of ending, and failing on this one again after every restart
+        src = self.root / "co" / ".env"
+        src.parent.mkdir()
+        src.write_text("K=1\n")
+        self.write_config(f"\n[env]\njyoka/app = {src} -> README.md/.env\n")
+        tid = self.new()
+        self.task("start", tid)
+        self.no_traceback()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("could not start", self.comments(tid)[-1])
+
+    def test_a_missing_gh_is_said_without_a_traceback(self):
+        self.env["TASK_GH"] = str(self.root / "no-such-gh")
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn(f"gh not found ({self.root / 'no-such-gh'})", out)
+        self.assertIn("help: install GitHub CLI", out)
+
+    def test_a_goal_file_that_cannot_be_read_is_said_without_a_traceback(self):
+        out = self.task("new", "--title", "t", "--repo", "jyoka/app", "--goal-file", str(self.root / "nope.md"),
+                        code=2)
+        self.no_traceback()
+        self.assertIn("error: cannot read --goal-file", out)
+        goal = self.root / "goal.md"
+        goal.write_text("Say hello. MODE:ok\n", encoding="utf-16")  # PowerShell 5.1's `>`
+        tid = re.search(r"id: (\d+)", self.task("new", "--title", "t", "--repo", "jyoka/app",
+                                                 "--goal-file", str(goal))).group(1)
+        self.assertEqual(self.gh()["issues"][tid]["body"].strip(), "Say hello. MODE:ok")
 
     def test_setup_runs_in_the_worktree_before_the_agent(self):
         # like `uv venv`: the virtualenv carries its own .gitignore, so git never sees it
@@ -1420,6 +1543,16 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertEqual(self.agent_calls(), [])
         self.assertIn("setup left files git would commit (.venv/lib.py)", self.comments(tid)[-1])
+        self.assertIsNone(self.pr(tid))
+
+    def test_setup_that_changes_tracked_files_blocks(self):
+        # like `npm install` rewriting package-lock.json: the change would land in the PR as if the agent made it
+        self.write_config("\n[setup]\njyoka/app = echo changed >> README.md\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("setup changed files of the repository (README.md)", self.comments(tid)[-1])
         self.assertIsNone(self.pr(tid))
 
     def check_script(self, name, lines, code):
@@ -1500,7 +1633,9 @@ class TaskTest(unittest.TestCase):
 
     def test_replanner_answer_that_cannot_be_verified_goes_to_the_human(self):
         self.write_config(replanner="agent")
-        for kind in ("invented", "misquoted"):  # a file that does not exist; a real line that does not say that
+        # a file that does not exist; a real line that does not say that; a file it wrote itself where git does not
+        # look; a quote too short to say anything
+        for kind in ("invented", "misquoted", "selfmade", "tiny"):
             tid = self.new(f"blocked REPLAN={kind}")
             self.task("start", tid)
             self.wait(tid)
@@ -2262,7 +2397,8 @@ class TaskTest(unittest.TestCase):
 
     def events_of(self, tid):
         path = self.events_file()
-        return [e for e in map(json.loads, path.read_text().splitlines()) if e["id"] == tid] if path.exists() else []
+        # split at \n only, as task-hub does: a title may hold U+2028, which splitlines() breaks a line at
+        return [e for e in map(json.loads, path.read_text().split("\n")[:-1]) if e["id"] == tid] if path.exists() else []
 
     def done_events(self, tid):
         return [e for e in self.events_of(tid) if e["event"] == "Done"]
@@ -3267,6 +3403,30 @@ class TaskTest(unittest.TestCase):
         second = self.agent_calls()[1]["prompt"]
         self.assertIn("An earlier run of this task stopped", second)
         self.assertIn("Need the Stripe test key.", second)
+
+    def test_rerun_takes_in_what_a_human_pushed_to_the_task_branch(self):
+        # "Update branch" on the PR, or a fix pushed by hand: the re-run starts from it, or its push is refused
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        bare = self.root / "origins" / "jyoka/app.git"
+        human = self.root / "human"
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{tid}", str(bare), str(human)], check=True,
+                       capture_output=True)
+        (human / "human.txt").write_text("pushed by a human\n")
+        subprocess.run(["git", "-C", str(human), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(human), "commit", "-qm", "by hand"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(human), "push", "-q"], check=True, capture_output=True)
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. Test key is in the vault. MODE:ok"
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
+        tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", f"task/{tid}"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("human.txt", tree)
+        self.assertIn("hello.txt", tree)
 
     def test_no_report_is_blocked(self):
         tid = self.new("noreport")

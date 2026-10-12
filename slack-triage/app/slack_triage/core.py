@@ -3,6 +3,8 @@ import json
 import re
 
 MAX_THREAD_CHARS = 40_000
+# Windows: the whole prompt goes to kiro-cli as one argument, and a command line is 32,767 characters at most
+WINDOWS_MAX_THREAD_CHARS = 28_000
 MAX_GOAL_CHARS = 6_000
 MIN_TEXT_CHARS = 10
 MAX_SUMMARY_ITEMS = 8
@@ -45,13 +47,13 @@ def looks_garbled(text):
     return bad >= 5 or (bad > 0 and bad / max(len(text), 1) > 0.01)
 
 
-def sanitize_thread_text(text):
+def sanitize_thread_text(text, limit=MAX_THREAD_CHARS):
     """外から来た文章を、プロンプトに埋め込めるようにする（区切りの偽装を無害化し、長すぎれば新しい側を残す）"""
     s = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     s = re.sub(r"</?thread>", "[thread]", s, flags=re.I)
     s = s.replace("<<<JSON", "[json]").replace("JSON>>>", "[json]")
-    if len(s) > MAX_THREAD_CHARS:
-        s = "…(古い発言は省略)…\n" + s[-MAX_THREAD_CHARS:]
+    if len(s) > limit:
+        s = "…(古い発言は省略)…\n" + s[-limit:]
     return s
 
 
@@ -167,11 +169,11 @@ def triage(text, ui, ask_kiro, run_task, config=None):
     """貼り付けたスレッド → Kiroが整理 → タスクにするかを1件ずつ人が決める → 登録。
     ui / ask_kiro / run_task は外から渡す（テストでは偽物に差し替える）。"""
     config = config or {}
-    thread_text = sanitize_thread_text(text)
+    thread_text = sanitize_thread_text(text, config.get("max_thread_chars") or MAX_THREAD_CHARS)
     if len(thread_text) < MIN_TEXT_CHARS:
         ui.alert("クリップボードにスレッドの文章がありません。\n\n"
-                 "Slackでスレッドの文章をドラッグして選び、⌘C でコピーしてから、もう一度 %s を押してください。"
-                 % config.get("hotkey_label", "⌃⌥S"))
+                 "Slackでスレッドの文章をドラッグして選び、%s でコピーしてから、もう一度 %s を押してください。"
+                 % (config.get("copy_label", "⌘C"), config.get("hotkey_label", "⌃⌥S")))
         return {"status": "empty", "results": []}
     if looks_garbled(thread_text):
         ui.alert("コピーした文章が文字化けしているので、Kiroに送るのを止めました。\n詳細: ~/.local/state/task-hub/slack-triage.log")

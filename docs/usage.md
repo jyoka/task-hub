@@ -66,7 +66,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -141,6 +141,8 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
+`task watch` は、GitHub のエラー、動いている間に壊れた設定ファイル、始められないカードでは止まりません。
+`error:` の行を出し(始められないカードは理由を書いて Blocked にし)、次の回にまた確かめます。
 
 In review、Blocked、replanner の仕分け、Done、長引いている実行(`slow`)は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
 通知、なければ macOS の通知)。文面はタイトル、判定か理由、見てほしいこと、PR の URL で、LLM は使わないので

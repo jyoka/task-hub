@@ -369,6 +369,7 @@ class InstallTest(unittest.TestCase):
                                           "code": "ABCD-1234", "approve": None, "repos": {}, "projects": [],
                                           "calls": []}))
         self.uv_calls = root / "uv-calls.txt"
+        self.uv_managed = root / "uv-has-python-3.12"
         self.server = Releases()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -417,18 +418,26 @@ class InstallTest(unittest.TestCase):
         sums.append(f"{sha256(b'other')}  gh_{ver}_linux_amd64.tar.gz")
         self.server.files[f"{base}/gh_{ver}_checksums.txt"] = ("\n".join(sums) + "\n").encode()
 
+    def fake_uv(self, on_path=True):
+        """`uv python install 3.12` links python3.12 to the Python running the tests (not with on_path=False, as uv
+        before 0.8); uninstall unlinks it. `uv python find` finds one of its own Pythons once self.uv_managed exists,
+        which install makes, and, as uv does, the active virtualenv's Python unless given --system."""
+        link = f' && ln -sf "{sys.executable}" "$dir/python$3"' if on_path else ""
+        return (f'#!/bin/sh\necho "$* UV_SYSTEM_CERTS=${{UV_SYSTEM_CERTS:-}} HTTPS_PROXY=${{HTTPS_PROXY:-}}"'
+                f' >> "{self.uv_calls}"\n'
+                'dir=${UV_PYTHON_BIN_DIR:-$HOME/.local/bin}\n'
+                'case "$1 $2" in\n'
+                f'  "python install") touch "{self.uv_managed}" && mkdir -p "$dir"{link} ;;\n'
+                '  "python uninstall") rm -f "$dir/python$3" ;;\n'
+                '  "python find") case " $* " in *" --system "*) ;; *) [ -z "${VIRTUAL_ENV:-}" ] || exit 0 ;; esac\n'
+                f'    [ -e "{self.uv_managed}" ] ;;\n'
+                '  *) exit 2 ;;\nesac\n')
+
     def publish_uv(self):
         base = f"/astral-sh/uv/releases/download/{UV_TAG}"
         self.server.redirects["/astral-sh/uv/releases/latest"] = f"/astral-sh/uv/releases/tag/{UV_TAG}"
         self.server.files[f"/astral-sh/uv/releases/tag/{UV_TAG}"] = b"release page"
-        # The fake uv: `uv python install 3.12` links python3.12 to the Python running the tests; uninstall unlinks it.
-        uv = (f'#!/bin/sh\necho "$* UV_SYSTEM_CERTS=${{UV_SYSTEM_CERTS:-}} HTTPS_PROXY=${{HTTPS_PROXY:-}}"'
-              f' >> "{self.uv_calls}"\n'
-              'dir=${UV_PYTHON_BIN_DIR:-$HOME/.local/bin}\n'
-              'case "$1 $2" in\n'
-              f'  "python install") mkdir -p "$dir" && ln -sf "{sys.executable}" "$dir/python$3" ;;\n'
-              '  "python uninstall") rm -f "$dir/python$3" ;;\n'
-              '  *) exit 2 ;;\nesac\n')
+        uv = self.fake_uv()
         for triple in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
             name = f"uv-{triple}.tar.gz"
             data = tar_bytes({f"uv-{triple}/uv": uv, f"uv-{triple}/uvx": "#!/bin/sh\n"})
@@ -610,7 +619,9 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.launchctl_calls.exists(), "launchctl is not run without --with-launchd")
         self.assertFalse(self.hdiutil_calls.exists())
         # uv from its release, then Python through uv (trusting the keychain); /usr/bin/python3 was not used
-        self.assertEqual(self.uv_calls.read_text().splitlines(), ["python install 3.12 UV_SYSTEM_CERTS=1 HTTPS_PROXY="])
+        self.assertEqual(self.uv_calls.read_text().splitlines(),
+                         ["python find --python-preference only-managed --system 3.12 UV_SYSTEM_CERTS= HTTPS_PROXY=",
+                          "python install 3.12 UV_SYSTEM_CERTS=1 HTTPS_PROXY="])
         self.assertTrue((local / "bin/uv").is_file())
         python = str(local / "bin/python3.12")
         # gh from the zip, checked against checksums.txt
@@ -628,7 +639,7 @@ class InstallTest(unittest.TestCase):
             "version": 1, "python": python,
             "kiro-cli-target": str(self.fakebin / "kiro-cli"),
             "installed": {"uv": str(local / "bin/uv"), "uv-python": "3.12", "gh": str(local / "bin/gh"),
-                          "kiro-cli": str(local / "bin/kiro-cli"),
+                          "git-credential": str(local / "bin/gh"), "kiro-cli": str(local / "bin/kiro-cli"),
                           "task-hub": str(local / "lib/task-hub"), "task": str(wrapper), "zprofile": ZPROFILE_LINE,
                           "config": str(self.home / ".config/task-hub/config.ini"),
                           "kiro-skill-task": str(self.home / ".kiro/skills/task"),
@@ -658,7 +669,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn("すべて済みです。変えたものはありません。", lines)
         self.assertEqual(lines[-1], "次にすること: Kiro の新しいチャットで /task を試してください")
         self.assertEqual(self.downloads(), [])
-        self.assertEqual(len(self.uv_calls.read_text().splitlines()), 1)
+        self.assertEqual(len(self.uv_calls.read_text().splitlines()), 2)  # none this time
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(head(), head_before)
         self.assertEqual(self.writes(), [], "nothing on GitHub is made or changed again")
@@ -819,6 +830,39 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(m["python"], python)
         self.assertNotIn("uv-python", m["installed"])  # not the Python
         self.assertNotIn("uv", m["installed"])
+
+    def test_a_python_uv_already_had_is_used_and_left_at_uninstall(self):
+        # uv's own 3.12, but not on PATH as python3.12 (uv before 0.8): the uninstaller must not remove it, and with
+        # it the virtualenvs built on it
+        self.script("uv", self.fake_uv())
+        self.uv_managed.touch()
+        self.install()
+        m = self.manifest()
+        self.assertEqual(m["python"], str(self.home / ".local/bin/python3.12"))
+        self.assertNotIn("uv-python", m["installed"])
+        self.assertNotIn("uv", m["installed"])  # nor the user's uv
+        self.uninstall(yes=True)
+        self.assertNotIn("python uninstall", self.uv_calls.read_text())
+
+    def test_a_python_uv_installed_on_a_run_that_stopped_is_still_removed_at_uninstall(self):
+        # uv before 0.8 installs 3.12 but puts no python3.12 on PATH: the run stops. With a newer uv the next run
+        # finds that 3.12 already there, but it is the installer's, and the uninstaller removes it
+        self.script("uv", self.fake_uv(on_path=False))
+        self.install(code=1)
+        self.script("uv", self.fake_uv())
+        self.install()
+        self.assertEqual(self.manifest()["installed"].get("uv-python"), "3.12")
+        self.uninstall(yes=True)
+        self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
+
+    def test_a_python_uv_installs_with_a_virtualenv_active_is_removed_at_uninstall(self):
+        # run from a terminal with a virtualenv active: its Python is not one uv had
+        self.script("uv", self.fake_uv())
+        self.env["VIRTUAL_ENV"] = str(self.home / "project/.venv")
+        self.install()
+        self.assertEqual(self.manifest()["installed"].get("uv-python"), "3.12")
+        self.uninstall(yes=True)
+        self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
 
     def test_uses_a_gh_already_on_path(self):
         self.use_python3()
@@ -1690,6 +1734,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertIn("- ~/.local/lib/task-hub(task-hub の clone)", lines)
         self.assertIn("- uv で入れた Python 3.12", lines)
+        self.assertIn("- git が GitHub のログインに ~/.local/bin/gh を使う設定(~/.gitconfig)", lines)
         self.assertIn("- ~/.kiro/skills/task(リンク)", lines)
         self.assertIn("- GitHub のボード(alice/tasks と Project alice/1)。要らなければ、GitHub の画面で消します:", lines)
         self.assertIn("    Project: https://github.com/users/alice/projects/1/settings の一番下「Delete this project」", lines)
@@ -1702,7 +1747,8 @@ class InstallTest(unittest.TestCase):
         for rel, text in mine.items():  # the user's own files, as they were
             self.assertEqual(left.pop(rel), text.encode(), rel)
         self.assertTrue(left.pop(KIRO_SETTINGS), "settings.json is the user's: kept")
-        left.pop(".gitconfig")  # gh's login for git: kept with the login
+        # the file stays, but git no longer asks the removed gh for the login: every fetch and push would fail
+        self.assertNotIn("auth git-credential", left.pop(".gitconfig").decode())
         for rel in list(left):
             if rel.startswith(".local/state/task-hub/"):  # task-hub's data (the watch logs)
                 left.pop(rel)
@@ -1767,6 +1813,49 @@ class InstallTest(unittest.TestCase):
         self.uninstall(yes=True)
         self.assertTrue(link.is_symlink(), "uninstall must preserve a repointed kiro-cli link")
         self.assertEqual(os.readlink(link), str(mine))
+
+    def test_a_skill_link_to_a_clone_that_is_gone_is_replaced(self):
+        # it served nothing: kept, the installer said "someone's own" and the diagnosis "missing", round and round
+        self.use_python3()
+        link = self.home / ".kiro/skills/task"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.home / "old-checkout/skills/task")  # moved or removed since
+        self.install()
+        self.assertEqual(os.path.realpath(link), os.path.realpath(self.home / ".local/lib/task-hub/skills/task"))
+        self.assertEqual(self.manifest()["installed"]["kiro-skill-task"], str(link))
+        self.assertEqual(self.marks(self.doctor(0))["9. Kiro との連携"], "○")
+
+    def test_a_config_from_a_run_that_stopped_is_still_the_installers(self):
+        # stage 8 wrote config.ini, then `task list` failed: the next run finds it there, yet it is the installer's
+        fails = self.root / "task-list-fails"
+        fails.touch()
+        python = self.fakebin / "python3"  # the Python 3.10+ on PATH, whose `task list` fails while `fails` is there
+        python.write_text(f'#!/bin/sh\ncase "$*" in *"bin/task list"*) [ -e "{fails}" ] && '
+                          '{ echo "error: cannot read GitHub Project alice/1"; exit 1; } ;; esac\n'
+                          f'exec "{sys.executable}" "$@"\n')
+        python.chmod(0o755)
+        lines = self.install(code=1)
+        self.assertTrue(any("task list が動きませんでした" in line for line in lines), lines)
+        config = self.home / ".config/task-hub/config.ini"
+        self.assertTrue(config.exists())
+        fails.unlink()
+        self.install()
+        self.assertEqual(self.manifest()["installed"]["config"], str(config))
+        self.uninstall(yes=True)
+        self.assertFalse(config.exists())
+
+    def test_uninstall_edits_a_zprofile_kept_as_a_link_through_the_link(self):
+        # dotfiles kept with stow or yadm: the PATH line went into the file the link points to; it comes out of it
+        self.use_python3()
+        dotfiles = self.home / "dotfiles/zprofile"
+        dotfiles.parent.mkdir()
+        dotfiles.write_text("export EDITOR=vi\n")
+        (self.home / ".zprofile").symlink_to(dotfiles)
+        self.install()
+        self.assertIn(ZPROFILE_LINE, dotfiles.read_text())
+        self.uninstall(yes=True)
+        self.assertTrue((self.home / ".zprofile").is_symlink())
+        self.assertEqual(dotfiles.read_text(), "export EDITOR=vi\n")
 
     def test_install_does_not_adopt_a_matching_manual_skill_link(self):
         self.use_python3()

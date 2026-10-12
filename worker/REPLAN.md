@@ -45,8 +45,9 @@ The answer, in a few sentences the implementation agent can act on.
 ```
 
 Every Evidence line must be a path relative to the worktree root, a line number, and a quote in
-backticks copied exactly from that line. task-hub checks each one; if any does not match, your answer is
-discarded and the question goes to the human.
+backticks copied exactly from that line, at least 3 characters long. The file must be one git tracks (a file you
+wrote yourself does not count). task-hub checks each one; if any does not match, your answer is discarded and the
+question goes to the human.
 
 ```markdown
 ## Decision

@@ -139,7 +139,8 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
      uv pip install -q -r voice-resume/requirements.txt --python voice-resume/.venv/bin/python
    ```
 
-   準備で作ったファイルは、git が無視するものでなければなりません。無視されないファイルが残ったら(PR に入って
+   準備で作ったファイルは、git が無視するものでなければなりません。リポジトリのファイルを書き換えてもいけません
+   (`npm install` が `package-lock.json` を書き換えるなど。`npm ci` なら書き換えません)。どちらかが残ったら(PR に入って
    しまうため)、エージェントを起動せずに Blocked にします。uv の `.venv` は中に `.gitignore` を持っているので
    そのままで通ります。設定ファイルでは ` ;` と ` #` のあとがコメントになるので、コマンドをつなぐときは `&&` か
    改行を使います。

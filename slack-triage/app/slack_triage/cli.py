@@ -173,7 +173,7 @@ def run_task(task):
         e = RuntimeError("task new が失敗しました")
         e.stderr = (p.stderr or p.stdout).strip()
         raise e
-    log("registered: %s (%s)" % (task["title"], task["repo"]))
+    log("registered: %s" % task["repo"])  # タイトルはスレッドから書いたもの: ログに残さない
     return p.stdout
 
 
@@ -270,7 +270,7 @@ def gh_login():
 def board_repo():
     """task-hub のボードの issues リポジトリ（config.ini の [board] issues。ほかのタスクの Issue と同じ場所）"""
     try:
-        with open(TASK_HUB_CONFIG, encoding="utf-8") as f:
+        with open(TASK_HUB_CONFIG, encoding="utf-8-sig") as f:  # メモ帳の「UTF-8 (BOM 付き)」も
             section = None
             for line in f:
                 t = line.split(";", 1)[0].split("#", 1)[0].strip()
@@ -414,12 +414,14 @@ def cmd_run(text_source, dry_run=False):
         if fill_repo_settings(cfg):
             save_config(cfg)
         cfg["hotkey_label"] = hotkey_label(cfg)
+        cfg["copy_label"] = "Ctrl+C" if WINDOWS else "⌘C"
+        if WINDOWS:
+            cfg["max_thread_chars"] = core.WINDOWS_MAX_THREAD_CHARS
         text = text_source(cfg) if callable(text_source) else text_source
         runner = (lambda t: "") if dry_run else run_task
         result = core.triage(text, ui, ask_kiro, runner, cfg)
         # スレッドの本文はログに残さない
-        log("%s%s %s" % (result["status"], " (practice)" if dry_run else "",
-                         json.dumps({"task_count": result.get("task_count"), "results": result["results"]}, ensure_ascii=False)))
+        log("%s%s %s" % (result["status"], " (practice)" if dry_run else "", loggable(result)))
         return 0
     except Exception as e:
         log("error: %r" % (e,))
@@ -597,6 +599,12 @@ def cmd_key(args):
     return 1
 
 
+def loggable(result):
+    """ログに書く結果: 件数と、登録したかと URL だけ。タイトルはスレッドから書いたもので、スレッドの中身は残さない"""
+    kept = [{k: r[k] for k in ("outcome", "url") if k in r} for r in result.get("results", [])]
+    return json.dumps({"task_count": result.get("task_count"), "results": kept}, ensure_ascii=False)
+
+
 # ---- 確認 ----
 
 def checks():
@@ -606,12 +614,15 @@ def checks():
     if not kiro:
         out.append(("Kiro CLI", False, "見つかりません", INSTALL))
     else:
-        r = subprocess.run([kiro, "whoami"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
-        out.append(("Kiro CLI のログイン", r.returncode == 0, "ログイン済み" if r.returncode == 0 else "未ログイン",
-                    "ターミナルで kiro-cli login を実行してください"))
+        try:
+            r = subprocess.run([kiro, "whoami"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+            ok, said = r.returncode == 0, "ログイン済み" if r.returncode == 0 else "未ログイン"
+        except subprocess.TimeoutExpired:  # ネットワークやログインの画面で止まった
+            ok, said = False, "kiro-cli whoami が 60 秒たっても返事がありません"
+        out.append(("Kiro CLI のログイン", ok, said, "ターミナルで kiro-cli login を実行してください"))
     tb = os.environ.get("TASK_BIN") or which("task")
     try:
-        with open(TASK_HUB_CONFIG, encoding="utf-8") as f:
+        with open(TASK_HUB_CONFIG, encoding="utf-8-sig") as f:
             board_ok = any(line.strip().startswith("issues") for line in f)
     except OSError:
         board_ok = False
