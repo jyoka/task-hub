@@ -26,6 +26,18 @@ if (-not (Get-LocalUser -Name $name -ErrorAction SilentlyContinue)) {
 if (Get-LocalGroupMember -Group Administrators -Member $name -ErrorAction SilentlyContinue) {
   throw "$name is an administrator: the run would prove nothing"
 }
+# Task Scheduler runs a task with a user's password as a batch logon: Windows Server (the runner) gives that right to
+# no standard user, and the task then never starts. Give it to this user only
+$sid = (Get-LocalUser -Name $name).SID.Value
+$inf = Join-Path $env:TEMP 'task-hub-rights.inf'
+secedit /export /cfg $inf /areas USER_RIGHTS /quiet | Out-Null
+$rights = [IO.File]::ReadAllLines($inf)
+$line = $rights | Where-Object { $_ -like 'SeBatchLogonRight*' }
+if (-not $line) { $rights += "SeBatchLogonRight = *$sid" }
+elseif ($line -notlike "*$sid*") { $rights = $rights | ForEach-Object { if ($_ -eq $line) { "$_,*$sid" } else { $_ } } }
+[IO.File]::WriteAllLines($inf, $rights, [Text.Encoding]::Unicode)
+secedit /configure /db (Join-Path $env:TEMP 'task-hub-rights.sdb') /cfg $inf /areas USER_RIGHTS /quiet | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "secedit could not give $name the right to log on as a batch job ($LASTEXITCODE)" }
 # the checkout: readable by the user, and git trusts a repository another user owns
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 icacls $repo /grant "${name}:(OI)(CI)RX" /T /Q | Out-Null
@@ -50,13 +62,23 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -
 Start-ScheduledTask -TaskName $taskName
 # until it has run and ended: Task Scheduler says 267011 (0x41303, "has not run yet") until it starts, then 267009
 # (0x41301, "running")
+$started = (Get-Date).AddMinutes(2)  # a task that has not started by then never will: say why now, not in 25 minutes
 $end = (Get-Date).AddMinutes($Minutes + 1)
 do {
   Start-Sleep -Seconds 5
   $code = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
   $state = (Get-ScheduledTask -TaskName $taskName).State
+  if ($code -eq 267011 -and $state -ne 'Running' -and (Get-Date) -gt $started) { break }
 } while (($state -eq 'Running' -or $code -in 267009, 267011) -and (Get-Date) -lt $end)
-if ($code -in 267009, 267011) { Write-Host "== the task did not end in $Minutes minutes (state $state, result $code)"; $code = 1 }
+if ($code -eq 267011) {
+  Write-Host "== the task never started as $name (state $state). Task Scheduler's last events:"
+  Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 10 -ErrorAction SilentlyContinue |
+    ForEach-Object { Write-Host "   $($_.TimeCreated) $($_.Id) $($_.Message -replace '\s+', ' ')" }
+  $code = 1
+} elseif ($code -eq 267009) {
+  Write-Host "== the task did not end in $Minutes minutes"
+  $code = 1
+}
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 if (Test-Path $log) { Get-Content $log -Encoding Default }
 Write-Host "== ran as the standard user $name (not an administrator): exit $code"
