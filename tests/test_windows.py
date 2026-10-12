@@ -622,8 +622,10 @@ class SetupTest(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", str(self.origin), str(lib)], check=True, capture_output=True)
         branch = self.lib_git("symbolic-ref", "--short", "HEAD")
         shim.parent.mkdir(parents=True)
+        # as docs/windows.md's install wrote it, unmarked: full paths in the code page (an English Windows has no
+        # letters for the Japanese folder name: they became ?, which is why it now writes %USERPROFILE%)
         shim.write_text(f'@setlocal\r\n@set PYTHONUTF8=1\r\n@"{sys.executable}" "{lib / "bin/task"}" %*\r\n',
-                        encoding="mbcs", newline="")  # as docs/windows.md's install wrote it, unmarked
+                        encoding="mbcs", errors="replace", newline="")
         out = self.install()
         self.assertEqual(self.lib_git("symbolic-ref", "--short", "HEAD"), branch)  # not switched to kiro-v1
         self.assertIn("task-hub: made by windows/install.ps1", shim.read_text(encoding="mbcs"))

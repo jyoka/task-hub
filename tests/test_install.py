@@ -122,7 +122,7 @@ def handle(db):
         # for github.com, and for the test's GitHub (TASK_INSTALL_GITHUB), which plays it. With / as git config
         # wants it on Windows too (tests/test_windows.py): a \ there is an escape
         me = sys.argv[0].replace(os.sep, "/")
-        with open(os.path.join(os.environ["HOME"], ".gitconfig"), "a") as f:
+        with open(os.path.join(os.environ["HOME"], ".gitconfig"), "a", encoding="utf-8") as f:  # as git reads it
             for host in ("https://github.com", os.environ.get("TASK_INSTALL_GITHUB")):
                 if host:
                     f.write(f'[credential "{host}"]\n\thelper =\n\thelper = !{me} auth git-credential\n')
