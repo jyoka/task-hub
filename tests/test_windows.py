@@ -26,12 +26,12 @@ from pathlib import Path
 WINDOWS = os.name == "nt"
 FCNTL = r'''
 import msvcrt, time
-LOCK_EX = 2
+LOCK_EX, LOCK_UN = 2, 8
 def flock(f, op):  # a byte far past the end: another opener's truncation never touches it
     while True:
         try:
             f.seek(1 << 30)
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK if op & LOCK_UN else msvcrt.LK_NBLCK, 1)
             return
         except OSError:
             time.sleep(0.01)
@@ -54,6 +54,71 @@ def write_exe(path, script):
         z.writestr("__main__.py", script)
     path.write_bytes((Path(distlib.__file__).parent / "t64.exe").read_bytes()
                      + f'#!"{sys.executable}"\n'.encode() + archive.getvalue())
+
+
+class Job:
+    """A Windows job object that ends its processes when closed, and lets them break away, as Task Scheduler's."""
+    KILL_ON_JOB_CLOSE, BREAKAWAY_OK, SILENT_BREAKAWAY_OK = 0x2000, 0x800, 0x1000
+    EXTENDED_LIMIT_INFORMATION = 9
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("per_process_user_time", ctypes.c_int64), ("per_job_user_time", ctypes.c_int64),
+                        ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                        ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority_class", wintypes.DWORD),
+                        ("scheduling_class", wintypes.DWORD)]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("basic", Basic), ("io", ctypes.c_uint64 * 6), ("process_memory", ctypes.c_size_t),
+                        ("job_memory", ctypes.c_size_t), ("peak_process_memory", ctypes.c_size_t),
+                        ("peak_job_memory", ctypes.c_size_t)]
+
+        self.Extended = Extended
+        k = self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateJobObjectW.restype = wintypes.HANDLE
+        k.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                                ctypes.c_void_p]
+        k.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.handle = k.CreateJobObjectW(None, None)
+        info = Extended()
+        info.basic.flags = self.KILL_ON_JOB_CLOSE | self.BREAKAWAY_OK
+        self.check(self.handle and k.SetInformationJobObject(self.handle, self.EXTENDED_LIMIT_INFORMATION,
+                                                             ctypes.byref(info), ctypes.sizeof(info)))
+
+    def check(self, ok):
+        if not ok:
+            import ctypes
+            raise OSError(f"job object call failed (Windows error {ctypes.get_last_error()})")
+
+    def breakaway_possible(self):
+        """False when this process is already in a job that keeps its children in: they could not leave ours."""
+        import ctypes
+        from ctypes import wintypes
+        k, in_job = self.kernel32, wintypes.BOOL()
+        self.check(k.IsProcessInJob(k.GetCurrentProcess(), None, ctypes.byref(in_job)))
+        if not in_job:
+            return True
+        info = self.Extended()
+        self.check(k.QueryInformationJobObject(None, self.EXTENDED_LIMIT_INFORMATION, ctypes.byref(info),
+                                               ctypes.sizeof(info), None))
+        return bool(info.basic.flags & (self.BREAKAWAY_OK | self.SILENT_BREAKAWAY_OK))
+
+    def add(self, proc):
+        self.check(self.kernel32.AssignProcessToJobObject(self.handle, int(proc._handle)))
+
+    def close(self):
+        if self.handle:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
 
 
 @unittest.skipUnless(WINDOWS, "Windows only")
@@ -128,15 +193,15 @@ class WindowsTest(unittest.TestCase):
         return re.search(r"id: (\d+)", out).group(1)
 
     def gh(self):
-        """The fake GitHub. Windows refuses to open a file another process is writing, and the fake gh writes it
-        without a lock here (fcntl is a no-op shim): read again for a moment instead of failing the test."""
-        for attempt in range(50):
+        """The fake GitHub, read under the fake gh's lock: Windows refuses to replace a file another process has
+        open, so a read without it could make a fake gh's rename fail, and the run that called it go Blocked."""
+        import fcntl  # the msvcrt stand-in above
+        with open(f"{self.db}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 return json.loads(self.db.read_text(encoding="utf-8"))
-            except (PermissionError, json.JSONDecodeError):
-                if attempt == 49:
-                    raise
-                time.sleep(0.05)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     def status(self, tid):
         return self.gh()["items"][f"PVTI_{tid}"]["values"].get("status")
@@ -149,9 +214,26 @@ class WindowsTest(unittest.TestCase):
             time.sleep(0.3)
         self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
 
+    def finish(self, tid, want, timeout=60):
+        """Wait for the run to end on the card `want`; else fail with the run's last comment and its log."""
+        got = self.wait(tid, timeout)
+        if got != want:
+            comments = self.gh()["issues"][tid]["comments"]
+            self.fail(f"task {tid} went {got}, not {want}\nlast comment: "
+                      f"{comments[-1]['body'] if comments else '(none)'}\nlog:\n{self.task('log', tid, '--full')}")
+
     def agent_calls(self):
         return [eval(line) for line in self.calls.read_text(encoding="utf-8").splitlines()] \
             if self.calls.exists() else []
+
+    def started(self, tid):
+        """The pid of the task's run, once the run has recorded it."""
+        end = time.time() + 30
+        while not self.run_state(tid).get("pid"):
+            if time.time() > end:
+                self.fail(f"task {tid}'s run never recorded its pid; log:\n{self.task('log', tid, '--full')}")
+            time.sleep(0.2)
+        return self.run_state(tid)["pid"]
 
     def run_state(self, tid):
         return json.loads((self.root / ".local/state/task-hub/runs" / f"{tid}.json").read_text())
@@ -166,7 +248,7 @@ class WindowsTest(unittest.TestCase):
     def test_a_task_in_japanese_runs_to_a_pr(self):
         tid = self.new(title="挨拶を追加する")
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "In review")
+        self.finish(tid, "In review")
         prompt = self.agent_calls()[0]["prompt"]
         self.assertIn("Task 1: 挨拶を追加する", prompt)  # through the code page and the command line
         self.assertIn("Say hello.\nMODE:ok", prompt)  # every line of it, not cut at the first
@@ -176,9 +258,7 @@ class WindowsTest(unittest.TestCase):
     def test_a_running_task_is_alive_until_it_is_killed(self):
         tid = self.new("slow")
         self.task("start", tid)
-        end = time.time() + 30
-        while not self.run_state(tid).get("pid") and time.time() < end:
-            time.sleep(0.2)
+        self.started(tid)
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("watch")  # alive: the watch leaves it In progress
         self.assertEqual(self.status(tid), "In progress")
@@ -187,6 +267,49 @@ class WindowsTest(unittest.TestCase):
         self.task("watch")  # gone: blocked as stopped
         self.assertEqual(self.status(tid), "Blocked")
         self.assertIn("the run stopped unexpectedly", self.gh()["issues"][tid]["comments"][-1]["body"])
+
+    def test_a_pid_handed_to_another_process_is_not_the_run(self):
+        # Windows hands out pids again soon: the watch must not take another process for the run, even one whose
+        # command line says `_run 1` somewhere, as an agent's prompt can
+        tid = self.new("slow")
+        self.task("start", tid)
+        pid = self.started(tid)
+        subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", f"_run {tid} in a prompt"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)  # cleanups run last first: kill, then wait
+        state = self.root / ".local/state/task-hub/runs" / f"{tid}.json"
+        state.write_text(json.dumps({**self.run_state(tid), "pid": str(other.pid)}))
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("watch")
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly", self.gh()["issues"][tid]["comments"][-1]["body"])
+        self.assertIsNone(other.poll())  # and left alone
+
+    def test_a_run_outlives_the_job_of_the_watch_that_started_it(self):
+        # Task Scheduler runs the watch in a job and ends what is left in it when the task stops (install.ps1
+        # -Uninstall, -Watch again, signing out): the run breaks away from it and goes on
+        job = Job()
+        if not job.breakaway_possible():
+            self.skipTest("this test runs in a job that allows no breakaway")
+        tid = self.new("slow")
+        holder = subprocess.Popen(  # waits until it is in the job, starts the task, says so, then stays in the job
+            [sys.executable, "-c", "import subprocess, sys, time; sys.stdin.readline(); "
+             "print(subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True).returncode, "
+             "flush=True); time.sleep(60)", sys.executable, str(BIN), "start", tid],
+            env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        job.add(holder)
+        holder.stdin.write("go\n")
+        holder.stdin.flush()
+        self.assertEqual(holder.stdout.readline().strip(), "0")
+        self.started(tid)
+        job.close()  # what stopping the scheduled task does
+        holder.wait(timeout=10)  # the job did end what stayed in it
+        time.sleep(1)
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("watch")  # the run is alive: still In progress, not Blocked as stopped
+        self.assertEqual(self.status(tid), "In progress")
 
     def test_a_config_from_notepad_or_powershell(self):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
@@ -200,7 +323,7 @@ class WindowsTest(unittest.TestCase):
         self.write_config(agent=f"env FAKE_AGENT_KEY=k1 {(self.root / 'agent.exe').as_posix()} {{prompt}}")
         tid = self.new()
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "In review")
+        self.finish(tid, "In review")
         self.assertEqual(self.agent_calls()[0]["key"], "k1")
 
     def npm_shim(self, target):
@@ -217,6 +340,7 @@ class WindowsTest(unittest.TestCase):
         self.env["PATH"] = f"{bindir};{self.env['PATH']}"
         return bindir / "node_modules/fake/bin" / target
 
+    @unittest.skipUnless(shutil.which("node"), "needs Node.js, as every agent installed with npm does")
     def test_an_npm_cmd_shim_gets_the_whole_prompt(self):
         self.npm_shim("fake.js").write_text(
             "const r = require('child_process').spawnSync(process.argv[2], process.argv.slice(3), {stdio: 'inherit'});\n"
@@ -224,7 +348,7 @@ class WindowsTest(unittest.TestCase):
         self.write_config(agent=f"fake {(self.root / 'agent.exe').as_posix()} {{prompt}}")
         tid = self.new()
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "In review")
+        self.finish(tid, "In review")
         self.assertIn("Say hello.\nMODE:ok", self.agent_calls()[0]["prompt"])
 
     def test_an_npm_cmd_shim_of_a_native_program_runs_it_without_node(self):
@@ -232,22 +356,58 @@ class WindowsTest(unittest.TestCase):
         self.write_config(agent="fake {prompt}")
         tid = self.new()
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "In review")
+        self.finish(tid, "In review")
         self.assertIn("Say hello.\nMODE:ok", self.agent_calls()[0]["prompt"])
+
+    def test_an_npm_cmd_shim_runs_its_script_with_the_node_beside_it(self):
+        # npm puts node.exe next to the shims when Node.js is installed there: that one, not whatever PATH finds
+        script = self.npm_shim("fake.js")
+        script.write_text("// run by the node.exe beside the shim\n")
+        seen = self.root / "node-script.txt"
+        write_exe(self.root / "npm" / "node.exe",  # a stand-in node: notes its script, then runs the rest
+                  f"import subprocess, sys\nopen({str(seen)!r}, 'w').write(sys.argv[1])\n"
+                  "sys.exit(subprocess.run(sys.argv[2:]).returncode)\n")
+        self.write_config(agent=f"fake {(self.root / 'agent.exe').as_posix()} {{prompt}}")
+        tid = self.new()
+        self.task("start", tid)
+        self.finish(tid, "In review")
+        self.assertEqual(Path(seen.read_text()), script)
+        self.assertIn("Say hello.\nMODE:ok", self.agent_calls()[0]["prompt"])
+
+    def test_a_batch_file_agent_blocks_and_says_what_to_point_at(self):
+        # not an npm shim: there is no program in it for task-hub to run instead, and cmd would cut the prompt
+        (self.root / "agent.cmd").write_text(f'@"{self.root / "agent.exe"}" %1\r\n')
+        self.write_config(agent=f"{(self.root / 'agent.cmd').as_posix()} {{prompt}}")
+        tid = self.new()
+        self.task("start", tid)
+        self.finish(tid, "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("is a batch file, which cannot take a prompt of several lines", self.task("log", tid, "--full"))
+
+    def test_a_goal_too_long_for_a_command_line_blocks_and_says_so(self):
+        goal = self.root / "goal.md"
+        goal.write_text("Say hello.\nMODE:ok\n" + "Keep every word of this. " * 1500)  # 37,500 characters
+        out = self.task("new", "--title", "Long", "--repo", "jyoka/app", "--goal-file", str(goal))
+        tid = re.search(r"id: (\d+)", out).group(1)
+        self.task("start", tid)
+        self.finish(tid, "Blocked")
+        log = self.task("log", tid, "--full")
+        self.assertIn("agent cannot run: its command line is over Windows' 32,767 characters", log)
+        self.assertNotIn("agent not found", log)  # what Windows says, and the wrong lead for the human
 
     def test_setup_runs_in_powershell(self):
         self.write_config("\n[setup]\njyoka/app = New-Item -ItemType Directory .venv | Out-Null\n"
                           "  Set-Content .venv/.gitignore '*'\n  Set-Content .venv/marker ready\n")
         tid = self.new("needsetup")
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "In review")
+        self.finish(tid, "In review")
         self.assertEqual(self.branch_file(tid, "hello.txt"), "setup seen: ready\n")
 
     def test_failing_setup_blocks(self):
         self.write_config("\n[setup]\njyoka/app = git --no-such-flag\n")
         tid = self.new()
         self.task("start", tid)
-        self.assertEqual(self.wait(tid), "Blocked")
+        self.finish(tid, "Blocked")
         self.assertEqual(self.agent_calls(), [])
         self.assertIn("setup failed (exit 129)", self.gh()["issues"][tid]["comments"][-1]["body"])
 

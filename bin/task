@@ -1661,11 +1661,15 @@ def agent_process(agent, prompt, wt, say):
             code = 130
         say("== stopped with Ctrl-C")
         return code
-    except FileNotFoundError as e:
-        say(f"agent not found: {e}")
+    except OSError as e:
+        if getattr(e, "winerror", None) == 206:  # Windows: the command line is over 32,767 characters, which
+            # Python reports as FileNotFoundError: not "agent not found", which would send the human to the wrong fix
+            say(f"agent cannot run: its command line is over Windows' 32,767 characters (a long goal or report): {e}")
+        else:
+            say(f"agent {'not found' if isinstance(e, FileNotFoundError) else 'cannot run'}: {e}")
         return 127
-    except (RuntimeError, OSError) as e:  # windows_command: a batch file it cannot run; Windows: the command line
-        say(f"agent cannot run: {e}")     # is over 32,767 characters (a long goal or report)
+    except RuntimeError as e:  # windows_command: a batch file it cannot run
+        say(f"agent cannot run: {e}")
         return 127
 
 
