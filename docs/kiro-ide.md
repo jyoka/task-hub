@@ -567,8 +567,19 @@ npm run package
 main を追う開発用の clone で作ります。
 
 `npm run package` は、`out/` にビルドしてから `task-hub-board-<版>.vsix` を `package.json` の隣に書き出します。
-`vsce` は使わず、`zip` で固めます(macOS には `/usr/bin/zip` があります)。Node のない Mac では、ほかの Mac で
-作った `.vsix` を使えます。
+`vsce` は使わず、`zip` で固めます(macOS には `/usr/bin/zip` があります)。Windows では、Windows 10 から入っている
+`tar.exe` で固めます。Node のない PC では、ほかの PC で作った `.vsix` を使えます(Mac で作ったものも Windows で
+使えます)。
+
+Windows では、PowerShell で次のように作ります。
+
+```
+cd ~\.local\lib\task-hub\kiro\board-extension
+npm run package
+```
+
+`npm test` は Mac 用です(偽物の `task` を sh で書いています)。Windows で確かめるのは、GitHub Actions の
+windows のジョブです(`task.cmd` で `task list` を動かすことと、`tar.exe` で作った `.vsix` の中身)。
 
 ### 入れる
 
@@ -583,6 +594,10 @@ main を追う開発用の clone で作ります。
   ```
   kiro --install-extension ~/.local/lib/task-hub/kiro/board-extension/task-hub-board-0.1.0.vsix
   ```
+
+Windows でも同じです。PowerShell では
+`kiro --install-extension $HOME\.local\lib\task-hub\kiro\board-extension\task-hub-board-0.1.0.vsix` です。
+拡張は `~\.local\bin\task.cmd`(`windows\install.ps1` が作るもの)で `task list` を動かします。
 
 入れたあと、アクティビティバーに task-hub が出なければ、コマンド「Developer: Reload Window」で再読み込みします。
 task-hub を更新したら、作り直して入れ直します(同じ版なら `kiro --install-extension <vsix> --force`)。

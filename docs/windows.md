@@ -416,6 +416,7 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 | 10 | 使用量の記録 | 作業が終わったあと `task stats` | 使ったクレジットが出る(kiro-cli)。出なくても、作業には影響しない |
 | 11 | フックとワークフロー | Kiro を再起動し、カードが In review になったあと、Kiro のチャットに何か書く。`/chief` を開いておく | チャットに `task-hub: new events since your last message:` が入る。`/chief` のチャットに知らせが来る。Kiro がコマンドを cmd と PowerShell のどちらで動かすかは確かめていません(両方で動くように書いています) |
 | 12 | Slackトリアージ | Slack でスレッドを選んでコピー(Ctrl+C)し、Ctrl+Alt+S を押す | 30 秒ほどで「タスクにしますか？」の画面が出て、日本語が読める。「登録」で Backlog にカードができる。黒い窓が出ない。サインインし直しても Ctrl+Alt+S が効く |
+| 13 | Kiro のボードの拡張 | [kiro-ide.md の 10 章](kiro-ide.md#10-ボードをサイドバーとステータスバーに出す拡張)のとおり `.vsix` を作って入れ、Kiro を再読み込みする | アクティビティバーの task-hub にカードが出て、日本語が読める。ステータスバーに件数が出る。カードの Goal、変更、ログが開く。黒い窓が出ない |
 
 ## 11. 困ったとき(エラーと対処)
 
@@ -554,6 +555,8 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 - 上のインストーラのテストを、管理者でない標準のユーザーでも動かします(GitHub Actions の Windows は管理者なので、
   そのままでは管理者権限が要ることに気づけないため。`tests/ci/as-standard-user.ps1`)。そのユーザーが、自分の
   サインインで始まるタスク(常駐と Slackトリアージの起動キー)をタスク スケジューラに登録できることも確かめます
+- Kiro のボードの拡張が `~\.local\bin\task.cmd` で `task list` を動かせること(ホームに空白と日本語があっても)と、
+  `tar.exe` で作った `.vsix` の中身。Kiro の画面に出ることは、手順 10 の 13 で確かめます
 - 版を出す前に、本物の GitHub の試験用ボードで、カードを 1 枚 PR まで進めます(ボタンで動かす。
   [release.md](release.md#windows-を本物のボードで確かめる))
 

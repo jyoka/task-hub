@@ -5,6 +5,7 @@
 import * as vscode from 'vscode'
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -28,8 +29,10 @@ const HIDDEN_KEY = 'taskHub.shipHidden'
 const BADGES_KEY = 'taskHub.badges'
 
 // The one command this extension runs. Bare `task` would start Ready cards; `task list` starts nothing.
-// An absolute path, since Kiro started from the Dock may not have the login shell's PATH.
-export const taskPath = (): string => join(homedir(), '.local', 'bin', 'task')
+// An absolute path, since Kiro started from the Dock may not have the login shell's PATH. On Windows it is
+// windows\install.ps1's task.cmd (~\.local\bin\task there is the one for Git Bash, a sh script).
+const WINDOWS = process.platform === 'win32'
+export const taskPath = (): string => join(homedir(), '.local', 'bin', WINDOWS ? 'task.cmd' : 'task')
 
 // `task list` calls gh, which the installer puts in ~/.local/bin: add the usual places after the PATH Kiro has.
 const childPath = (): string => {
@@ -40,9 +43,14 @@ const childPath = (): string => {
 
 export type Run = (fresh?: boolean) => Promise<Outcome | { reason: string }>
 
+// Node runs a .cmd only through cmd.exe (shell), its path quoted, as it may have spaces; the arguments are fixed words.
+// cmd.exe says nothing Node can tell from an exit code when the file is not there, so that is looked at first.
 const runTask = (fresh: boolean): ReturnType<Run> => new Promise(resolve => {
   const task = taskPath()
-  execFile(task, ['list', ...(fresh ? ['--max-age', '0'] : [])], { timeout: TIMEOUT_MS, env: { ...process.env, PATH: childPath() } }, (err, stdout, stderr) => {
+  if (WINDOWS && !existsSync(task)) return resolve({ reason: `${task} がありません` })
+  execFile(WINDOWS ? `"${task}"` : task, ['list', ...(fresh ? ['--max-age', '0'] : [])], {
+    timeout: TIMEOUT_MS, env: { ...process.env, PATH: childPath() }, shell: WINDOWS,
+  }, (err, stdout, stderr) => {
     if (!err) resolve({ exitCode: 0, stdout, stderr })
     else if (typeof err.code === 'number') resolve({ exitCode: err.code, stdout, stderr })
     else if (err.code === 'ENOENT') resolve({ reason: `${task} がありません` })
