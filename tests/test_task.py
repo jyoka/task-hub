@@ -4406,7 +4406,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("fake installer of kiro-v2 from task-hub --with-launchd --start-launchd", out)
         self.assertIn("updated: kiro-v1 -> kiro-v2 (kiro-v2)", out)
         self.assertIn("watch: restarted com.task-hub.watch (launchd)", out)  # the plist may be the same; the code is not
-        self.assertEqual(self.lib_git(lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+        self.assertIn("kiro-v2", self.lib_git(lib, "tag", "--points-at", "HEAD").split())  # (v0.7.0 is there too)
         self.assertEqual(self.hub(lib, "--version").strip(), "0.7.0")
 
         self.kiro_release(seed, "kiro-v3", "0.8.0")
@@ -4414,7 +4414,7 @@ class TaskTest(unittest.TestCase):
         out = self.hub(lib, "update", code=1)
         self.assertIn("kiro-v3's installer stopped (exit 1)", out)
         self.assertIn("次にすること: もう一度", out)  # the installer's own next step, as it said it
-        self.assertEqual(self.lib_git(lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+        self.assertIn("kiro-v2", self.lib_git(lib, "tag", "--points-at", "HEAD").split())
 
     def test_list_tells_an_installers_clone_of_a_new_kiro_release(self):
         lib, seed = self.kiro_release_clone()
