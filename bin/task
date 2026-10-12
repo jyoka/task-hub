@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -343,6 +344,9 @@ def config():
     except UnicodeDecodeError:
         fail(f"{home(CONFIG)} is not saved as UTF-8",
              "open it in Notepad and save it with Encoding: UTF-8 (PowerShell's > and Out-File write UTF-16)")
+    except configparser.Error as e:  # a section or a name given twice, a line with no `=`
+        fail(f"{home(CONFIG)} cannot be read: {str(e).splitlines()[0]}",
+             "fix that line: each [section] once, each name once in it, and every line `name = value`")
     return c
 
 
@@ -360,7 +364,11 @@ def agent_command(name, prompt):
     c = config()
     if not c.has_option("agents", name):
         fail(f"unknown agent {name!r}", f"agents: {', '.join(c['agents'])} (add more in {home(CONFIG)})", 2)
-    return [prompt if part == "{prompt}" else part for part in shlex.split(c["agents"][name])]
+    try:
+        parts = shlex.split(c["agents"][name])
+    except ValueError as e:  # a quote left open, or cut by a ; or # that starts a comment
+        raise RuntimeError(f"[agents] {name} in {home(CONFIG)} cannot be read: {e}") from None
+    return [prompt if part == "{prompt}" else part for part in parts]
 
 
 def windows_command(argv):
@@ -450,6 +458,8 @@ BOARD_CHANGES = {("project", "item-edit"), ("project", "item-add"), ("project", 
 def gh(*args):
     try:
         r = run(GH, *args)
+    except FileNotFoundError:
+        raise RuntimeError(f"gh not found ({GH})") from None
     finally:  # every board change goes through here; stamped even on a failure, which may have changed it anyway
         if tuple(args[:2]) in BOARD_CHANGES or (tuple(args[:2]) == ("api", "graphql") and len(args) > 3
                                                  and str(args[3]).startswith("query=mutation")):
@@ -867,12 +877,26 @@ def issue(t):
 # ---------- run state on this machine ----------
 
 def load_run(tid):
-    f = RUNS / f"{tid}.json"
-    return {**json.loads(f.read_text()), "id": str(tid)} if f.exists() else {}  # the id lives in the file name
+    """This machine's record of the task's run; {} when there is none. A record a crash or a full disk left cut
+    short, or one another task-hub removed meanwhile, counts as none: one bad file must not stop every command."""
+    try:
+        data = json.loads((RUNS / f"{tid}.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {**data, "id": str(tid)} if isinstance(data, dict) else {}  # the id lives in the file name
 
 
 def save_run(t):
     write_atomic(RUNS / f"{t['id']}.json", json.dumps({k: t.get(k, "") for k in RUN_KEYS}, indent=1))
+
+
+def read_agent_file(path):
+    """A file an agent wrote (its report, review or replan): UTF-8, with a BOM or not, or UTF-16 with its BOM, as
+    PowerShell 5.1's `>` and Out-File write it on Windows. A byte that is neither becomes U+FFFD, never an error."""
+    data = path.read_bytes()
+    text = data.decode("utf-16", errors="replace") if data.startswith((b"\xff\xfe", b"\xfe\xff")) \
+        else data.decode("utf-8-sig", errors="replace")
+    return text.replace("\r\n", "\n")
 
 
 def write_atomic(path, text):
@@ -1002,10 +1026,16 @@ def slow_threshold(agent):
     return limit, usual
 
 
+def event_lines_of(text):
+    """The lines of EVENTS, split at \\n only: json.dumps leaves U+2028, U+2029 and U+0085 in a title as they are,
+    and str.splitlines() would break a line there. A last line still being written is left out."""
+    return text[:text.rfind("\n") + 1].split("\n")[:-1]
+
+
 def events_named(name):
     """The events called `name` in EVENTS, oldest first."""
     events = []
-    for line in (EVENTS.read_text(errors="replace").splitlines() if EVENTS.exists() else []):
+    for line in (event_lines_of(EVENTS.read_text(errors="replace")) if EVENTS.exists() else []):
         try:
             e = json.loads(line)
         except ValueError:
@@ -1195,6 +1225,7 @@ def copy_env_files(t, wt):
             raise RuntimeError(f"env file {rel} is tracked in {t['repo']}; copying it would change the PR")
     for rel, src in copies.items():
         (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+        (wt / rel).unlink(missing_ok=True)  # an earlier run's copy of a read-only file cannot be written over
         shutil.copy2(src, wt / rel)
     # anchored: this path only; a wildcard character in a file name is matched as itself
     ensure_internal_excludes(wt, ["/" + re.sub(r"([*?\[\\])", r"\\\1", rel) for rel in copies])
@@ -2035,7 +2066,7 @@ def run_review(t, report, say, usage=None):
                             "Reviewers must only inspect the worktree.")
     if not (wt / REVIEW_FILE).exists():
         return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\nReviewer exited {code} without writing {REVIEW_FILE}.")
-    return ReviewResult((wt / REVIEW_FILE).read_text())
+    return ReviewResult(read_agent_file(wt / REVIEW_FILE))
 
 
 def review_loop(t, report, code, say, record):
@@ -2063,7 +2094,7 @@ def review_loop(t, report, code, say, record):
         set_stage(t, "retry")
         (wt / REPORT_FILE).unlink(missing_ok=True)  # a retry that dies must not pass for the first run's report
         code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"])
-        report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
+        report = read_agent_file(wt / REPORT_FILE) if (wt / REPORT_FILE).exists() else ""
         if not report.strip() or AgentReport(report).blocked:
             return report, code, review.issue_section(), ""
 
@@ -2119,7 +2150,7 @@ def run_replan(t, report, say, usage=None):
     if not (wt / REPLAN_FILE).exists():
         say(f"== replanner exited {code} without writing {REPLAN_FILE}")
         return "ignored"
-    text = (wt / REPLAN_FILE).read_text()
+    text = read_agent_file(wt / REPLAN_FILE)
     decision = (section(text, "Decision").splitlines() or [""])[0].strip(" *`_.").lower()
     note = ""
     if decision == "answered":
@@ -2189,7 +2220,7 @@ def cmd_run(a):
     code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"])
     say(f"== agent exited with code {code}")
 
-    report = (wt / REPORT_FILE).read_text() if (wt / REPORT_FILE).exists() else ""
+    report = read_agent_file(wt / REPORT_FILE) if (wt / REPORT_FILE).exists() else ""
     review, review_blocked = "", ""
     try:
         report, code, review, review_blocked = review_loop(t, report, code, say, record)
@@ -2373,7 +2404,7 @@ def sync(started_here=False):
             if before == IN_PROGRESS and not alive(t):
                 # a report the run could not deliver (GitHub was unreachable) is posted now
                 kept = Path(t.get("worktree") or "/nonexistent") / REPORT_FILE
-                report = kept.read_text() if kept.exists() else ""
+                report = read_agent_file(kept) if kept.exists() else ""
                 report_comment(t, blocked=f"the run stopped unexpectedly, see `task log {t['id']}`"
                                if t.get("started") else "no run of this task on this machine",
                                report=report.strip())
@@ -2425,7 +2456,10 @@ def sync(started_here=False):
                 if started_here:  # Issues made without `task new` (gh, GitHub, other skills) have no workspace yet
                     remember_where_asked(t, keep=True)
                 launch(t)
-            except RuntimeError as e:  # still holding the lock: no other start sees the card Ready in between
+            # still holding the lock: no other start sees the card Ready in between. OSError and ValueError too (a
+            # file in the way, a read-only copy): the card is blocked with why, instead of ending a watch that would
+            # fail on it again after every restart, and start no other card
+            except (RuntimeError, OSError, ValueError) as e:
                 record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""),
                             "agent": t.get("agent", ""), "started": now(), "finished": now(), "seconds": 0,
                             "status": BLOCKED, "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
@@ -2830,8 +2864,13 @@ def cmd_events(a):
     if a["next"] or (a["after"] is not None and not a["follow"]):  # --follow keeps ignoring --after
         return events_next(a, wanted)
     if not a["follow"]:
-        recent = EVENTS.read_text().splitlines()[-20:] if EVENTS.exists() else []
-        events = [e for e in (json.loads(line) for line in recent if line.startswith("{")) if wanted(e)]
+        recent = event_lines_of(EVENTS.read_text(errors="replace"))[-20:] if EVENTS.exists() else []
+        events = []
+        for line in recent:
+            with contextlib.suppress(ValueError):  # a line a crash cut short
+                e = json.loads(line)
+                if isinstance(e, dict) and wanted(e):
+                    events.append(e)
         out(*([line for e in events for line in event_lines(e, a["digest"])] or [f"events: none yet in {home(EVENTS)}"]))
         return
     pos = EVENTS.stat().st_size if EVENTS.exists() else 0  # only what happens from now on
@@ -2845,7 +2884,7 @@ def cmd_events(a):
                     chunk = f.read()
                 whole = chunk[:chunk.rfind(b"\n") + 1]  # a line still being written waits for the next look
                 pos += len(whole)
-                for line in whole.decode(errors="replace").splitlines():
+                for line in event_lines_of(whole.decode(errors="replace")):
                     try:
                         e = json.loads(line)
                         if wanted(e):  # one print: a monitor must see the event and its digest together
@@ -2859,8 +2898,7 @@ def cmd_events(a):
 
 def events_next(a, wanted):
     def whole_lines():  # a line still being written is not counted until it is complete
-        text = EVENTS.read_text(errors="replace") if EVENTS.exists() else ""
-        return text[:text.rfind("\n") + 1].splitlines()
+        return event_lines_of(EVENTS.read_text(errors="replace")) if EVENTS.exists() else []
 
     if a["after"] is not None and not a["after"].isdigit():
         fail(f"--after takes the number printed on the last `next:` line, got {a['after']!r}", code=2)
@@ -2902,6 +2940,11 @@ def cmd_watch(_):
             lines, _ = sync()
         except RuntimeError as e:  # a GitHub hiccup must not end the watch
             lines = [f"error: {e}"]
+        except SystemExit:  # a config edited into a bad state meanwhile: fail() said why; the next check reads it again
+            lines = []
+        except Exception as e:  # a bug must not end it either: under launchd it would fail the same way at every start
+            lines = [f"error: unexpected {type(e).__name__}: {e} (please report it with this log)"]
+            traceback.print_exc()
         lines += update_notice(check)
         if lines:
             out(f"== {now()}", *lines)
@@ -3074,7 +3117,10 @@ def cmd_open(a):
     if not template:
         out(home(wt), f"help: set  [ide]  open = code {{path}}  in {home(CONFIG)} to open it in your IDE")
         return
-    cmd = [wt if part == "{path}" else part for part in shlex.split(template)]
+    try:
+        cmd = [wt if part == "{path}" else part for part in shlex.split(template)]
+    except ValueError as e:  # a quote left open
+        fail(f"[ide] open in {home(CONFIG)} cannot be read: {e}", "check the quotes in  [ide]  open")
     try:
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          **DETACHED)
@@ -3212,7 +3258,10 @@ def cmd_new(a):
     blockers = [x.strip().lstrip("#") for x in (a["blocked_by"] or "").split(",") if x.strip()]
     if not all(x.isdigit() for x in blockers):
         fail(f"--blocked-by takes task numbers, e.g. 12 or 12,14; got {a['blocked_by']!r}", code=2)
-    goal = Path(a["goal_file"]).read_text() if a["goal_file"] else (a["goal"] or "")
+    try:  # a goal written with PowerShell 5.1's `>` is UTF-16
+        goal = read_agent_file(Path(a["goal_file"])) if a["goal_file"] else (a["goal"] or "")
+    except OSError as e:
+        fail(f"cannot read --goal-file {a['goal_file']}: {e.strerror or e}", code=2)
     if not goal.strip():
         fail("goal is empty", "pass --goal \"...\" or --goal-file path", 2)
     b = board()
@@ -3261,7 +3310,10 @@ def pick(candidates):
         return r.stdout.split("\t", 1)[0].strip() or None
     for n, t in enumerate(candidates, 1):
         print(f"  {n}) #{t['id']} [{t['status']}] {t['title']} ({t['repo']})")
-    choice = input("start which? (number, empty to cancel): ").strip()
+    try:
+        choice = input("start which? (number, empty to cancel): ").strip()
+    except EOFError:  # Ctrl-D
+        return None
     return candidates[int(choice) - 1]["id"] if choice.isdigit() and 0 < int(choice) <= len(candidates) else None
 
 
@@ -3404,10 +3456,14 @@ def main(argv):
         handler(a)
     except RuntimeError as e:  # GitHub or git failed: say what, never a traceback
         fail(str(e), hint(e))
+    except KeyboardInterrupt:  # Ctrl-C: the person knows why it stopped
+        sys.exit(130)
 
 
 def hint(e):
     """The help line for a GitHub failure, when there is a known next step."""
+    if "gh not found (" in str(e):  # also inside "cannot read GitHub Project ...": not a permissions problem
+        return "install GitHub CLI (https://cli.github.com, docs/setup.md), then run `gh auth login`"
     if "rate limit" in str(e).lower():  # not a permissions problem: waiting fixes it
         return "GitHub limits GraphQL calls per hour; wait for the limit to reset and run again"
     if str(e).startswith("cannot read GitHub Project"):

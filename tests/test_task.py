@@ -287,7 +287,9 @@ if mode == "route":  # review items, then the learning route worker/PROMPT.md as
                "  - Explain yourself: why is the greeting a file, not code?\n")
 if mode in ("blocked", "stuck"):  # stuck = blocked before changing anything
     report = "## Blocked\n\nNeed the Stripe test key.\n\n" + report
-if mode != "noreport":
+if mode == "utf16":  # what PowerShell 5.1's `>` and Out-File write on Windows
+    Path(".task-report.md").write_text(report, encoding="utf-16")
+elif mode != "noreport":
     Path(".task-report.md").write_text(report)
 def set_gh(key):  # under the fake gh's lock, like every other writer
     import fcntl, json
@@ -1412,6 +1414,75 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
         self.assertFalse((self.root / ".local/share/task-hub/worktrees/outside.env").exists())
 
+    def no_traceback(self):
+        self.assertNotIn("Traceback", self.stderr[-1])
+
+    def test_a_config_that_does_not_parse_says_where_without_a_traceback(self):
+        cfg = self.root / ".config/task-hub/config.ini"
+        cfg.write_text(cfg.read_text() + "\n[runner]\nagent = other\n")  # [runner] twice
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn("error: ~/.config/task-hub/config.ini cannot be read: ", out)
+        self.assertIn("section 'runner' already exists", out)
+
+    def test_a_run_record_cut_short_does_not_stop_every_command(self):
+        # a crash or a full disk can leave runs/<id>.json empty: task list, task watch and task done must go on
+        tid = self.new()
+        runs = self.root / ".local/state/task-hub/runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / f"{tid}.json").write_text('{"pid": "12')
+        self.task("list")
+        self.no_traceback()
+        self.task("done", tid)
+        self.no_traceback()
+        self.assertFalse((runs / f"{tid}.json").exists())
+
+    def test_a_report_in_utf16_is_read(self):
+        tid = self.new("utf16")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("Added hello.txt. Ran the tests: 3 passed.", self.comments(tid)[-1])
+
+    def test_an_event_with_a_line_separator_in_its_title_is_not_lost(self):
+        # json.dumps leaves U+2028 as it is, and str.splitlines() breaks a line there
+        tid = self.new(title="Add\u2028hello")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn(f"#{tid} In review", self.task("events", "--after", "0", "--only", "In review"))
+        self.assertIn(f"#{tid} In review", self.task("events"))
+        self.no_traceback()
+
+    def test_a_start_that_fails_on_a_file_blocks_the_card_without_a_traceback(self):
+        # not a RuntimeError (here: a folder where the repo has a file): the card is blocked with why, and a watch
+        # would go on to the next card instead of ending, and failing on this one again after every restart
+        src = self.root / "co" / ".env"
+        src.parent.mkdir()
+        src.write_text("K=1\n")
+        self.write_config(f"\n[env]\njyoka/app = {src} -> README.md/.env\n")
+        tid = self.new()
+        self.task("start", tid)
+        self.no_traceback()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("could not start", self.comments(tid)[-1])
+
+    def test_a_missing_gh_is_said_without_a_traceback(self):
+        self.env["TASK_GH"] = str(self.root / "no-such-gh")
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn(f"gh not found ({self.root / 'no-such-gh'})", out)
+        self.assertIn("help: install GitHub CLI", out)
+
+    def test_a_goal_file_that_cannot_be_read_is_said_without_a_traceback(self):
+        out = self.task("new", "--title", "t", "--repo", "jyoka/app", "--goal-file", str(self.root / "nope.md"),
+                        code=2)
+        self.no_traceback()
+        self.assertIn("error: cannot read --goal-file", out)
+        goal = self.root / "goal.md"
+        goal.write_text("Say hello. MODE:ok\n", encoding="utf-16")  # PowerShell 5.1's `>`
+        tid = re.search(r"id: (\d+)", self.task("new", "--title", "t", "--repo", "jyoka/app",
+                                                 "--goal-file", str(goal))).group(1)
+        self.assertEqual(self.gh()["issues"][tid]["body"].strip(), "Say hello. MODE:ok")
+
     def test_setup_runs_in_the_worktree_before_the_agent(self):
         # like `uv venv`: the virtualenv carries its own .gitignore, so git never sees it
         self.write_config("\n[setup]\njyoka/app = mkdir -p .venv\n  echo '*' > .venv/.gitignore\n"
@@ -2287,7 +2358,8 @@ class TaskTest(unittest.TestCase):
 
     def events_of(self, tid):
         path = self.events_file()
-        return [e for e in map(json.loads, path.read_text().splitlines()) if e["id"] == tid] if path.exists() else []
+        # split at \n only, as task-hub does: a title may hold U+2028, which splitlines() breaks a line at
+        return [e for e in map(json.loads, path.read_text().split("\n")[:-1]) if e["id"] == tid] if path.exists() else []
 
     def done_events(self, tid):
         return [e for e in self.events_of(tid) if e["event"] == "Done"]
