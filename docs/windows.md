@@ -61,54 +61,44 @@ PowerShell を開き、次のコマンドを 1 つずつ貼り付けて、結果
 | 3 | git | `git --version` | `git version 2.xx.x.windows.x` | 手順 4 のインストーラが入れます |
 | 4 | GitHub CLI | `gh --version` | `gh version 2.xx.x` | 手順 4 のインストーラが入れます |
 | 5 | Python 3.10 以上 | `py -3 --version` | `Python 3.12.x` など(3.10 以上) | 手順 4 のインストーラが入れます。`python --version` で Microsoft Store が開くときも、入っていません |
-| 6 | GitHub にログイン済み | `gh auth status` | `Logged in to github.com` と、`Token scopes:` の行に `'project'` | 手順 3 の「GitHub にログインする」 |
-| 7 | エージェント | `kiro-cli whoami`(Claude Code なら `claude --version`) | ログイン中のアカウントが出る | エージェントを入れてログインする(下の注) |
+| 6 | GitHub にログイン済み | `gh auth status` | `Logged in to github.com` と、`Token scopes:` の行に `'project'` | 手順 4 のインストーラが、ログインの窓を開きます |
+| 7 | エージェント | `kiro-cli whoami`(Claude Code なら `claude --version`) | ログイン中のアカウントが出る | kiro-cli は手順 4 のインストーラが入れ、ログインの窓を開きます。Claude Code、Codex は自分で入れてログインします |
 
 注: kiro-cli は 2.0 から Windows 11 にネイティブ対応しています([Kiro CLI 2.0 の変更履歴](https://kiro.dev/changelog/cli/2-0/))。
-入れ方は Kiro の公式ドキュメントに従ってください。入れたら `kiro-cli login` でログインし、`kiro-cli whoami` で確かめます。
 
 ## 3. 足りないものを入れる
 
 ### ソフトを入れる
 
-git、GitHub CLI(gh)、Python は、自分で入れる必要はありません。無ければ、手順 4 のインストーラが自分のフォルダー
-(`~\.local`)に入れます。管理者権限は使いません(winget や MSI のインストーラは、入れるときや消すときに管理者権限を
-求めることがあるため使いません)。
+git、GitHub CLI(gh)、Python、kiro-cli は、自分で入れる必要はありません。無ければ、手順 4 のインストーラが自分の
+フォルダー(`~\.local`)に入れます。管理者権限は使いません(winget や、MSI をふつうに入れるやり方は、入れるときや
+消すときに管理者権限を求めることがあるため使いません)。kiro-cli は、Kiro を使わない人(Claude Code、Codex だけの人)
+にも入り、ログインを求めます。
 
 ただし、手順 4-1 の `git clone` には git が要ります(インストーラは、取ってきたリポジトリの中にあるため)。git が
 無い PC での始め方は、かんたんセットアップ(準備中)で扱います。それまでは、Git for Windows を入れてから始めます。
 
-gh が無い人は、下の「GitHub にログインする」を、手順 4-2 のインストーラのあとに、新しい PowerShell で行います。
-
-入れたものは、GitHub の公開されているファイルを、公開されているチェックサム(SHA-256)で確かめてから置きます。
+入れたものは、公開されているファイルを、公開されているチェックサム(SHA-256)で確かめてから置きます。
 
 | 名前 | 置く場所 |
 |---|---|
 | git(Git for Windows の MinGit) | `~\.local\lib\git` |
 | GitHub CLI | `~\.local\bin\gh.exe` |
 | Python 3.12(uv で取る) | `~\.local\bin\uv.exe` と、uv の Python の場所 |
+| kiro-cli(公式の MSI を、入れずに展開だけする。約 300 MB) | `~\.local\lib\kiro-cli\kiro-cli.exe` |
 
-### GitHub にログインする
+kiro-cli は、公式の手順(`C:\Program Files\Kiro-Cli` に入れる。管理者権限が要る)で入れてあれば、それを使います。
 
-```
-gh auth login
-```
+### ログイン
 
-質問には次のように答えます(矢印キーで選び、Enter で決定します)。
+GitHub と kiro-cli のログインも、手順 4-2 のインストーラが案内します。ログインしていなければ、ログイン用の
+PowerShell の窓を開いて止まります。
 
-1. `Where do you use GitHub?` → `GitHub.com`
-2. `What is your preferred protocol for Git operations?` → `HTTPS`
-3. `Authenticate Git with your GitHub credentials?` → `Yes`
-4. `How would you like to authenticate GitHub CLI?` → `Login with a web browser`
-5. 画面に出た 8 文字のコード(例 `ABCD-1234`)を控え、開いたブラウザに入力して承認します
+- **GitHub**: 窓で Enter を押すとブラウザが開きます。窓に出た 8 文字のコード(例 `ABCD-1234`)をブラウザに入れて
+  承認します。Project を読み書きする権限(`project`)も一緒に求めます
+- **kiro-cli**: 窓でログインの方法を矢印キーで選び、ブラウザで承認します
 
-続けて、Project を読み書きする権限を足します。同じようにブラウザで承認します。
-
-```
-gh auth refresh -s project
-```
-
-最後に `gh auth status` を実行します。`Token scopes:` の行に `'project'` が入っていれば完了です。
+終わったら窓を閉じて、インストーラをもう一度実行します。続きから進みます。
 
 ## 4. task-hub を入れる
 
@@ -130,24 +120,26 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1
 
 インストーラは次を行います。何度実行しても安全です。管理者権限は使いません。
 
-1. git、Python 3.10 以上、gh があるかを確かめ、無いものを自分のフォルダーに入れます(手順 3 の表)。開いたあとに
-   入ったソフトも見つけます(PowerShell を開き直さなくてかまいません)。入れたものは
+1. git、Python 3.10 以上、gh、kiro-cli があるかを確かめ、無いものを自分のフォルダーに入れます(手順 3 の表)。
+   開いたあとに入ったソフトも見つけます(PowerShell を開き直さなくてかまいません)。入れたものは
    `~\.local\state\task-hub\install-manifest.json` に記録します
-2. 動かす用の task-hub を `~\.local\lib\task-hub` に取ってきます(すでにあれば最新にします)。
+2. GitHub と kiro-cli にログインしているかを確かめ、していなければログインの窓を開いて止まります(手順 3 の「ログイン」)
+3. 動かす用の task-hub を `~\.local\lib\task-hub` に取ってきます(すでにあれば最新にします)。
    4-1 のフォルダーとは別にするのは、そちらを書き換えても、動いている task-hub が変わらないようにするためです
-3. `task` コマンドを `~\.local\bin` に置き、そのフォルダーを PATH(コマンドを探す場所)に足します。
+4. `task` コマンドを `~\.local\bin` に置き、そのフォルダーを PATH(コマンドを探す場所)に足します。
    Git Bash(Windows の Claude Code が使うシェル)用の `task` も、同じ場所に置きます
 
-うまくいくと、最後のほうに次のように出ます(パスは人によって違います)。
+うまくいくと、次のように出ます(パスは人によって違います)。
 
 ```
 task-hub をセットアップします(管理者権限は使いません)
 1. 前提の確認: 済み(Windows 11 x64、git、GitHub に接続)
 2. Python: 済み(C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe を使います)
 3. gh: 済み(C:\Program Files\GitHub CLI\gh.exe)
-task-hub: cloned https://github.com/jyoka/task-hub.git to C:\Users\you\.local\lib\task-hub
-task-hub: added C:\Users\you\.local\bin to your PATH (new terminals see it)
-0.6.0
+4. kiro-cli: 済み(C:\Program Files\Kiro-Cli\kiro-cli.exe)
+5. GitHub のログイン: 済み(you)
+5. kiro-cli のログイン: 済み
+6. task-hub 本体: 入れました(clone(main 1a2b3c4)、~\.local\bin\task.cmd、~\.local\bin\task、ユーザーの PATH に ~\.local\bin)
 task-hub: done. Next: docs/windows.md (config, then `task list`). ...
 ```
 
@@ -378,6 +370,10 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 | `… のチェックサムが合いません … 入れていません` | ダウンロードしたファイルが、GitHub の公開しているものと違う(途中で壊れた、または書き換えられた) | 何も入れていません。時間をおいてもう一度実行する。続くときは担当者に伝える |
 | `入れた git が動きません`、`入れた gh が動きません` | 会社のセキュリティ(AppLocker など)が、ユーザーフォルダーの下のプログラムを止めている | 情シスに相談する |
 | `この PC の PowerShell は機能が制限されています` | 制約付き言語モード | 表示された依頼文を情シスに送る |
+| `Kiro CLI の MSI を展開できませんでした` | MSI の展開(`msiexec /a`)を会社のポリシーが止めている、または空き容量がない | 空き容量(約 1 GB)を確かめて、もう一度実行する。続くときは、情シスに Kiro CLI を公式の手順で入れてもらう(インストーラはそれを使います) |
+| `ログインの窓を開けませんでした` | 新しい PowerShell の窓を開けなかった | 表示されたファイルを、エクスプローラーで右クリックして「PowerShell で実行」する |
+| `GitHub にログインしていません。開いた窓で…` | ログインの途中 | 開いた窓でブラウザの承認を終え、窓を閉じて、もう一度実行する。窓が見えなければ、タスクバーを見る |
+| `環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません` | 以前の設定でトークンを環境変数に入れている | その環境変数を消してサインインし直すか、`project` の権限があるトークンにする |
 | `error: could not clone ...` | ネットワークに出られない(会社のプロキシ)、または URL の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
 | `error: could not update C:\Users\...\.local\lib\task-hub` | 本体のフォルダーを手で書き換えた | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
 | `error: ...task.cmd does not run` | Python か本体のフォルダーが壊れている | 表示された help のコマンドを実行して、出たエラーを担当者に伝える |

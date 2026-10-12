@@ -9,14 +9,21 @@
      so a tool installed after this window opened is found. Without git, puts MinGit in ~\.local\lib\git.
   2. Python 3.10+: the one an earlier run chose, else py -3 or python, else uv's Python 3.12 (uv in ~\.local\bin).
   3. gh: the one on PATH, else the release zip into ~\.local\bin.
-  Then clones task-hub to ~\.local\lib\task-hub (or pulls it), writes ~\.local\bin\task.cmd, which runs bin\task with
-  that Python, and puts ~\.local\bin on the user PATH.
+  4. kiro-cli: the one on PATH or the official installer's (put on the user PATH), else the official MSI unpacked
+     with msiexec /a (no admin rights) into ~\.local\lib\kiro-cli.
+  5. Logins, gh's (with the project scope, and git using it) and kiro-cli's: when one is missing it opens a PowerShell
+     window for it, and stops; run this again once it is done.
+  6. task-hub: clones it to ~\.local\lib\task-hub, on the newest kiro-v<number> tag if any (later runs switch to a
+     newer one; a clone someone made on a branch is only pulled), writes ~\.local\bin\task.cmd, which runs bin\task
+     with that Python, and `task` for Git Bash, and puts ~\.local\bin on the user PATH.
   With -Watch it also starts `task watch` at every logon (Task Scheduler; the Startup folder when that is refused)
   and starts it now. -Uninstall stops and removes the watch and task.cmd; the clone, config and data stay.
   Downloads are checked against the release's SHA-256. Safe to run again.
-  For tests: TASK_INSTALL_GITHUB replaces https://github.com, TASK_INSTALL_GITHUB_API https://api.github.com, and
-  TASK_INSTALL_USER_ENV / TASK_INSTALL_MACHINE_ENV name keys under HKCU to use as the user's and the machine's
-  environment (PATH), so a test changes no real PATH.
+  For tests: TASK_INSTALL_GITHUB replaces https://github.com, TASK_INSTALL_GITHUB_API https://api.github.com,
+  TASK_INSTALL_KIRO_CLI https://prod.download.cli.kiro.dev, TASK_INSTALL_MSIEXEC msiexec.exe,
+  TASK_INSTALL_PROGRAM_FILES $env:ProgramFiles, and TASK_INSTALL_OPEN_WINDOW is run with a login's script instead of
+  opening a window. TASK_INSTALL_USER_ENV / TASK_INSTALL_MACHINE_ENV name keys under HKCU to use as the user's and
+  the machine's environment (PATH), so a test changes no real PATH.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Watch
@@ -24,7 +31,8 @@
 param(
   [switch]$Watch,
   [switch]$Uninstall,
-  [string]$From = ""  # where to clone from; default: the origin of the clone this script is in
+  [string]$From = "",  # where to clone from; default: the origin of the clone this script is in
+  [string]$Ref = ""  # for developers: the version (branch or tag) to put in ~\.local\lib\task-hub, this run only
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # Windows PowerShell 5.1's progress bar makes downloads many times slower
@@ -34,6 +42,7 @@ $TaskName = 'task-hub watch'
 $Root = $env:USERPROFILE
 $Lib = Join-Path $Root '.local\lib\task-hub'
 $GitDir = Join-Path $Root '.local\lib\git'  # MinGit, when there was no git
+$KiroDir = Join-Path $Root '.local\lib\kiro-cli'  # kiro-cli, when there was none
 $BinDir = Join-Path $Root '.local\bin'
 $State = Join-Path $Root '.local\state\task-hub'
 $Manifest = Join-Path $State 'install-manifest.json'
@@ -43,6 +52,10 @@ $ShShim = Join-Path $BinDir 'task'  # for Git Bash, which Claude Code's Bash too
 $Startup = [IO.Path]::Combine([Environment]::GetFolderPath('Startup', 'Create'), 'task-hub watch.lnk')
 $GitHub = if ($env:TASK_INSTALL_GITHUB) { $env:TASK_INSTALL_GITHUB.TrimEnd('/') } else { 'https://github.com' }
 $GitHubApi = if ($env:TASK_INSTALL_GITHUB_API) { $env:TASK_INSTALL_GITHUB_API.TrimEnd('/') } else { 'https://api.github.com' }
+$KiroDownload = if ($env:TASK_INSTALL_KIRO_CLI) { $env:TASK_INSTALL_KIRO_CLI.TrimEnd('/') } else { 'https://prod.download.cli.kiro.dev' }
+$Msiexec = if ($env:TASK_INSTALL_MSIEXEC) { $env:TASK_INSTALL_MSIEXEC } else { 'msiexec.exe' }
+$ProgramFiles = if ($env:TASK_INSTALL_PROGRAM_FILES) { $env:TASK_INSTALL_PROGRAM_FILES } else { $env:ProgramFiles }
+$Marker = 'task-hub: made by windows/install.ps1'
 $NetHelp = 'ネットワーク(VPN、プロキシ)を確かめて、もう一度実行してください'
 $label = '準備'
 $changed = $false
@@ -60,7 +73,7 @@ function Tilde($p) { if ("$p".StartsWith("$Root\")) { '~' + "$p".Substring($Root
 function Runs($exe, [string[]]$a) {  # whether it runs and exits 0; what it printed (stdout, then stderr) in $script:Out
   $ErrorActionPreference = 'Continue'  # Windows PowerShell 5.1 would stop at a line on stderr
   try {
-    $script:Out = @(& $exe @a 2>&1 | ForEach-Object { "$_" })
+    $script:Out = @($null | & $exe @a 2>&1 | ForEach-Object { "$_" })
     return ($LASTEXITCODE -eq 0)
   } catch {
     $script:Out = @("$_")
@@ -379,6 +392,292 @@ function Stage-Gh {
   Ok 入れました "gh $ver、$(Tilde $script:Gh)"
 }
 
+function Install-KiroCli {
+  # The official script runs the MSI with msiexec /i, into Program Files: admin rights. msiexec /a only unpacks it
+  # (an "administrative install"), which needs none; kiro-cli is one program, and runs from wherever it is.
+  Write-Host "$($script:label): Kiro CLI を取っています(約 300 MB。公式の手順ではありません: 公式は管理者権限の要る Program Files に入れるため)…"
+  $list = Join-Path $script:Work 'kiro-manifest.json'
+  Fetch "$KiroDownload/stable/latest/manifest.json" $list
+  try {
+    $pkg = @(([IO.File]::ReadAllText($list) | ConvertFrom-Json).packages |
+      Where-Object { $_.os -eq 'windows' -and $_.kind -eq 'msi' -and $_.architecture -eq 'x86_64' })[0]
+  } catch { $pkg = $null }
+  if (-not $pkg) {
+    Die 'Kiro CLI の一覧(manifest.json)に Windows 用の MSI がありません' `
+      '時間をおいてもう一度実行してください。続くときは task-hub の担当者に知らせてください'
+  }
+  $msi = Join-Path $script:Work 'kiro-cli.msi'
+  Fetch "$KiroDownload/stable/$($pkg.download)" $msi
+  Confirm-Sum $msi "$($pkg.sha256)"
+  $unpacked = Join-Path $script:Work 'kiro-cli'
+  $p = Start-Process $Msiexec -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$unpacked`"" -Wait -PassThru -WindowStyle Hidden
+  $exe = Get-ChildItem -LiteralPath $unpacked -Recurse -Filter 'kiro-cli.exe' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($p.ExitCode -ne 0 -or -not $exe) {
+    Die "Kiro CLI の MSI を展開できませんでした(msiexec の終了コード $($p.ExitCode))。入れていません" `
+      '時間をおいてもう一度実行してください。続くときは task-hub の担当者に知らせてください'
+  }
+  if ((Test-Path $KiroDir) -and $script:M.installed.'kiro-cli' -ne $KiroDir) {
+    Die "$(Tilde $KiroDir) がすでにあります(このインストーラが入れたものではありません)" `
+      'そのフォルダーを別の場所に移してから、もう一度実行してください'
+  }
+  New-Item -ItemType Directory -Force $KiroDir | Out-Null
+  $dst = Join-Path $KiroDir 'kiro-cli.exe'
+  try {
+    Copy-Item -Force -LiteralPath $exe.FullName "$dst.tmp"
+    Move-Item -Force "$dst.tmp" $dst
+  } catch {
+    Die "$(Tilde $dst) に置けませんでした" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください'
+  }
+  Set-Record 'kiro-cli' $KiroDir
+  if (-not (Runs $dst @('--version'))) {
+    Die '入れた kiro-cli が動きません' '情シスに、ユーザーフォルダーの下に置いた実行ファイルを止めていないか確かめてください'
+  }
+  return $dst
+}
+
+function Stage-KiroCli {
+  $script:label = '4. kiro-cli'
+  $found = Find-App kiro-cli
+  if ($found -and (Runs $found @('--version'))) {
+    $script:Kiro = $found
+    Ok 済み (Tilde $found)
+    return
+  }
+  # not on PATH: where the official installer puts it, or where an earlier run of this script did, else get it
+  $found, $result = $null, 'PATH に足しました'
+  foreach ($k in (Join-Path $ProgramFiles 'Kiro-Cli\kiro-cli.exe'), (Join-Path $KiroDir 'kiro-cli.exe')) {
+    if ((Test-Path -LiteralPath $k) -and (Runs $k @('--version'))) { $found = $k; break }
+  }
+  if (-not $found) { $found, $result = (Install-KiroCli), '入れました' }
+  $dir = Split-Path $found
+  if (Add-UserPath $dir) { Set-Record 'kiro-cli-path' $dir }
+  $env:Path = "$dir;$env:Path"
+  $script:Kiro = $found
+  $script:changed = $true
+  Ok $result (Tilde $found)
+}
+
+function Get-GhUser {  # the login and the scopes of gh's token, in $script:GhUser and $script:GhScopes
+  $script:GhUser, $script:GhScopes = '', ''
+  if (-not (Runs $script:Gh @('api', '-i', 'user'))) { return $false }
+  foreach ($line in $script:Out) {
+    if ($line -match '^x-oauth-scopes:\s*(.*)$') { $script:GhScopes = $Matches[1].Trim() }
+    if ($line -match '^\{"login":"([^"]+)"') { $script:GhUser = $Matches[1] }  # the body starts with it
+  }
+  return [bool]$script:GhUser
+}
+
+function Test-GitUsesGh {  # gh is git's credential helper for GitHub (gh auth setup-git)
+  Runs git @('config', '--global', '--get-all', 'credential.https://github.com.helper') | Out-Null
+  return [bool]($script:Out | Where-Object { $_ -match 'auth git-credential' })
+}
+
+function Open-LoginWindow($name, [string[]]$command) {
+  # A login asks its questions in a window of its own: Kiro's chat cannot answer them. The window gets this
+  # process's environment (the proxy included); the script removes itself when it starts.
+  $file = Join-Path $State $name
+  $quoted = ($command | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' '
+  $body = "# $Marker. Runs in its own window, where the login can ask its questions.`r`n" +
+    "Remove-Item -LiteralPath `$PSCommandPath -ErrorAction SilentlyContinue`r`n" +
+    "& $quoted`r`n" +
+    "Write-Host ''`r`n" +
+    "Write-Host '終わったら、この窓を閉じて、もう一度 windows\install.ps1 を実行してください(Kiro のチャットなら「続けて」)'`r`n" +
+    "Read-Host 'Enter で閉じます' | Out-Null`r`n"
+  try {
+    [IO.File]::WriteAllText($file, $body, (New-Object Text.UTF8Encoding $true))
+    if ($env:TASK_INSTALL_OPEN_WINDOW) { & $env:TASK_INSTALL_OPEN_WINDOW $file }
+    else { Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$file`"" }
+  } catch {
+    Die "ログインの窓を開けませんでした($($_.Exception.Message))" `
+      "エクスプローラーで $(Tilde $file) を右クリックして「PowerShell で実行」で進め、終わったらもう一度実行してください"
+  }
+}
+
+function Stage-GhLogin {
+  $script:label = '5. GitHub のログイン'
+  if ((Get-GhUser) -and (", $($script:GhScopes)," -match ', project,')) {
+    Remove-Item -LiteralPath (Join-Path $State 'gh-login.ps1') -ErrorAction SilentlyContinue
+    # git (task-hub's clones and pushes) uses the same login; a login in a window does not set that up
+    if (Test-GitUsesGh) {
+      Ok 済み $script:GhUser
+      return
+    }
+    if (-not (Runs $script:Gh @('auth', 'setup-git', '-h', 'github.com'))) {
+      Die "git に GitHub のログインを設定できませんでした($($script:Out | Select-Object -Last 1))" 'もう一度実行してください'
+    }
+    $script:changed = $true
+    Ok 設定しました "$($script:GhUser)、git も gh のログインを使います"
+    return
+  }
+  if ($script:GhUser) {
+    $command, $need = @('auth', 'refresh', '-h', 'github.com', '-s', 'project'), 'Projects の権限(project)が要ります'
+  } else {
+    $command, $need = @('auth', 'login', '--web', '-s', 'project', '-h', 'github.com', '-p', 'https'), 'GitHub にログインしていません'
+  }
+  if ($env:GH_TOKEN -or $env:GITHUB_TOKEN) {  # gh refuses to log in while one is set
+    Die "${need}。環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません" `
+      'その環境変数を外すか、project の権限があるトークンにしてから、もう一度実行してください'
+  }
+  Open-LoginWindow 'gh-login.ps1' (@($script:Gh) + $command)
+  Die "${need}。開いた窓で、案内に沿ってブラウザで承認してください" '承認が終わったら、もう一度実行してください'
+}
+
+function Stage-KiroLogin {
+  $script:label = '5. kiro-cli のログイン'
+  if (Runs $script:Kiro @('whoami')) {
+    Remove-Item -LiteralPath (Join-Path $State 'kiro-login.ps1') -ErrorAction SilentlyContinue
+    Ok 済み
+    return
+  }
+  # kiro-cli login first asks how to log in, in a menu that needs a window
+  Open-LoginWindow 'kiro-login.ps1' @($script:Kiro, 'login')
+  Die 'kiro-cli にログインしていません。開いた窓で、ログインの方法を選んでブラウザで承認してください' `
+    'ログインが終わったら、もう一度実行してください'
+}
+
+function GitLib {  # git in the clone; $true when it exits 0, what it printed in $script:Out
+  return (Runs git (@('-C', $Lib) + $args))
+}
+
+function Get-NewestKiroTag($names) {  # of tag names, kiro-v<number>, numbers compared as numbers
+  $names | Where-Object { $_ -match '^kiro-v\d+$' } | Sort-Object { [int]$_.Substring(6) } | Select-Object -Last 1
+}
+
+function Get-CloneVersion {  # the kiro-v* tag the clone is on, else its branch and commit (or tag, or commit)
+  if (GitLib symbolic-ref -q --short HEAD) {
+    $b = $script:Out[0]
+    GitLib rev-parse --short HEAD | Out-Null
+    return "$b $($script:Out[0])"
+  }
+  GitLib tag --points-at HEAD | Out-Null
+  $t = Get-NewestKiroTag $script:Out
+  if ($t) { return $t }
+  if (GitLib describe --tags --exact-match HEAD) { return $script:Out[0] }
+  GitLib rev-parse --short HEAD | Out-Null
+  return $script:Out[0]
+}
+
+function Switch-To($v) {  # a tag or a branch of origin, already fetched. The version there still works if it fails
+  if (GitLib rev-parse -q --verify "refs/tags/$v") {
+    $ok = GitLib checkout -q --detach "refs/tags/$v"
+  } elseif (GitLib rev-parse -q --verify "refs/remotes/origin/$v") {
+    $ok = (GitLib checkout -q $v) -and (GitLib pull --ff-only -q)
+  } else {
+    Die "$v という版(ブランチかタグ)がありません" '-Ref の名前を確かめて、もう一度実行してください'
+  }
+  if (-not $ok) {
+    Write-Host "$($script:label): $v に切り替えられませんでした($($script:Out | Select-Object -Last 1))。今の版のまま進めます"
+  }
+}
+
+function Write-Shim($file, $want, $enc, $key) {  # $true when it wrote it
+  $now = if (Test-Path -LiteralPath $file) { [IO.File]::ReadAllText($file, $enc) } else { $null }
+  $wrote = $now -ne $want
+  if ($wrote) {
+    try { [IO.File]::WriteAllText($file, $want, $enc) }
+    catch { Die "$(Tilde $file) を書けませんでした" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください' }
+  }
+  if ($script:M.installed.$key -ne $file) { Set-Record $key $file }
+  return $wrote
+}
+
+function Stage-TaskHub {
+  $script:label = '6. task-hub 本体'
+  $did = @()
+  $env:GIT_TERMINAL_PROMPT = '0'  # fail instead of waiting for a password nobody can type
+  $stale = { Write-Host "$($script:label): $(Tilde $Lib) を更新できませんでした($($script:Out | Select-Object -Last 1))。今の版のまま進めます" }
+  if (Test-Path (Join-Path $Lib '.git')) {
+    $before = Get-CloneVersion
+    $branch = if (GitLib symbolic-ref -q --short HEAD) { $script:Out[0] } else { '' }
+    # The installer's clone (in the manifest, or not on a branch) follows the newest kiro-v*. A clone on a branch
+    # that someone made by hand (docs/windows.md's earlier install, a developer's) is only pulled, as before.
+    if (-not $Ref -and -not $script:M.installed.'task-hub' -and $branch) {
+      if (-not (GitLib pull --ff-only -q)) { & $stale }
+    } elseif (-not (GitLib fetch -q --tags)) {
+      & $stale  # the version there still works: go on with it
+    } elseif ($Ref) {
+      Switch-To $Ref
+    } else {
+      GitLib tag -l 'kiro-v*' | Out-Null
+      $newest = Get-NewestKiroTag $script:Out
+      $current = ''
+      if (-not $branch) {
+        GitLib tag --points-at HEAD | Out-Null
+        $current = Get-NewestKiroTag $script:Out
+      }
+      if ($newest -and (-not $current -or [int]$newest.Substring(6) -gt [int]$current.Substring(6))) {
+        Switch-To $newest
+      } elseif ($branch) {  # no release yet: the branch, as before
+        if (-not (GitLib pull --ff-only -q)) { & $stale }
+      }
+    }
+    $after = Get-CloneVersion
+    if ($before -ne $after) { $did += "$before → $after" }
+  } elseif (Test-Path $Lib) {
+    Die "$(Tilde $Lib) がありますが、git の clone ではありません" '中身を確かめて別の場所に移してから、もう一度実行してください'
+  } else {
+    $url = $From
+    if (-not $url -and (Runs git @('-C', (Join-Path $PSScriptRoot '..'), 'remote', 'get-url', 'origin'))) { $url = $script:Out[0] }
+    if (-not $url) { $url = 'https://github.com/jyoka/task-hub.git' }
+    New-Item -ItemType Directory -Force (Split-Path $Lib) | Out-Null
+    $branchArgs = if ($Ref) { @('-b', $Ref) } else { @() }
+    if (-not (Runs git (@('clone', '-q') + $branchArgs + @($url, $Lib)))) {
+      Die "$url$(if ($Ref) { " の $Ref" }) を clone できませんでした($($script:Out | Select-Object -Last 1))" `
+        'GitHub でこのリポジトリを読めるか(-Ref を付けたなら、その版の名前も)確かめて、もう一度実行してください'
+    }
+    if (-not $Ref) {
+      GitLib tag -l 'kiro-v*' | Out-Null
+      $newest = Get-NewestKiroTag $script:Out
+      if ($newest -and -not (GitLib checkout -q --detach "refs/tags/$newest")) {
+        Die "$newest に切り替えられませんでした($($script:Out | Select-Object -Last 1))" 'もう一度実行してください'
+      }
+    }
+    Set-Record 'task-hub' $Lib
+    $did += "clone($(Get-CloneVersion))"
+  }
+
+  # task.cmd for PowerShell and cmd.exe, and `task` for Git Bash, which Claude Code's Bash tool uses: it runs no .cmd
+  New-Item -ItemType Directory -Force $BinDir | Out-Null
+  $task = Join-Path $Lib 'bin\task'
+  # cmd.exe reads a .cmd in the console's code page, which may not have the letters of the user folder's name (a
+  # Japanese name on a Chinese Windows): paths under it are written as %USERPROFILE%, which cmd.exe expands as it runs
+  $cmdPath = { param($p) if ($p.StartsWith("$Root\")) { '%USERPROFILE%' + $p.Substring($Root.Length) } else { $p } }
+  $posix = { param($p) $p -replace '\\', '/' }
+  $oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+  $utf8 = New-Object Text.UTF8Encoding $false
+  $shims = @(
+    @($Shim, $oem, 'task', '^@setlocal\r\n@set PYTHONUTF8=1\r\n@".*" ".*\\bin\\task" %\*\r\n$',
+      "@rem $Marker`r`n@setlocal`r`n@set PYTHONUTF8=1`r`n@`"$(& $cmdPath $script:Python)`" `"$(& $cmdPath $task)`" %*`r`n"),
+    @($ShShim, $utf8, 'task-sh', '^#!/bin/sh\nPYTHONUTF8=1 exec ".*" ".*/bin/task" "\$@"\n$',
+      "#!/bin/sh`n# $Marker`nPYTHONUTF8=1 exec `"$(& $posix $script:Python)`" `"$(& $posix $task)`" `"`$@`"`n"))
+  foreach ($s in $shims) {  # what install.ps1 wrote before it marked them is taken over; anything else is someone's
+    if (Test-Path -LiteralPath $s[0]) {
+      $now = [IO.File]::ReadAllText($s[0], $s[1])
+      if (-not $now.Contains($Marker) -and $now -notmatch $s[3]) {
+        Die "$(Tilde $s[0]) がすでにあります(このインストーラが作ったものではありません)" 'それを消すか移してから、もう一度実行してください'
+      }
+    }
+  }
+  foreach ($s in $shims) {
+    if (Write-Shim $s[0] $s[4] $s[1] $s[2]) { $did += Tilde $s[0] }
+  }
+  if (Add-UserPath $BinDir) {
+    Set-Record 'user-path' $BinDir
+    $did += 'ユーザーの PATH に ~\.local\bin'
+  }
+  if (-not (Runs $Shim @('--version'))) {
+    Die "$(Tilde $Shim) が動きません($($script:Out | Select-Object -Last 1))" `
+      'この表示を task-hub の担当者に知らせてください'
+  }
+  if ($did) {
+    $script:changed = $true
+    Ok 入れました ($did -join '、')
+  } else {
+    Ok 済み "$(Tilde $Lib)($(Get-CloneVersion))、$(Tilde $Shim)"
+  }
+}
+
 function Stop-Watch {
   # the loop (task-watch.ps1) and the `task watch` it started, and nothing else: a run goes on, and so does an agent
   # whose prompt happens to name task-watch.ps1. Not Stop-ScheduledTask, which can end every process the task started
@@ -421,41 +720,11 @@ Update-ProcessPath
 Stage-Prereq
 Stage-Python
 Stage-Gh
+Stage-KiroCli
+Stage-GhLogin
+Stage-KiroLogin
+Stage-TaskHub
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
-
-# the clone task-hub runs from (never the one you develop in: switching branches there would change running code)
-if (Test-Path (Join-Path $Lib '.git')) {
-  git -C $Lib pull -q --ff-only
-  if ($LASTEXITCODE -ne 0) { Stop-Here "could not update $Lib" "run: git -C `"$Lib`" status" }
-  Say "updated $Lib"
-} else {
-  if (-not $From) { $From = (git -C (Join-Path $PSScriptRoot '..') remote get-url origin) }
-  if (-not $From) { Stop-Here 'no clone URL' 'pass -From <url of task-hub>' }
-  New-Item -ItemType Directory -Force (Split-Path $Lib) | Out-Null
-  git clone -q $From $Lib
-  if ($LASTEXITCODE -ne 0) { Stop-Here "could not clone $From" 'check that gh auth login was done and you can open the repository' }
-  Say "cloned $From to $Lib"
-}
-
-# `task` on PATH
-New-Item -ItemType Directory -Force $BinDir | Out-Null
-$task = Join-Path $Lib 'bin\task'
-# cmd.exe reads a .cmd in the console's code page, which may not have the letters of the user folder's name (a
-# Japanese name on a Chinese Windows): paths under it are written as %USERPROFILE%, which cmd.exe expands as it runs
-$cmdPath = { param($p) if ($p.StartsWith("$Root\")) { '%USERPROFILE%' + $p.Substring($Root.Length) } else { $p } }
-$oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-[IO.File]::WriteAllText($Shim,
-  "@setlocal`r`n@set PYTHONUTF8=1`r`n@`"$(& $cmdPath $Python)`" `"$(& $cmdPath $task)`" %*`r`n", $oem)
-$posix = { param($p) $p -replace '\\', '/' }
-[IO.File]::WriteAllText($ShShim, "#!/bin/sh`nPYTHONUTF8=1 exec `"$(& $posix $Python)`" `"$(& $posix $task)`" `"`$@`"`n",
-  (New-Object Text.UTF8Encoding $false))
-if (Add-UserPath $BinDir) {
-  Set-Record 'user-path' $BinDir
-  Say "added $BinDir to your PATH (new terminals see it)"
-}
-$env:Path = "$BinDir;$env:Path"
-& $Shim --version
-if ($LASTEXITCODE -ne 0) { Stop-Here "$Shim does not run" "run it by hand to see why: & `"$Shim`" --version" }
 
 if (-not $Watch) {
   Say 'done. Next: docs/windows.md (config, then `task list`). To start Ready cards without a terminal: install.ps1 -Watch'
