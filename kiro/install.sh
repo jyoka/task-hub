@@ -3,9 +3,9 @@
 #   sh kiro/install.sh [--with-launchd] [--start-launchd] [--ref <branch or tag>]
 # --with-launchd: also put the launchd plist that keeps `task watch` running (stage 10). It is only started with
 # --start-launchd (which implies --with-launchd), after the user said yes.
-# --ref: for developers, the version of task-hub to put in ~/.local/lib/task-hub (say main or kiro-v1), this run only.
-# Without it, a new clone is on the newest tag kiro-v<number> (the released version; docs/kiro-ide.md,
-# 「配布する版を出す」), else on the default branch (stage 6).
+# --ref: for developers, the version of task-hub to put in ~/.local/lib/task-hub (say main or v0.12.0), this run only.
+# Without it, a new clone is on the newest release tag v<MAJOR>.<MINOR>.<PATCH> from v0.12.0 (docs/release.md),
+# else on the default branch (stage 6).
 # Each stage checks whether it is already done and skips it, so running this again is always safe.
 # Everything goes under $HOME. What this script put there is recorded in
 # ~/.local/state/task-hub/install-manifest.json, for the uninstaller (kiro/uninstall.sh). At the end it runs
@@ -437,10 +437,15 @@ stage_kiro_login() {
 }
 
 g() { "$GIT" -C "$LIB_DIR" "$@"; }  # git in the clone
-kiro_newest() { grep -E '^kiro-v[0-9]+$' | sort -t v -k 2,2n | tail -n 1; }  # of tag names, numbers compared as numbers
-clone_version() {  # the kiro-v* tag the clone is on, else its branch and commit (or tag, or commit)
+# of tag names, the newest release v<MAJOR>.<MINOR>.<PATCH> from v0.12.0, the first the easy setup installs (the ones
+# before it lack what this installer puts in place); numbers compared as numbers
+release_newest() {
+  grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | awk -F. '$1 > 0 || $2 >= 12' \
+    | sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1 | sed 's/^./v&/'
+}
+clone_version() {  # the release tag the clone is on, else its branch and commit (or tag, or commit)
   if b=$(g symbolic-ref -q --short HEAD); then printf '%s %s' "$b" "$(g rev-parse --short HEAD)"; return; fi
-  t=$(g tag --points-at HEAD | kiro_newest)
+  t=$(g tag --points-at HEAD | release_newest)
   [ -n "$t" ] || t=$(g describe --tags --exact-match HEAD 2>/dev/null) || t=$(g rev-parse --short HEAD)
   printf '%s' "$t"
 }
@@ -479,7 +484,7 @@ stage_task_hub() {
     remember_legacy_copies
     before=$(clone_version)
     branch=$(g symbolic-ref -q --short HEAD) || branch=
-    # The installer's clone (in the manifest, or not on a branch) follows the newest kiro-v*. A clone on a branch
+    # The installer's clone (in the manifest, or not on a branch) follows the newest release. A clone on a branch
     # that someone made by hand (a developer's, following main) is only pulled, as before.
     if [ -z "$ref" ] && [ -z "$M_task_hub" ] && [ -n "$branch" ]; then
       g pull --ff-only -q >"$work/git.log" 2>&1 \
@@ -489,10 +494,11 @@ stage_task_hub() {
     elif [ -n "$ref" ]; then
       switch_to "$ref"
     else
-      newest=$(g tag -l 'kiro-v*' | kiro_newest)
+      newest=$(g tag -l 'v*' | release_newest)
       current=
-      [ -n "$branch" ] || current=$(g tag --points-at HEAD | kiro_newest)
-      if [ -n "$newest" ] && { [ -z "$current" ] || [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; }; then
+      [ -n "$branch" ] || current=$(g tag --points-at HEAD | release_newest)
+      if [ -n "$newest" ] && [ "$newest" != "$current" ] \
+        && [ "$(printf '%s\n' "$newest" "$current" | release_newest)" = "$newest" ]; then
         switch_to "$newest"
       elif [ -n "$branch" ]; then  # no release yet: the branch, as before
         g pull --ff-only -q >"$work/git.log" 2>&1 \
@@ -518,7 +524,7 @@ stage_task_hub() {
       "$GIT" clone -q "$url" "$LIB_DIR" >"$work/git.log" 2>&1 \
         || die "$url を clone できませんでした($(tail -n 1 "$work/git.log"))" \
           "GitHub でこのリポジトリを読めるか確かめて、もう一度実行してください"
-      newest=$(g tag -l 'kiro-v*' | kiro_newest)
+      newest=$(g tag -l 'v*' | release_newest)
       [ -z "$newest" ] || g checkout -q --detach "refs/tags/$newest" >"$work/git.log" 2>&1 \
         || die "$newest に切り替えられませんでした($(tail -n 1 "$work/git.log"))" "もう一度実行してください"
     fi
@@ -961,7 +967,7 @@ while [ $# -gt 0 ]; do
     --start-launchd) with_launchd=1 start_launchd=1 ;;
     --ref|--ref=*)
       if [ "$1" = --ref ]; then ref=${2:-}; [ $# -lt 2 ] || shift; else ref=${1#--ref=}; fi
-      case $ref in ""|-*) die "--ref に版の名前(ブランチかタグ)がありません" "sh kiro/install.sh --ref kiro-v1 のように実行してください" ;; esac
+      case $ref in ""|-*) die "--ref に版の名前(ブランチかタグ)がありません" "sh kiro/install.sh --ref v0.12.0 のように実行してください" ;; esac
       ;;
     *) die "知らない引数です: $1" "sh kiro/install.sh(常駐も入れるなら --with-launchd を付けて)で実行してください" ;;
   esac

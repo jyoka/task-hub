@@ -16,4 +16,4 @@ jobs:
       - run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      - run: python -m unittest -k update -k kiro_release tests.test_task -v
+      - run: python -m unittest -k update -k installers_clone tests.test_task -v

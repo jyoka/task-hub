@@ -588,7 +588,7 @@ class SetupTest(unittest.TestCase):
         write_exe(root / "open-window.exe", FAKE_OPEN_WINDOW)
         self.db = root / "gh.json"
         self.set_gh_auth(None)
-        # task-hub's origin: kiro-v* tags are added by the tests that want them
+        # task-hub's origin: release tags are added by the tests that want them
         self.origin = root / "task-hub.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(REPO), str(self.origin)], check=True, capture_output=True)
 
@@ -873,17 +873,20 @@ class SetupTest(unittest.TestCase):
 
     def test_the_clone_follows_the_newest_release_tag(self):
         self.ready()
-        self.tag("kiro-v1", "HEAD~1")
+        self.tag("v0.11.0", "HEAD~1")  # a release before v0.12.0, the first the easy setup installs: not one it takes
         out = self.install()
-        self.assertIn("6. task-hub 本体: 入れました(clone(kiro-v1)", out)
-        self.tag("kiro-v2")
-        self.tag("kiro-v10", "HEAD~1")  # numbers compared as numbers: v10 is the newest
+        self.assertIn("6. task-hub 本体: 入れました(clone(main ", out)
+        self.tag("v0.12.0", "HEAD~1")
         out = self.install()
-        self.assertIn("6. task-hub 本体: 入れました(kiro-v1 → kiro-v10)", out)
+        self.assertIn(" → v0.12.0", out)
+        self.tag("v0.12.2")
+        self.tag("v0.12.10", "HEAD~1")  # numbers compared as numbers: v0.12.10 is the newest
+        out = self.install()
+        self.assertIn("6. task-hub 本体: 入れました(v0.12.0 → v0.12.10)", out)
 
     def test_an_earlier_manual_install_is_taken_over_and_its_branch_kept(self):
         self.ready()
-        self.tag("kiro-v1", "HEAD~1")
+        self.tag("v0.12.0", "HEAD~1")
         lib, shim = self.home / ".local/lib/task-hub", self.home / ".local/bin/task.cmd"
         subprocess.run(["git", "clone", "-q", str(self.origin), str(lib)], check=True, capture_output=True)
         branch = self.lib_git("symbolic-ref", "--short", "HEAD")
@@ -893,7 +896,7 @@ class SetupTest(unittest.TestCase):
         shim.write_text(f'@setlocal\r\n@set PYTHONUTF8=1\r\n@"{sys.executable}" "{lib / "bin/task"}" %*\r\n',
                         encoding="mbcs", errors="replace", newline="")
         out = self.install()
-        self.assertEqual(self.lib_git("symbolic-ref", "--short", "HEAD"), branch)  # not switched to kiro-v1
+        self.assertEqual(self.lib_git("symbolic-ref", "--short", "HEAD"), branch)  # not switched to v0.12.0
         self.assertIn("task-hub: made by windows/install.ps1", shim.read_text(encoding="mbcs"))
         self.assertIn(r"6. task-hub 本体: 入れました(~\.local\bin\task.cmd", out)
         self.assertNotIn("task-hub", self.manifest()["installed"])  # not the installer's clone
@@ -1164,7 +1167,7 @@ class SetupTest(unittest.TestCase):
                 self.assertTrue(data.startswith(b"\xef\xbb\xbf"), f)
 
 
-# kiro-vN's installer, in the releases of UpdateTest: says how it was run, then does what the real one does to the
+# a release's installer, in the releases of UpdateTest: says how it was run, then does what the real one does to the
 # clone (switches it to its own tag), or stops as the real one does when the file "stop" is there
 FAKE_RELEASE_INSTALLER = r'''
 param([switch]$Watch)
@@ -1178,7 +1181,7 @@ git -C $lib checkout -q --detach @TAG@
 
 @unittest.skipUnless(WINDOWS, "Windows only")
 class UpdateTest(unittest.TestCase):
-    """task update on Windows: an installer's clone (on a kiro-v* tag) is updated by the newest release's own
+    """task update on Windows: an installer's clone (on a release tag) is updated by the newest release's own
     windows\\install.ps1, run from a copy of that release, with -Watch when the watch is installed."""
 
     def setUp(self):
@@ -1196,9 +1199,9 @@ class UpdateTest(unittest.TestCase):
             self.env.pop(k, None)
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
         subprocess.run(["git", "clone", "-q", str(self.origin), str(self.seed)], check=True, capture_output=True)
-        self.release("kiro-v1")
+        self.release("v0.12.0")
         subprocess.run(["git", "clone", "-q", str(self.origin), str(self.lib)], check=True, capture_output=True)
-        self.git(self.lib, "checkout", "-q", "--detach", "kiro-v1")  # where the installer keeps its clone
+        self.git(self.lib, "checkout", "-q", "--detach", "v0.12.0")  # where the installer keeps its clone
 
     def git(self, where, *args):
         return subprocess.run(["git", "-C", str(where), *args], check=True, capture_output=True, text=True,
@@ -1223,23 +1226,23 @@ class UpdateTest(unittest.TestCase):
         return r.stdout + r.stderr
 
     def test_an_installers_clone_is_updated_by_the_new_releases_installer(self):
-        self.assertIn("up_to_date: kiro-v1 (newest release kiro-v1)", self.update())
-        self.release("kiro-v2")
+        self.assertIn("up_to_date: v0.12.0 (newest release v0.12.0)", self.update())
+        self.release("v0.13.0")
         manifest = self.home / ".local/state/task-hub/install-manifest.json"  # its folder: update.json is there
         manifest.write_text(json.dumps({"version": 1, "installed": {"watch": "scheduled-task:task-hub watch"}}))
         out = self.update()
-        self.assertIn("update: kiro-v1 -> kiro-v2, by kiro-v2's installer", out)
-        self.assertIn("fake installer of kiro-v2 from task-hub -Watch", out)  # the new one, from a copy, with -Watch
-        self.assertIn("updated: kiro-v1 -> kiro-v2 (kiro-v2)", out)
-        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+        self.assertIn("update: v0.12.0 -> v0.13.0, by v0.13.0's installer", out)
+        self.assertIn("fake installer of v0.13.0 from task-hub -Watch", out)  # the new one, from a copy, with -Watch
+        self.assertIn("updated: v0.12.0 -> v0.13.0 (v0.13.0)", out)
+        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "v0.13.0")
         self.assertEqual(list(Path(tempfile.gettempdir()).glob("task-hub-update-*")), [])  # the copy is gone
 
-        self.release("kiro-v3")
+        self.release("v0.14.0")
         (self.home / "stop").touch()
         out = self.update(code=1)
-        self.assertIn("kiro-v3's installer stopped (exit 1)", out)
+        self.assertIn("v0.14.0's installer stopped (exit 1)", out)
         self.assertIn("次にすること: もう一度", out)  # the installer's own next step, as it said it
-        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "kiro-v2")
+        self.assertEqual(self.git(self.lib, "describe", "--tags", "--exact-match"), "v0.13.0")
 
 
 SLACK_APP = REPO / "slack-triage" / "app"

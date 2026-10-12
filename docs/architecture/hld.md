@@ -219,7 +219,7 @@ flowchart TB
 - 動かす用の clone はリリースのタグだけを使います。開発用の clone のブランチで本物のタスクは動きません
 - Windows は、Kiro IDE のチャット(「セットアップして」)から `windows\install.ps1` が入れ、`-Watch` で Task Scheduler に
   `task watch` を常駐させます([windows-quickstart.md](../windows-quickstart.md)、[windows.md](../windows.md))。
-  動かす用の clone は、Mac と同じく `kiro-v*` のタグを使います。診断は `windows\doctor.ps1`、アンインストールは
+  動かす用の clone は、Mac と同じくリリースのタグ(v0.12.0 以上)を使います。診断は `windows\doctor.ps1`、アンインストールは
   `windows\uninstall.ps1`(インストーラが記録したものだけを消す)
 - 複数マシンで同じボードを動かすことは想定していません(実行の記録が手元にしかないため)
 

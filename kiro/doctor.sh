@@ -189,33 +189,38 @@ elif [ -z "$by_hand" ] && { [ -L "$wrapper" ] || ! grep -q '^# task-hub: made by
 elif ! "$wrapper" --version >/dev/null 2>&1; then
   ng "$(tilde "$wrapper") が動きません" "$INSTALL"
 else
-  # the version, and whether there is a newer kiro-v* (as kiro/install.sh decides: its clone, in the manifest or not
-  # on a branch, follows the newest kiro-v*; a clone on a branch made by hand is only pulled). ls-remote: no fetch
+  # the version, and whether there is a newer release (as kiro/install.sh decides: its clone, in the manifest or not
+  # on a branch, follows the newest release from v0.12.0; a clone on a branch made by hand is only pulled).
+  # ls-remote: no fetch
   lib=$(tilde "$clone") note=
   if [ -n "$GIT" ]; then
     g() { GIT_TERMINAL_PROMPT=0 "$GIT" -C "$clone" "$@"; }
-    kiro_newest() { grep -E '^kiro-v[0-9]+$' | sort -t v -k 2,2n | tail -n 1; }
+    release_newest() {  # as kiro/install.sh's
+      grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | awk -F. '$1 > 0 || $2 >= 12' \
+        | sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1 | sed 's/^./v&/'
+    }
     M_task_hub=$(plutil -extract installed.task-hub raw -o - "$MANIFEST" 2>/dev/null) || M_task_hub=
     current=
     if branch=$(g symbolic-ref -q --short HEAD 2>/dev/null); then
       ver="$branch $(g rev-parse --short HEAD 2>/dev/null)"
     else
-      branch= current=$(g tag --points-at HEAD 2>/dev/null | kiro_newest)
+      branch= current=$(g tag --points-at HEAD 2>/dev/null | release_newest)
       ver=$current
       [ -n "$ver" ] || ver=$(g describe --tags --exact-match HEAD 2>/dev/null) || ver=$(g rev-parse --short HEAD 2>/dev/null)
     fi
     if [ -z "$M_task_hub" ] && [ -n "$branch" ]; then
       note="ブランチ $branch の上の clone です。インストーラはタグに切り替えず、pull だけします"
-    elif ! remote=$(g ls-remote --tags origin 'kiro-v*' 2>/dev/null); then
+    elif ! remote=$(g ls-remote --tags origin 'v*' 2>/dev/null); then
       note="新しい版があるかは確かめられませんでした(origin に届きません)"
     else
-      newest=$(printf '%s\n' "$remote" | sed 's|.*refs/tags/||' | kiro_newest)
+      newest=$(printf '%s\n' "$remote" | sed 's|.*refs/tags/||' | release_newest)
       if [ -z "$newest" ]; then :
       elif [ -n "$current" ]; then
-        if [ "${newest#kiro-v}" -gt "${current#kiro-v}" ]; then note="新しい版 $newest があります。$INSTALL"
+        if [ "$newest" != "$current" ] && [ "$(printf '%s\n' "$newest" "$current" | release_newest)" = "$newest" ]; then
+          note="新しい版 $newest があります。$INSTALL"
         else ver="${ver}、最新"
         fi
-      else  # not on a kiro-v* tag (--ref): by commits, the newest tag's (its ^{} line, if annotated) and HEAD
+      else  # not on a release tag (--ref): by commits, the newest tag's (its ^{} line, if annotated) and HEAD
         sha=$(printf '%s\n' "$remote" | awk -v t="refs/tags/$newest" '$2 == t || $2 == t "^{}" { s = $1 } END { print s }')
         if ! g cat-file -e "$sha^{commit}" 2>/dev/null; then
           note="新しい版があるかは確かめられませんでした($newest のコミットが手元にありません)"

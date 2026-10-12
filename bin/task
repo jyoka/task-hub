@@ -87,6 +87,7 @@ LIB = BIN.parent.parent  # the clone `task` runs from (~/.local/lib/task-hub, do
 UPDATE = STATE / "update.json"  # the newest v* tag seen on origin, when origin was asked, and which one was notified
 # origin is asked at most once a day (again after an hour when it could not be reached), for at most UPDATE_TIMEOUT
 UPDATE_EVERY, UPDATE_RETRY, UPDATE_TIMEOUT = 24 * 3600, 3600, 5
+EASY_SETUP_FIRST = (0, 12, 0)  # the first release the easy setup's installers put their clone on (docs/release.md)
 WATCH_LABEL = "com.task-hub.watch"  # the launchd job of docs/setup.md
 # Kiro reads these only as copies, never links (docs/kiro-ide.md): `task update` copies them again
 KIRO_COPIES = {"kiro-hook": ("kiro/hooks/task-hub-events.json", ".kiro/hooks/task-hub-events.json"),
@@ -2505,7 +2506,7 @@ def sync(started_here=False):
 # ---------- updates: this clone and the releases on its origin (docs/release.md) ----------
 
 def version_key(name):
-    """(major, minor, patch) of "v1.2.3" or "1.2.3", or None for any other name (kiro-v2, v1.2)."""
+    """(major, minor, patch) of "v1.2.3" or "1.2.3", or None for any other name (task-rs-v0.2.0, v1.2)."""
     m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", name or "")
     return tuple(map(int, m.groups())) if m else None
 
@@ -2521,7 +2522,8 @@ def quiet_git_env():
 
 
 def lib_branch():
-    """The branch LIB is on, or "" (kiro/install.sh keeps its clone on a kiro-v* tag; or LIB is not a clone)."""
+    """The branch LIB is on, or "" (the easy setup's installers keep their clone on a release tag; or LIB is not a
+    clone)."""
     return run("git", "-C", LIB, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
 
 
@@ -2531,18 +2533,13 @@ def lib_version():
     return m.group(1) if m else "unknown"
 
 
-def kiro_newest(names):
-    """The newest kiro-v<number> tag among names (numbers compared as numbers), or ""."""
-    tags = [(int(n[6:]), n) for n in names if re.fullmatch(r"kiro-v\d+", n)]
-    return max(tags)[1] if tags else ""
-
-
-def lib_kiro_tag():
-    """The kiro-v<number> tag LIB is on, or "": the easy setup's installers (kiro/install.sh, windows\\install.ps1)
-    keep their clone on the newest one, not on a branch (docs/kiro-ide.md, 「配布する版を出す」)."""
+def lib_release_tag():
+    """The release tag LIB is on, or "": the easy setup's installers (kiro/install.sh, windows\\install.ps1) keep
+    their clone on the newest release from EASY_SETUP_FIRST, not on a branch (docs/release.md)."""
     if lib_branch():
         return ""
-    return kiro_newest(run("git", "-C", LIB, "tag", "--points-at", "HEAD").stdout.split())
+    names = run("git", "-C", LIB, "tag", "--points-at", "HEAD").stdout.split()
+    return newest_release(n for n in names if (version_key(n) or ()) >= EASY_SETUP_FIRST)
 
 
 def read_update():
@@ -2570,20 +2567,18 @@ class UpdateCheck:
 
     origin is asked (`git ls-remote`: the clone's own access, no GitHub token) at most once a day, while the command
     does its own work, and waited for at most UPDATE_TIMEOUT. When it cannot be reached, nothing is said and it is
-    asked again after UPDATE_RETRY. A clone on a kiro-v* tag (an installer's) is told of a newer kiro-v* tag, which
-    `task update` installs by that release's installer; nothing for another clone that is not on a branch.
+    asked again after UPDATE_RETRY. A clone on a release tag (an installer's) is told too: `task update` installs the
+    newer one by its installer. Nothing for another clone that is not on a branch.
     """
 
     def __init__(self):
         self.proc = None
         quiet = os.environ.get("TASK_NO_UPDATE_NOTIFIER")
-        self.kiro = "" if quiet else lib_kiro_tag()  # the installer's release this clone is on
-        self.wanted = not quiet and (bool(self.kiro) or bool(lib_branch()))
+        self.wanted = not quiet and bool(lib_release_tag() or lib_branch())
         if not self.wanted or not self.due():
             return
         try:
-            self.proc = subprocess.Popen(["git", "-C", str(LIB), "ls-remote", "--tags", "--refs", "origin",
-                                          "kiro-v*" if self.kiro else "v*"],
+            self.proc = subprocess.Popen(["git", "-C", str(LIB), "ls-remote", "--tags", "--refs", "origin", "v*"],
                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                          text=True, env=quiet_git_env(), **DETACHED)
             self.began = time.monotonic()
@@ -2615,17 +2610,13 @@ class UpdateCheck:
                 stdout, ok = "", False
             self.proc = None
             names = [line.split("\trefs/tags/", 1)[1] for line in stdout.splitlines() if "\trefs/tags/" in line]
-            found = {"newest_kiro": kiro_newest(names)} if self.kiro else {"newest": newest_release(names)}
-            write_update(checked=now(), ok=ok, **(found if ok else {}))
-        if self.kiro:
-            newest = read_update().get("newest_kiro") or ""
-            return newest if newest and int(newest[6:]) > int(self.kiro[6:]) else ""
+            write_update(checked=now(), ok=ok, **({"newest": newest_release(names)} if ok else {}))
         newest = read_update().get("newest") or ""
         return newest if version_key(newest) and version_key(newest) > version_key(VERSION) else ""
 
 
-def update_line(newest, current=""):
-    return f"update: {newest} が出ています。`task update` で更新(今は {current or 'v' + VERSION})"
+def update_line(newest):
+    return f"update: {newest} が出ています。`task update` で更新(今は v{VERSION})"
 
 
 def update_notice(check):
@@ -2634,8 +2625,8 @@ def update_notice(check):
     if not newest or read_update().get("notified") == newest:
         return []
     write_update(notified=newest)
-    notify({"event": "update", "version": newest, "reason": update_line(newest, check.kiro).removeprefix("update: ")})
-    return [update_line(newest, check.kiro)]
+    notify({"event": "update", "version": newest, "reason": update_line(newest).removeprefix("update: ")})
+    return [update_line(newest)]
 
 
 def lib_repo():
@@ -2819,7 +2810,7 @@ def cmd_list(a):
     check = UpdateCheck()  # asks origin while GitHub is read
     lines = list_lines(tasks(max_age=max_age))
     newest = check.newer()
-    out(*lines, *([update_line(newest, check.kiro)] if newest else []))
+    out(*lines, *([update_line(newest)] if newest else []))
 
 
 def list_lines(board_):
@@ -2996,9 +2987,10 @@ def cmd_update(_):
         fail(f"{lib} is not a git clone of task-hub; nothing changed", "install it as docs/setup.md says")
     branch = lib_branch()
     if not branch:
-        current = lib_kiro_tag()
+        current = lib_release_tag()
         if not current:
-            fail(f"{lib} is not on a branch or on a kiro-v* tag; nothing changed",
+            fail(f"{lib} is not on a branch or on a release tag from v{'.'.join(map(str, EASY_SETUP_FIRST))}; "
+                 "nothing changed",
                  f"see `git -C {lib} status`, or install it again as docs/setup.md says")
         return update_by_installer(current)
     dirty = run("git", "-C", LIB, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
@@ -3047,15 +3039,15 @@ def fetch_lib():
 
 
 def update_by_installer(current):
-    """An installer's clone (on the kiro-v* tag current): the newest kiro-v* release's own installer does the update,
+    """An installer's clone (on the release tag current): the newest release's own installer does the update,
     as 「セットアップして」 again would. It runs from a copy of that release (a shared clone of LIB, nothing
     downloaded), not from LIB, which it changes while it runs. The watch is kept as it was (the installer starts it
     again with the new code). Its lines are the person's to read; it says itself what to do when it stops."""
     lib = home(LIB)
     fetch_lib()
-    newest = kiro_newest(run("git", "-C", LIB, "tag", "-l", "kiro-v*").stdout.split()) or current
-    write_update(checked=now(), ok=True, newest_kiro=newest)
-    if int(newest[6:]) <= int(current[6:]):
+    newest = newest_release(run("git", "-C", LIB, "tag", "-l", "v*").stdout.split()) or current
+    write_update(checked=now(), ok=True, newest=newest)
+    if version_key(newest) <= version_key(current):
         out(f"up_to_date: {current} (newest release {newest})")
         return
     try:
@@ -3081,7 +3073,7 @@ def update_by_installer(current):
         code = subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode
     finally:
         shutil.rmtree(snapshot, onerror=lambda f, path, _: (os.chmod(path, 0o700), f(path)) if WINDOWS else None)
-    after = lib_kiro_tag() or lib_version()
+    after = lib_release_tag() or lib_version()
     if code:
         fail(f"{newest}'s installer stopped (exit {code}); {lib} is at {after}",
              "do what its 次にすること line says, then run `task update` again")

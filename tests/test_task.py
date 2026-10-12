@@ -4386,10 +4386,11 @@ class TaskTest(unittest.TestCase):
         self.release(seed, "0.7.0", "new")
         return lib
 
-    def kiro_release(self, seed, tag, version):
-        """A release of the easy setup (docs/kiro-ide.md, 「配布する版を出す」): release(), its kiro-v<number> tag, and a
-        stand-in kiro/install.sh that says how it was run and moves the clone to its own tag as the real one does, or
-        stops as the real one does when $HOME/stop is there."""
+    def installer_release(self, seed, version):
+        """A release the easy setup installs (docs/release.md): release() with a stand-in kiro/install.sh that says how
+        it was run and moves the clone to its own tag as the real one does, or stops as the real one does when
+        $HOME/stop is there."""
+        tag = f"v{version}"
         (seed / "kiro").mkdir(exist_ok=True)
         (seed / "kiro/install.sh").write_text(
             '#!/bin/sh\nhere=$(cd "$(dirname "$0")/.." && pwd)\n'
@@ -4397,18 +4398,16 @@ class TaskTest(unittest.TestCase):
             '[ -e "$HOME/stop" ] && { echo "次にすること: もう一度"; exit 1; }\n'
             f'git -C "$HOME/.local/lib/task-hub" checkout -q --detach {tag}\n')
         self.release(seed, version, tag)
-        for args in (["tag", tag], ["push", "-q", "origin", tag]):
-            subprocess.run(["git", "-C", str(seed), *args], check=True, capture_output=True, env=self.env)
 
-    def kiro_release_clone(self):
-        """The clone an installer keeps (on a kiro-v* tag, not on a branch), at kiro-v1."""
+    def installer_release_clone(self):
+        """The clone an installer keeps (on a release tag, not on a branch), at v0.12.0."""
         origin, seed = self.root / "origins/task-hub.git", self.root / "hub-seed"
         lib = self.root / ".local/lib/task-hub"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
         subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True, capture_output=True)
-        self.kiro_release(seed, "kiro-v1", "0.6.0")
+        self.installer_release(seed, "0.12.0")
         subprocess.run(["git", "clone", "-q", str(origin), str(lib)], check=True, capture_output=True)
-        self.lib_git(lib, "checkout", "-q", "--detach", "kiro-v1")
+        self.lib_git(lib, "checkout", "-q", "--detach", "v0.12.0")
         return lib, seed
 
     def hub(self, lib, *args, code=0, env=None):
@@ -4554,34 +4553,34 @@ class TaskTest(unittest.TestCase):
         self.assert_update_stops(lib, "could not fetch from origin")
 
     def test_update_of_an_installers_clone_runs_the_new_releases_installer(self):
-        lib, seed = self.kiro_release_clone()
-        self.assertIn("up_to_date: kiro-v1 (newest release kiro-v1)", self.hub(lib, "update"))
-        self.kiro_release(seed, "kiro-v2", "0.7.0")
+        lib, seed = self.installer_release_clone()
+        self.assertIn("up_to_date: v0.12.0 (newest release v0.12.0)", self.hub(lib, "update"))
+        self.installer_release(seed, "0.13.0")
         manifest = self.root / ".local/state/task-hub/install-manifest.json"
         manifest.write_text(json.dumps({"version": 1, "installed": {
             "launchd": str(self.root / "Library/LaunchAgents/com.task-hub.watch.plist")}}))
         out = self.hub(lib, "update", env={"TASK_TEST_LAUNCHD": "registered"})
-        self.assertIn("update: kiro-v1 -> kiro-v2, by kiro-v2's installer", out)
+        self.assertIn("update: v0.12.0 -> v0.13.0, by v0.13.0's installer", out)
         # the new release's own installer, from a copy of it, keeping the watch it had
-        self.assertIn("fake installer of kiro-v2 from task-hub --with-launchd --start-launchd", out)
-        self.assertIn("updated: kiro-v1 -> kiro-v2 (kiro-v2)", out)
+        self.assertIn("fake installer of v0.13.0 from task-hub --with-launchd --start-launchd", out)
+        self.assertIn("updated: v0.12.0 -> v0.13.0 (v0.13.0)", out)
         self.assertIn("watch: restarted com.task-hub.watch (launchd)", out)  # the plist may be the same; the code is not
-        self.assertIn("kiro-v2", self.lib_git(lib, "tag", "--points-at", "HEAD").split())  # (v0.7.0 is there too)
-        self.assertEqual(self.hub(lib, "--version").strip(), "0.7.0")
+        self.assertIn("v0.13.0", self.lib_git(lib, "tag", "--points-at", "HEAD").split())
+        self.assertEqual(self.hub(lib, "--version").strip(), "0.13.0")
 
-        self.kiro_release(seed, "kiro-v3", "0.8.0")
+        self.installer_release(seed, "0.14.0")
         (self.root / "stop").touch()
         out = self.hub(lib, "update", code=1)
-        self.assertIn("kiro-v3's installer stopped (exit 1)", out)
+        self.assertIn("v0.14.0's installer stopped (exit 1)", out)
         self.assertIn("次にすること: もう一度", out)  # the installer's own next step, as it said it
-        self.assertIn("kiro-v2", self.lib_git(lib, "tag", "--points-at", "HEAD").split())
+        self.assertIn("v0.13.0", self.lib_git(lib, "tag", "--points-at", "HEAD").split())
 
-    def test_list_tells_an_installers_clone_of_a_new_kiro_release(self):
-        lib, seed = self.kiro_release_clone()
-        self.kiro_release(seed, "kiro-v2", "0.7.0")
+    def test_list_tells_an_installers_clone_of_a_new_release(self):
+        lib, seed = self.installer_release_clone()
+        self.installer_release(seed, "0.13.0")
         out = self.hub(lib, "list")
-        self.assertEqual(out.splitlines()[-1], "update: kiro-v2 が出ています。`task update` で更新(今は kiro-v1)")
-        self.assertEqual(self.update_cache()["newest_kiro"], "kiro-v2")
+        self.assertEqual(out.splitlines()[-1], "update: v0.13.0 が出ています。`task update` で更新(今は v0.12.0)")
+        self.assertEqual(self.update_cache()["newest"], "v0.13.0")
 
     def test_update_stops_on_a_clone_that_is_not_on_a_branch(self):
         lib = self.release_clone()

@@ -13,8 +13,8 @@
      with msiexec /a (no admin rights) into ~\.local\lib\kiro-cli.
   5. Logins, gh's (with the project scope, and git using it) and kiro-cli's: when one is missing it opens a PowerShell
      window for it, and stops; run this again once it is done.
-  6. task-hub: clones it to ~\.local\lib\task-hub, on the newest kiro-v<number> tag if any (later runs switch to a
-     newer one; a clone someone made on a branch is only pulled), writes ~\.local\bin\task.cmd, which runs bin\task
+  6. task-hub: clones it to ~\.local\lib\task-hub, on the newest release tag from v0.12.0 if any (later runs switch to
+     a newer one; a clone someone made on a branch is only pulled), writes ~\.local\bin\task.cmd, which runs bin\task
      with that Python, and `task` for Git Bash, and puts ~\.local\bin on the user PATH.
   With -Watch it also starts `task watch` at every logon (Task Scheduler; the Startup folder when that is refused)
   and starts it now. -Uninstall removes what it recorded (windows\uninstall.ps1 -Yes); the board, logins and data stay.
@@ -554,18 +554,21 @@ function GitLib {  # git in the clone; $true when it exits 0, what it printed in
   return (Runs git (@('-C', $Lib) + $args))
 }
 
-function Get-NewestKiroTag($names) {  # of tag names, kiro-v<number>, numbers compared as numbers
-  $names | Where-Object { $_ -match '^kiro-v\d+$' } | Sort-Object { [int]$_.Substring(6) } | Select-Object -Last 1
+# of tag names, the newest release v<MAJOR>.<MINOR>.<PATCH> from v0.12.0, the first the easy setup installs (the ones
+# before it lack what this installer puts in place); numbers compared as numbers
+function Get-NewestRelease($names) {
+  $names | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' -and [version]$_.Substring(1) -ge [version]'0.12.0' } |
+    Sort-Object { [version]$_.Substring(1) } | Select-Object -Last 1
 }
 
-function Get-CloneVersion {  # the kiro-v* tag the clone is on, else its branch and commit (or tag, or commit)
+function Get-CloneVersion {  # the release tag the clone is on, else its branch and commit (or tag, or commit)
   if (GitLib symbolic-ref -q --short HEAD) {
     $b = $script:Out[0]
     GitLib rev-parse --short HEAD | Out-Null
     return "$b $($script:Out[0])"
   }
   GitLib tag --points-at HEAD | Out-Null
-  $t = Get-NewestKiroTag $script:Out
+  $t = Get-NewestRelease $script:Out
   if ($t) { return $t }
   if (GitLib describe --tags --exact-match HEAD) { return $script:Out[0] }
   GitLib rev-parse --short HEAD | Out-Null
@@ -604,7 +607,7 @@ function Stage-TaskHub {
   if (Test-Path (Join-Path $Lib '.git')) {
     $before = Get-CloneVersion
     $branch = if (GitLib symbolic-ref -q --short HEAD) { $script:Out[0] } else { '' }
-    # The installer's clone (in the manifest, or not on a branch) follows the newest kiro-v*. A clone on a branch
+    # The installer's clone (in the manifest, or not on a branch) follows the newest release. A clone on a branch
     # that someone made by hand (docs/windows.md's earlier install, a developer's) is only pulled, as before.
     if (-not $Ref -and -not $script:M.installed.'task-hub' -and $branch) {
       if (-not (GitLib pull --ff-only -q)) { & $stale }
@@ -613,14 +616,14 @@ function Stage-TaskHub {
     } elseif ($Ref) {
       Switch-To $Ref
     } else {
-      GitLib tag -l 'kiro-v*' | Out-Null
-      $newest = Get-NewestKiroTag $script:Out
+      GitLib tag -l 'v*' | Out-Null
+      $newest = Get-NewestRelease $script:Out
       $current = ''
       if (-not $branch) {
         GitLib tag --points-at HEAD | Out-Null
-        $current = Get-NewestKiroTag $script:Out
+        $current = Get-NewestRelease $script:Out
       }
-      if ($newest -and (-not $current -or [int]$newest.Substring(6) -gt [int]$current.Substring(6))) {
+      if ($newest -and (-not $current -or [version]$newest.Substring(1) -gt [version]$current.Substring(1))) {
         Switch-To $newest
       } elseif ($branch) {  # no release yet: the branch, as before
         if (-not (GitLib pull --ff-only -q)) { & $stale }
@@ -641,8 +644,8 @@ function Stage-TaskHub {
         'GitHub でこのリポジトリを読めるか(-Ref を付けたなら、その版の名前も)確かめて、もう一度実行してください'
     }
     if (-not $Ref) {
-      GitLib tag -l 'kiro-v*' | Out-Null
-      $newest = Get-NewestKiroTag $script:Out
+      GitLib tag -l 'v*' | Out-Null
+      $newest = Get-NewestRelease $script:Out
       if ($newest -and -not (GitLib checkout -q --detach "refs/tags/$newest")) {
         Die "$newest に切り替えられませんでした($($script:Out | Select-Object -Last 1))" 'もう一度実行してください'
       }
