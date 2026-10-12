@@ -294,6 +294,11 @@ task log 12
 ジャンクション(管理者権限の要らないリンク)を作り、`~\.kiro\steering\task-hub.md` をコピーします。入れたら
 Kiro を再起動します。すでに自分のスキルのフォルダーがあれば、それは変えません。
 
+出来事(In review、Blocked など)を Kiro のチャットで知るためのフックとワークフローも、同じ段階で入れます。
+`~\.kiro\hooks\task-hub-events.json` と `~\.kiro\workflows\task-hub-events.workflow.json` をコピーし、Kiro の設定
+(`%APPDATA%\Kiro\User\settings.json`)で Workflows を有効にします。中身は Mac と同じで、コマンドだけが Windows の形
+(Python とスクリプトのフルパス)です。仕組みは [kiro-ide.md の 5 章](kiro-ide.md#5-フックとワークフロー出来事をチャットで知る)。
+
 Claude Code や Codex でも使うときは、次をまとめて貼り付けます。
 
 ```
@@ -399,6 +404,7 @@ powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes
 | 8 | PowerShell の機能が制限されていない | 手順 2 の #2 | `FullLanguage`。× なら情シスへの相談が要る |
 | 9 | スキルが使える | エージェントの会話で `/task` と打つ(手順 7 のあと) | `/task` が候補に出て、カードが Backlog にできる |
 | 10 | 使用量の記録 | 作業が終わったあと `task stats` | 使ったクレジットが出る(kiro-cli)。出なくても、作業には影響しない |
+| 11 | フックとワークフロー | Kiro を再起動し、カードが In review になったあと、Kiro のチャットに何か書く。`/chief` を開いておく | チャットに `task-hub: new events since your last message:` が入る。`/chief` のチャットに知らせが来る。Kiro がコマンドを cmd と PowerShell のどちらで動かすかは確かめていません(両方で動くように書いています) |
 
 ## 11. 困ったとき(エラーと対処)
 
@@ -534,5 +540,5 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 ### Windows に対応していないもの
 
 - herdr(作業ごとのタブ)
-- Kiro IDE のフック、ワークフロー、かんたんセットアップ(`kiro/` の中身。mac 用です)
+- Kiro IDE のかんたんセットアップの入口(チャットで「セットアップして」。準備中です。インストーラそのものは手順 4-2)
 - Claude Code の task-board mod
