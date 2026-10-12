@@ -86,7 +86,6 @@ Slack のスレッドをコピーして **⌃⌥S**(control + option + S)を押�
 | 複数選ぶとき | ⌘ を押しながらクリック | Ctrl を押しながらクリック |
 | 通知 | macOS の通知 | Windows の通知(画面の右下) |
 | 登録 | `task new` | `bin/task` を Python で直接動かす(タイトルの `&` や `%` が、バッチファイルで命令として読まれないように) |
-
 | 起動キーを待つ常駐 | launchd の plist(`slack-triage-hotkey`) | `windows\slack-triage-hotkey.ps1`。Windows の `RegisterHotKey` で待ち、タスク スケジューラの「task-hub slack-triage」がサインインのたびに始める(断られたらスタートアップ フォルダー)。設定を 1 秒ごとに読み直すので、`key` と `off` はすぐ効く |
 | コマンド | `~/.local/bin/slack-triage` | `~\.local\bin\slack-triage.cmd`(PowerShell でも `slack-triage check` のように打てる) |
 

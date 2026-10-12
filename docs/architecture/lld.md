@@ -136,8 +136,11 @@ flowchart LR
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new` | Issue、カード、欄、Blocked by | events、asked |
 | `task done <id>` | `cleanup`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ | runs を消す、events |
-| `task show`、`task log`、`task open` | `get`、`issue` | 読むだけ | なし |
+| `task show` | `get`、`issue` | 読むだけ | なし |
+| `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
 | `task events`、`task stats` | `events_named`、`cmd_stats` | なし | なし |
+| `task update` | `cmd_update`、`restart_watch`、`copy_kiro`。かんたんセットアップで入れた clone は `update_by_installer`(新しい版のインストーラを動かす) | なし(origin のタグを読む) | LIB を新しい版に、Kiro のフックとワークフローのコピー |
+| `task feedback` | `cmd_feedback`、`open_in_browser` | なし(ブラウザで Issue の画面を開くだけ) | なし |
 | `task _run <id>` | `cmd_run` | 3.3 の図 | runs、logs、metrics、events |
 
 新しいコマンドは `COMMANDS` の表に `名前: (関数, 位置引数, フラグ, 使い方)` を 1 行足し、`cmd_<名前>(a)` を書きます。

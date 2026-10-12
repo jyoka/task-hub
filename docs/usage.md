@@ -66,7 +66,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 ```
 
 | 設定 | 有効にすると | 人が決めること |

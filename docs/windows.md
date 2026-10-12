@@ -438,9 +438,9 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | `ログインの窓を開けませんでした` | 新しい PowerShell の窓を開けなかった | 表示されたファイルを、エクスプローラーで右クリックして「PowerShell で実行」する |
 | `GitHub にログインしていません。開いた窓で…` | ログインの途中 | 開いた窓でブラウザの承認を終え、窓を閉じて、もう一度実行する。窓が見えなければ、タスクバーを見る |
 | `環境変数 GH_TOKEN(または GITHUB_TOKEN)があるので、gh ではログインできません` | 以前の設定でトークンを環境変数に入れている | その環境変数を消してサインインし直すか、`project` の権限があるトークンにする |
-| `error: could not clone ...` | ネットワークに出られない(会社のプロキシ)、または URL の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
-| `error: could not update C:\Users\...\.local\lib\task-hub` | 本体のフォルダーを手で書き換えた | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
-| `error: ...task.cmd does not run` | Python か本体のフォルダーが壊れている | 表示された help のコマンドを実行して、出たエラーを担当者に伝える |
+| `… を clone できませんでした` | ネットワークに出られない(会社のプロキシ)、または URL や `-Ref` の版の名前の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
+| `~\.local\lib\task-hub を更新できませんでした(…)。今の版のまま進めます` | ネットワークに出られなかった、または本体のフォルダーを手で書き換えた。止まらず、今の版で続けます | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
+| `~\.local\bin\task.cmd が動きません(…)` | Python か本体のフォルダーが壊れている | 表示された内容を担当者に伝える |
 | `タスク スケジューラに断られたので(…)、スタートアップ フォルダーに置きました` | 会社のポリシーで、タスク スケジューラが使えない | エラーではありません。スタートアップ フォルダーで常駐します(手順 10 の #1 として伝える) |
 | `~\.kiro\steering\task-hub.md は、このインストーラが入れた内容と確認できないので書き換えていません` | そのファイルを手で書き換えた(または以前に手で置いた) | 中身を確かめて別の場所に移してから、もう一度実行する |
 
