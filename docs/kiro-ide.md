@@ -429,6 +429,11 @@ plist の `EnvironmentVariables` にキーを書くと、ファイルにキー�
    6. 「診断して」で ○ の一覧が出ることを確かめる。次に「アンインストールして」→「はい」と言い、`~/.local/bin`、
       `~/.local/lib/task-hub`、`~/.kiro` のリンクとコピーが消えて、GitHub のボードが残ることを確かめる
    7. ボードを GitHub の画面で消し、使い捨てのユーザーを削除する
+
+   同じタグを Windows にも配ります。Windows は、GitHub Actions の windows の「Run workflow」(「live」に印)が
+   緑であることと、Windows を毎日使う人に [windows-quickstart.md](windows-quickstart.md) の 1〜5 章を通してもらう
+   ことで確かめます([release.md の「Windows を本物のボードで確かめる」](release.md#windows-を本物のボードで確かめる)。
+   画面を見ないと分からないことは [windows.md の 10 章](windows.md#10-実機で確かめること要確認事項))
 3. 確かめたコミット(main)に、次の番号のタグを付けて push します。
 
    ```

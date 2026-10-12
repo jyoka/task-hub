@@ -1849,7 +1849,7 @@ class SteeringTest(unittest.TestCase):
     """The steering files have the front matter Kiro reads (https://kiro.dev/docs/steering/)."""
 
     def front_matter(self, path):
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0], "---", path)
         end = lines.index("---", 1)
         fields = dict(line.split(": ", 1) for line in lines[1:end])
@@ -1868,8 +1868,15 @@ class SteeringTest(unittest.TestCase):
         self.assertEqual(fields["inclusion"], "auto")
         for word in ("セットアップして", "続けて"):
             self.assertIn(word, fields["description"])
-        text = setup.read_text()
-        self.assertIn("sh kiro/install.sh", text)
+        text = setup.read_text(encoding="utf-8")
+        # every installer, diagnosis and uninstaller, on both systems, as the chat runs it
+        for command in ("sh kiro/install.sh", "sh kiro/doctor.sh", "sh kiro/uninstall.sh",
+                        r"powershell -ExecutionPolicy Bypass -File windows\install.ps1",
+                        r"powershell -ExecutionPolicy Bypass -File windows\doctor.ps1",
+                        r"powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1"):
+            self.assertIn(command, text)
+            script = command.split()[-1].replace("\\", "/")
+            self.assertTrue((REPO / script).exists(), script)
         self.assertIn("worker", text)  # what a worker (Kiro CLI reads every steering file) is to do with it
 
     def test_the_global_steering(self):

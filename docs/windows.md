@@ -5,6 +5,10 @@
 
 WSL(Windows の中の Linux)は使いません。会社の PC で WSL が禁止されていても使えます。
 
+> **Kiro IDE を使う人は、[windows-quickstart.md](windows-quickstart.md) のほうが簡単です。** Kiro のチャットで
+> 「セットアップして」と言うだけで、このページの手順 3〜8 をインストーラが代わりに行います。このページは、
+> PowerShell で自分で入れる人や、インストーラが何をしているかを知りたい人のためのものです。
+
 > **以前、AI に頼んで手で Windows に合わせた task-hub を使っていた人へ**
 > その版はもう使いません。この手順で入れ直すと、公式の Windows 対応版に切り替わります。
 > 手順 4-3 の「古い `task` が残っていないか」の確認だけは、必ず行ってください。
@@ -76,7 +80,7 @@ git、GitHub CLI(gh)、Python、kiro-cli は、自分で入れる必要はあり
 にも入り、ログインを求めます。
 
 ただし、手順 4-1 の `git clone` には git が要ります(インストーラは、取ってきたリポジトリの中にあるため)。git が
-無い PC での始め方は、かんたんセットアップ(準備中)で扱います。それまでは、Git for Windows を入れてから始めます。
+無い PC では、先に Git for Windows を入れます([windows-quickstart.md の 1 章](windows-quickstart.md#1-kiro-ide-でリポジトリを開く)の「こうなったら」)。
 
 入れたものは、公開されているファイルを、公開されているチェックサム(SHA-256)で確かめてから置きます。
 
@@ -561,5 +565,4 @@ py -3 -m unittest tests.test_windows -v
 ### Windows に対応していないもの
 
 - herdr(作業ごとのタブ)
-- Kiro IDE のかんたんセットアップの入口(チャットで「セットアップして」。準備中です。インストーラそのものは手順 4-2)
 - Claude Code の task-board mod
