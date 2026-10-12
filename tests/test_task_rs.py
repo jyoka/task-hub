@@ -893,5 +893,54 @@ class ReaderTest(TuiCase):
         self.assert_no_gh_and_read_only()
 
 
+class HerdrPaneTest(TuiCase):
+    """`task-rs tui` started inside herdr with no terminal (by an agent): it opens a herdr pane to the right and runs
+    there. `herdr` (HERDR_BIN_PATH) is a fake that notes each call and answers `pane split` with a new pane's id."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_board(item(1, "one", "Ready"))
+        self.herdr_calls = self.tmp / "herdr-calls"
+        herdr = self.tmp / "herdr"
+        herdr.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{self.herdr_calls}"\n'
+                         'case "$1 $2" in\n'
+                         '  "pane split") [ -n "$HERDR_FAIL" ] && { echo "no such pane" >&2; exit 3; }\n'
+                         '    echo \'{"result":{"pane":{"pane_id":"p9"}}}\' ;;\n'
+                         'esac\n')
+        herdr.chmod(0o755)
+        self.herdr = herdr
+
+    def tui(self, **env):
+        return subprocess.run([str(self.binary), "tui"], cwd=self.repo, capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL,
+                              env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
+                                   "HERDR_BIN_PATH": str(self.herdr), **env})
+
+    def calls(self):
+        return self.herdr_calls.read_text().splitlines() if self.herdr_calls.exists() else []
+
+    def test_with_no_terminal_it_opens_a_pane_to_the_right_and_runs_the_same_binary_there(self):
+        r = self.tui(HERDR_PANE_ID="p1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "tui: opened in herdr pane p9, to the right of p1")
+        self.assertEqual(self.calls(), [
+            f"pane split --pane p1 --direction right --cwd {os.path.realpath(self.repo)} --focus",
+            f"pane run p9 '{self.binary}' tui"])
+        self.assertFalse(self.gh_calls.exists())
+
+    def test_task_herdr_0_and_no_herdr_pane_leave_herdr_alone(self):
+        for env in ({"HERDR_PANE_ID": "p1", "TASK_HERDR": "0"}, {}):
+            with self.subTest(env):
+                r = self.tui(**env)
+                self.assertNotEqual(r.returncode, 0)  # no terminal to draw on
+                self.assertEqual(self.calls(), [])
+
+    def test_a_failing_herdr_is_an_error_not_a_hang(self):
+        r = self.tui(HERDR_PANE_ID="p1", HERDR_FAIL="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("error: herdr pane split failed: no such pane", r.stdout)  # task-rs says errors on stdout
+        self.assertEqual(len(self.calls()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

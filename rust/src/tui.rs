@@ -3,7 +3,7 @@
 //! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`.
 //! `g` lends the terminal to Lazygit in the selected task's worktree: Lazygit is not read only, the board is.
 
-use super::{alive, ago, board_config, epoch, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
+use super::{alive, ago, board_config, epoch, fail, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
             tilde, Task};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event,
                                 KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 /// Columns in the order a person acts on them: what needs you first.
 const ORDER: [&str; 7] = ["In review", "Blocked", "In progress", "Ready", "wait for merge", "Backlog", "Done"];
@@ -1054,6 +1054,9 @@ fn main_loop(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
 
 pub fn run() {
     board_config(); // a missing config stops here, before the screen is taken over
+    if open_in_herdr_pane() {
+        return;
+    }
     let hook = std::panic::take_hook(); // ratatui's hook restores the screen, then this one turns the wheel reports off
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -1065,4 +1068,29 @@ pub fn run() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Started inside herdr but not on a terminal (by an agent, say): open a herdr pane to the right of this one and run
+/// the TUI there, instead of failing with no screen. TASK_HERDR=0 turns this off, as for bin/task.
+fn open_in_herdr_pane() -> bool {
+    let Ok(pane) = env::var("HERDR_PANE_ID") else { return false };
+    if env::var("TASK_HERDR").as_deref() == Ok("0") || std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return false;
+    }
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".into());
+    let herdr_out = |args: &[&str]| match Command::new(&herdr).args(args).stdin(Stdio::null()).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => fail(&format!("herdr {} failed: {}", args[..2].join(" "), String::from_utf8_lossy(&o.stderr).trim()), "", 1),
+        Err(e) => fail(&format!("could not run {herdr}: {e}"), "", 1),
+    };
+    let cwd = env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let split = herdr_out(&["pane", "split", "--pane", &pane, "--direction", "right", "--cwd", &cwd, "--focus"]);
+    let new = serde_json::from_str::<Value>(&split).ok()
+        .and_then(|v| v["result"]["pane"]["pane_id"].as_str().map(String::from))
+        .unwrap_or_else(|| fail(&format!("herdr pane split gave no pane id: {}", split.trim()), "", 1));
+    // the pane's shell has the herdr server's PATH, not ours: run this same binary by its path
+    let exe = env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "task-rs".into());
+    herdr_out(&["pane", "run", &new, &format!("'{}' tui", exe.replace('\'', "'\\''"))]);
+    println!("tui: opened in herdr pane {new}, to the right of {pane}");
+    true
 }

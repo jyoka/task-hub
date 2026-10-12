@@ -151,6 +151,10 @@ replacing it: `|` in Lazygit cycles through them. Settings you already have, suc
 config, are not changed. The example follows Lazygit's
 [Custom_DiffRenderers.md](https://github.com/jesseduffield/lazygit/blob/master/docs/Custom_DiffRenderers.md).
 
+Started inside [herdr](https://herdr.dev) but not on a terminal (by an agent such as Claude Code or Kiro),
+`task-rs tui` opens a herdr pane to the right of the one it was started from and runs there. Typed in a pane, it
+runs in that pane. `TASK_HERDR=0` turns the new pane off.
+
 ## Install the binary (no Rust needed)
 
 The binary is on a GitHub pre-release with a `task-rs-v*` tag, for Apple Silicon Macs. `task update` never
