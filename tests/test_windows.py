@@ -511,7 +511,18 @@ class SetupTest(unittest.TestCase):
         self.assertIn("5. kiro-cli のログイン: 済み", out)
         self.assertIn("6. task-hub 本体: 入れました(clone(", out)
         self.assertIn(r"~\.local\bin\task.cmd、~\.local\bin\task、ユーザーの PATH に ~\.local\bin)", out)
-        lib, bindir = self.home / ".local/lib", self.home / ".local/bin"
+        self.assertIn("7. ボード: 作りました(", out)
+        self.assertIn(r"8. 設定: 作りました(~\.config\task-hub\config.ini。task list で確かめました)", out)
+        self.assertIn(r"9. Kiro との連携: 入れました(~\.kiro\skills\task(ジャンクション)、~\.kiro\skills\chief(ジャンクション)、"
+                      r"~\.kiro\steering\task-hub.md(コピー)。Kiro を再起動すると読み込まれます)", out)
+        self.assertIn("10. 常駐: 飛ばしました(", out)
+        self.assertEqual(out.splitlines()[-2:], ["ここまで終わりました。", "次にすること: Kiro を再起動し(開いているチャットには、"
+                                                 "少なくともウィンドウの再読み込みが要ります)、新しいチャットで /task を試してください"])
+        lib, bindir, kiro = self.home / ".local/lib", self.home / ".local/bin", self.home / ".kiro"
+        for s in ("task", "chief"):  # junctions to the clone
+            self.assertEqual(os.path.realpath(kiro / "skills" / s), os.path.realpath(lib / "task-hub/skills" / s))
+        self.assertEqual((kiro / "steering/task-hub.md").read_bytes(),
+                         (lib / "task-hub/kiro/steering/task-hub.md").read_bytes())
         for f in (lib / "git/cmd/git.exe", bindir / "uv.exe", bindir / "gh.exe", lib / "kiro-cli/kiro-cli.exe",
                   lib / "task-hub/bin/task", bindir / "task.cmd", bindir / "task"):
             self.assertTrue(f.exists(), f)
@@ -523,7 +534,10 @@ class SetupTest(unittest.TestCase):
             "git": str(lib / "git"), "git-path": str(lib / "git/cmd"), "uv": str(bindir / "uv.exe"), "uv-python": "3.12",
             "gh": str(bindir / "gh.exe"), "kiro-cli": str(lib / "kiro-cli"), "kiro-cli-path": str(lib / "kiro-cli"),
             "task-hub": str(lib / "task-hub"), "task": str(bindir / "task.cmd"), "task-sh": str(bindir / "task"),
-            "user-path": str(bindir)})
+            "user-path": str(bindir), "config": str(self.home / ".config/task-hub/config.ini"),
+            "kiro-skill-task": str(kiro / "skills/task"), "kiro-skill-chief": str(kiro / "skills/chief"),
+            "kiro-steering": str(kiro / "steering/task-hub.md")})
+        self.assertEqual(set(m["sha256"]), {"kiro-steering"})
         self.assertEqual(self.user_path(), [str(bindir), str(lib / "kiro-cli"), str(lib / "git/cmd")])
         self.assertFalse(self.windows.exists())  # no login was needed
         r = subprocess.run([str(bindir / "task.cmd"), "--version"], env=self.env, capture_output=True, text=True)
@@ -533,7 +547,9 @@ class SetupTest(unittest.TestCase):
         out = self.install()
         for line in ("1. 前提の確認: 済み(", f"2. Python: 済み({sys.executable})", r"3. gh: 済み(~\.local\bin\gh.exe)",
                      r"4. kiro-cli: 済み(~\.local\lib\kiro-cli\kiro-cli.exe)", "5. GitHub のログイン: 済み(alice)",
-                     "5. kiro-cli のログイン: 済み", r"6. task-hub 本体: 済み(~\.local\lib\task-hub("):
+                     "5. kiro-cli のログイン: 済み", r"6. task-hub 本体: 済み(~\.local\lib\task-hub(", "7. ボード: 済み(",
+                     "8. 設定: 済み(", "9. Kiro との連携: 済み(スキル、steering)", "すべて済みです。変えたものはありません。",
+                     "次にすること: Kiro の新しいチャットで /task を試してください"):
             self.assertIn(line, out)
         self.assertEqual(self.srv.log, ["/"])  # only "does GitHub answer"
         self.assertEqual(self.manifest(), m)
@@ -641,6 +657,23 @@ class SetupTest(unittest.TestCase):
         self.assertIn(r"6. task-hub 本体: 止まりました。~\.local\bin\task.cmd がすでにあります", out)
         self.assertEqual(shim.read_bytes(), b"@echo another task\r\n")
 
+    def test_kiro_files_of_someone_else_are_left_alone(self):
+        self.ready()
+        own = self.home / ".kiro/skills/task"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("my own /task\n")
+        out = self.install()
+        self.assertIn(r"~\.kiro\skills\task は別のものを指しているので、そのままにしました", out)
+        self.assertEqual((own / "SKILL.md").read_text(), "my own /task\n")
+        self.assertNotIn("kiro-skill-task", self.manifest()["installed"])
+        # a steering file someone changed is not overwritten, even when task-hub's changes
+        steering = self.home / ".kiro/steering/task-hub.md"
+        steering.write_text("edited\n")
+        out = self.install(code=1)
+        self.assertIn(r"9. Kiro との連携: 止まりました。~\.kiro\steering\task-hub.md は、このインストーラが入れた内容と"
+                      "確認できないので書き換えていません", out)
+        self.assertEqual(steering.read_text(), "edited\n")
+
     def test_scripts_with_japanese_are_saved_with_a_bom(self):
         # Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code page: the Japanese would be garbled
         for f in (REPO / "windows").glob("*.ps1"):
@@ -681,6 +714,9 @@ class InstallTest(unittest.TestCase):
                     "TASK_TEST_GH_DB": str(db), "TASK_TEST_KIRO_LOGGED_IN": str(root / "kiro-logged-in"),
                     "HOME": str(root), "GIT_CONFIG_GLOBAL": str(root / ".gitconfig")}
         self.addCleanup(delete_key, rf"Software\task-hub-test\{os.getpid()}")
+        config = self.home / ".config/task-hub/config.ini"  # stage 8 writes it, for the fake GitHub's board
+        if not config.exists():
+            self.addCleanup(config.unlink, missing_ok=True)
         self.addCleanup(self.ps, "-Uninstall")
 
     def watch_loops(self):
@@ -693,7 +729,7 @@ class InstallTest(unittest.TestCase):
     def test_install_watch_and_uninstall(self):
         r = self.ps("-Watch", "-From", str(REPO))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("registered and started the scheduled task", r.stdout)  # not the Startup folder fallback
+        self.assertIn("10. 常駐: 始めました(タスク スケジューラの「task-hub watch」", r.stdout)  # not the Startup folder
         shim = self.home / ".local/bin/task.cmd"
         self.assertTrue((self.home / ".local/lib/task-hub/bin/task").exists())
         version = subprocess.run([str(shim), "--version"], capture_output=True, text=True)
@@ -706,13 +742,13 @@ class InstallTest(unittest.TestCase):
         bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "see task-watch.ps1"])
         self.addCleanup(bystander.wait)
         self.addCleanup(bystander.kill)  # cleanups run last first: kill, then wait
-        # with no config the watch fails and says so in its log, then waits to try again: it is running
+        # the loop says when it starts task watch (which then fails: the runner's own gh is not logged in)
         log = self.home / ".local/state/task-hub/watch.log"
         end = time.time() + 60
-        while time.time() < end and "the board is not configured" not in (log.read_text(errors="replace")
-                                                                        if log.exists() else ""):
+        while time.time() < end and "starting task watch" not in (log.read_text(errors="replace")
+                                                                if log.exists() else ""):
             time.sleep(1)
-        self.assertIn("the board is not configured", log.read_text(errors="replace"))
+        self.assertIn("starting task watch", log.read_text(errors="replace"))
         self.assertTrue(set(self.watch_loops()) - {bystander.pid})  # the loop itself
         r = self.ps("-Uninstall")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

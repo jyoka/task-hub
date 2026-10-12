@@ -43,6 +43,7 @@ $Root = $env:USERPROFILE
 $Lib = Join-Path $Root '.local\lib\task-hub'
 $GitDir = Join-Path $Root '.local\lib\git'  # MinGit, when there was no git
 $KiroDir = Join-Path $Root '.local\lib\kiro-cli'  # kiro-cli, when there was none
+$KiroHome = Join-Path $Root '.kiro'  # what Kiro reads: skills, steering
 $BinDir = Join-Path $Root '.local\bin'
 $State = Join-Path $Root '.local\state\task-hub'
 $Manifest = Join-Path $State 'install-manifest.json'
@@ -59,6 +60,8 @@ $Marker = 'task-hub: made by windows/install.ps1'
 $NetHelp = 'ネットワーク(VPN、プロキシ)を確かめて、もう一度実行してください'
 $label = '準備'
 $changed = $false
+$Todo = ''  # what is left to do by hand, said on the last line
+$Restart = $false  # stage 9 changed what Kiro reads when it starts
 
 function Say($text) { Write-Host "task-hub: $text" }
 function Stop-Here($text, $help) { Write-Host "error: $text"; if ($help) { Write-Host "help: $help" }; exit 1 }
@@ -678,6 +681,159 @@ function Stage-TaskHub {
   }
 }
 
+function Invoke-Helper {  # kiro/install-board: the board and config.ini, where GraphQL and INI are easier in Python
+  $ErrorActionPreference = 'Continue'
+  & $script:Python (Join-Path $PSScriptRoot '..\kiro\install-board') @args 2>&1 | ForEach-Object { Write-Host "$_" }
+  $code = $LASTEXITCODE
+  $todo = Join-Path $script:Work 'todo'
+  if (Test-Path $todo) { $script:Todo = [IO.File]::ReadAllText($todo).Trim() }
+  switch ($code) {
+    0 { }
+    3 { $script:changed = $true }
+    1 { exit 1 }  # it said why and what to do next
+    default { Die "思わぬエラーで終わりました(終了コード $code)" 'この表示を task-hub の担当者に知らせてください' }
+  }
+}
+
+function Stage-Board {
+  $script:label = '7. ボード'
+  Invoke-Helper board $script:label $script:GhUser $script:Work
+}
+
+function Stage-Config {
+  $script:label = '8. 設定'
+  $config = Join-Path $Root '.config\task-hub\config.ini'
+  $new = -not (Test-Path $config)
+  Invoke-Helper config $script:label $script:Work
+  if ($new -and (Test-Path $config)) { Set-Record 'config' $config }
+}
+
+function Get-RealPath($p) {  # where a junction (or a link) leads, else the path itself
+  $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  if ($item -and $item.LinkType -and $item.Target) { return [IO.Path]::GetFullPath(@($item.Target)[0]).TrimEnd('\') }
+  return [IO.Path]::GetFullPath($p).TrimEnd('\')
+}
+
+function Get-Sha256($file) {
+  # .NET, not Get-FileHash: see Confirm-Sum
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $s = [IO.File]::OpenRead($file)
+  try { return -join ($sha.ComputeHash($s) | ForEach-Object { $_.ToString('x2') }) } finally { $s.Dispose(); $sha.Dispose() }
+}
+
+function Set-Sum($key, $value) {  # under "sha256": the copies this script owns, checked before it changes them
+  if (-not $script:M.sha256) { $script:M | Add-Member -Force sha256 ([pscustomobject]@{}) }
+  $script:M.sha256 | Add-Member -Force $key $value
+  Save-Manifest
+}
+
+function Stage-Kiro {
+  $script:label = '9. Kiro との連携'
+  $did, $kept = @(), @()
+  # Skills are folders: a junction, which needs no admin rights (a symbolic link does). A link that leads to the
+  # clone already (made by hand) is fine; one that leads elsewhere, or a folder of someone's own, is left alone.
+  foreach ($s in 'task', 'chief') {
+    $target = Join-Path $Lib "skills\$s"
+    $link = Join-Path $KiroHome "skills\$s"
+    if (Test-Path -LiteralPath $link) {
+      if ((Get-RealPath $link) -ne (Get-RealPath $target)) { $kept += Tilde $link }
+      continue
+    }
+    try {
+      New-Item -ItemType Directory -Force (Split-Path $link) | Out-Null
+      New-Item -ItemType Junction -Path $link -Target $target | Out-Null
+    } catch {
+      Die "$(Tilde $link) を作れませんでした($($_.Exception.Message))" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください'
+    }
+    Set-Record "kiro-skill-$s" $link
+    $did += "$(Tilde $link)(ジャンクション)"
+  }
+  # Steering is a file: a copy (a link to a file needs admin rights), made again when the clone's changes. Only a
+  # copy this script made, and nobody changed since (its SHA-256), is replaced.
+  $src = Join-Path $Lib 'kiro\steering\task-hub.md'
+  $dst = Join-Path $KiroHome 'steering\task-hub.md'
+  $want = Get-Sha256 $src
+  $how = $null
+  if (-not (Test-Path -LiteralPath $dst)) {
+    $how = 'コピー'
+  } elseif ((Get-Sha256 $dst) -ne $want) {
+    if ($script:M.installed.'kiro-steering' -ne $dst -or (Get-Sha256 $dst) -ne $script:M.sha256.'kiro-steering') {
+      Die "$(Tilde $dst) は、このインストーラが入れた内容と確認できないので書き換えていません" `
+        '中身を確かめて別の場所に移してから、もう一度実行してください'
+    }
+    $how = 'コピーし直し'  # task-hub was updated
+  }
+  if ($how) {
+    try {
+      New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+      Copy-Item -Force -LiteralPath $src "$dst.tmp"
+      Move-Item -Force "$dst.tmp" $dst
+    } catch {
+      Die "$(Tilde $dst) に置けませんでした" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください'
+    }
+    Set-Record 'kiro-steering' $dst
+    Set-Sum 'kiro-steering' $want
+    $did += "$(Tilde $dst)($how)"
+  }
+  $note = if ($kept) { "。$($kept -join '、') は別のものを指しているので、そのままにしました" } else { '' }
+  if ($did) {
+    $script:changed = $true
+    $script:Restart = $true
+    Ok 入れました "$($did -join '、')。Kiro を再起動すると読み込まれます$note"
+  } else {
+    Ok 済み "スキル、steering$note"
+  }
+}
+
+function Stage-Watch {
+  $script:label = '10. 常駐'
+  if (-not $Watch) {
+    Ok 飛ばしました '任意です。Ready のカードを自動で始めるときは -Watch を付けて実行します'
+    return
+  }
+  # `task watch` at every logon, restarted when it ends. Started again here, so a new version of task-hub is used
+  Stop-Watch
+  $script = Join-Path $Lib 'windows\task-watch.ps1'
+  $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Python `"$($script:Python)`""
+  $registered, $refused = $false, ''
+  try {
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    # no time limit, on battery too, and started again if it ever stops
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries `
+      -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+      -Description 'task-hub: start Ready cards (docs/windows.md)' | Out-Null
+    $registered = $true
+  } catch {
+    # some company PCs refuse new scheduled tasks; the Startup folder needs no permission
+    $refused = $_.Exception.Message.Trim()
+    try {
+      $shell = New-Object -ComObject WScript.Shell
+      $link = $shell.CreateShortcut($Startup)
+      $link.TargetPath = 'powershell.exe'
+      $link.Arguments = $arguments
+      $link.WindowStyle = 7  # minimized: -WindowStyle Hidden hides it once PowerShell starts
+      $link.Save()
+      Start-Process powershell.exe -ArgumentList $arguments -WindowStyle Hidden
+    } catch {
+      Die "常駐を登録できませんでした(タスク スケジューラ: $refused、スタートアップ フォルダー: $($_.Exception.Message.Trim()))" `
+        'この表示を task-hub の担当者に知らせてください'
+    }
+  }
+  $log = Tilde (Join-Path $State 'watch.log')
+  $script:changed = $true
+  if ($registered) {  # outside the try: a failing start must not also add the Startup shortcut (two watches)
+    Start-ScheduledTask -TaskName $TaskName
+    Set-Record 'watch' "scheduled-task:$TaskName"
+    Ok 始めました "タスク スケジューラの「$TaskName」。サインインのたびに始まります。ログは $log"
+  } else {
+    Set-Record 'watch' $Startup
+    Ok 始めました "タスク スケジューラに断られたので($refused)、スタートアップ フォルダーに置きました。ログは $log"
+  }
+}
+
 function Stop-Watch {
   # the loop (task-watch.ps1) and the `task watch` it started, and nothing else: a run goes on, and so does an agent
   # whose prompt happens to name task-watch.ps1. Not Stop-ScheduledTask, which can end every process the task started
@@ -724,42 +880,17 @@ Stage-KiroCli
 Stage-GhLogin
 Stage-KiroLogin
 Stage-TaskHub
+Stage-Board
+Stage-Config
+Stage-Kiro
+Stage-Watch
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 
-if (-not $Watch) {
-  Say 'done. Next: docs/windows.md (config, then `task list`). To start Ready cards without a terminal: install.ps1 -Watch'
-  exit 0
+if ($changed) { Write-Host 'ここまで終わりました。' } else { Write-Host 'すべて済みです。変えたものはありません。' }
+if ($Todo) {
+  Write-Host "次にすること: $Todo"
+} elseif ($Restart) {
+  Write-Host '次にすること: Kiro を再起動し(開いているチャットには、少なくともウィンドウの再読み込みが要ります)、新しいチャットで /task を試してください'
+} else {
+  Write-Host '次にすること: Kiro の新しいチャットで /task を試してください'
 }
-
-# `task watch` at every logon, restarted when it ends
-Stop-Watch
-$script = Join-Path $Lib 'windows\task-watch.ps1'
-$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Python `"$Python`""
-$registered = $false
-try {
-  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  # no time limit, on battery too, and started again if it ever stops
-  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
-    -Description 'task-hub: start Ready cards (docs/windows.md)' | Out-Null
-  $registered = $true
-} catch {
-  # some company PCs refuse new scheduled tasks; the Startup folder needs no permission
-  Say "Task Scheduler refused ($($_.Exception.Message.Trim())); using the Startup folder instead"
-  $shell = New-Object -ComObject WScript.Shell
-  $link = $shell.CreateShortcut($Startup)
-  $link.TargetPath = 'powershell.exe'
-  $link.Arguments = $arguments
-  $link.WindowStyle = 7  # minimized: -WindowStyle Hidden hides it once PowerShell starts
-  $link.Save()
-  Start-Process powershell.exe -ArgumentList $arguments -WindowStyle Hidden
-  Say "added $Startup and started it"
-}
-if ($registered) {  # outside the try: a failing start must not also add the Startup shortcut (two watches)
-  Start-ScheduledTask -TaskName $TaskName
-  Say "registered and started the scheduled task '$TaskName'"
-}
-Say "log: $(Join-Path $Root '.local\state\task-hub\watch.log')"

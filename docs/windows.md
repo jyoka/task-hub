@@ -140,11 +140,16 @@ task-hub をセットアップします(管理者権限は使いません)
 5. GitHub のログイン: 済み(you)
 5. kiro-cli のログイン: 済み
 6. task-hub 本体: 入れました(clone(main 1a2b3c4)、~\.local\bin\task.cmd、~\.local\bin\task、ユーザーの PATH に ~\.local\bin)
-task-hub: done. Next: docs/windows.md (config, then `task list`). ...
+7. ボード: 作りました(https://github.com/users/you/projects/1、you/tasks: private の you/tasks、Project you/1、…)
+8. 設定: 作りました(~\.config\task-hub\config.ini。task list で確かめました)
+9. Kiro との連携: 入れました(~\.kiro\skills\task(ジャンクション)、…。Kiro を再起動すると読み込まれます)
+10. 常駐: 飛ばしました(任意です。Ready のカードを自動で始めるときは -Watch を付けて実行します)
+ここまで終わりました。
+次にすること: Kiro を再起動し(…)、新しいチャットで /task を試してください
 ```
 
-無いものを入れたときは「入れました」と出ます。`止まりました。` の行と `次にすること:` が出て止まったら、
-その「次にすること」に従います。`error:` で始まる行が出て止まったら、手順 11 の「インストールのとき」を見ます。
+無いものを入れたときは「入れました」と出ます。最後の `次にすること:` の行に従います。途中で `止まりました。` の行が
+出て止まったときも、その下の `次にすること:` に従います。もう一度実行すると、続きから進みます(済んだ段階は「済み」)。
 
 ### 4-3. 新しい PowerShell で確かめる
 
@@ -162,15 +167,24 @@ Get-Command task -All
 
 ## 5. 設定ファイルを作る
 
-設定ファイルは `~\.config\task-hub\config.ini` です。メモ帳で作ります。
+設定ファイルは `~\.config\task-hub\config.ini` です。**手順 4-2 のインストーラが作ります**(段階 7 と 8)。
+
+- ボード: 設定ファイルに `[board]` が無ければ、自分の GitHub に非公開のリポジトリ `<自分>/tasks` と、Project「task-hub」を
+  作ります(すでにあれば、それを使います)。列と欄も task-hub に合わせます
+- 設定: 無い項目だけを足します(`[board]`、`[runner] agent = kiro`、`[check] kiro = kiro-cli whoami`)。書いてある値は
+  変えません。足す前の内容は `config.ini.bak-<日時>` に残します
+- 最後に `task list` を動かして、ボードとつながることを確かめます
+
+**すでにあるボードを使うときは**、インストーラの前に `[board]` だけを書いておきます(下の例の 2 行)。そのボードの列と
+欄は、足りないものだけを足し、カードはそのままです。
+
+設定を変えるとき(エージェントを変える、性能の低い PC で同時に動かす数を減らす、など)は、メモ帳で開きます。
 
 ```
-New-Item -ItemType Directory -Force $HOME\.config\task-hub | Out-Null
 notepad $HOME\.config\task-hub\config.ini
 ```
 
-「新しいファイルを作成しますか？」と聞かれたら「はい」を押します。次を貼り付けて、`<...>` を自分のものに書き換えます。
-`;` から後ろはメモ(コメント)なので、残しても消しても構いません。
+書き方の例です。`;` から後ろはメモ(コメント)なので、残しても消しても構いません。
 
 ```ini
 [board]
@@ -191,13 +205,13 @@ kiro = kiro-cli whoami      ; 始める前にログインを確かめる。失�
 **保存のしかた**: メモ帳の「ファイル」→「名前を付けて保存」で、「エンコード」を **UTF-8** にして保存します
 (「UTF-8 (BOM 付き)」でも読めます)。PowerShell の `>` や `Out-File` で作ると UTF-16 になり、読めません。
 
-保存したら確かめます。
+変えたら確かめます。
 
 ```
 task list
 ```
 
-次のように出れば、ボードとつながっています(カードの数は人によって違います)。
+次のように出れば、ボードとつながっています(カードの数は人によって違います)。インストーラも同じことを確かめています。
 
 ```
 counts: Backlog=0, Ready=0, In progress=0, In review=0, wait for merge=0, Blocked=0
@@ -264,11 +278,16 @@ task log 12
 ## 7. /task と /chief スキルを入れる
 
 エージェントとの会話から `/task`(会話をカードにする)や `/chief`(ボードの相談役)を使うためのものです。
-リンクの代わりに「ジャンクション」を作ります。管理者権限は要りません。次をまとめて貼り付けます。
+
+**Kiro の分は、手順 4-2 のインストーラが入れます**(段階 9)。`~\.kiro\skills\task` と `~\.kiro\skills\chief` に
+ジャンクション(管理者権限の要らないリンク)を作り、`~\.kiro\steering\task-hub.md` をコピーします。入れたら
+Kiro を再起動します。すでに自分のスキルのフォルダーがあれば、それは変えません。
+
+Claude Code や Codex でも使うときは、次をまとめて貼り付けます。
 
 ```
 foreach ($s in 'task', 'chief') {
-  foreach ($d in "$HOME\.claude\skills", "$HOME\.kiro\skills", "$HOME\.agents\skills") {
+  foreach ($d in "$HOME\.claude\skills", "$HOME\.agents\skills") {
     New-Item -ItemType Directory -Force $d | Out-Null
     if (-not (Test-Path "$d\$s")) { New-Item -ItemType Junction -Path "$d\$s" -Target "$HOME\.local\lib\task-hub\skills\$s" | Out-Null }
   }
@@ -287,12 +306,12 @@ cd $HOME\task-hub-setup
 powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Watch
 ```
 
-最後に次のどちらかが出ます。
+`10. 常駐:` の行に次のどちらかが出ます(`-Watch` を付けないときは `飛ばしました` と出ます)。
 
 | 表示 | 意味 |
 |---|---|
-| `registered and started the scheduled task 'task-hub watch'` | タスク スケジューラに登録して、今すぐ始めました(ふつうはこちら) |
-| `Task Scheduler refused (...); using the Startup folder instead` と `added ... and started it` | 会社のポリシーでタスク スケジューラに登録できなかったので、代わりにスタートアップ フォルダーに置いて、今すぐ始めました |
+| `10. 常駐: 始めました(タスク スケジューラの「task-hub watch」。…)` | タスク スケジューラに登録して、今すぐ始めました(ふつうはこちら) |
+| `10. 常駐: 始めました(タスク スケジューラに断られたので(…)、スタートアップ フォルダーに置きました。…)` | 会社のポリシーでタスク スケジューラに登録できなかったので、代わりにスタートアップ フォルダーに置いて、今すぐ始めました |
 
 ### 動いているかを確かめる
 
@@ -347,7 +366,7 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 
 | # | 確かめること | やり方 | ○ の条件 |
 |---|---|---|---|
-| 1 | タスク スケジューラに登録できる | 手順 8 | `registered and started the scheduled task` が出る。× なら、スタートアップ フォルダーに切り替わったか(`added ... and started it`)も伝える |
+| 1 | タスク スケジューラに登録できる | 手順 8 | `10. 常駐: 始めました(タスク スケジューラの「task-hub watch」` が出る。× なら、スタートアップ フォルダーに切り替わったか(`スタートアップ フォルダーに置きました`)と、断られた理由も伝える |
 | 2 | サインインし直しても始まる | PC を再起動してサインインし、5 分待って手順 8 の「動いているかを確かめる」 | State が Running で、ログに新しい `starting task watch` がある |
 | 3 | 窓が出続けない | サインイン直後と、作業中の様子を見る | PowerShell の窓が一瞬で消える。作業中に黒い窓が次々に開かない |
 | 4 | 通知が出る | 手順 6 の作業が In review になったとき | 画面の右下に `#12 In review: ...` の通知が出る。出なければ、手順 11 の「通知が出ない」も試す |
@@ -377,7 +396,8 @@ powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Uninstall
 | `error: could not clone ...` | ネットワークに出られない(会社のプロキシ)、または URL の誤り | ブラウザで https://github.com/jyoka/task-hub が開けるか確かめる。会社のプロキシがあるなら、下の「プロキシ」 |
 | `error: could not update C:\Users\...\.local\lib\task-hub` | 本体のフォルダーを手で書き換えた | `git -C $HOME\.local\lib\task-hub status` で変更を確かめる。要らない変更なら `git -C $HOME\.local\lib\task-hub checkout .` で戻してから、もう一度実行する |
 | `error: ...task.cmd does not run` | Python か本体のフォルダーが壊れている | 表示された help のコマンドを実行して、出たエラーを担当者に伝える |
-| `Task Scheduler refused (...); using the Startup folder instead` | 会社のポリシーで、タスク スケジューラが使えない | エラーではありません。スタートアップ フォルダーで常駐します(手順 10 の #1 として伝える) |
+| `タスク スケジューラに断られたので(…)、スタートアップ フォルダーに置きました` | 会社のポリシーで、タスク スケジューラが使えない | エラーではありません。スタートアップ フォルダーで常駐します(手順 10 の #1 として伝える) |
+| `~\.kiro\steering\task-hub.md は、このインストーラが入れた内容と確認できないので書き換えていません` | そのファイルを手で書き換えた(または以前に手で置いた) | 中身を確かめて別の場所に移してから、もう一度実行する |
 
 ### `task` を動かしたとき
 
