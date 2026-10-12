@@ -417,7 +417,10 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、
   一時的なユーザーフォルダー、偽物の GitHub Releases(手元の HTTP サーバー)、HKCU の下のテスト用の鍵を
-  ユーザーとマシンの環境(PATH)にして動かし、本物の PATH を変えない
+  ユーザーとマシンの環境(PATH)にして動かし、本物の PATH を変えない。CI の `standard-user` のジョブは、同じテストを
+  管理者でない標準のユーザーで動かす(`tests/ci/as-standard-user.ps1`。タスク スケジューラでそのユーザーとして)
+- `tests/live_board.py`: テストではない。本物の GitHub の試験用ボードで、カードを 1 枚 PR まで進めて片付ける
+  (windows.yml の `live`。ボタンで動かす。[release.md](../release.md#windows-を本物のボードで確かめる))
 - `tests/test_run.py`: `tests/run.py` そのもの(既定の並べる数、低い優先度、全部のテストのロック)。Windows の CI でも動く
 - `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`。偽物の `vscode` と
   一時的な git リポジトリで、Goal、変更、ログのコマンドを動かす)。`kiro/board-extension/test/host/check.mjs` は、VSIX を

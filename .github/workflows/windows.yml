@@ -3,6 +3,11 @@ name: windows
 on:
   push:  # every branch: a PR's branch is pushed here too
   workflow_dispatch:
+    inputs:
+      live:
+        description: "Also run one card on the real test board (docs/release.md: secret TASK_HUB_LIVE_TOKEN, variables TASK_HUB_LIVE_*)"
+        type: boolean
+        default: false
 jobs:
   test:
     runs-on: windows-latest
@@ -21,3 +26,37 @@ jobs:
         env:
           TASK_TEST_WINDOWS_INSTALL: "1"
       - run: python -m unittest tests.test_run -v  # tests/run.py: its lock and its low priority on Windows
+
+  # The runner is an administrator: the same installer tests again as a standard user made for it, so that anything
+  # needing admin rights (a UAC prompt on a person's PC) fails here (docs/architecture/designs/windows-easy-setup.md)
+  standard-user:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the installer, the diagnosis and the uninstaller, as a standard user
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Command "python -m unittest tests.test_windows.SetupTest tests.test_windows.InstallBoardTest -v"
+      - name: a task at the user's own logon (task watch, Slack triage's key), as a standard user
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Minutes 3 -Command "powershell -NoProfile -ExecutionPolicy Bypass -File tests\ci\register-own-task.ps1"
+
+  # Before a release, by hand (Actions → windows → Run workflow, with "live"): one card on a real test board to a PR
+  live:
+    if: github.event_name == 'workflow_dispatch' && inputs.live
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tests/live_board.py
+        env:
+          TASK_HUB_LIVE_TOKEN: ${{ secrets.TASK_HUB_LIVE_TOKEN }}
+          TASK_HUB_LIVE_PROJECT: ${{ vars.TASK_HUB_LIVE_PROJECT }}
+          TASK_HUB_LIVE_ISSUES: ${{ vars.TASK_HUB_LIVE_ISSUES }}
+          TASK_HUB_LIVE_REPO: ${{ vars.TASK_HUB_LIVE_REPO }}

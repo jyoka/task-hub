@@ -963,6 +963,7 @@ class SetupTest(unittest.TestCase):
         f = self.home / ".local/state/task-hub/slack-triage-hotkey.status"
         return f.read_text(encoding="utf-8").strip() if f.exists() else ""
 
+    @unittest.skipIf(os.environ.get("TASK_TEST_NO_DESKTOP"), "a hotkey needs a desktop (tests/ci/as-standard-user.ps1)")
     def test_slack_triage_key_from_install_to_uninstall(self):
         self.ready()
         self.slack_config(owner_name="佐藤 花子", hotkey_key="j", hotkey_mods="ctrl,alt,shift")  # a key of this test's
@@ -987,6 +988,7 @@ class SetupTest(unittest.TestCase):
         time.sleep(1)
         self.assertIn("× 11. Slackトリアージ: task-hub 本体がないので確かめていません", self.doctor(code=1))
 
+    @unittest.skipIf(os.environ.get("TASK_TEST_NO_DESKTOP"), "a hotkey needs a desktop (tests/ci/as-standard-user.ps1)")
     def test_starting_at_logon_with_a_user_folder_name_no_code_page_has(self):
         # on an English Windows a Japanese name is such a name: the shortcut must not lose it
         self.ready()
