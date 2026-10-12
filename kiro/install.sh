@@ -223,16 +223,16 @@ stage_python() {
     write_manifest
   fi
   # one of uv's own already (uv before 0.8 puts none on PATH as python3.12): used, but not recorded, so the
-  # uninstaller never removes a Python the user's virtualenvs are built on
+  # uninstaller never removes a Python the user's virtualenvs are built on. --system: not an active virtualenv's
   had=
-  "$uv" python find --python-preference only-managed 3.12 >/dev/null 2>&1 && had=1
+  "$uv" python find --python-preference only-managed --system 3.12 >/dev/null 2>&1 && had=1
   say "$label: uv で Python 3.12 を取っています…"
   # UV_SYSTEM_CERTS: trust the keychain (a company's SSL inspection root), not only uv's own list.
   if ! UV_SYSTEM_CERTS=1 UV_PYTHON_BIN_DIR=$BIN_DIR "$uv" python install 3.12 >"$work/uv.log" 2>&1; then
     die "uv で Python を入れられませんでした($(tail -n 1 "$work/uv.log"))" \
       "ネットワーク(releases.astral.sh に届くか)を確かめて、もう一度実行してください"
   fi
-  [ -n "$had" ] || M_uv_python=3.12
+  [ -n "$had" ] || { M_uv_python=3.12; write_manifest; }  # now: the next run would find it as had
   python_ok "$BIN_DIR/python3.12" || die "入れた Python($(tilde "$BIN_DIR/python3.12"))が動きません" \
     "もう一度実行してください。続くときは task-hub の担当者に知らせてください"
   PY=$BIN_DIR/python3.12 M_python=$BIN_DIR/python3.12

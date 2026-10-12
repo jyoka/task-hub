@@ -418,16 +418,19 @@ class InstallTest(unittest.TestCase):
         sums.append(f"{sha256(b'other')}  gh_{ver}_linux_amd64.tar.gz")
         self.server.files[f"{base}/gh_{ver}_checksums.txt"] = ("\n".join(sums) + "\n").encode()
 
-    def fake_uv(self):
-        """`uv python install 3.12` links python3.12 to the Python running the tests; uninstall unlinks it.
-        `uv python find` finds one of its own Pythons once self.uv_managed exists."""
+    def fake_uv(self, on_path=True):
+        """`uv python install 3.12` links python3.12 to the Python running the tests (not with on_path=False, as uv
+        before 0.8); uninstall unlinks it. `uv python find` finds one of its own Pythons once self.uv_managed exists,
+        which install makes, and, as uv does, the active virtualenv's Python unless given --system."""
+        link = f' && ln -sf "{sys.executable}" "$dir/python$3"' if on_path else ""
         return (f'#!/bin/sh\necho "$* UV_SYSTEM_CERTS=${{UV_SYSTEM_CERTS:-}} HTTPS_PROXY=${{HTTPS_PROXY:-}}"'
                 f' >> "{self.uv_calls}"\n'
                 'dir=${UV_PYTHON_BIN_DIR:-$HOME/.local/bin}\n'
                 'case "$1 $2" in\n'
-                f'  "python install") mkdir -p "$dir" && ln -sf "{sys.executable}" "$dir/python$3" ;;\n'
+                f'  "python install") touch "{self.uv_managed}" && mkdir -p "$dir"{link} ;;\n'
                 '  "python uninstall") rm -f "$dir/python$3" ;;\n'
-                f'  "python find") [ -e "{self.uv_managed}" ] ;;\n'
+                '  "python find") case " $* " in *" --system "*) ;; *) [ -z "${VIRTUAL_ENV:-}" ] || exit 0 ;; esac\n'
+                f'    [ -e "{self.uv_managed}" ] ;;\n'
                 '  *) exit 2 ;;\nesac\n')
 
     def publish_uv(self):
@@ -617,7 +620,7 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.hdiutil_calls.exists())
         # uv from its release, then Python through uv (trusting the keychain); /usr/bin/python3 was not used
         self.assertEqual(self.uv_calls.read_text().splitlines(),
-                         ["python find --python-preference only-managed 3.12 UV_SYSTEM_CERTS= HTTPS_PROXY=",
+                         ["python find --python-preference only-managed --system 3.12 UV_SYSTEM_CERTS= HTTPS_PROXY=",
                           "python install 3.12 UV_SYSTEM_CERTS=1 HTTPS_PROXY="])
         self.assertTrue((local / "bin/uv").is_file())
         python = str(local / "bin/python3.12")
@@ -840,6 +843,26 @@ class InstallTest(unittest.TestCase):
         self.assertNotIn("uv", m["installed"])  # nor the user's uv
         self.uninstall(yes=True)
         self.assertNotIn("python uninstall", self.uv_calls.read_text())
+
+    def test_a_python_uv_installed_on_a_run_that_stopped_is_still_removed_at_uninstall(self):
+        # uv before 0.8 installs 3.12 but puts no python3.12 on PATH: the run stops. With a newer uv the next run
+        # finds that 3.12 already there, but it is the installer's, and the uninstaller removes it
+        self.script("uv", self.fake_uv(on_path=False))
+        self.install(code=1)
+        self.script("uv", self.fake_uv())
+        self.install()
+        self.assertEqual(self.manifest()["installed"].get("uv-python"), "3.12")
+        self.uninstall(yes=True)
+        self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
+
+    def test_a_python_uv_installs_with_a_virtualenv_active_is_removed_at_uninstall(self):
+        # run from a terminal with a virtualenv active: its Python is not one uv had
+        self.script("uv", self.fake_uv())
+        self.env["VIRTUAL_ENV"] = str(self.home / "project/.venv")
+        self.install()
+        self.assertEqual(self.manifest()["installed"].get("uv-python"), "3.12")
+        self.uninstall(yes=True)
+        self.assertIn("python uninstall 3.12", self.uv_calls.read_text())
 
     def test_uses_a_gh_already_on_path(self):
         self.use_python3()

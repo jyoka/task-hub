@@ -1440,11 +1440,17 @@ class TaskTest(unittest.TestCase):
 
     def test_a_config_that_does_not_parse_says_where_without_a_traceback(self):
         cfg = self.root / ".config/task-hub/config.ini"
-        cfg.write_text(cfg.read_text() + "\n[runner]\nagent = other\n")  # [runner] twice
+        good = cfg.read_text()
+        cfg.write_text(good + "\n[runner]\nagent = other\n")  # [runner] twice
         out = self.task("list", code=1)
         self.no_traceback()
         self.assertIn("error: ~/.config/task-hub/config.ini cannot be read: ", out)
         self.assertIn("section 'runner' already exists", out)
+        cfg.write_text(good + "oops\n")  # no `=`
+        line = cfg.read_text().splitlines().index("oops") + 1
+        out = self.task("list", code=1)
+        self.no_traceback()
+        self.assertIn(f"error: ~/.config/task-hub/config.ini cannot be read: line {line} is not `name = value`", out)
 
     def test_a_run_record_cut_short_does_not_stop_every_command(self):
         # a crash or a full disk can leave runs/<id>.json empty: task list, task watch and task done must go on

@@ -351,14 +351,14 @@ function Stage-Python {
   $env:UV_NATIVE_TLS = '1'
   $env:UV_SYSTEM_CERTS = '1'
   # one of uv's own already (not on PATH as python): used, but not recorded, so uninstall.ps1 never removes a
-  # Python the user's virtualenvs are built on
-  $had = Runs $uv @('python', 'find', '--python-preference', 'only-managed', '3.12')
+  # Python the user's virtualenvs are built on. --system: not an active virtualenv's, here and below
+  $had = Runs $uv @('python', 'find', '--python-preference', 'only-managed', '--system', '3.12')
   if (-not (Runs $uv @('python', 'install', '3.12'))) {
     Die "uv で Python を入れられませんでした($($script:Out | Select-Object -Last 1))" `
       'ネットワーク(releases.astral.sh に届くか)を確かめて、もう一度実行してください'
   }
   if (-not $had) { Set-Record 'uv-python' '3.12' }
-  $p = if (Runs $uv @('python', 'find', '--managed-python', '3.12')) {
+  $p = if (Runs $uv @('python', 'find', '--managed-python', '--system', '3.12')) {
     @($script:Out | Where-Object { $_ -match '\.exe$' })[0]
   }
   if (-not (Test-Python $p)) {

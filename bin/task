@@ -345,7 +345,12 @@ def config():
         fail(f"{home(CONFIG)} is not saved as UTF-8",
              "open it in Notepad and save it with Encoding: UTF-8 (PowerShell's > and Out-File write UTF-16)")
     except configparser.Error as e:  # a section or a name given twice, a line with no `=`
-        fail(f"{home(CONFIG)} cannot be read: {str(e).splitlines()[0]}",
+        why = str(e).splitlines()[0]
+        if isinstance(e, configparser.MissingSectionHeaderError):
+            why = f"line {e.lineno} comes before any [section]"
+        elif isinstance(e, configparser.ParsingError) and getattr(e, "errors", None):  # its first line names no line
+            why = f"line {e.errors[0][0]} is not `name = value`"
+        fail(f"{home(CONFIG)} cannot be read: {why}",
              "fix that line: each [section] once, each name once in it, and every line `name = value`")
     return c
 

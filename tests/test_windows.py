@@ -507,6 +507,9 @@ with open(log, "a") as f:
 if a == ["python", "install", "3.12"]:
     open(log + ".installed", "w").close()
     sys.exit(0)
+if a[:2] == ["python", "find"] and os.environ.get("VIRTUAL_ENV") and "--system" not in a:
+    print(os.path.join(os.environ["VIRTUAL_ENV"], "Scripts", "python.exe"))  # as uv does: the active virtualenv's
+    sys.exit(0)
 if a[:2] == ["python", "find"] and os.path.exists(log + ".installed"):
     print(sys.executable)  # "uv's Python" is this one
     sys.exit(0)
@@ -730,7 +733,8 @@ class SetupTest(unittest.TestCase):
             self.assertTrue(f.exists(), f)
         self.assertIn("task-hub: made by windows/install.ps1", (bindir / "task.cmd").read_text(encoding="mbcs"))
         self.assertEqual([json.loads(x) for x in self.uv_log.read_text().splitlines()][:2],
-                         [["python", "find", "--python-preference", "only-managed", "3.12"], ["python", "install", "3.12"]])
+                         [["python", "find", "--python-preference", "only-managed", "--system", "3.12"],
+                          ["python", "install", "3.12"]])
         m = self.manifest()
         self.assertEqual(m["python"], sys.executable)
         self.assertEqual(m["installed"], {
@@ -782,6 +786,23 @@ class SetupTest(unittest.TestCase):
         out = self.uninstall("-Yes")
         self.assertNotIn("uv で入れた Python", out)
         self.assertNotIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
+
+    def test_a_python_uv_installs_with_a_virtualenv_active_is_used_and_removed_at_uninstall(self):
+        # run from a terminal with a virtualenv active: its Python is neither one uv had nor the one to use
+        uvbin = self.root / "uvbin"
+        uvbin.mkdir()
+        write_exe(uvbin / "uv.exe", FAKE_UV)
+        self.set_path("machine", Path(shutil.which("git")).parent)
+        self.set_path("user", uvbin, self.kirobin)
+        self.set_gh_auth({"login": "alice", "scopes": "gist, project, read:org, repo"})
+        self.kiro_logged_in.touch()
+        self.env["VIRTUAL_ENV"] = str(self.home / "project" / ".venv")
+        self.install()
+        m = self.manifest()
+        self.assertEqual(m["python"], sys.executable)
+        self.assertEqual(m["installed"].get("uv-python"), "3.12")
+        self.uninstall("-Yes")
+        self.assertIn(["python", "uninstall", "3.12"], [json.loads(x) for x in self.uv_log.read_text().splitlines()])
 
     def test_finds_what_was_installed_after_the_window_opened(self):
         self.ready()
