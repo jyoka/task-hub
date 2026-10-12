@@ -2566,6 +2566,38 @@ def restart_watch():
     return f"watch: restarted {WATCH_LABEL} (launchd)"
 
 
+def windows_command_path(p):
+    """A path for a command line that cmd.exe and PowerShell both run as it is: unquoted (a quoted first word is a
+    string to PowerShell), with / (no escapes), and its short 8.3 name when it has a space. Quoted when that fails."""
+    p = str(p)
+    if " " in p:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.kernel32.GetShortPathNameW(p, buf, len(buf)) and " " not in buf.value:
+            p = buf.value
+    p = p.replace("\\", "/")
+    return f'"{p}"' if " " in p else p
+
+
+# kiro/workflows/task-hub-events.workflow.json's advice for a slow run; Windows has no herdr tabs
+HERDR_STOP = "and that if they want to stop it, Ctrl-C in that task's herdr tab."
+WINDOWS_STOP = "and that `task log <id>` shows what it is doing."
+
+
+def kiro_copy_bytes(key, python=None):
+    """What Kiro gets of LIB's hook or workflow (KIRO_COPIES[key]): the file itself; on Windows, each command is
+    Python and the script as full paths (Kiro runs it with neither sh nor $HOME, and Windows reads no #! line)."""
+    data = (LIB / KIRO_COPIES[key][0]).read_bytes()
+    if not WINDOWS:
+        return data
+    text = data.decode("utf-8")
+    py = windows_command_path(python or sys.executable)
+    for name in ("task-events-since", "task-events-watch"):
+        text = text.replace(json.dumps(f"$HOME/.local/lib/task-hub/kiro/{name}"),
+                            json.dumps(f"{py} {windows_command_path(LIB / 'kiro' / name)}", ensure_ascii=False))
+    return text.replace(HERDR_STOP, WINDOWS_STOP).encode("utf-8")
+
+
 def copy_kiro():
     """Copy Kiro's hook and workflow again where they are installed, when they differ from LIB's."""
     copied = []
@@ -2573,17 +2605,32 @@ def copy_kiro():
         src, dest = LIB / src, Path.home() / dest
         if not src.is_file() or not (dest.exists() or dest.is_symlink()):
             continue  # not installed: Kiro is not used here, or not this part of it
-        if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == src.read_bytes():
+        want = kiro_copy_bytes(key)
+        if not dest.is_symlink() and dest.is_file() and dest.read_bytes() == want:
             continue
         temp = dest.with_name(f".{dest.name}.tmp")
         try:
-            shutil.copyfile(src, temp)
+            temp.write_bytes(want)
             temp.replace(dest)  # a link of an earlier manual install becomes a copy too, as Kiro requires
         except OSError as e:
             return [f"kiro: could not copy {home(src)} to {home(dest)} ({e}); copy it by hand (docs/setup.md)"]
         note_install_copy(key, dest)
         copied.append(home(dest))
     return [f"kiro: copied again {', '.join(copied)}"] if copied else []
+
+
+def cmd_kiro_copy(a):
+    if a["key"] not in KIRO_COPIES:
+        fail(f"unknown key {a['key']!r}", "kiro-hook or kiro-workflow", 2)
+    want = kiro_copy_bytes(a["key"])
+    if not a["to"]:
+        print(hashlib.sha256(want).hexdigest())
+        return
+    dest = Path(a["to"])
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temp = dest.with_name(f".{dest.name}.tmp")
+    temp.write_bytes(want)
+    temp.replace(dest)
 
 
 def note_install_copy(key, dest):
@@ -3175,6 +3222,10 @@ COMMANDS = {
                  "task feedback [--feature]  # report a bug (or ask for a feature) on task-hub's GitHub: opens the "
                  "form with the version and OS filled in, or prints its URL"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
+    "_kiro-copy": (cmd_kiro_copy, ["key"], {"to": True},
+                   "task _kiro-copy kiro-hook|kiro-workflow [--to FILE]  # internal, for windows/install.ps1 and "
+                   "doctor.ps1: writes Kiro's hook or workflow as Kiro on this OS runs it, or without --to prints the "
+                   "SHA-256 of that"),
     "_home": (cmd_home, [], {}, "task  # sync with the board, start Ready tasks, show what needs you"),
 }
 

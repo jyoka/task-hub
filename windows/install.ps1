@@ -748,40 +748,82 @@ function Stage-Kiro {
     Set-Record "kiro-skill-$s" $link
     $did += "$(Tilde $link)(ジャンクション)"
   }
-  # Steering is a file: a copy (a link to a file needs admin rights), made again when the clone's changes. Only a
-  # copy this script made, and nobody changed since (its SHA-256), is replaced.
-  $src = Join-Path $Lib 'kiro\steering\task-hub.md'
-  $dst = Join-Path $KiroHome 'steering\task-hub.md'
-  $want = Get-Sha256 $src
-  $how = $null
-  if (-not (Test-Path -LiteralPath $dst)) {
-    $how = 'コピー'
-  } elseif ((Get-Sha256 $dst) -ne $want) {
-    if ($script:M.installed.'kiro-steering' -ne $dst -or (Get-Sha256 $dst) -ne $script:M.sha256.'kiro-steering') {
-      Die "$(Tilde $dst) は、このインストーラが入れた内容と確認できないので書き換えていません" `
-        '中身を確かめて別の場所に移してから、もう一度実行してください'
+  # Steering, the hook and the workflow are files: copies (a link to a file needs admin rights; Kiro reads no link
+  # for hooks and workflows anyway), made again when the clone's change. The hook's and the workflow's commands are
+  # in Windows' form (`task _kiro-copy`, which `task update` uses too). Only a copy this script made, and nobody
+  # changed since (its SHA-256), is replaced.
+  $steering = Join-Path $Lib 'kiro\steering\task-hub.md'
+  $copies = @(
+    @('kiro-steering', (Join-Path $KiroHome 'steering\task-hub.md'), (Get-Sha256 $steering),
+      [scriptblock]::Create("Copy-Item -Force -LiteralPath '$($steering -replace "'", "''")' `$args[0]")),
+    @('kiro-hook', (Join-Path $KiroHome 'hooks\task-hub-events.json'), (Get-KiroCopySum 'kiro-hook'),
+      { Write-KiroCopy 'kiro-hook' $args[0] }),
+    @('kiro-workflow', (Join-Path $KiroHome 'workflows\task-hub-events.workflow.json'), (Get-KiroCopySum 'kiro-workflow'),
+      { Write-KiroCopy 'kiro-workflow' $args[0] }))
+  $older = ''
+  foreach ($c in $copies) {
+    $key, $dst, $want, $write = $c
+    if (-not $want) {  # this version of task-hub cannot write it for Windows yet
+      $older = '。フックとワークフローは、この版の task-hub では Windows に入れられません(新しい版で入ります)'
+      continue
     }
-    $how = 'コピーし直し'  # task-hub was updated
-  }
-  if ($how) {
+    $how = $null
+    if (-not (Test-Path -LiteralPath $dst)) {
+      $how = 'コピー'
+    } elseif ((Get-Sha256 $dst) -ne $want) {
+      if ($script:M.installed.$key -ne $dst -or (Get-Sha256 $dst) -ne $script:M.sha256.$key) {
+        Die "$(Tilde $dst) は、このインストーラが入れた内容と確認できないので書き換えていません" `
+          '中身を確かめて別の場所に移してから、もう一度実行してください'
+      }
+      $how = 'コピーし直し'  # task-hub was updated
+    }
+    if (-not $how) { continue }
     try {
       New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
-      Copy-Item -Force -LiteralPath $src "$dst.tmp"
+      & $write "$dst.tmp"
       Move-Item -Force "$dst.tmp" $dst
     } catch {
-      Die "$(Tilde $dst) に置けませんでした" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください'
+      Die "$(Tilde $dst) に置けませんでした($($_.Exception.Message))" 'ユーザーフォルダーの空き容量と権限を確かめて、もう一度実行してください'
     }
-    Set-Record 'kiro-steering' $dst
-    Set-Sum 'kiro-steering' $want
+    Set-Record $key $dst
+    Set-Sum $key $want
     $did += "$(Tilde $dst)($how)"
+  }
+  # Workflows on in Kiro's settings.json (the /chief workflow needs them): kiro/install-board, as on the Mac. It says
+  # in <work>/kiro-settings what it did: "changed<TAB>what", "manual<TAB>what", or "same"
+  $c0 = $script:changed
+  Invoke-Helper kiro-settings $script:label $script:Work
+  $script:changed = $c0
+  $report = @([IO.File]::ReadAllLines((Join-Path $script:Work 'kiro-settings')))
+  $kind, $what = $report[0] -split "`t", 2
+  $manual = ''
+  if ($kind -eq 'changed') {
+    $did += $what
+    if (-not $script:M.installed.'kiro-settings') { Set-Record 'kiro-settings' $report[1] }
+  } elseif ($kind -eq 'manual') {
+    $manual = "。$what"
   }
   $note = if ($kept) { "。$($kept -join '、') は別のものを指しているので、そのままにしました" } else { '' }
   if ($did) {
     $script:changed = $true
     $script:Restart = $true
-    Ok 入れました "$($did -join '、')。Kiro を再起動すると読み込まれます$note"
+    Ok 入れました "$($did -join '、')。Kiro を再起動すると読み込まれます$note$manual$older"
   } else {
-    Ok 済み "スキル、steering$note"
+    Ok 済み "スキル、steering、$(if (-not $older) { 'フック、ワークフロー、' })Workflows の設定$note$manual$older"
+  }
+}
+
+function Get-KiroCopySum($key) {
+  # The SHA-256 of the hook or workflow as `task _kiro-copy` writes it, or $null when the clone's version of task-hub
+  # is older than that command (a release from before Windows had hooks): then they wait for a newer one
+  if (Runs $script:Python @((Join-Path $Lib 'bin\task'), '_kiro-copy', $key)) { return "$($script:Out | Select-Object -Last 1)".Trim() }
+  if ($script:Out -match 'unknown command|commands: ') { return $null }
+  Die "Kiro の $key を作れませんでした($($script:Out | Select-Object -Last 1))" 'この表示を task-hub の担当者に知らせてください'
+}
+
+function Write-KiroCopy($key, $file) {
+  if (-not (Runs $script:Python @((Join-Path $Lib 'bin\task'), '_kiro-copy', $key, '--to', $file))) {
+    throw "task _kiro-copy: $($script:Out | Select-Object -Last 1)"
   }
 }
 

@@ -77,13 +77,13 @@ function Get-NewestKiroTag($names) {
   $names | Where-Object { $_ -match '^kiro-v\d+$' } | Sort-Object { [int]$_.Substring(6) } | Select-Object -Last 1
 }
 
-function Invoke-Check($what) {  # kiro/install-board check: "ok<TAB>detail" or "ng<TAB>detail<TAB>next step"
+function Invoke-Check($what, $before = '') {  # kiro/install-board check: "ok<TAB>detail" or "ng<TAB>detail<TAB>next step"
   if (-not (Runs $script:Python @((Join-Path $PSScriptRoot '..\kiro\install-board'), 'check', $what))) {
     Ng '確かめられませんでした' 'この出力を task-hub の担当者に知らせてください'
     return
   }
   $r = "$($script:Out | Select-Object -Last 1)" -split "`t"
-  if ($r[0] -eq 'ok') { Ok $r[1] }
+  if ($r[0] -eq 'ok') { Ok "$before$($r[1])" }
   elseif ($r.Count -ge 3) { Ng $r[1] $r[2] }
   else { Ng '確かめられませんでした' 'この出力を task-hub の担当者に知らせてください' }
 }
@@ -267,11 +267,26 @@ if (-not (Test-Path -LiteralPath $steering)) { $lacks += Tilde $steering }
 elseif ((Test-Path -LiteralPath $src) -and
         -not ([IO.File]::ReadAllBytes($steering).Length -eq [IO.File]::ReadAllBytes($src).Length -and
               [IO.File]::ReadAllText($steering) -eq [IO.File]::ReadAllText($src))) { $stale += Tilde $steering }
+# the hook and the workflow, as `task _kiro-copy` writes them for this PC (Windows' form of their commands)
+$older = $false  # the clone's task-hub is from before Windows had hooks: the installer skips them, so does this
+foreach ($c in @(@('kiro-hook', 'hooks\task-hub-events.json'), @('kiro-workflow', 'workflows\task-hub-events.workflow.json'))) {
+  $dst = Join-Path $KiroHome $c[1]
+  if ($script:Python -and -not (Runs $script:Python @((Join-Path $Lib 'bin\task'), '_kiro-copy', $c[0])) -and
+      ($script:Out -match 'unknown command|commands: ')) { $older = $true; continue }
+  if (-not [IO.File]::Exists($dst)) { $lacks += Tilde $dst; continue }
+  if (-not $script:Python -or -not (Runs $script:Python @((Join-Path $Lib 'bin\task'), '_kiro-copy', $c[0]))) { continue }
+  $want = "$($script:Out | Select-Object -Last 1)".Trim()
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $got = -join ($sha.ComputeHash([IO.File]::ReadAllBytes($dst)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+  if ($got -ne $want) { $stale += Tilde $dst }
+}
 if ($lacks) { Ng "$($lacks -join '、') がありません" $Install }
 elseif ($stale) { Ng "$($stale -join '、') が task-hub の今の版と違います" $Install }
+elseif (-not $script:Python) { Ng 'Python がないので Workflows の設定を確かめていません' $Install }
 else {
-  Ok 'スキル、steering'
+  Invoke-Check kiro-settings "スキル、steering、$(if (-not $older) { 'フック、ワークフロー、' })"
   if ($other) { Note "$($other -join '、') は別のものを指しています。インストーラもそのままにします" }
+  if ($older) { Note 'フックとワークフローは、この版の task-hub では Windows に入れられません(新しい版で入ります)' }
 }
 
 # 10. task watch at logon (optional): Task Scheduler, or the Startup folder when that was refused

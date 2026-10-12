@@ -52,7 +52,11 @@ DELETE_WORKFLOW = """mutation($id: ID!) { deleteProjectV2Workflow(input: {workfl
 WINDOWS = os.name == "nt"
 INSTALLER = r"windows\install.ps1" if WINDOWS else "kiro/install.sh"
 CONFIG_HEADER = f"; task-hub の設定。{INSTALLER} が作りました(書き方は docs/setup.md)\n"
-KIRO_SETTINGS = Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json"
+# where Kiro (a VS Code) keeps its user settings; on Windows %APPDATA%\Kiro, as VS Code's %APPDATA%\Code (not yet seen on
+# a real Windows: docs/architecture/designs/windows-easy-setup.md)
+KIRO_SETTINGS = (Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Kiro" / "User" / "settings.json" if WINDOWS
+                 else Path.home() / "Library" / "Application Support" / "Kiro" / "User" / "settings.json")
+PALETTE = "Ctrl+Shift+P" if WINDOWS else "⌘⇧P"  # Kiro's command palette
 WORKFLOWS_KEY = "kiroAgent.workflows.enabled"  # boolean, false by default; read by each new chat
 
 
@@ -309,7 +313,7 @@ def kiro_settings(label, work):
                 "Kiro のコマンドパレットで「Enable Workflows」を実行してください")
         todo = Path(work) / "todo"
         if not todo.exists():  # the board's step, if any, comes first
-            todo.write_text("Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください")
+            todo.write_text(f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください")
     elif not text.strip():
         write(path, json.dumps({WORKFLOWS_KEY: True}, indent=4) + "\n")
         kind, what = "changed", f"{tilde(path)}(Workflows を有効に)"
@@ -378,7 +382,7 @@ def check_kiro_settings():
         return True, "Workflows は有効", ""
     if data is None:
         return False, "Workflows が有効になっていません", \
-            "Kiro のコマンドパレット(⌘⇧P)で「Enable Workflows」を実行し、Kiro を再起動してください"
+            f"Kiro のコマンドパレット({PALETTE})で「Enable Workflows」を実行し、Kiro を再起動してください"
     return False, "Workflows が有効になっていません", INSTALL
 
 

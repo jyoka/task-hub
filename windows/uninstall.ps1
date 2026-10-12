@@ -31,7 +31,8 @@ $Startup = [IO.Path]::Combine([Environment]::GetFolderPath('Startup'), 'task-hub
 $Again = 'powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1 -Yes'
 # The order things are removed in: the watch first (it runs task), then what Kiro reads, task, and what they use;
 # uv last, after the Python it installed. PATH entries go before the folders they name.
-$Keys = 'watch', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'config', 'task', 'task-sh', 'user-path',
+$Keys = 'watch', 'kiro-hook', 'kiro-workflow', 'kiro-steering', 'kiro-skill-task', 'kiro-skill-chief', 'kiro-settings',
+  'config', 'task', 'task-sh', 'user-path',
   'kiro-cli-path', 'git-path', 'task-hub', 'kiro-cli', 'gh', 'uv-python', 'uv', 'git'
 
 function Tilde($p) { if ("$p".StartsWith("$Root\")) { '~' + "$p".Substring($Root.Length) } else { "$p" } }
@@ -105,6 +106,7 @@ function Show-Kept {
   Write-Host '消さないもの:'
   Write-Host '- GitHub のログイン(gh)と kiro-cli のログイン'
   Write-Host '- task-hub のデータ: ~\.local\share\task-hub(worktree)、~\.local\state\task-hub(ログ、出来事)'
+  if ($script:settings) { Write-Host "- $(Tilde $script:settings) の Workflows の設定(インストーラは有効にしただけです)" }
   $config = Join-Path $Root '.config\task-hub\config.ini'
   $project, $issues = '', ''
   if (Test-Path -LiteralPath $config) {
@@ -176,9 +178,12 @@ foreach ($k in $Keys) {
       # the junction, never the folder it leads to (Remove-Item -Recurse would empty the clone's skills)
       Remove-Thing "$(Tilde $v)(ジャンクション)" ([scriptblock]::Create("[IO.Directory]::Delete('$($v -replace "'", "''")')"))
     }
-    'kiro-steering' {
+    'kiro-settings' {  # a file of the user's that the installer changed one setting in: said, not removed
+      $script:settings = $v
+    }
+    { $_ -in 'kiro-steering', 'kiro-hook', 'kiro-workflow' } {  # copies, which may have been edited since
       if (-not (Mine $v) -or -not (Test-Path -LiteralPath $v)) { continue }
-      if ((Get-Sha256 $v) -ne $m.sha256.'kiro-steering') { Write-Host "残しました: $(Tilde $v)(インストーラが入れた内容と確認できません)"; continue }
+      if ((Get-Sha256 $v) -ne $m.sha256.$k) { Write-Host "残しました: $(Tilde $v)(インストーラが入れた内容と確認できません)"; continue }
       Remove-Thing (Tilde $v) ([scriptblock]::Create("Remove-Item -LiteralPath '$($v -replace "'", "''")'"))
     }
     { $_ -in 'task', 'task-sh' } {  # only while it is the installer's
