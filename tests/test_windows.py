@@ -880,7 +880,8 @@ class SetupTest(unittest.TestCase):
         self.ready()
         self.tag("v0.11.0", "HEAD~1")  # a release before v0.12.0, the first the easy setup installs: not one it takes
         out = self.install()
-        self.assertIn("6. task-hub 本体: 入れました(clone(main ", out)
+        # on the origin's default branch (in CI, the branch the checkout is on), not on v0.11.0
+        self.assertRegex(out, r"6\. task-hub 本体: 入れました\(clone\([^ ()]+ [0-9a-f]{7,}\)")
         self.tag("v0.12.0", "HEAD~1")
         out = self.install()
         self.assertIn(" → v0.12.0", out)
