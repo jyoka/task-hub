@@ -510,9 +510,10 @@ def board(saved_ok=False):
 
     saved_ok: BOARD_META will do (read-only `task list`). A command that moves cards reads the Project again, so an
     option remade on the board since then can never send a card to the wrong column; its read refreshes BOARD_META."""
-    if _board:
-        return _board
     owner, number, issues = board_config()
+    if _board and (_board.get("owner"), _board.get("number"), _board.get("issues")) == (owner, number, issues):
+        return _board
+    _board.clear()  # `task watch` reads the config again at every check: [board] may name another Project now
     saved = read_json(BOARD_META) if saved_ok else {}
     at = saved.get("at")
     if saved.get("key") == [owner, number, issues] and isinstance(at, (int, float)) \
@@ -968,11 +969,13 @@ def alive(t):
             return False  # no run of this task on this machine
         # launched but `_run` has not recorded itself yet; give it two minutes
         return seconds_since(t["started"]) < 120
+    # this task's own run: pids are handed out again (soon on Windows; and the run files outlive a restart), to
+    # another task's run too, and an agent's prompt can say _run
+    own = rf"\s_run\s+{t['id']}\s*$"
     if WINDOWS:
-        # this task's own run: Windows hands out pids again soon, and an agent's prompt can say _run
-        return bool(re.search(rf"\s_run\s+{t['id']}\s*$", windows_command_line(int(t["pid"]))))
+        return bool(re.search(own, windows_command_line(int(t["pid"]))))
     r = run("ps", "-p", t["pid"], "-o", "command=")
-    return r.returncode == 0 and "_run" in r.stdout
+    return r.returncode == 0 and bool(re.search(own, r.stdout))
 
 
 def windows_command_line(pid):
@@ -1240,7 +1243,8 @@ def setup_command(repo):
 def run_setup(t, wt, say):
     """Run [setup] in the worktree before the agent. Returns why the run cannot go on, or "".
 
-    It must leave nothing git would commit: a virtualenv the repository does not ignore would land in the PR.
+    It must leave nothing git would commit: a virtualenv the repository does not ignore, or a lockfile it rewrote,
+    would land in the PR.
     """
     cmd = setup_command(t["repo"])
     if not cmd:
@@ -1248,6 +1252,7 @@ def run_setup(t, wt, say):
     set_stage(t, "setup")
     say(f"== setup: {cmd}")
     before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
+    changed_before = set(run("git", "-C", wt, "diff", "--name-only", "HEAD").stdout.split("\n"))
     # Windows has no sh: PowerShell, stopping at a failing cmdlet, ending with the last program's exit code
     shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
              "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $ErrorActionPreference = 'Stop'\n" + cmd
@@ -1263,6 +1268,12 @@ def run_setup(t, wt, say):
     if [f for f in new if f]:
         shown = ", ".join(f for f in new if f)[:200]
         return f"setup left files git would commit ({shown}); ignore them in the repository or change [setup]"
+    # a file of the repository it rewrote (npm install and package-lock.json) would be committed as the agent's work
+    changed = sorted(set(run("git", "-C", wt, "diff", "--name-only", "HEAD").stdout.split("\n")) - changed_before)
+    if [f for f in changed if f]:
+        shown = ", ".join(f for f in changed if f)[:200]
+        return (f"setup changed files of the repository ({shown}); change [setup] so it leaves them as they are "
+                "(for example npm ci instead of npm install)")
     return ""
 
 
@@ -1298,6 +1309,14 @@ def ensure_worktree(t):
                                "push it, then move the card to Ready again")
     if (wt / ".git").exists():
         ensure_internal_excludes(wt)
+        # what a human pushed to the task branch since (the PR's "Update branch", a fix by hand): the agent starts
+        # from it, and the push at the end is not refused for being behind
+        remote = f"origin/{t['branch']}"
+        if run("git", "-C", wt, "rev-parse", "--verify", "-q", remote).returncode == 0 and \
+                run("git", "-C", wt, "merge", "--ff-only", "-q", remote).returncode != 0:
+            raise RuntimeError(f"branch {t['branch']} on GitHub and this machine's worktree {home(wt)} have both "
+                               f"changed; merge {remote} in that worktree (or delete it to start from GitHub's), "
+                               "then move the card to Ready again")
         return wt
     run("git", "-C", repo_dir, "worktree", "prune")
     branch = t["branch"]
@@ -2100,15 +2119,19 @@ def review_loop(t, report, code, say, record):
 
 
 def unverified_evidence(wt, evidence):
-    """The evidence lines that do not check out. Each must be `path:line` plus a `quote` that is on that line."""
+    """The evidence lines that do not check out. Each must be `path:line` plus a `quote` that is on that line.
+
+    The path must be one git tracks: a file the replanner wrote itself where git does not look (an ignored folder,
+    which restore leaves) proves nothing. A quote of under 3 characters is on almost any line."""
     items = [line.strip() for line in evidence.splitlines() if line.strip()]
     bad = []
     for item in items:
         m = re.search(r"([^\s`:]+):(\d+)\D.*?`([^`]+)`", item)
         ok = False
-        if m:
+        if m and len(m.group(3).strip()) >= 3:
             path = (wt / m.group(1)).resolve()
-            if path.is_relative_to(wt.resolve()) and path.is_file():
+            if path.is_relative_to(wt.resolve()) and path.is_file() and run(
+                    "git", "-C", wt, "ls-files", "--error-unmatch", "--", path.relative_to(wt.resolve())).returncode == 0:
                 lines = path.read_text(errors="replace").splitlines()
                 n = int(m.group(2))
                 ok = 1 <= n <= len(lines) and m.group(3).strip() in lines[n - 1]

@@ -267,7 +267,8 @@ you/app = uv venv -q .venv
 - プログラム(uv、npm など)が失敗しても、その場では止まらず次の行に進みます。最後に残った終了コードが 0 以外なら、
   最後に失敗にします。その場で止めたい行のあとには `if ($LASTEXITCODE) { exit $LASTEXITCODE }` を書きます
 - プログラムに `2>&1` や `2>$null` を付けないでください。エラー出力が 1 行でも出ると、そこで失敗になります
-- 準備で作ったファイルは、git が無視するものでなければなりません(uv の `.venv` はそのままで大丈夫です)
+- 準備で作ったファイルは、git が無視するものでなければなりません(uv の `.venv` はそのままで大丈夫です)。
+  リポジトリのファイルを書き換えてもいけません(`npm install` が `package-lock.json` を書き換えるなど。`npm ci` なら書き換えません)
 
 ## 6. 1 件だけ手で動かして確かめる
 
@@ -471,6 +472,7 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | ログに `agent cannot run: its command line is over Windows' 32,767 characters` | プロンプト(Goal や前回のレポート)が長すぎて、Windows のコマンドの長さの上限(約 32,000 文字)を超えた | Goal を短くするか、タスクを分ける |
 | `setup failed (exit N), see task log N` | `[setup]` のコマンドが失敗した | `task log <番号> --full` で `== setup:` のあとを読む。作業フォルダー(`task open <番号>` で場所が出る)で、同じコマンドを手で動かして確かめる |
 | `setup left files git would commit (...)` | 準備で作ったファイルが、git に無視されていない | そのファイルをリポジトリの `.gitignore` に足すか、`[setup]` を変える |
+| `setup changed files of the repository (...)` | 準備がリポジトリのファイルを書き換えた(`npm install` と `package-lock.json` など) | 書き換えないコマンドにする(`npm ci` など) |
 | `the run stopped unexpectedly` | 作業のプロセスが止まった(PC の再起動やシャットダウン、タスク スケジューラで「終了」を押した) | Ready に戻せば、続きからやり直します |
 | `agent exited without a report (exit N)` | エージェントが途中で落ちた、ログインが切れた、またはクレジットを使い切った | `task log <番号> --full` の最後のほうを読む |
 

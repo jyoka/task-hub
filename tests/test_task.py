@@ -222,9 +222,16 @@ if "You triage one blocked task-hub run" in prompt:  # used as the replanner; RE
                        "## Evidence\n\n- config/keys.md:3: `STRIPE=sk_test_123`\n",
            "misquoted": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
                         "## Evidence\n\n- README.md:1: `STRIPE=sk_test_123`\n",
+           "selfmade": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                       "## Evidence\n\n- __pycache__/notes.txt:1: `STRIPE=sk_test_123`\n",
+           "tiny": "## Decision\n\nanswered\n\n## Answer\n\nUse sk_test_123.\n\n"
+                   "## Evidence\n\n- README.md:1: `a`\n",
            "human": "## Decision\n\nhuman\n\n## For the human\n\nCould you add the Stripe test key to [env]?\n",
            "conflict": "## Decision\n\ngoal-conflict\n\n## Proposed goal change\n\nDrop the hello requirement.\n",
            "edits": None, "stagededits": None}[kind]
+    if kind == "selfmade":  # its own "evidence", in a folder git ignores: never part of the repository
+        Path("__pycache__").mkdir(exist_ok=True)
+        Path("__pycache__/notes.txt").write_text("STRIPE=sk_test_123\n")
     if out is None:
         Path("README.md").write_text("changed by the replanner\n")
         if kind == "stagededits":
@@ -1027,13 +1034,27 @@ class TaskTest(unittest.TestCase):
 
     def fake_running(self, tid):
         """Make a task look like a live run on this machine."""
-        proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run"])
+        proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", str(tid)])  # as `task _run`
         self.addCleanup(proc.kill)
         self.move(tid, "In progress")
         self.run_file(tid).parent.mkdir(parents=True, exist_ok=True)
         self.run_file(tid).write_text(json.dumps({"pid": str(proc.pid), "started": "2026-01-01T00:00:00Z",
                                                   "repo": "jyoka/app", "branch": f"task/{tid}"}))
         return proc
+
+    def test_a_pid_now_another_tasks_run_is_not_this_run(self):
+        # pids are handed out again (the run files outlive a restart): another task's run is not this one
+        tid = self.new()
+        proc = self.fake_running(tid)
+        proc.kill()
+        proc.wait()
+        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
+        self.addCleanup(other.kill)
+        state = json.loads(self.run_file(tid).read_text())
+        self.run_file(tid).write_text(json.dumps({**state, "pid": str(other.pid)}))
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly", self.comments(tid)[-1])
 
     # --- registering ---
 
@@ -1518,6 +1539,16 @@ class TaskTest(unittest.TestCase):
         self.assertIn("setup left files git would commit (.venv/lib.py)", self.comments(tid)[-1])
         self.assertIsNone(self.pr(tid))
 
+    def test_setup_that_changes_tracked_files_blocks(self):
+        # like `npm install` rewriting package-lock.json: the change would land in the PR as if the agent made it
+        self.write_config("\n[setup]\njyoka/app = echo changed >> README.md\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("setup changed files of the repository (README.md)", self.comments(tid)[-1])
+        self.assertIsNone(self.pr(tid))
+
     def check_script(self, name, lines, code):
         """A stand-in for an agent's readiness check (like `kiro-cli whoami`): prints lines, exits with code."""
         path = self.root / name
@@ -1596,7 +1627,9 @@ class TaskTest(unittest.TestCase):
 
     def test_replanner_answer_that_cannot_be_verified_goes_to_the_human(self):
         self.write_config(replanner="agent")
-        for kind in ("invented", "misquoted"):  # a file that does not exist; a real line that does not say that
+        # a file that does not exist; a real line that does not say that; a file it wrote itself where git does not
+        # look; a quote too short to say anything
+        for kind in ("invented", "misquoted", "selfmade", "tiny"):
             tid = self.new(f"blocked REPLAN={kind}")
             self.task("start", tid)
             self.wait(tid)
@@ -3364,6 +3397,30 @@ class TaskTest(unittest.TestCase):
         second = self.agent_calls()[1]["prompt"]
         self.assertIn("An earlier run of this task stopped", second)
         self.assertIn("Need the Stripe test key.", second)
+
+    def test_rerun_takes_in_what_a_human_pushed_to_the_task_branch(self):
+        # "Update branch" on the PR, or a fix pushed by hand: the re-run starts from it, or its push is refused
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        bare = self.root / "origins" / "jyoka/app.git"
+        human = self.root / "human"
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{tid}", str(bare), str(human)], check=True,
+                       capture_output=True)
+        (human / "human.txt").write_text("pushed by a human\n")
+        subprocess.run(["git", "-C", str(human), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(human), "commit", "-qm", "by hand"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(human), "push", "-q"], check=True, capture_output=True)
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. Test key is in the vault. MODE:ok"
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
+        tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", f"task/{tid}"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("human.txt", tree)
+        self.assertIn("hello.txt", tree)
 
     def test_no_report_is_blocked(self):
         tid = self.new("noreport")
