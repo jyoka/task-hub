@@ -298,7 +298,10 @@ class WindowsTest(unittest.TestCase):
              "print(subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, capture_output=True).returncode, "
              "flush=True); time.sleep(60)", sys.executable, str(BIN), "start", tid],
             env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        self.addCleanup(holder.kill)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.stdin.close)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)  # cleanups run last first: kill, wait, then close its pipes
         job.add(holder)
         holder.stdin.write("go\n")
         holder.stdin.flush()
