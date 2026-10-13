@@ -592,6 +592,12 @@ class SetupTest(unittest.TestCase):
         # release (v0.12.0 and later) would be the clone the installer takes
         self.origin = root / "task-hub.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(REPO), str(self.origin)], check=True, capture_output=True)
+        # a checkout of a tag (CI on a release's push) is on no branch, and so is the bare clone's HEAD: give it main,
+        # as GitHub's origin has, or the installer's clone is on no branch either
+        if subprocess.run(["git", "-C", str(self.origin), "symbolic-ref", "-q", "HEAD"], capture_output=True).returncode:
+            subprocess.run(["git", "-C", str(self.origin), "branch", "-f", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(self.origin), "symbolic-ref", "HEAD", "refs/heads/main"], check=True,
+                           capture_output=True)
         tags = subprocess.run(["git", "-C", str(self.origin), "tag", "-l"], check=True, capture_output=True,
                               text=True).stdout.split()
         if tags:
@@ -880,7 +886,7 @@ class SetupTest(unittest.TestCase):
         self.ready()
         self.tag("v0.11.0", "HEAD~1")  # a release before v0.12.0, the first the easy setup installs: not one it takes
         out = self.install()
-        # on the origin's default branch (in CI, the branch the checkout is on), not on v0.11.0
+        # on the origin's default branch (in CI, the branch the checkout is on, or main on a tag's), not on v0.11.0
         self.assertRegex(out, r"6\. task-hub 本体: 入れました\(clone\([^ ()]+ [0-9a-f]{7,}\)")
         self.tag("v0.12.0", "HEAD~1")
         out = self.install()
