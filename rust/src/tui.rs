@@ -4,7 +4,7 @@
 //! `g` lends the terminal to Lazygit in the selected task's worktree: Lazygit is not read only, the board is.
 
 use super::{alive, ago, board_config, epoch, fail, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
-            tilde, Task};
+            tilde, try_board_config, Task};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event,
                                 KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::crossterm::terminal::{enable_raw_mode, Clear as ClearScreen, ClearType, EnterAlternateScreen};
@@ -625,9 +625,9 @@ impl App {
     /// Reads the board, the runs and the events again, keeping the selected card, and the reader's task and place.
     fn reload(&mut self) {
         let keep = self.current().map(|t| t.id.clone());
-        let (_, _, issues) = board_config();
-        match load_local() {
-            Ok((items, age, changed)) => {
+        // a config broken meanwhile is an error on the status line, as a broken local board is
+        match try_board_config().and_then(|(_, _, issues)| Ok((load_local()?, issues))) {
+            Ok(((items, age, changed), issues)) => {
                 let mut board = tasks(&items, &issues);
                 board.sort_by_key(|t| ORDER.iter().position(|s| *s == t.status).unwrap_or(ORDER.len()));
                 (self.board, self.age, self.changed, self.error) = (board, age, changed, String::new());
