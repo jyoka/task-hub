@@ -932,7 +932,9 @@ class HerdrPaneTest(TuiCase):
         for env in ({"HERDR_PANE_ID": "p1", "TASK_HERDR": "0"}, {}):
             with self.subTest(env):
                 r = self.tui(**env)
-                self.assertNotEqual(r.returncode, 0)  # no terminal to draw on
+                self.assertEqual(r.returncode, 1)  # no terminal to draw on: an error, not a panic
+                self.assertIn("error: the TUI needs a terminal, and stdout is not one", r.stdout)
+                self.assertNotIn("panicked", r.stderr)
                 self.assertEqual(self.calls(), [])
 
     def test_a_failing_herdr_is_an_error_not_a_hang(self):
