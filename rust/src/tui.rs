@@ -1057,6 +1057,9 @@ pub fn run() {
     if open_in_herdr_pane() {
         return;
     }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        fail("the TUI needs a terminal, and stdout is not one", "run `task-rs tui` in a terminal, or `task-rs list` for plain output", 1);
+    }
     let hook = std::panic::take_hook(); // ratatui's hook restores the screen, then this one turns the wheel reports off
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
