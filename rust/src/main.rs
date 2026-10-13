@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{self, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io::{self, Write};
 use std::{env, fs, thread};
 
 mod tui;
@@ -46,14 +47,28 @@ fn tilde(p: &PathBuf) -> String {
     p.display().to_string().replace(&home_dir(), "~")
 }
 
+/// A line on stdout, or on stderr. A reader that is gone (`task-rs list --watch | head -1`) ends task-rs quietly with
+/// `code`: println! would panic there, and the release build would abort with a core dump.
+fn say(stderr: bool, line: &str, code: i32) {
+    let written = if stderr { writeln!(io::stderr(), "{line}") } else { writeln!(io::stdout(), "{line}") };
+    if written.is_err() {
+        process::exit(code);
+    }
+}
+
 fn out(lines: &[String]) {
-    println!("{}", lines.join("\n"));
+    say(false, &lines.join("\n"), 0);
+}
+
+/// A note on stderr, such as the local board's age: stdout keeps only the answer.
+fn note(line: &str) {
+    say(true, line, 0);
 }
 
 fn fail(msg: &str, help: &str, code: i32) -> ! {
-    println!("error: {msg}");
+    say(false, &format!("error: {msg}"), code);
     if !help.is_empty() {
-        println!("help: {help}");
+        say(false, &format!("help: {help}"), code);
     }
     process::exit(code)
 }
@@ -158,7 +173,7 @@ fn ago(seconds: f64) -> String {
 fn local_items() -> Result<Vec<Value>, String> {
     let (items, age, changed) = load_local()?;
     let changed = if changed { ", task-hub changed the board since" } else { "" };
-    eprintln!("board: local copy from {} ago{changed} (`task-rs fetch` reads GitHub)", ago(age));
+    note(&format!("board: local copy from {} ago{changed} (`task-rs fetch` reads GitHub)", ago(age)));
     Ok(items)
 }
 
@@ -267,7 +282,7 @@ fn fetched_line(result: &Result<(usize, bool), String>) -> String {
 fn cmd_fetch() {
     let result = fetch();
     match result {
-        Ok((_, true)) => println!("{}", fetched_line(&result)),
+        Ok((_, true)) => out(&[fetched_line(&result)]),
         _ => fail(&fetched_line(&result), "check `gh auth status`, then run `task-rs fetch` again", 1),
     }
 }
@@ -484,7 +499,7 @@ fn cmd_list(flags: &HashMap<String, String>) {
     if flags.contains_key("fetch") || flags.contains_key("sync") {
         let result = fetch();
         if !matches!(result, Ok((_, true))) {
-            eprintln!("{}; showing the local board", fetched_line(&result));
+            note(&format!("{}; showing the local board", fetched_line(&result)));
         }
     }
     if !flags.contains_key("watch") {
@@ -570,7 +585,7 @@ fn cmd_events(flags: &HashMap<String, String>) {
 fn main() {
     let argv: Vec<String> = env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
-        Some("-v" | "-V" | "--version") => return println!("{VERSION}"),
+        Some("-v" | "-V" | "--version") => return out(&[VERSION.into()]),
         None | Some("-h" | "--help" | "help") => {
             return out(&["commands (read only, a Rust prototype of bin/task):".into(),
                          format!("  {LIST_USAGE}  # the open cards from the local board; --fetch reads GitHub first"),

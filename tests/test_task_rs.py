@@ -942,5 +942,31 @@ class HerdrPaneTest(TuiCase):
         self.assertEqual(len(self.calls()), 1)
 
 
+class ClosedPipeTest(TuiCase):
+    """Output into a pipe whose reader is gone (`task-rs list --watch | head -1`, a monitor that stopped): task-rs
+    stops quietly, never with a panic and a core dump."""
+
+    def run_into_closed_pipe(self, *args, stream="stdout"):
+        r, w = os.pipe()
+        os.close(r)
+        pipes = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, stream: w}
+        try:
+            return subprocess.run([str(self.binary), *args], cwd=self.tmp, timeout=30, stdin=subprocess.DEVNULL,
+                                  env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
+                                       "TASK_WATCH_ONCE": "1"}, **pipes)
+        finally:
+            os.close(w)
+
+    def test_every_command_stops_quietly(self):
+        self.write_board(item(5, "Alpha", "Ready"))
+        (self.state / "events.jsonl").write_text('{"id": 5, "event": "Done", "title": "Alpha"}\n')
+        for args, stream, code in [(["list"], "stdout", 0), (["list", "--watch"], "stdout", 0),
+                                   (["events"], "stdout", 0), (["--help"], "stdout", 0), (["--version"], "stdout", 0),
+                                   (["list"], "stderr", 0), (["nope"], "stdout", 2)]:
+            with self.subTest(args=args, stream=stream):
+                r = self.run_into_closed_pipe(*args, stream=stream)
+                self.assertEqual(r.returncode, code)  # a signal (the panic's abort) would be negative
+
+
 if __name__ == "__main__":
     unittest.main()

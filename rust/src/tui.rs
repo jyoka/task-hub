@@ -1091,6 +1091,6 @@ fn open_in_herdr_pane() -> bool {
     // the pane's shell has the herdr server's PATH, not ours: run this same binary by its path
     let exe = env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "task-rs".into());
     herdr_out(&["pane", "run", &new, &format!("'{}' tui", exe.replace('\'', "'\\''"))]);
-    println!("tui: opened in herdr pane {new}, to the right of {pane}");
+    super::out(&[format!("tui: opened in herdr pane {new}, to the right of {pane}")]);
     true
 }
