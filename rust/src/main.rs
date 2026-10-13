@@ -47,28 +47,28 @@ fn tilde(p: &PathBuf) -> String {
     p.display().to_string().replace(&home_dir(), "~")
 }
 
-/// A line on stdout, or on stderr. A reader that is gone (`task-rs list --watch | head -1`) ends task-rs quietly with
-/// `code`: println! would panic there, and the release build would abort with a core dump.
-fn say(stderr: bool, line: &str, code: i32) {
-    let written = if stderr { writeln!(io::stderr(), "{line}") } else { writeln!(io::stdout(), "{line}") };
-    if written.is_err() {
+/// A line on stdout. A reader that is gone (`task-rs list --watch | head -1`) ends task-rs quietly with `code`:
+/// println! would panic there, and the release build would abort with a core dump.
+fn say(line: &str, code: i32) {
+    if writeln!(io::stdout(), "{line}").is_err() {
         process::exit(code);
     }
 }
 
 fn out(lines: &[String]) {
-    say(false, &lines.join("\n"), 0);
+    say(&lines.join("\n"), 0);
 }
 
-/// A note on stderr, such as the local board's age: stdout keeps only the answer.
+/// A note on stderr, such as the local board's age: stdout keeps only the answer, and a note nobody reads is no
+/// reason to stop before it.
 fn note(line: &str) {
-    say(true, line, 0);
+    let _ = writeln!(io::stderr(), "{line}");
 }
 
 fn fail(msg: &str, help: &str, code: i32) -> ! {
-    say(false, &format!("error: {msg}"), code);
+    say(&format!("error: {msg}"), code);
     if !help.is_empty() {
-        say(false, &format!("help: {help}"), code);
+        say(&format!("help: {help}"), code);
     }
     process::exit(code)
 }

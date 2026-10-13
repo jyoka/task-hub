@@ -949,7 +949,7 @@ class ClosedPipeTest(TuiCase):
     def run_into_closed_pipe(self, *args, stream="stdout"):
         r, w = os.pipe()
         os.close(r)
-        pipes = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, stream: w}
+        pipes = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, stream: w}
         try:
             return subprocess.run([str(self.binary), *args], cwd=self.tmp, timeout=30, stdin=subprocess.DEVNULL,
                                   env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
@@ -966,6 +966,8 @@ class ClosedPipeTest(TuiCase):
             with self.subTest(args=args, stream=stream):
                 r = self.run_into_closed_pipe(*args, stream=stream)
                 self.assertEqual(r.returncode, code)  # a signal (the panic's abort) would be negative
+                if stream == "stderr":  # the note on stderr is lost, never the board on stdout
+                    self.assertIn(b"counts: Backlog=0, Ready=1", r.stdout)
 
 
 if __name__ == "__main__":
