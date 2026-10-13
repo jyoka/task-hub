@@ -88,8 +88,16 @@ fn q(s: &str) -> String {
 
 // ---------- config ----------
 
-/// The [board] project and issues of config.ini: just enough of configparser for that section.
+const BOARD_HELP: &str = "add:  [board]  project = <owner>/<project number>  issues = <owner>/<issues repo>  (see docs/setup.md)";
+
+/// The [board] of config.ini, or an end with its help: for the commands, before they print anything.
 fn board_config() -> (String, String, String) {
+    try_board_config().unwrap_or_else(|e| fail(&e, BOARD_HELP, 1))
+}
+
+/// The [board] project and issues of config.ini: just enough of configparser for that section. An Err, not an end:
+/// the TUI reads it again on every reload, and an exit there would leave the terminal in raw mode.
+fn try_board_config() -> Result<(String, String, String), String> {
     let path = PathBuf::from(home_dir()).join(".config/task-hub/config.ini");
     let text = fs::read_to_string(&path).unwrap_or_default();
     let (mut section, mut project, mut issues) = (String::new(), String::new(), String::new());
@@ -126,11 +134,10 @@ fn board_config() -> (String, String, String) {
         && n.chars().all(|c| c.is_ascii_digit()));
     let ok_issues = issues.split_once('/').map_or(false, |(o, r)| name(o) && name(r));
     if !ok_project || !ok_issues {
-        fail(&format!("the board is not configured in {}", tilde(&path)),
-             "add:  [board]  project = <owner>/<project number>  issues = <owner>/<issues repo>  (see docs/setup.md)", 1);
+        return Err(format!("the board is not configured in {}", tilde(&path)));
     }
     let (owner, number) = project.split_once('/').unwrap();
-    (owner.to_string(), number.to_string(), issues)
+    Ok((owner.to_string(), number.to_string(), issues))
 }
 
 // ---------- the board cache ----------
@@ -164,7 +171,7 @@ fn local_items() -> Result<Vec<Value>, String> {
 
 /// The local board's items, its age in seconds, and whether task-hub changed the board after it was read.
 fn load_local() -> Result<(Vec<Value>, f64, bool), String> {
-    let (owner, number, issues) = board_config();
+    let (owner, number, issues) = try_board_config()?;
     let mut data = read_json(&state("board-cache.json"));
     let (Some(at), Some(Value::Array(_))) = (data.get("fetched_at").and_then(Value::as_f64), data.get("items")) else {
         return Err("no local board yet: run `task-rs fetch` to read it from GitHub".into());
@@ -220,7 +227,7 @@ fn project(owner: &str, number: &str, issues: &str) -> Result<(String, HashMap<S
 /// Reads the open cards from GitHub into board-cache.json, the same file bin/task writes and reads.
 /// Returns how many cards were read, and whether they were saved (not when task-hub changed the board meanwhile).
 fn fetch() -> Result<(usize, bool), String> {
-    let (owner, number, issues) = board_config();
+    let (owner, number, issues) = try_board_config()?;
     let (id, names) = project(&owner, &number, &issues)?;
     let mut query = ITEMS_QUERY.to_string();
     for (n, spelled) in &names {
@@ -265,6 +272,7 @@ fn fetched_line(result: &Result<(usize, bool), String>) -> String {
 }
 
 fn cmd_fetch() {
+    board_config(); // not configured: that error and its help, not a failed fetch
     let result = fetch();
     match result {
         Ok((_, true)) => println!("{}", fetched_line(&result)),
@@ -481,6 +489,7 @@ fn local_now() -> String {
 }
 
 fn cmd_list(flags: &HashMap<String, String>) {
+    board_config(); // not configured: that error and its help, before any fetch
     if flags.contains_key("fetch") || flags.contains_key("sync") {
         let result = fetch();
         if !matches!(result, Ok((_, true))) {

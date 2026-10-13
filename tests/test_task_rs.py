@@ -893,6 +893,38 @@ class ReaderTest(TuiCase):
         self.assert_no_gh_and_read_only()
 
 
+class BrokenConfigTest(TuiCase):
+    """config.ini broken while the TUI runs: an error on the status line, never an exit that leaves the terminal in
+    raw mode on the other screen. The config is read again on every reload, and by `f` in its own thread."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.home / ".config" / "task-hub" / "config.ini"
+        self.good = self.config.read_text()
+
+    def test_a_reload_and_f_show_the_error_and_the_board_comes_back_once_it_is_fixed(self):
+        self.write_board(item(5, "Alpha", "Ready"))
+        self.start(then_stty=True)
+        self.config.write_text("")
+        self.write_board(item(5, "Alpha", "Ready"))  # a board change: the TUI reloads
+        self.wait_screen("the board is not configured", self.status)
+        self.press("f")  # fails in its thread, then the reload after it shows the same error
+        self.settle(1.5)
+        self.assertIn("error: the board is not configured", self.status())
+        self.assert_responsive("5")
+        self.config.write_text(self.good)
+        self.write_board(item(5, "Alpha", "Ready"), item(6, "Beta", "Ready"))
+        self.wait_screen("Beta")
+        self.assertNotIn("error:", self.status())
+        self.press("q")
+        self.expect("AFTER-STTY")
+        after = self.out[self.mark:]
+        self.assertIn("task-rs exited 0", after)
+        self.assertIn(LEAVE_ALT, after)
+        self.assertIn("icanon", (self.lg / "after").read_text().split())
+        self.assertEqual(self.wait_exit(), 0)
+
+
 class HerdrPaneTest(TuiCase):
     """`task-rs tui` started inside herdr with no terminal (by an agent): it opens a herdr pane to the right and runs
     there. `herdr` (HERDR_BIN_PATH) is a fake that notes each call and answers `pane split` with a new pane's id."""
