@@ -50,6 +50,12 @@ REPLAN_FILE = ".task-replan.md"
 NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
 REPLAN_MARK = "<!-- task-hub replan -->"
+LINK_MARK = "<!-- task-hub link -->"  # a comment on the personal Issue: where `task share` put the task's copy
+SHARED_MARK = "<!-- task-hub shared -->"  # the first line of the copy's body
+SHARE_NOTICE = "> task-hub overwrites this body from a personal task board. Please write in the comments instead."
+# the team's column for a personal Status, when [share] names none and the team has no column of the same name
+SHARE_STATUS = {BACKLOG: "Todo", READY: IN_PROGRESS, IN_PROGRESS: IN_PROGRESS, IN_REVIEW: IN_PROGRESS,
+                WAIT_FOR_MERGE: IN_PROGRESS, BLOCKED: IN_PROGRESS, DONE: DONE}
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
@@ -95,7 +101,8 @@ KIRO_COPIES = {"kiro-hook": ("kiro/hooks/task-hub-events.json", ".kiro/hooks/tas
                                  ".kiro/workflows/task-hub-events.workflow.json")}
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
-            "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+            "research", "stage", "link"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+# link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again
 GH = os.environ.get("TASK_GH", "gh")
 # the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
 # A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
@@ -278,8 +285,9 @@ class AgentReport:
         return "\n\n".join([f"## Blocked\n\n{self.blocked}"] * bool(self.blocked) +
                            [f"## Report\n\n{self.report}", f"## Please review\n\n{self.review}"] +
                            ([self.auto_review] if self.auto_review else []) +
-                           [f"Closes {board()['issues']}#{t['id']}",
-                            f"<sub>task-hub | agent: {t['agent']}</sub>"])
+                           [f"Closes {board()['issues']}#{t['id']}"] +
+                           ([f"Closes {t['link']}"] if t.get("link") else []) +
+                           [f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
 DIGEST_KEYS = ["verdict", "reason", "review", "report", "decision", "question", "answer", "goal_change", "pr"]
@@ -337,7 +345,7 @@ def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
-                 "agents": DEFAULT_AGENTS, "check": {}, "board": {},
+                 "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
@@ -875,8 +883,11 @@ def issue(t):
     data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments,labels")
     reports = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     replans = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPLAN_MARK)]
+    links = [m[1] for c in data.get("comments", []) if c["body"].startswith(LINK_MARK)
+             for m in [re.search(r"([\w.-]+/[\w.-]+#\d+)", c["body"])] if m]
     return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else "",
-            "replans": replans,
+            "replans": replans, "link": links[-1] if links else "",
+            "own_comments": [c["body"] for c in data.get("comments", []) if c["body"].startswith((REPORT_MARK, REPLAN_MARK))],
             "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
 
 
@@ -1363,6 +1374,7 @@ def launch(t):
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     i = issue(t)
     t["research"] = "yes" if i["research"] else ""
+    t["link"] = i["link"]
     prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
@@ -2391,6 +2403,132 @@ def cleanup(t):
     return ""
 
 
+# ---------- sharing: a task's copy on a team's board ----------
+
+def share_config(repo):
+    """[share] for one place to share to: its team Project, the title prefix, the single-select fields to set, and
+    the Status table (`status.<column>`, for every place; `<repo>.status.<column>`, for this one). Names are matched
+    without regard to case, as configparser lowers them."""
+    s, key = config()["share"], repo.lower()
+    project = s.get(key, "").strip()
+    if project and not re.fullmatch(r"[\w.-]+/\d+", project):
+        fail(f"[share] {repo} must be a Project as <owner>/<number>, got {project!r}", f"fix it in {home(CONFIG)}")
+    prefix = s.get(f"{key}.title", "")
+    if len(prefix) >= 2 and prefix[0] == prefix[-1] == '"':  # quoted: a space at its end stays
+        prefix = prefix[1:-1]
+    named = lambda start: {k[len(start):]: v.strip() for k, v in s.items() if k.startswith(start) and k != start}
+    return {"project": project, "title": prefix, "fields": named(f"{key}.field."),
+            "status": {**named("status."), **named(f"{key}.status.")}}
+
+
+class TeamGitHub:
+    """The connector for a team's GitHub: an Issue in its repo, and a card on its Project. Another kind of place to
+    share to (Jira, ...) is another connector with the same methods; `task share` stays as it is.
+    (docs/architecture/designs/team-sync.md; the Status and closing of later steps are not here yet.)"""
+
+    def __init__(self, repo, project=""):
+        self.repo, self.project, self.card = repo, project, None
+
+    def ref(self, number):
+        return f"{self.repo}#{number}"
+
+    def prepare(self, status, settings):
+        """Read the team's Project and work out the card's values before anything is written: a column, a field or a
+        value it does not have stops the share with nothing made. Returns the team's column for status, or ""."""
+        if not self.project:
+            return ""
+        owner, number = self.project.split("/")
+        where = f"[share] in {home(CONFIG)}"
+        try:
+            project = (graphql(PROJECT_QUERY, owner=owner, number=int(number))["repositoryOwner"] or {}).get("projectV2")
+            if not project:
+                raise RuntimeError(f"no user or organization {owner}")
+        except RuntimeError as e:
+            fail(f"cannot read the team's Project {self.project}: {e}",
+                 f"run `gh auth refresh -s project`, and check --project or {where}")
+        by_name = {f["name"].lower(): f for f in project["fields"]["nodes"] if f}
+        options = lambda f: {o["name"].lower(): o for o in f.get("options") or []}
+        values, column = [], ""
+        if "status" in by_name:
+            columns = options(by_name["status"])
+            wanted = settings["status"].get(status.lower())
+            if wanted and wanted.lower() not in columns:
+                fail(f'the team\'s Project {self.project} has no column "{wanted}" (status.{status})',
+                     f"columns: {', '.join(o['name'] for o in columns.values())}; fix {where}")
+            found = columns.get((wanted or status).lower()) or columns.get(SHARE_STATUS.get(status, "").lower())
+            if found:
+                values.append((by_name["status"]["id"], found["id"]))
+                column = found["name"]
+        for name, value in settings["fields"].items():
+            field = by_name.get(name)
+            if not field or field.get("dataType") != "SINGLE_SELECT":
+                fail(f'the team\'s Project {self.project} has no single-select field "{name}"', f"fix {where}")
+            if value.lower() not in options(field):
+                fail(f'the field "{field["name"]}" of the team\'s Project {self.project} has no option "{value}"',
+                     f"options: {', '.join(o['name'] for o in options(field).values())}; fix {where}")
+            values.append((field["id"], options(field)[value.lower()]["id"]))
+        self.card = {"id": project["id"], "owner": owner, "number": number, "values": values}
+        return column
+
+    def create_issue(self, title, body):
+        """The team's Issue, assigned to you. Returns its number and url."""
+        f = DATA / "share-issue.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+        try:
+            url = gh("issue", "create", "--repo", self.repo, "--title", title, "--body-file", f,
+                     "--assignee", "@me").strip().splitlines()[-1]
+        finally:
+            f.unlink(missing_ok=True)
+        return url.rstrip("/").rsplit("/", 1)[-1], url
+
+    def comment(self, number, body):
+        f = DATA / f"share-comment-{number}.md"
+        f.write_text(body)
+        try:
+            gh("issue", "comment", number, "--repo", self.repo, "--body-file", f)
+        finally:
+            f.unlink(missing_ok=True)
+
+    def add_card(self, url):
+        """Put the Issue on the team's Project with the values prepare() worked out (no Project: nothing)."""
+        if not self.card:
+            return
+        c = self.card
+        item = gh_json("project", "item-add", c["number"], "--owner", c["owner"], "--url", url, "--format", "json")["id"]
+        for field, option in c["values"]:
+            gh("project", "item-edit", "--id", item, "--project-id", c["id"], "--field-id", field,
+               "--single-select-option-id", option)
+
+
+def add_closes(url, ref):
+    """`Closes <ref>` in an open PR's body, after its other Closes lines. False when it is closed or has it already."""
+    pr = gh_json("pr", "view", url, "--json", "body,state")
+    body = pr.get("body") or ""
+    if pr.get("state") != "OPEN" or re.search(rf"(?im)^closes {re.escape(ref)}\s*$", body):
+        return False
+    closes = list(re.finditer(r"(?im)^closes \S+[ \t]*$", body))
+    at = closes[-1].end() if closes else len(body.rstrip())
+    f = DATA / f"pr-body-{ref.replace('/', '-').replace('#', '-')}.md"
+    f.write_text(body[:at] + f"\n\nCloses {ref}" + body[at:])
+    try:
+        gh("pr", "edit", url, "--body-file", f)
+    finally:
+        f.unlink(missing_ok=True)
+    return True
+
+
+def share_pr(t, ref):
+    """The lines about the task's PR once it is shared: its PR closes the team's Issue too. A run still going
+    rewrites its PR's body when it finishes, from what it read when it began."""
+    if t.get("running"):
+        return [f"help: its run began before it was shared, so that run's PR closes only #{t['id']}: run this again "
+                "once the run ends (later runs add it themselves)"]
+    if t.get("pr") and add_closes(t["pr"], ref):
+        return [f"  pr: {t['pr']} (closes {ref} too now)"]
+    return []
+
+
 # ---------- sync: board and runs in, new runs out ----------
 
 def sync(started_here=False):
@@ -3395,6 +3533,48 @@ def cmd_done(a):
         *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []), *archived)
 
 
+def cmd_share(a):
+    to, project = a["to"] or "", a["project"] or ""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", to):
+        fail(f"--to must be the team's repo as owner/name, got {to!r}", f"usage: {COMMANDS['share'][3]}", 2)
+    if project and not re.fullmatch(r"[\w.-]+/\d+", project):
+        fail(f"--project must look like owner/number, got {project!r}", f"usage: {COMMANDS['share'][3]}", 2)
+    t = get(a["id"])
+    i = issue(t)
+    if i["link"]:  # the same share again changes nothing; one task has one copy
+        out(f"share: #{t['id']} already shared as {i['link']} (no-op)",
+            f"  issue: https://github.com/{i['link'].replace('#', '/issues/')}", *share_pr(t, i["link"]))
+        return
+    settings = share_config(to)
+    team = TeamGitHub(to, project or settings["project"])
+    column = team.prepare(t["status"], settings)
+    try:
+        number, url = team.create_issue(settings["title"] + t["title"],
+                                        f"{SHARED_MARK}\n{SHARE_NOTICE}\n\n{i['body'].strip()}\n")
+    except RuntimeError as e:
+        fail(f"cannot create an Issue in {to}: {e}",
+             f"check that `gh auth status` shows an account that can open Issues in {to}; nothing was changed")
+    ref = team.ref(number)
+    try:  # first: from now on `task share` finds the copy, whatever fails after it
+        comment(t, f"{LINK_MARK}\nShared to {ref}: {url}\n")
+    except RuntimeError as e:
+        fail(f"made {url}, but could not note it on #{t['id']}: {e}",
+             f"close {url} and run this again, or comment `{LINK_MARK} {ref}` on #{t['id']} by hand")
+    try:
+        for body in i["own_comments"]:
+            team.comment(number, body)
+        team.add_card(url)
+        lines = share_pr(t, ref)
+    except RuntimeError as e:
+        fail(f"made and linked {url}, but then: {e}",
+             "add the rest by hand on GitHub (task-hub's reports, the card on the Project); "
+             "`task share` will not make another Issue")
+    out("share:", f"  id: {t['id']}", f"  issue: {url}", f"  comments: {len(i['own_comments'])}",
+        *([f"  project: {team.project}", f"  status: {column or '(none)'}"] if team.card else []), *lines,
+        *([f"help: the team's Project has no column for {t['status']}: set  [share]  status.{t['status']} = <column>"]
+          if team.card and not column else []))
+
+
 COMMANDS = {
     # name: (handler, positional args (optional ones end with ?), flags(name -> takes_value), help)
     "start": (cmd_start, ["id?"], {"agent": True},
@@ -3410,6 +3590,10 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
+    "share": (cmd_share, ["id"], {"to": True, "project": True},
+              "task share <id> --to owner/name [--project owner/number]  # copy a task to a team's GitHub: an Issue "
+              "with its Goal and task-hub's reports, and a card on the team's Project ([share] in the config); "
+              "its PR then closes both"),
     "list": (cmd_list, [], {"watch": False, "max-age": True},
              "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
              f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "

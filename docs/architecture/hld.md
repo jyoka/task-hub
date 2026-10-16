@@ -11,7 +11,8 @@ task-hub が何でできていて、データがどこを流れるかの全体�
 
 GitHub Project をかんばんにして、そのカードをコーディングエージェントに実行させます。人が決めるのは
 「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする)」の 2 つだけです。その間の準備、実行、レビュー、
-PR、止まったときの仕分け、後片付けを task-hub が行います。
+PR、止まったときの仕分け、後片付けを task-hub が行います。人が選んだタスクは、チームの GitHub(組織のリポジトリの Issue と
+Project)にも写せます(`task share`。写す向きは個人 → チームだけ)。
 
 範囲外: タスクの中身を決めること(人と `/chief`)、コードの品質の最終判断(人のレビュー)、複数マシンの調停。
 
@@ -24,6 +25,7 @@ flowchart LR
     slack["Slack のスレッド<br/>コピーして ⌃⌥S"]
     th["task-hub<br/>あなたの Mac で動く"]
     gh[("GitHub<br/>Issue、Project、PR")]
+    team[("チームの GitHub<br/>組織のリポジトリ、Project")]
     agents["エージェントの CLI<br/>claude -p、codex、pi、kiro-cli"]
     herdr["herdr<br/>タブ、通知"]
     os["OS の通知<br/>macOS、Windows"]
@@ -34,6 +36,7 @@ flowchart LR
     slack -- "タスクの案" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
+    th -- "task share: Issue、カード(gh)" --> team
     th -- "起動する" --> agents
     agents -- "worktree を編集" --> th
     th -- "タブ、通知" --> herdr
@@ -41,7 +44,8 @@ flowchart LR
     th -- "出来事(events.jsonl)" --> chat
 ```
 
-状態の正本は GitHub です。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+状態の正本は GitHub の個人のボードです。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+チームの GitHub は写しで、task-hub はそこを読みません。
 
 ## 3. 部品(C4 レベル 2)
 
@@ -62,6 +66,7 @@ flowchart TB
         sync["同期と開始<br/>sync、launch"]
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
+        links["つなぎ先<br/>task share、つなぎ手 TeamGitHub"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -76,6 +81,7 @@ flowchart TB
 
     subgraph ext["外のもの"]
         gh[("GitHub")]
+        team[("チームの GitHub")]
         agents["エージェントの CLI"]
         herdr["herdr"]
     end
@@ -94,6 +100,9 @@ flowchart TB
     sync --> board
     sync -- "起動" --> runner
     board -- "gh" --> gh
+    cli --> links
+    links --> board
+    links -- "gh" --> team
     runner --> board
     runner -- "起動" --> agents
     runner -- "git、gh pr" --> gh
@@ -110,6 +119,7 @@ flowchart TB
 |---|---|---|
 | `bin/task` | CLI、同期、開始、ボードの読み書き、通知 | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| つなぎ先(`task share`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |

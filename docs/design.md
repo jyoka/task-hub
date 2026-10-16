@@ -199,6 +199,14 @@
     winget の GitHub CLI を消すのに UAC が要った)。入れたものは記録し、アンインストールはそれだけを消します。
     Windows の実機を毎回借りなくてよいように、CI が標準のユーザーでもインストーラを通し、版を出す前に本物のボードで
     1 枚を PR まで進めます([windows-easy-setup.md](architecture/designs/windows-easy-setup.md))。
+22. **正本は個人の Project のままで、チームへは人が選んだタスクを一方向に写します(`task share`)。** チームの Project を
+    task-hub のボードにすると、チームに task-hub の欄と列が要り、ボードごとに毎分の読み取りが増えます。正本を手元に移すと、
+    今の入口(スマホで Ready に移す)と同期の仕組みを作り直すことになります。そこで、チームの GitHub には人が選んだタスクの
+    写し(Issue とカード)だけを作り、つなぎ先を個人の Issue のコメントに残します(別のマシンでも読め、実行の中は `launch`
+    が読んだものを使うので呼び出しが増えません)。PR の `Closes` を 2 つにして、マージで両方を閉じます。写すのは task-hub が
+    書いたもの(Goal、Report、仕分け)だけで、人のコメントはどちらにも写しません。チームの Issue の本文は task-hub が
+    上書きするので、先頭に「意見はコメントへ」と書きます。共有先は「つなぎ手」の部品にして、GitHub 以外の道具に移っても
+    `task share` を変えずに済むようにしました([team-sync.md](architecture/designs/team-sync.md))。
 
 ## Status の遷移
 
