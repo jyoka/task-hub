@@ -136,7 +136,7 @@ archives the oldest Done cards.
 | `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
 | `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
 | `task done <id>` | Closes or cancels a task by hand |
-| `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project |
+| `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project, then keeps its Status and reports in step |
 | `task update` | Updates task-hub to the newest release |
 | `task feedback [--feature]` | Opens the bug report or feature request form |
 

@@ -498,6 +498,13 @@ MOVE_TO_TOP = """mutation($project: ID!, $item: ID!) {
 PROJECT_QUERY = """query($owner: String!, $number: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner {
   projectV2(number: $number) { id url fields(first: 50) { nodes {
     ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } } }"""
+# the card of a team's Issue (`task share`) on each Project, with the Project's single-select fields and the card's
+# values: which column it is in now, so an unchanged column costs no mutation (1 point)
+TEAM_CARD_QUERY = """query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
+  issue(number: $number) { projectItems(first: 20) { nodes { id
+    project { id url fields(first: 50) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } }
+    fieldValues(first: 50) { nodes { ... on ProjectV2ItemFieldSingleSelectValue {
+      name field { ... on ProjectV2FieldCommon { id } } } } } } } } } }"""
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
   items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id updatedAt
@@ -795,6 +802,8 @@ def set_status(t, status, reason="", digest_=None):
         digest_ = {"reason": clip(reason, DIGEST_TEXT)}
     emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_)
     move_to_top(t)  # after the event: whoever sees the new Status finds its event already written
+    # the team's copy (`task share`) last: a slow or failing team's GitHub never holds back the event
+    to_team(t, f"the Status {status}", lambda team, n: team.move(n, status, share_config(team.repo)))
 
 
 def emit(t, event, **extra):
@@ -871,6 +880,8 @@ def comment(t, body):
     f.write_text(body)
     gh("issue", "comment", t["id"], "--repo", board()["issues"], "--body-file", f)
     f.unlink(missing_ok=True)
+    if body.startswith((REPORT_MARK, REPLAN_MARK)):  # task-hub's report and triage go to the team; nothing else
+        to_team(t, "task-hub's comment", lambda team, n: team.comment(n, body))
 
 
 def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
@@ -1375,6 +1386,9 @@ def launch(t):
     i = issue(t)
     t["research"] = "yes" if i["research"] else ""
     t["link"] = i["link"]
+    # the Goal as it is now (an answer added before Ready again too), whatever the team changed in the copy
+    to_team(t, "the title and Goal", lambda team, n: team.edit(n, share_config(team.repo)["title"] + t["title"],
+                                                               share_body(i["body"])))
     prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
@@ -2412,7 +2426,7 @@ def share_config(repo):
     s, key = config()["share"], repo.lower()
     project = s.get(key, "").strip()
     if project and not re.fullmatch(r"[\w.-]+/\d+", project):
-        fail(f"[share] {repo} must be a Project as <owner>/<number>, got {project!r}", f"fix it in {home(CONFIG)}")
+        raise RuntimeError(f"[share] {repo} must be a Project as <owner>/<number>, got {project!r}")
     prefix = s.get(f"{key}.title", "")
     if len(prefix) >= 2 and prefix[0] == prefix[-1] == '"':  # quoted: a space at its end stays
         prefix = prefix[1:-1]
@@ -2421,10 +2435,24 @@ def share_config(repo):
             "status": {**named("status."), **named(f"{key}.status.")}}
 
 
+def share_body(goal):
+    """The team's Issue body: the notice that task-hub overwrites it, then the Goal as it is."""
+    return f"{SHARED_MARK}\n{SHARE_NOTICE}\n\n{goal.strip()}\n"
+
+
+def share_column(status, settings, columns, project):
+    """The team's column (an option of columns, by lowered name) for a personal Status: [share], then a column of the
+    same name, then SHARE_STATUS; None when the team has none of them. One that [share] names but the team lacks raises."""
+    wanted = settings["status"].get(status.lower())
+    if wanted and wanted.lower() not in columns:
+        raise RuntimeError(f'the team\'s Project {project} has no column "{wanted}" (status.{status})')
+    return columns.get((wanted or status).lower()) or columns.get(SHARE_STATUS.get(status, "").lower())
+
+
 class TeamGitHub:
     """The connector for a team's GitHub: an Issue in its repo, and a card on its Project. Another kind of place to
-    share to (Jira, ...) is another connector with the same methods; `task share` stays as it is.
-    (docs/architecture/designs/team-sync.md; the Status and closing of later steps are not here yet.)"""
+    share to (Jira, ...) is another connector with the same methods; `task share` and `set_status` stay as they are.
+    (docs/architecture/designs/team-sync.md)"""
 
     def __init__(self, repo, project=""):
         self.repo, self.project, self.card = repo, project, None
@@ -2451,11 +2479,10 @@ class TeamGitHub:
         values, column = [], ""
         if "status" in by_name:
             columns = options(by_name["status"])
-            wanted = settings["status"].get(status.lower())
-            if wanted and wanted.lower() not in columns:
-                fail(f'the team\'s Project {self.project} has no column "{wanted}" (status.{status})',
-                     f"columns: {', '.join(o['name'] for o in columns.values())}; fix {where}")
-            found = columns.get((wanted or status).lower()) or columns.get(SHARE_STATUS.get(status, "").lower())
+            try:
+                found = share_column(status, settings, columns, self.project)
+            except RuntimeError as e:
+                fail(str(e), f"columns: {', '.join(o['name'] for o in columns.values())}; fix {where}")
             if found:
                 values.append((by_name["status"]["id"], found["id"]))
                 column = found["name"]
@@ -2482,13 +2509,58 @@ class TeamGitHub:
             f.unlink(missing_ok=True)
         return url.rstrip("/").rsplit("/", 1)[-1], url
 
+    def body_file(self, kind, number, text):
+        f = DATA / f"share-{kind}-{self.repo.replace('/', '-')}-{number}.md"  # two runs may write at once
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
     def comment(self, number, body):
-        f = DATA / f"share-comment-{number}.md"
-        f.write_text(body)
+        f = self.body_file("comment", number, body)
         try:
             gh("issue", "comment", number, "--repo", self.repo, "--body-file", f)
         finally:
             f.unlink(missing_ok=True)
+
+    def edit(self, number, title, body):
+        """Write the title and body again: task-hub's copy, whatever the team changed in it (its notice says so)."""
+        f = self.body_file("body", number, body)
+        try:
+            gh("issue", "edit", number, "--repo", self.repo, "--title", title, "--body-file", f)
+        finally:
+            f.unlink(missing_ok=True)
+
+    def close(self, number):
+        gh("issue", "close", number, "--repo", self.repo)
+
+    def move(self, number, status, settings):
+        """Put the Issue's card on the team's Project in the column for status. One read finds the card, the Project's
+        columns, and the card's column now: the mutation only when the column changes. Returns the column, or "" when
+        the Issue has no card or the Project no column for it."""
+        owner, name = self.repo.split("/")
+        items = ((graphql(TEAM_CARD_QUERY, owner=owner, name=name, number=int(number))["repository"] or {})
+                 .get("issue") or {}).get("projectItems", {}).get("nodes") or []
+        items = [x for x in items if x and x.get("project")]
+        project = self.project or settings["project"]  # several Projects: the one [share] names, else the first
+        at = f"/{project.split('/')[0]}/projects/{project.split('/')[-1]}".lower() if project else ""
+        item = next((x for x in items if at and x["project"].get("url", "").lower().endswith(at)), None) or \
+            (items[0] if items else None)
+        if not item:
+            return ""
+        field = next((f for f in item["project"]["fields"]["nodes"] if f and f.get("name", "").lower() == "status"),
+                     None)
+        if not field:
+            return ""
+        found = share_column(status, settings, {o["name"].lower(): o for o in field.get("options") or []},
+                             item["project"].get("url", project))
+        if not found:
+            return ""
+        now_ = next((v.get("name") for v in item["fieldValues"]["nodes"]
+                     if v and (v.get("field") or {}).get("id") == field["id"]), None)
+        if now_ != found["name"]:
+            gh("project", "item-edit", "--id", item["id"], "--project-id", item["project"]["id"],
+               "--field-id", field["id"], "--single-select-option-id", found["id"])
+        return found["name"]
 
     def add_card(self, url):
         """Put the Issue on the team's Project with the values prepare() worked out (no Project: nothing)."""
@@ -2499,6 +2571,19 @@ class TeamGitHub:
         for field, option in c["values"]:
             gh("project", "item-edit", "--id", item, "--project-id", c["id"], "--field-id", field,
                "--single-select-option-id", option)
+
+
+def to_team(t, what, change):
+    """Copy a change to the task's team Issue (`task share`): change(connector, number). Only for a task with a link
+    (t["link"]: launch's issue() read, kept in the run file, or the command's own issue() read): no GitHub call is added
+    to find it. A failure stops nothing: one line on stderr, as a failed notification or cache (lld.md 8)."""
+    m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", t.get("link") or "")
+    if not m:
+        return
+    try:
+        change(TeamGitHub(m[1]), m[2])
+    except (RuntimeError, OSError, ValueError, LookupError, TypeError, AttributeError) as e:
+        print(f"warning: task {t['id']}: could not copy {what} to {m[0]}: {e}", file=sys.stderr, flush=True)
 
 
 def add_closes(url, ref):
@@ -2558,6 +2643,7 @@ def sync(started_here=False):
             if card and card["status"] == DONE and not any(
                     e.get("id") == t["id"] and e.get("time", "") >= t.get("started", "") for e in events_named(DONE)):
                 move_to_top(card)
+                to_team(t, f"the Status {DONE}", lambda team, n: team.move(n, DONE, share_config(team.repo)))
                 emit(t, DONE, pr=t.get("pr", ""))
             left = cleanup(t)
             if left:
@@ -2583,6 +2669,7 @@ def sync(started_here=False):
             elif StatusLifecycle.needs_merge_watch(t) and pr_merged(t):
                 # GitHub's "Closes ..." works only for PRs into the default branch, and can miss even those
                 gh("issue", "close", t["id"], "--repo", board()["issues"])
+                to_team(t, "the close", lambda team, n: team.close(n))  # GitHub did not close it either
                 set_status(t, DONE)
                 cleanup(t)
         except RuntimeError as e:
@@ -3522,8 +3609,11 @@ def cmd_done(a):
         fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
              "stop the agent in its herdr workspace first, then retry")
     left = cleanup(t)
-    if issue(t)["state"] != "CLOSED":
+    i = issue(t)
+    t["link"] = i["link"]  # read anyway: closing the team's copy too costs no other read
+    if i["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
+    to_team(t, "the close", lambda team, n: team.close(n))
     set_status(t, DONE)
     try:
         archived = archive_lines(archive_overflow())
@@ -3545,12 +3635,14 @@ def cmd_share(a):
         out(f"share: #{t['id']} already shared as {i['link']} (no-op)",
             f"  issue: https://github.com/{i['link'].replace('#', '/issues/')}", *share_pr(t, i["link"]))
         return
-    settings = share_config(to)
+    try:
+        settings = share_config(to)
+    except RuntimeError as e:
+        fail(str(e), f"fix it in {home(CONFIG)}")
     team = TeamGitHub(to, project or settings["project"])
     column = team.prepare(t["status"], settings)
     try:
-        number, url = team.create_issue(settings["title"] + t["title"],
-                                        f"{SHARED_MARK}\n{SHARE_NOTICE}\n\n{i['body'].strip()}\n")
+        number, url = team.create_issue(settings["title"] + t["title"], share_body(i["body"]))
     except RuntimeError as e:
         fail(f"cannot create an Issue in {to}: {e}",
              f"check that `gh auth status` shows an account that can open Issues in {to}; nothing was changed")

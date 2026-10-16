@@ -36,7 +36,7 @@ flowchart LR
     slack -- "タスクの案" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
-    th -- "task share: Issue、カード(gh)" --> team
+    th -- "task share: Issue、カード。その後の Status、本文、コメント、閉じる(gh)" --> team
     th -- "起動する" --> agents
     agents -- "worktree を編集" --> th
     th -- "タブ、通知" --> herdr
@@ -45,7 +45,7 @@ flowchart LR
 ```
 
 状態の正本は GitHub の個人のボードです。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
-チームの GitHub は写しで、task-hub はそこを読みません。
+チームの GitHub は写しです。task-hub がそこを読むのは、写すときのチームの Project の列と、つないだカードの今の列だけです。
 
 ## 3. 部品(C4 レベル 2)
 
@@ -66,7 +66,7 @@ flowchart TB
         sync["同期と開始<br/>sync、launch"]
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
-        links["つなぎ先<br/>task share、つなぎ手 TeamGitHub"]
+        links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -103,6 +103,8 @@ flowchart TB
     cli --> links
     links --> board
     links -- "gh" --> team
+    board -. "set_status、comment(つないだタスク)" .-> links
+    sync -. "開始、マージで閉じる" .-> links
     runner --> board
     runner -- "起動" --> agents
     runner -- "git、gh pr" --> gh
@@ -119,7 +121,7 @@ flowchart TB
 |---|---|---|
 | `bin/task` | CLI、同期、開始、ボードの読み書き、通知 | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
-| つなぎ先(`task share`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
+| つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |

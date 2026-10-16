@@ -52,11 +52,13 @@ kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get
                                           "add-blocked-by" if "addBlockedBy" in fields.get("query", "") else
                                           "move-to-top" if "updateProjectV2ItemPosition" in fields.get("query", "") else
                                           "archive" if "archiveProjectV2Item" in fields.get("query", "") else
+                                          "team-card" if "projectItems(" in fields.get("query", "") else
                                           "field-list") \
     if cmd == ["api", "graphql"] else None
 # every call, by kind: what a change must leave alone (lld.md 9). A team's repo or Project is named apart
 team_call = opt("--repo") in db.get("team_repos", {}) or (opt("--project-id") or "").removeprefix("PVT_") in db.get(
-    "team_fields", {}) or f"{opt('--owner') or fields.get('owner')}/{fields.get('number') or ''.join(a[2:3])}" in db.get("team_fields", {})
+    "team_fields", {}) or f"{opt('--owner') or fields.get('owner')}/{fields.get('number') or ''.join(a[2:3])}" in db.get("team_fields", {}) \
+    or f"{fields.get('owner')}/{fields.get('name')}" in db.get("team_repos", {})
 db.setdefault("gh_calls", []).append(("team " if team_call else "") + (kind or " ".join(a[:2]) if a[0] != "api" or kind
                                                                      else "api " + a[1].split("/")[0]))
 def touch(iid):  # GitHub's updatedAt of the card: a clock that only goes forward, written as a sortable time
@@ -68,6 +70,8 @@ if db.get("down") == "item-list-all" and kind == "item-list" and fields["q"] == 
     fail("GraphQL: API rate limit exceeded for user ID 1.")
 if cmd == ["api", "graphql"]:
     db["graphql_calls"] = db.get("graphql_calls", 0) + 1
+if team_call and db.get("team_down"):  # the team's GitHub fails, the personal board works
+    fail("HTTP 502: Bad Gateway")
 if kind == "field-list":  # the Project's id, url, and fields: db["owners"] says who is a User or an Organization
     assert "repositoryOwner(" in fields["query"] and a[a.index("number=" + fields["number"]) - 1] == "-F", a  # Int!
     owner_type = db.get("owners", {"jyoka": "User"}).get(fields["owner"])
@@ -83,6 +87,21 @@ if kind == "field-list":  # the Project's id, url, and fields: db["owners"] says
         url = f"https://github.com/{'orgs' if owner_type == 'Organization' else 'users'}/{fields['owner']}/projects/{fields['number']}"
         pid, nodes = (f"PVT_{key}", db["team_fields"][key]) if key in db.get("team_fields", {}) else ("PVT_1", db["fields"])
         out = {"data": {"repositoryOwner": {"projectV2": {"id": pid, "url": url, "fields": {"nodes": nodes}}}}}
+elif kind == "team-card":  # a team's Issue's cards, with each Project's fields and the card's values
+    url = f"https://github.com/{fields['owner']}/{fields['name']}/issues/{fields['number']}"
+    nodes = []
+    for iid, it in db.get("team_items", {}).items():
+        if it["url"] != url:
+            continue
+        key = it["project"].removeprefix("PVT_")
+        owner_type = db.get("owners", {}).get(key.split("/")[0])
+        project_fields = db["team_fields"][key]
+        nodes.append({"id": iid, "project": {
+            "id": it["project"], "fields": {"nodes": [f for f in project_fields if f["dataType"] == "SINGLE_SELECT"]},
+            "url": f"https://github.com/{'orgs' if owner_type == 'Organization' else 'users'}/{key.replace('/', '/projects/')}"},
+            "fieldValues": {"nodes": [{"name": it["values"][f["name"]], "field": {"id": f["id"]}}
+                                      for f in project_fields if f["name"] in it["values"]]}})
+    out = {"data": {"repository": {"issue": {"projectItems": {"nodes": nodes}}}}}
 elif kind == "item-list":
     db["item_list_calls"] = db.get("item_list_calls", 0) + 1
     # each "alias: fieldValueByName(name: ...)" gets the value only if the name is spelled as on the board
@@ -152,6 +171,10 @@ elif cmd == ["issue", "create"] and opt("--repo") in db.get("team_repos", {}):
     print(f"https://github.com/{opt('--repo')}/issues/{n}")
 elif cmd == ["issue", "comment"] and opt("--repo") in db.get("team_repos", {}):
     db["team_repos"][opt("--repo")]["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read()})
+elif cmd == ["issue", "edit"] and opt("--repo") in db.get("team_repos", {}):
+    db["team_repos"][opt("--repo")]["issues"][a[2]].update(title=opt("--title"), body=open(opt("--body-file")).read())
+elif cmd == ["issue", "close"] and opt("--repo") in db.get("team_repos", {}):
+    db["team_repos"][opt("--repo")]["issues"][a[2]]["state"] = "CLOSED"
 elif cmd == ["issue", "create"]:
     if opt("--repo") != db["issues_repo"]:
         fail("could not resolve repository")
@@ -4681,7 +4704,7 @@ class TaskTest(unittest.TestCase):
 
     # --- sharing a task with a team (task share) ---
 
-    def team(self, writable=True, share=""):
+    def team(self, writable=True, share="", replanner=""):
         """A team's repo org/app and its Project org/7 on the fake GitHub: only Todo, In progress and Done, and a
         single-select "Sprint" field of its own. [share] sends org/app to it, with a title prefix and a Sprint."""
         db = self.gh()
@@ -4696,7 +4719,7 @@ class TaskTest(unittest.TestCase):
              "options": [{"id": "TS_a", "name": "Sprint A"}, {"id": "TS_b", "name": "Sprint B"}]}]}
         self.save_db(db)
         self.write_config("[share]\norg/app = org/7\norg/app.title = 【Sprint A】\norg/app.field.Sprint = Sprint A\n"
-                          + share)
+                          + share, replanner=replanner)
 
     def team_issues(self):
         return self.gh()["team_repos"]["org/app"]["issues"]
@@ -4856,6 +4879,149 @@ class TaskTest(unittest.TestCase):
         calls = {c: self.gh_calls().count(c) for c in sorted(set(self.gh_calls()))}
         self.assertEqual(calls, {"field-list": 3, "issue comment": 1, "issue create": 1, "issue view": 1, "item-add": 1,
                                  "item-edit": 4, "item-list": 2, "move-to-top": 3, "pr create": 1, "pr list": 1})
+
+    # --- what happens to a shared task afterwards goes to the team too (task share, step 2) ---
+
+    def team_moves(self, since=0):
+        """The mutations on the team's Project after the first `since` calls: one per change of the card's column."""
+        return self.gh_calls()[since:].count("team item-edit")
+
+    def team_card(self):
+        cards = self.team_cards()
+        self.assertEqual(len(cards), 1)
+        return cards[0]["values"]["Status"]
+
+    def test_a_shared_tasks_status_moves_the_teams_card_by_the_table_and_never_to_the_same_column(self):
+        self.team()
+        tid = self.new()
+        self.task("share", tid, "--to", "org/app")
+        self.assertEqual(self.team_card(), "Todo")  # Backlog
+        since = len(self.gh_calls())
+        self.move(tid, "Ready")  # dragged on GitHub: task-hub does not see it, the start moves the team's card
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.metrics(1)  # the run's last step: its last GitHub call is behind it
+        # In progress, then In review: the same team column, so one mutation only
+        self.assertEqual(self.team_card(), "In progress")
+        self.assertEqual(self.team_moves(since), 1)
+        # the watch's every-minute check of a task that does not move: nothing more on the team's GitHub
+        calls = len(self.gh_calls())
+        self.task()
+        self.task()
+        self.assertEqual([c for c in self.gh_calls()[calls:] if c.startswith("team")], [])
+        self.task("done", tid)
+        self.assertEqual(self.team_card(), "Done")
+        self.assertEqual(self.team_moves(since), 2)
+        self.assertEqual(self.team_issues()["1"]["state"], "CLOSED")
+
+    def test_a_shared_task_goes_to_the_same_name_column_and_to_share_config_first(self):
+        self.team(share="org/app.status.Blocked = Todo\n")
+        db = self.gh()
+        db["team_fields"]["org/7"][0]["options"].append({"id": "TO_r", "name": "In Review"})
+        self.save_db(db)
+        review, block = self.new(), self.new("blocked", title="Add bye")
+        for tid in (review, block):
+            self.task("share", tid, "--to", "org/app")
+            self.task("start", tid)
+            self.wait(tid)
+        self.metrics(2)
+        self.assertEqual([c["values"]["Status"] for c in self.team_cards()], ["In Review", "Todo"])
+
+    def test_task_hubs_report_and_triage_go_to_the_teams_issue_and_a_persons_comment_does_not(self):
+        self.team(replanner="agent")
+        tid = self.new("blocked REPLAN=human")
+        self.task("share", tid, "--to", "org/app")
+        self.human_comment(tid, "A note for me only.")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.metrics(1)  # written after the replanner
+        mine = [c for c in self.comments(tid) if c.startswith(("<!-- task-hub report -->", "<!-- task-hub replan -->"))]
+        self.assertEqual(len(mine), 2)
+        self.assertEqual([c["body"] for c in self.team_issues()["1"]["comments"]], mine)
+
+    def test_a_goal_answered_and_ready_again_is_the_teams_body_at_the_next_run(self):
+        self.team()
+        tid = self.new("blocked")
+        self.task("share", tid, "--to", "org/app")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.metrics(1)
+        with self.db_lock():  # the answer in the personal Goal; someone on the team edited the copy meanwhile
+            db = json.loads(self.db.read_text())
+            db["issues"][tid]["body"] += "\n\nAnswer: the key is in the vault."
+            db["issues"][tid]["title"] = "Add hello, with the key"
+            db["team_repos"]["org/app"]["issues"]["1"]["body"] = "edited by the team"
+            self.db.write_text(json.dumps(db))
+        self.move(tid, "Ready")
+        self.task()
+        self.wait(tid)
+        team = self.team_issues()["1"]
+        self.assertEqual(team["title"], "【Sprint A】Add hello, with the key")
+        notice, goal = team["body"].split("\n\n", 1)
+        self.assertIn("task-hub overwrites this body", notice)
+        self.assertEqual(goal.strip(), self.gh()["issues"][tid]["body"].strip())
+        self.assertIn("Answer: the key is in the vault.", goal)
+
+    def test_done_closes_the_teams_issue_too(self):
+        self.team()
+        tid = self.new()
+        self.task("share", tid, "--to", "org/app")
+        self.task("done", tid)
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        self.assertEqual(self.team_issues()["1"]["state"], "CLOSED")
+        self.assertEqual(self.team_card(), "Done")
+
+    def test_a_merge_github_did_not_close_closes_the_teams_issue_too(self):
+        # into another branch than the default: GitHub closes neither Issue, the sync that finds the merge does
+        self.team()
+        self.push_branch("feat/x", "feat.txt")
+        tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
+        self.task("share", tid, "--to", "org/app")
+        self.task("start", tid)
+        self.wait(tid)
+        self.metrics(1)
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
+        self.save_db(db)
+        self.assertIn("Done", self.task())
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        self.assertEqual(self.team_issues()["1"]["state"], "CLOSED")
+        self.assertEqual(self.team_card(), "Done")
+
+    def test_a_failing_team_github_leaves_the_card_and_the_run_as_before(self):
+        self.team()
+        tid = self.new()
+        self.task("share", tid, "--to", "org/app")
+        db = self.gh()
+        db["team_down"] = True
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.metrics(1)
+        self.assertTrue(self.comments(tid)[-1].startswith("<!-- task-hub report -->"))
+        self.assertFalse(self.pr(tid)["isDraft"])
+        self.task("done", tid)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        # nothing reached the team; each failure is one line on stderr (the run's goes to its log)
+        self.assertEqual(self.team_issues()["1"]["state"], "OPEN")
+        self.assertEqual(self.team_issues()["1"]["comments"], [])
+        self.assertEqual(self.team_card(), "Todo")
+        log = (self.root / ".local/state/task-hub/logs" / f"{tid}.log").read_text()
+        for text, what in ((log, "the Status In review"), (log, "task-hub's comment"),
+                           (self.stderr[-1], "the close"), (self.stderr[-1], "the Status Done")):
+            self.assertRegex(text, rf"(?m)^warning: task {tid}: could not copy {what} to org/app#1: ")
+        self.assertNotIn("Traceback", log + "".join(self.stderr))
+
+    def test_a_task_not_shared_is_done_with_the_github_calls_of_before(self):
+        self.team()
+        tid = self.new()
+        calls = len(self.gh_calls())
+        self.task("done", tid)
+        done = self.gh_calls()[calls:]
+        self.assertEqual({c: done.count(c) for c in sorted(set(done))},
+                         {"field-list": 1, "issue close": 1, "issue view": 1, "item-edit": 1, "item-list": 2,
+                          "move-to-top": 1})
 
     def test_readme_lists_every_command(self):
         """CONTRIBUTING.md: a new command gets a row in both READMEs' command tables in the same PR."""

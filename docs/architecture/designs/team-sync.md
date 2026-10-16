@@ -2,8 +2,9 @@
 
 調べもの(task 157、2026-10-11)の設計メモです。選択肢と、人が決めたことを並べます。
 2026-10-11 と 2026-10-13 に人が決めたことを「決まったこと」に書きました。本文はそれに合わせて直してあります。
-第 1 段階の `task share` は実装しました(使い方は [usage.md の「チームのボードに出す」](../../usage.md#チームのボードに出すtask-share))。
-第 2 段階から先はまだです。
+第 1 段階の `task share` と、第 2 段階の Status、本文、コメント、閉じることの写しは実装しました(使い方は
+[usage.md の「チームのボードに出す」](../../usage.md#チームのボードに出すtask-share)、作りは [lld.md の 4.6](../lld.md))。
+第 3 段階から先はまだです。
 
 ## 何を、なぜ
 
@@ -305,7 +306,7 @@ flowchart TB
 | 0. 実験(コードなし) | チームの Issue を人が作り、Goal の末尾に「つなぎ先: org/repo#M」と書く。PR を人が編集して `Closes` を足す | なし | なし |
 | 1. `task share`(最小の一歩、推奨) | 選んだタスクのチームの Issue を作り、チームの Project に足し、つなぎ先を記録する。`finish` が PR の本文に `Closes org/repo#M` を足す | なし。Ready に移す、マージする、は同じ。`task share` を使わなければ何も変わらない | 1 回あたり Issue の作成 1、カードの追加 1、欄 1〜2、コメント 1。watch は増えない |
 | 1'. `task new --from <URL>`(取り込みの最小) | チームの Issue から個人のタスクを作り、同時につなぐ。タイトルと本文の引用を Goal のたたき台にする | なし | 登録 1 回あたり読み 1 回 |
-| 2. Status と本文とコメントを写す | つないだタスクの `set_status` で、チームのカードの Status も変える(すべての列)。実行を始めるときにタイトルと Goal を写し、Report と仕分けのコメントもチームの Issue に書く。`task done` でチームの Issue も閉じる | なし | Status の変化 1 回につき mutation 1(+ チームの Project の id を 1 時間取っておく) |
+| 2. Status と本文とコメントを写す(実装した) | つないだタスクの `set_status` で、チームのカードの Status も変える(すべての列)。実行を始めるときにタイトルと Goal を写し、Report と仕分けのコメントもチームの Issue に書く。`task done` でチームの Issue も閉じる | なし | Status の変化 1 回につき、カードと列を読む GraphQL 1 + 列が変わるときだけ mutation 1 |
 | 3. チームの変化を知らせる | watch がつないだ Issue のうち開いているものだけを読み、チームで閉じられた、担当が変わったら出来事を出す | なし(知らせるだけ) | 1 回の問い合わせでまとめれば 1 分 1 ポイント、1 時間 +60 |
 | 4. Jira | PR のタイトルにキーを入れる(GitHub for Jira 頼み)。次に REST で遷移を動かす | なし | Jira の API トークンと権限 |
 | 5. 正本の見直し | 1〜4 の実績で、ローカル正本(案 B)やボードの複数化(案 C)、Rust を考え直す | 変わる | - |
@@ -331,10 +332,10 @@ task share <id> --to <owner>/<repo> [--project <owner>/<number>]
 | 部品 | 変わること |
 |---|---|
 | `bin/task` の CLI | `task share`、(1' を選べば)`task new --from` を `COMMANDS` に足す |
-| `bin/task` のボードの読み書き | `set_status` が、つなぎ先のあるタスクではチームのカードにも写す(第 2 段階)。失敗しても止めない |
+| `bin/task` のボードの読み書き | `set_status` が、つなぎ先のあるタスクではチームのカードにも写す(第 2 段階)。`comment` が task-hub のコメント(Report、仕分け)をチームの Issue にも書く。どちらも `to_team` を通し、失敗しても止めない |
 | `task _run` の finish | `AgentReport.pr_body` に、つなぎ先の `Closes` を足す |
 | 設定 | `[share]`: リポジトリ → チームの Project、列の対応、(必要なときだけ)別の認証 |
-| つなぎ手(新規) | 共有先の種類ごとの小さな部品。できることは「Issue を作る、本文を書く、コメントする、Status を変える、閉じる」の 5 つ。最初はチームの GitHub だけ。Jira などは後でつなぎ手を足し、`task share` と `set_status` は変えない |
+| つなぎ手(新規) | 共有先の種類ごとの小さな部品。できることは「Issue を作る、本文を書く、コメントする、Status を変える、閉じる」の 5 つ(`TeamGitHub` の `create_issue`、`edit`、`comment`、`move`、`close`。`prepare` と `add_card` は `task share` だけ)。最初はチームの GitHub だけ。Jira などは後でつなぎ手を足し、`task share` と `set_status` は変えない |
 | `[runner] parallel`(新規、`task share` とは別) | 同時に動かすタスクの数。既定は今と同じ 5 |
 
 ## 流れ(LLD)
@@ -368,10 +369,10 @@ Status、段階、出来事の種類は増えません(第 3 段階で、チー�
 
 | もの | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| つなぎ先 | `task share`、`task new --from` | `finish`(`issue()` が読むコメントに含まれる)、`set_status` | 個人の Issue のコメント。`<!-- task-hub link -->` で始まり、`org/repo#M` か Jira のキー。第 1 段階は `<!-- task-hub link -->` の次の行に `Shared to org/app#12: <URL>` |
-| つなぎ先(実行の中) | `launch`(`issue()` で読んだもの) | `finish`(`AgentReport.pr_body`) | `runs/<id>.json` の `link`。実行の中で GitHub をもう一度読まないため |
+| つなぎ先 | `task share`、`task new --from` | `finish`(`issue()` が読むコメントに含まれる)、`set_status`、`comment`、`task done`、同期のマージの処理 | 個人の Issue のコメント。`<!-- task-hub link -->` で始まり、`org/repo#M` か Jira のキー。第 1 段階は `<!-- task-hub link -->` の次の行に `Shared to org/app#12: <URL>` |
+| つなぎ先(実行の中) | `launch`(`issue()` で読んだもの) | `finish`(`AgentReport.pr_body`)、実行の中と同期の `set_status` と `comment`、同期のマージの処理 | `runs/<id>.json` の `link`。実行の中で GitHub をもう一度読まないため |
 | `[share]` | 人 | `task share`(第 2 段階で `set_status` も) | INI。下の例。別の認証が要る共有先だけ `gh` の設定の場所(`GH_CONFIG_DIR`)を書く案は、まだ入れていない |
-| `board-meta` の写し | (第 2 段階) | 同 | チームの Project の id と欄(1 時間取っておく)。第 1 段階は `task share` のたびに 1 回読む |
+| チームの Project の id と欄 | 取っておかない | `task share`、`move` | `task share` は `PROJECT_QUERY` を 1 回。第 2 段階の `move` は `TEAM_CARD_QUERY` 1 回でカード、列、今の列を一緒に読む(今の列が分かるので、同じ列への mutation を省ける。手元のファイルは増えない) |
 
 第 1 段階の `[share]` の形(名前は大文字と小文字を区別しない):
 
@@ -400,13 +401,14 @@ Goal の本文には書きません(決定事項 12 と同じく、本文は人�
 | Issue の作成 | `gh issue create`(内容を作る要求 1) | `task share` |
 | カードの追加、Status | GraphQL の mutation 2 | `task share` |
 | 個人の Issue へのコメント | `gh issue comment` 1 | `task share` |
-| チームのカードの Status | GraphQL の mutation 1 | 第 2 段階: つないだタスクの Status が変わるとき |
+| チームのカードの Status | GraphQL 1(`TEAM_CARD_QUERY`)+ 列が変わるときだけ mutation 1 | 第 2 段階: つないだタスクの Status が変わるとき |
 | チームの Issue のタイトルと本文 | `gh issue edit` 1 | 第 2 段階: つないだタスクの実行を始めるとき |
 | チームの Issue へのコメント | `gh issue comment` 1 | 第 2 段階: Report か仕分けを書くとき |
 | チームの Issue を閉じる | `gh issue close` 1 | 第 2 段階: `task done` のとき |
-| つなぎ先の読み取り | `gh issue view` 1 | 第 2 段階: 実行の中は `launch` が読んだ `issue()` の結果を `runs/<id>.json` に入れて使うので増えない。`task done` など実行の外で Status を変えるときだけ 1 回 |
+| つなぎ先の読み取り | 0 | 第 2 段階: 実行の中と同期は `launch` が読んだ `issue()` の結果(`runs/<id>.json` の `link`)を使う。`task done` は前から読んでいた `issue()` の結果を使う。`task start` は手元の記録だけを使い、記録がなければ写さない(次の開始の In progress で合う) |
 
-`task watch` の 1 時間あたりの費用(約 60 ポイント)は、第 1、2 段階では変わりません。第 3 段階で約 +60 です。
+`task watch` の 1 時間あたりの費用(約 60 ポイント)は、第 1、2 段階では変わりません(毎分の同期は、つないだタスクでも Status が
+変わらなければチームを呼ばない)。第 3 段階で約 +60 です。
 
 ## 失敗したとき
 
@@ -414,7 +416,7 @@ Goal の本文には書きません(決定事項 12 と同じく、本文は人�
 |---|---|
 | チームのリポジトリに書けない(権限、届かないアカウント) | `task share` が `error:` と `help:` を出して終わる。個人のカードは変えない |
 | Issue は作れたが、カードの追加か記録のコメントに失敗 | Issue を作ったらすぐに、個人の Issue につなぎ先のコメントを書く。そのあとの失敗(コメントの写し、カード)は、作った Issue の URL と「残りは手で」を出す。もう一度の `task share` は同じ Issue を出すだけで、もう 1 つ作らない。つなぎ先のコメントそのものに失敗したときは、URL と「閉じてやり直すか、手でコメントする」を出す |
-| 第 2 段階の Status の写しに失敗 | 無視して stderr に 1 行(通知とキャッシュの失敗と同じ。lld.md 8 章) |
+| 第 2 段階の写し(Status、本文、コメント、閉じる)に失敗 | 無視して stderr に 1 行(通知とキャッシュの失敗と同じ。lld.md 8 章)。個人のカードと実行は写しがないときと同じに進む |
 | チームのワークフローが Status を上書きした | 直さない。写すのは task-hub が Status を変えたときだけ |
 | PR がデフォルトブランチ以外にマージされた、または GitHub が閉じなかった(決定事項 10) | 今の個人の Issue と同じく、マージを見つけた同期がチームの Issue も閉じる |
 | 写した本文をチームの人が直した | 次に写すとき(第 2 段階)に上書きされる。本文の先頭の注意で、チームの人には本文でなくコメントに書いてもらう(決まったこと 12) |

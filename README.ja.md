@@ -130,7 +130,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
 | `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
 | `task done <番号>` | 手で閉じる・取り消す |
-| `task share <番号> --to owner/name [--project owner/番号]` | 選んだタスクをチームの Issue と Project に出す |
+| `task share <番号> --to owner/name [--project owner/番号]` | 選んだタスクをチームの Issue と Project に出す。その後の Status と Report も写す |
 | `task update` | 最新のリリースに更新する |
 | `task feedback [--feature]` | バグ報告・機能の要望のフォームを開く |
 
