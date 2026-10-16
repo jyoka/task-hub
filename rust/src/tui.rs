@@ -1,10 +1,11 @@
 //! `task-rs tui`: a live, read-only view of the local board, the runs on this machine, and the events.
 //! Two screens: the board, to choose a task, and the reader, its Issue, diff or log over the whole terminal.
-//! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`.
+//! It reads only local files and redraws when they change. GitHub is read only when the user presses `f`, and for the
+//! comments of an Issue opened in the reader.
 //! `g` lends the terminal to Lazygit in the selected task's worktree: Lazygit is not read only, the board is.
 
-use super::{alive, ago, board_config, epoch, fail, fetch, fetched_line, load_local, now, read_json, shown_status, state, tasks, text,
-            tilde, try_board_config, Task};
+use super::{alive, ago, board_config, epoch, fail, fetch, fetch_comments, fetched_line, load_local, now, read_json, saved_comments,
+            shown_status, state, tasks, text, tilde, try_board_config, Task};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event,
                                 KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::crossterm::terminal::{enable_raw_mode, Clear as ClearScreen, ClearType, EnterAlternateScreen};
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, SystemTime};
 use std::{env, fs, thread};
 
@@ -80,22 +81,29 @@ fn utc_offset() -> i64 {
 
 /// "13:09" today, "10-09 13:09" before, in local time.
 fn local_time(stamp: &str, offset: i64) -> String {
-    let Some(at) = epoch(stamp) else { return String::new() };
+    epoch(stamp).map_or(String::new(), |at| local_at(at, offset, false))
+}
+
+/// Seconds since 1970 in local time: "13:09" today and "10-09 13:09" before, or, with `year`, "2026-10-09 13:09".
+fn local_at(at: f64, offset: i64, year: bool) -> String {
     let local = |t: f64| t as i64 + offset;
     let (day, today) = (local(at).div_euclid(86400), local(now()).div_euclid(86400));
     let secs = local(at).rem_euclid(86400);
     let hm = format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60);
-    if day == today {
+    if day == today && !year {
         return hm;
     }
     // civil from days (Howard Hinnant's algorithm)
     let z = day + 719468;
-    let doe = z.rem_euclid(146097);
+    let (era, doe) = (z.div_euclid(146097), z.rem_euclid(146097));
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
-    format!("{m:02}-{d:02} {hm}")
+    if !year {
+        return format!("{m:02}-{d:02} {hm}");
+    }
+    format!("{}-{m:02}-{d:02} {hm}", yoe + era * 400 + (m <= 2) as i64)
 }
 
 /// The log's size and time: the reader reads it again when they change.
@@ -412,8 +420,16 @@ fn handoff_lines(t: &Target, title: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// The Issue (its Goal) from the local copy of the board: no browser, no network.
-fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
+/// An Issue's comments in the reader: the copy read last, and the read from GitHub under way or why it failed.
+#[derive(Default)]
+struct Comments {
+    saved: Value, // {"fetched_at", "total", "comments"}, from GitHub or task-rs's own file; Null: none yet
+    reading: Option<Receiver<Result<Value, String>>>,
+    error: String,
+}
+
+/// The Issue: its Goal from the local copy of the board, then its comments, oldest first, as last read from GitHub.
+fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!("#{} {}", t.id, t.title)).bold(),
         Line::from(format!("{} (local copy from {} ago)", t.url, ago(age))).dim(),
@@ -422,8 +438,50 @@ fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
     if t.body.trim().is_empty() {
         lines.push(Line::from("no body").dim());
     }
+    markdown_lines(&t.body, &mut lines);
+    let Some(c) = comments else { return lines };
+    let list = c.saved["comments"].as_array().map_or(&[][..], Vec::as_slice);
+    let total = c.saved["total"].as_u64().map_or(list.len(), |n| n as usize);
+    let at = c.saved["fetched_at"].as_f64().map(|at| local_at(at, offset, false));
+    lines.push(Line::default());
+    lines.push(Line::from(if at.is_some() { format!("Comments ({total})") } else { "Comments".into() }).bold().underlined());
+    lines.push(match (c.reading.is_some(), c.error.as_str(), at.as_deref()) {
+        (true, _, None) => Line::from("reading them from GitHub…").dim(),
+        (true, _, Some(at)) => Line::from(format!("reading them from GitHub…; meanwhile the copy read at {at}")).dim(),
+        (_, "", Some(at)) => Line::from(format!("read from GitHub at {at}; f reads them again")).dim(),
+        (_, e, None) => Line::from(format!("could not read the comments: {e}")).yellow(),
+        (_, e, Some(at)) => Line::from(format!("could not read the comments: {e}; the copy read at {at}")).yellow(),
+    });
+    if at.is_some() && total == 0 {
+        lines.push(Line::from("no comments").dim());
+    }
+    if total > list.len() {
+        lines.push(Line::from(format!("{} older comment(s) only on GitHub: b opens the Issue", total - list.len())).dim());
+    }
+    for comment in list {
+        let author = comment["author"]["login"].as_str().unwrap_or("ghost"); // GitHub's name for a deleted account
+        let body = text(comment, "body");
+        // task-hub's own comments start with a mark: <!-- task-hub report -->, <!-- task-hub replan -->
+        let marked = body.trim_start().strip_prefix("<!-- task-hub ").and_then(|rest| rest.split_once("-->"));
+        let mut head = vec![Span::raw("── ")];
+        if let Some((kind, _)) = marked {
+            let kind = kind.trim();
+            let label = kind.get(..1).unwrap_or("").to_uppercase() + kind.get(1..).unwrap_or("");
+            head.extend([label.bold().green(), Span::raw(" · ")]);
+        }
+        head.extend([author.to_string().bold(),
+                     format!(" · {}", epoch(&text(comment, "createdAt")).map_or(String::new(), |at| local_at(at, offset, true))).dim()]);
+        lines.push(Line::default());
+        lines.push(Line::from(head));
+        markdown_lines(marked.map_or(body.as_str(), |(_, rest)| rest).trim_start_matches(['\r', '\n']), &mut lines);
+    }
+    lines
+}
+
+/// Markdown as it is written, with its headings in color and its code blocks dim.
+fn markdown_lines(markdown: &str, lines: &mut Vec<Line<'static>>) {
     let mut code = false;
-    for l in t.body.lines() {
+    for l in markdown.lines() {
         let l = l.replace('\t', "    ");
         if l.trim_start().starts_with("```") {
             code = !code;
@@ -436,7 +494,6 @@ fn issue_lines(t: &Task, age: f64) -> Vec<Line<'static>> {
             lines.push(Line::from(l));
         }
     }
-    lines
 }
 
 /// The full-screen reader: one task's Issue, diff or log. It stays on the task it opened on, by id: the arrows scroll
@@ -456,20 +513,60 @@ struct Reader {
     bottom: usize, // the last top row that still fills the body, at the last draw
     right: usize,  // the last first column (the diff), at the last draw
     size: (u16, u16), // the body's width and height at the last draw
+    comments: Option<Comments>, // the Issue's comments; None until the Issue is first shown
+    offset: i64,
 }
 
 impl Reader {
-    fn new(task: Task, view: View) -> Self {
+    fn new(task: Task, view: View, offset: i64) -> Self {
         let log = Pos { follow: true, ..Pos::default() }; // the log opens at its end
         Reader { task, gone: false, view, pos: [Pos::default(), Pos::default(), log], lines: vec![], rows: None, stale: true,
-                 log_path: String::new(), log_from: 0, log_seen: None, page: 1, bottom: 0, right: 0, size: (0, 0) }
+                 log_path: String::new(), log_from: 0, log_seen: None, page: 1, bottom: 0, right: 0, size: (0, 0),
+                 comments: None, offset }
     }
 
-    /// Makes the view's lines again from the task as it is now: the local Issue, the worktree, the log file.
+    /// Reads the Issue's comments from GitHub in the background (one call), showing the copy read last meanwhile.
+    fn read_comments(&mut self) {
+        let c = self.comments.get_or_insert_with(Comments::default);
+        if c.reading.is_some() {
+            return;
+        }
+        let (issues, number) = (board_config().2, self.task.num);
+        if c.saved.is_null() {
+            c.saved = saved_comments(&issues, number);
+        }
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(fetch_comments(&issues, number));
+        });
+        (c.reading, c.error) = (Some(rx), String::new());
+    }
+
+    /// Takes the comments read from GitHub, or why they could not be, once the read is over. True when it is.
+    fn comments_read(&mut self) -> bool {
+        let Some(c) = self.comments.as_mut() else { return false };
+        let result = match c.reading.as_ref().map(Receiver::try_recv) {
+            None | Some(Err(TryRecvError::Empty)) => return false,
+            Some(Ok(result)) => result,
+            Some(Err(TryRecvError::Disconnected)) => Err("the read stopped".into()),
+        };
+        match result {
+            Ok(saved) => c.saved = saved,
+            Err(e) => c.error = e,
+        }
+        c.reading = None;
+        true
+    }
+
+    /// Makes the view's lines again from the task as it is now: the local Issue and its comments, the worktree, the
+    /// log file. The Issue's comments are read from GitHub the first time it is shown, and only then.
     fn fill(&mut self, age: f64) {
+        if self.view == View::Issue && self.comments.is_none() {
+            self.read_comments();
+        }
         let t = &self.task;
         self.lines = match self.view {
-            View::Issue => issue_lines(t, age),
+            View::Issue => issue_lines(t, age, self.comments.as_ref(), self.offset),
             View::Diff => diff_lines(t),
             View::Log if t.log.is_empty() => vec![Line::from("no run of this task on this machine").dim()],
             View::Log => {
@@ -684,8 +781,11 @@ impl App {
         if Self::files() != self.seen || now() - self.loaded_at >= 15.0 {
             self.reload();
         }
-        // the log on screen, as soon as it grows
+        // the log on screen, as soon as it grows; the Issue's comments, once read
         if let Some(r) = &mut self.reader {
+            if r.comments_read() && r.view == View::Issue {
+                r.fill(self.age);
+            }
             if r.view == View::Log && !r.task.log.is_empty() && log_stamp(&r.task.log) != r.log_seen {
                 r.fill(self.age);
             }
@@ -697,7 +797,7 @@ impl App {
         let Some(t) = self.current().cloned() else {
             return self.warn("no card selected".into());
         };
-        let mut r = Reader::new(t, view);
+        let mut r = Reader::new(t, view, self.offset);
         r.fill(self.age);
         self.reader = Some(r);
     }
@@ -755,6 +855,11 @@ impl App {
                 });
                 self.fetching = Some(rx);
                 self.status = "fetching from GitHub (read only)…".into();
+                // in the reader on an Issue, its comments too
+                if let Some(r) = self.reader.as_mut().filter(|r| r.view == View::Issue) {
+                    r.read_comments();
+                    r.fill(self.age);
+                }
             }
             // in the reader, the other keys move in it and never change the task
             code if self.reader.is_some() => {

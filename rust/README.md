@@ -7,7 +7,7 @@ of task-hub and is not installed by `task update`.
 |---|---|
 | `task-rs list` | The open cards from the local board, the same lines as `task list`. Never calls GitHub |
 | `task-rs list --watch` | The same, redrawn every 60 seconds from the local board, like `task list --watch` |
-| `task-rs fetch` | Copies the open cards from GitHub to the local board, once. Reads only. The only GitHub call |
+| `task-rs fetch` | Copies the open cards from GitHub to the local board, once. Reads only |
 | `task-rs list --fetch` | `fetch`, then `list`. If the fetch fails, it shows the local board |
 | `task-rs events [--only "In review,Blocked"]` | The last 20 events, like `task events` |
 | `task-rs tui` | A live terminal view: the board, the selected card's details, and the events. Enter, `d` and `l` read a task's Issue, diff or log full screen. `g` opens Lazygit in a task's worktree |
@@ -15,7 +15,8 @@ of task-hub and is not installed by `task update`.
 The local board is `~/.local/state/task-hub/board-cache.json`, the file `bin/task` also reads and writes. So:
 
 - `task-rs list` shows it at any age, and prints its age on stderr.
-- GitHub is read only when you ask: `task-rs fetch` or `list --fetch`. Both only read. (`sync`, the 0.1 name, still works.)
+- GitHub is read only when you ask: `task-rs fetch` or `list --fetch`, and in the TUI `f` or opening an Issue (for its
+  comments). All of them only read. (`sync`, the 0.1 name, still works.)
 - Nothing syncs to GitHub, and nothing needs to: the local board is only a copy. Change the board on GitHub or with
   `task new`, `task start` and `task done`.
 - `task list` (when its copy is old) and `task` also refresh it, and a running `task watch` refreshes it every minute.
@@ -27,7 +28,8 @@ The local board is `~/.local/state/task-hub/board-cache.json`, the file `bin/tas
 
 - **The board**, for choosing a task: the cards with what needs you first, the selected card's details, and the
   newest events.
-- **The reader**, for reading one task: its Issue (the Goal), its diff, or its agent's log, over the whole terminal.
+- **The reader**, for reading one task: its Issue (the Goal and the comments), its diff, or its agent's log, over the
+  whole terminal.
   Only a one-line header (the view, the task, where you are) and the keys at the bottom stay.
 
 Both redraw when the local files change. The board is read only. `g` hands the terminal to Lazygit, which is not
@@ -38,7 +40,7 @@ read only (see below).
 | Key | What it does |
 |---|---|
 | ↑ ↓ (or j k) | Move between cards |
-| Enter | Read the Issue (its Goal), from the local copy |
+| Enter | Read the Issue: its Goal from the local copy, then its comments from GitHub |
 | d | Read the diff: all the task changed in its worktree since its base branch, committed or not (while the worktree exists) |
 | l | Read the run's log |
 | PgUp, PgDn (or Space) | Scroll the details |
@@ -62,7 +64,7 @@ The reader stays on the task you opened it on. No key in it selects another card
 | ← → | Scroll the diff sideways. Its lines are not wrapped or cut: the header shows the column |
 | Enter, d, l | Switch to the Issue, the diff, the log. Each keeps its place while the reader is open |
 | g | Lazygit in this task's worktree, as on the board. Quitting it brings back the same view at the same place |
-| b, o, f | As on the board, for this task |
+| b, o, f | As on the board, for this task. On the Issue, `f` also reads its comments again |
 | Esc | Back to the board, on the same card |
 | q | Quit task-rs, as on the board |
 
@@ -74,8 +76,8 @@ Option (Terminal, iTerm2) or Shift (most other terminals). The board leaves the 
 
 ### Live updates in the reader
 
-The reader reads its task again when the local files change, as the board does, and never calls GitHub for it. Your
-place stays where it is: a reload does not move it.
+The reader reads its task again when the local files change, as the board does. It calls GitHub only for the Issue's
+comments (below). Your place stays where it is: a reload does not move it.
 
 - **The log** opens at its end and follows new output while you are at the bottom (the header says `following`).
   Scroll up and it stops following (`paused, End follows`): new output is added below without moving what you read.
@@ -83,11 +85,34 @@ place stays where it is: a reload does not move it.
   while you read older output. If the log grows past that, or is cut or replaced, the reader goes to its end.
 - **The diff** is made again from the worktree on each reload (at least every 15 seconds). Git reads a copy of the
   worktree's index, so task-rs does not write the index or take its lock while an agent works there.
-- **The Issue** is the local copy of the board. `f` fetches a newer one.
+- **The Issue** is its Goal from the local copy of the board (`f` fetches a newer one), then its comments: task-hub's
+  reports and replans, and people's comments. See below.
 - When the terminal changes size, the reader keeps the line that was at the top, or stays at the end.
 - If the task leaves the board (Done), the reader says `no longer on the local board` and keeps its last copy. It
   never shows another task instead. Esc goes back to the board, on a card that is still there. A missing worktree or
   log is said in the reader.
+
+### The Issue's comments
+
+The comments are not on the local board: `board-cache.json` is shared with `bin/task`, which reads the board every
+minute, and comments would make that read heavier. task-rs reads them itself, from GitHub, with one call that only
+reads (the newest 100):
+
+- when the reader shows the Issue for the first time (Enter on the board, or Enter in the reader), and
+- when you press `f` on the Issue.
+
+Reloads and other keys do not read them again. The read runs in the background: the reader stays usable, and the
+comments appear when it is done.
+
+They come under the Goal, oldest first. Each starts with a line with who wrote it and when, in local time
+(`── alice · 2026-10-09 13:09`). A comment task-hub wrote is named in that line: `── Report · …` for a report (and its
+Blocked part), `── Replan · …` for the replanner's answer. Long lines wrap and scroll as the Goal does, and the header
+counts their rows too. A line under `Comments (n)` says when they were read.
+
+task-rs keeps the comments it read in its own file, `~/.local/state/task-hub/task-rs/comments-<owner>_<repo>-<number>.json`.
+When GitHub cannot be reached (offline, `gh` not logged in, an error), the reader shows that copy with the reason and
+when it was read: `could not read the comments: <reason>; the copy read at 13:05`. With no copy, it shows the Goal
+and `could not read the comments: <reason>`.
 
 ## Lazygit in a task's worktree (g)
 

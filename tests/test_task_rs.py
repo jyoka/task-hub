@@ -4,9 +4,11 @@ and the full-screen reader (Enter, d, l).
 Each test builds task-rs (cargo, debug) once, then runs `task-rs tui` in a PTY with a temporary HOME: a config, a
 local board, runs/<id>.json, logs and real git worktrees. `lazygit` on PATH is a fake that records where and how it ran
 (working directory, arguments, whether its stdin and stdout are a terminal, the terminal's mode), talks to the
-person through the terminal, and can change the board or exit with a code meanwhile. `gh` (TASK_GH) notes any call.
+person through the terminal, and can change the board or exit with a code meanwhile. `gh` (TASK_GH) notes any call:
+the reader may ask it for an Issue's comments only, and IssueCommentsTest's fake answers that.
 Skipped without cargo, and on Windows (no PTY).
 """
+import calendar
 import json
 import os
 import re
@@ -596,7 +598,9 @@ class ReaderTest(TuiCase):
         self.settle(1)
 
     def assert_no_gh_and_read_only(self):
-        self.assertFalse(self.gh_calls.exists(), "task-rs called gh")
+        """gh was asked for the Issue's comments at most (the reader shows them), never for the board."""
+        calls = self.gh_calls.read_text() if self.gh_calls.exists() else ""
+        self.assertEqual(calls.count("api graphql"), calls.count("comments(last: 100)"), calls)
         self.assertEqual(snapshot(self.state / "runs"), self.before)  # no run file written
 
     # ---------- the tests ----------
@@ -923,6 +927,109 @@ class BrokenConfigTest(TuiCase):
         self.assertIn(LEAVE_ALT, after)
         self.assertIn("icanon", (self.lg / "after").read_text().split())
         self.assertEqual(self.wait_exit(), 0)
+
+
+def local(stamp_or_epoch, year=True):
+    """A time as the reader shows it, in this machine's time zone: "2026-10-09 13:09"; without year, "13:09" today
+    and "10-09 13:09" before."""
+    at = stamp_or_epoch if isinstance(stamp_or_epoch, float) else \
+        calendar.timegm(time.strptime(stamp_or_epoch, "%Y-%m-%dT%H:%M:%SZ"))
+    t = time.localtime(at)
+    if year:
+        return time.strftime("%Y-%m-%d %H:%M", t)
+    return time.strftime("%H:%M" if t[:3] == time.localtime()[:3] else "%m-%d %H:%M", t)
+
+
+FAKE_GH = r"""#!/bin/sh
+# a fake gh: notes each call, answers the comments query from $GH/comments.json, or fails as $GH/fail says
+echo "$@" >> "$GH/calls"
+case "$*" in *"comments(last: 100)"*) ;; *) echo "not this one" >&2; exit 1 ;; esac
+if [ -f "$GH/fail" ]; then cat "$GH/fail" >&2; exit 1; fi
+cat "$GH/comments.json"
+"""
+
+
+class IssueCommentsTest(TuiCase):
+    """The reader's Issue shows the Issue's comments under its Goal. They are read from GitHub (one call) when the
+    Issue opens and when f is pressed on it, and kept in task-rs's own file, never in the shared board-cache.json."""
+
+    HUMAN = {"author": {"login": "alice"}, "createdAt": "2026-10-09T04:09:00Z", "body": "HUMAN-COMMENT please check"}
+    REPORT = {"author": {"login": "jyoka"}, "createdAt": "2026-10-10T05:30:00Z",
+              "body": "<!-- task-hub report -->\n\n## Report\n\nREPORT-TEXT done\n\n## Please review\n\n- a file"}
+
+    def setUp(self):
+        super().setUp()
+        self.gh = self.tmp / "ghdir"
+        self.gh.mkdir()
+        self.gh_calls = self.gh / "calls"
+        fake = self.tmp / "gh"  # TASK_GH
+        fake.write_text(FAKE_GH.replace("$GH", str(self.gh)))
+        fake.chmod(0o755)
+        self.write_board(with_body(item(5, "Alpha", "In review"), "### Goal\nGOAL-LINE"))
+        self.cache = self.state / "task-rs" / "comments-someone_tasks-5.json"
+
+    def answer(self, *comments):
+        (self.gh / "comments.json").write_text(json.dumps({"data": {"repository": {"issue": {"comments": {
+            "totalCount": len(comments), "nodes": list(comments)}}}}}))
+
+    def body(self):
+        return self.screen.text(rows=(1, self.screen.rows - 3))
+
+    def test_comments_follow_the_goal_oldest_first_with_author_time_and_the_report_marked(self):
+        self.answer(self.HUMAN, self.REPORT)
+        board_before = (self.state / "board-cache.json").read_bytes()
+        self.start()
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        shown = self.body()
+        human = f"── alice · {local(self.HUMAN['createdAt'])}"
+        report = f"── Report · jyoka · {local(self.REPORT['createdAt'])}"
+        order = [shown.find(s) for s in ("GOAL-LINE", "Comments (2)", "read from GitHub at", human,
+                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "- a file")]
+        self.assertNotIn(-1, order, shown)
+        self.assertEqual(order, sorted(order), shown)  # the Goal, then the comments, oldest first
+        self.assertNotIn("<!-- task-hub", shown)
+        calls = self.gh_calls.read_text()
+        self.assertEqual(calls.count("api graphql"), 1, calls)  # one call when the Issue opens
+        for words in ("owner=someone", "name=tasks", "number=5"):
+            self.assertIn(words, calls)
+        # f reads them again
+        self.answer(self.HUMAN, self.REPORT, {"author": {"login": "bob"}, "createdAt": "2026-10-11T00:00:00Z",
+                                              "body": "NEWER-COMMENT"})
+        self.press("f")
+        self.wait_screen("NEWER-COMMENT")
+        self.wait_screen("Comments (3)")
+        self.assertEqual(self.quit(), 0)
+        # kept in task-rs's own file; the board-cache.json bin/task shares is not touched (the board fetch failed)
+        self.assertEqual([c["body"] for c in json.loads(self.cache.read_text())["comments"]][-1], "NEWER-COMMENT")
+        self.assertEqual((self.state / "board-cache.json").read_bytes(), board_before)
+
+    def test_unreachable_github_shows_the_saved_copy_and_when_it_was_read(self):
+        read_at = time.time() - 600
+        saved = {"key": ["someone/tasks", 5], "fetched_at": read_at, "total": 1, "comments": [self.HUMAN]}
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps(saved))
+        (self.gh / "fail").write_text("error connecting to api.github.com\n")
+        self.start()
+        self.press("\r")
+        self.wait_screen(f"could not read the comments: error connecting to api.github.com; the copy read at "
+                         f"{local(read_at, year=False)}")
+        self.assertIn("HUMAN-COMMENT please check", self.body())
+        self.assertIn("GOAL-LINE", self.body())
+        self.assertEqual(json.loads(self.cache.read_text()), saved)  # a failed read keeps the copy
+        self.assertEqual(self.quit(), 0)
+
+    def test_unreachable_github_and_no_copy_shows_the_goal_and_why(self):
+        (self.gh / "fail").write_text("error connecting to api.github.com\n")
+        self.start()
+        self.press("\r")
+        self.wait_screen("could not read the comments: error connecting to api.github.com")
+        self.assertIn("GOAL-LINE", self.body())
+        self.assertNotIn("──", self.body())
+        self.press("\x1b")  # still answers keys
+        self.wait_screen(" Board ")
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.quit(), 0)
 
 
 class HerdrPaneTest(TuiCase):
