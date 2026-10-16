@@ -63,13 +63,21 @@ The reader stays on the task you opened it on. No key in it selects another card
 | Home, End | The beginning, the end |
 | ← → | Scroll the diff sideways. Its lines are not wrapped or cut: the header shows the column |
 | Enter, d, l | Switch to the Issue, the diff, the log. Each keeps its place while the reader is open |
+| n, p | On the Issue: the next, the previous comment. Its heading goes to the top and gets the cursor |
+| Enter, o | On the Issue, with the cursor on a comment's heading: open or close that comment. With no heading on screen, Enter does nothing and `o` is `task open` as on the board |
 | g | Lazygit in this task's worktree, as on the board. Quitting it brings back the same view at the same place |
-| b, o, f | As on the board, for this task. On the Issue, `f` also reads its comments again |
+| b, o, f | As on the board, for this task (`o` on a comment's heading opens or closes it instead). On the Issue, `f` also reads its comments again |
 | Esc | Back to the board, on the same card |
 | q | Quit task-rs, as on the board |
 
 The Issue and the log wrap long lines, and every row of a long line can be scrolled to. The header shows the rows on
-screen and how many there are.
+screen and how many there are. The Issue is at most 100 columns wide, so that its lines stay easy to read in a wide
+terminal.
+
+The Issue's Markdown is drawn for reading: headings (`#` to `####`) in bold and color without their `#`, lists with
+even indents (`•`, `1.`, `☐` and `☑` for `- [ ]` and `- [x]`), `**bold**` in bold, `` `code` `` in yellow, code blocks
+in a frame (`┌─`, `│`, `└─`), and tables with their columns lined up. A table wider than the Issue has its widest
+columns cut (`…`); a table with too many columns wraps.
 
 The reader turns on the terminal's mouse reports so that the wheel scrolls. To select text with the mouse there, hold
 Option (Terminal, iTerm2) or Shift (most other terminals). The board leaves the mouse to the terminal.
@@ -104,10 +112,16 @@ reads (the newest 100):
 Reloads and other keys do not read them again. The read runs in the background: the reader stays usable, and the
 comments appear when it is done.
 
-They come under the Goal, oldest first. Each starts with a line with who wrote it and when, in local time
-(`── alice · 2026-10-09 13:09`). A comment task-hub wrote is named in that line: `── Report · …` for a report (and its
-Blocked part), `── Replan · …` for the replanner's answer. Long lines wrap and scroll as the Goal does, and the header
-counts their rows too. A line under `Comments (n)` says when they were read.
+They come under the Goal, oldest first. Each starts with a rule and a heading with its kind, who wrote it and when,
+in local time: `Report · jyoka · 2026-10-10 14:30` for a report task-hub wrote (and its Blocked part),
+`Replan · …` for the replanner's answer, and `Comment · alice · 2026-10-09 13:09` for a person's comment. A line under
+`Comments (n)` says when they were read.
+
+Only the newest Report is open (`▾`). The other comments, older Reports included, are closed (`▸`): one line with
+their heading and the start of their text. The cursor (the heading drawn reversed) is on the first heading on screen,
+or on the comment `n` or `p` went to. Enter or `o` opens or closes it, and the comments you opened or closed stay so
+while the reader is open, across reloads and `f`. An open comment's long lines wrap and scroll as the Goal does, and
+the header counts their rows too.
 
 task-rs keeps the comments it read in its own file, `~/.local/state/task-hub/task-rs/comments-<owner>_<repo>-<number>.json`.
 When GitHub cannot be reached (offline, `gh` not logged in, an error), the reader shows that copy with the reason and

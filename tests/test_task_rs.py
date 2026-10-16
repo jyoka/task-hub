@@ -982,13 +982,17 @@ class IssueCommentsTest(TuiCase):
         self.press("\r")
         self.wait_screen("REPORT-TEXT done")
         shown = self.body()
-        human = f"── alice · {local(self.HUMAN['createdAt'])}"
-        report = f"── Report · jyoka · {local(self.REPORT['createdAt'])}"
+        human = f"▸ Comment · alice · {local(self.HUMAN['createdAt'])}"  # closed: one line, the start of its body
+        report = f"▾ Report · jyoka · {local(self.REPORT['createdAt'])}"  # the newest Report is open
         order = [shown.find(s) for s in ("GOAL-LINE", "Comments (2)", "read from GitHub at", human,
-                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "- a file")]
+                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "• a file")]
         self.assertNotIn(-1, order, shown)
         self.assertEqual(order, sorted(order), shown)  # the Goal, then the comments, oldest first
         self.assertNotIn("<!-- task-hub", shown)
+        rows = shown.split("\n")
+        for heading in (human, report):  # a rule above each comment's heading
+            at = next(i for i, r in enumerate(rows) if heading in r)
+            self.assertTrue(rows[at - 1].startswith("─" * 40), shown)
         calls = self.gh_calls.read_text()
         self.assertEqual(calls.count("api graphql"), 1, calls)  # one call when the Issue opens
         for words in ("owner=someone", "name=tasks", "number=5"):
@@ -1003,6 +1007,141 @@ class IssueCommentsTest(TuiCase):
         # kept in task-rs's own file; the board-cache.json bin/task shares is not touched (the board fetch failed)
         self.assertEqual([c["body"] for c in json.loads(self.cache.read_text())["comments"]][-1], "NEWER-COMMENT")
         self.assertEqual((self.state / "board-cache.json").read_bytes(), board_before)
+
+    def rows_with(self, text):
+        return [r for r in self.body().split("\n") if text in r]
+
+    def test_only_the_newest_report_is_open_and_enter_or_o_opens_and_closes_a_comment(self):
+        old = {"author": {"login": "jyoka"}, "createdAt": "2026-10-08T00:00:00Z",
+               "body": "<!-- task-hub report -->\n\n## Report\n\nOLD-START " + "x " * 80 + "\n\nOLD-END"}
+        human = {"author": {"login": "alice"}, "createdAt": "2026-10-09T04:09:00Z",
+                 "body": "HUMAN-FIRST " + "y " * 80 + "\n\nHUMAN-END"}
+        self.answer(old, human, self.REPORT)
+        self.start()
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        old_head, human_head = f"Report · jyoka · {local(old['createdAt'])}", f"Comment · alice · {local(human['createdAt'])}"
+        # the older Report and the person's comment are one line each: their heading and the start of their body
+        self.assertTrue(self.rows_with(old_head)[0].startswith("▸ "), self.body())
+        self.assertIn("OLD-START", self.rows_with(old_head)[0])
+        self.assertTrue(self.rows_with(human_head)[0].startswith("▸ "), self.body())
+        self.assertNotIn("OLD-END", self.body())
+        self.assertNotIn("HUMAN-END", self.body())
+        self.assertIn("▾ Report · jyoka", self.body())
+        self.assertIn("• a file", self.body())
+        self.assertIn("n p comment", self.status())
+        # the cursor is on the first heading on screen: Enter opens it, o closes it
+        self.press("\r")
+        self.wait_screen("OLD-END")
+        self.assertTrue(self.rows_with(old_head)[0].startswith("▾ "), self.body())
+        self.assertIn("Issue", self.header())  # Enter on a heading stays on the Issue
+        self.press("o")
+        self.settle(0.5)
+        self.assertNotIn("OLD-END", self.body())
+        self.assertNotIn("task open", self.status())  # o on a heading is not `task open`
+        # n moves the cursor to the next comment: o opens that one, and the others stay as they are
+        self.press("n")
+        self.settle(0.3)
+        self.press("o")
+        self.wait_screen("HUMAN-END")
+        self.assertNotIn("OLD-END", self.body())
+        self.assertIn("REPORT-TEXT done", self.body())
+        # p goes back to the older Report, Enter opens it; then n twice, to the newest Report, and Enter closes it
+        self.press("p")
+        self.settle(0.3)
+        self.press("\r")
+        self.wait_screen("OLD-END")
+        self.press("n")
+        self.settle(0.3)
+        self.press("n")
+        self.settle(0.3)
+        self.press("\r")
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())  # only the one line
+        self.assertTrue(self.rows_with("Report · jyoka · " + local(self.REPORT["createdAt"]))[0].startswith("▸ "))
+        # a reload keeps what was opened and closed
+        self.write_board(with_body(item(5, "Alpha", "In review"), "### Goal\nGOAL-LINE RELOADED"))
+        self.wait_screen("GOAL-LINE RELOADED", timeout=5)
+        self.assertIn("OLD-END", self.body())
+        self.assertIn("HUMAN-END", self.body())
+        self.assertNotIn("• a file", self.body())  # only the one line
+        self.assertEqual(self.quit(), 0)
+
+    def test_n_and_p_jump_between_comments_and_bring_each_to_the_top(self):
+        others = [{"author": {"login": f"c{n}"}, "createdAt": f"2026-10-0{n}T00:00:00Z", "body": f"C{n}-BODY"}
+                  for n in range(1, 6)]
+        report = {"author": {"login": "jyoka"}, "createdAt": "2026-10-07T00:00:00Z",
+                  "body": "<!-- task-hub report -->\n\n## Report\n\n" + "\n".join(f"report line {n:02}" for n in range(1, 41))}
+        self.answer(*others, report)
+        self.start(rows=20, cols=80)
+        self.press("\r")
+        self.wait_screen("C1-BODY")
+
+        def top_heading():
+            rows = self.body().split("\n")
+            self.assertTrue(rows[0].startswith("─" * 80), self.body())  # the comment's rule, on the top row
+            return rows[1]
+
+        self.press("n")  # the cursor was on c1, the first heading on screen
+        self.settle(0.3)
+        self.assertIn("Comment · c2 ·", top_heading())
+        for _ in range(4):
+            self.press("n")
+            self.settle(0.2)
+        self.assertIn("▾ Report · jyoka", top_heading())
+        self.press("p")
+        self.settle(0.3)
+        self.assertIn("Comment · c5 ·", top_heading())
+        # with no heading on screen, p goes to the comment being read, and o is `task open` as before
+        self.press(END)
+        self.wait_screen("report line 40")
+        self.assertNotIn("Comment · ", self.body())
+        self.assertNotIn("Report · ", self.body())
+        self.press("o")
+        self.wait_screen("task open", self.status)
+        self.press("p")
+        self.settle(0.3)
+        self.assertIn("▾ Report · jyoka", top_heading())
+        self.assertEqual(self.quit(), 0)
+
+    def test_markdown_is_drawn_for_reading_within_about_100_columns(self):
+        goal = "\n".join([
+            "## Big heading", "#### Small heading", "plain with **strong words** and `some_code()` inside",
+            "- first item", "  - nested item", "1. numbered one", "10. numbered ten", "- [ ] open box", "- [x] done box",
+            "```sh", "make build", "```",
+            "| Key | What it does |", "|---|---|", "| a | short |", "| **bb** | " + "long " * 40 + "TABLE-END |",
+            WORDS[:1200] + " WRAP-END"])
+        self.write_board(with_body(item(5, "Alpha", "In review"), goal))
+        self.answer(self.REPORT)
+        self.start(rows=70)  # 140 columns
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        shown = self.body()
+        rows = [r.rstrip() for r in shown.split("\n")]
+        self.assertIn("Big heading", shown)
+        self.assertNotIn("# ", shown)  # headings without their marks
+        self.assertIn("Small heading", rows)
+        self.assertIn("plain with strong words and some_code() inside", shown)  # no ** or `
+        self.assertIn("  • first item", rows)
+        self.assertIn("    • nested item", rows)
+        self.assertIn("  1. numbered one", rows)
+        self.assertIn("  • ☐ open box", rows)
+        self.assertIn("  • ☑ done box", rows)
+        self.assertIn("┌─ sh", rows)  # the code block in a frame
+        self.assertIn("│ make build", rows)
+        self.assertIn("└─", rows)
+        # the table's columns line up, and its too long cell is cut to fit
+        table = [r for r in rows if " │ " in r]
+        self.assertEqual(len(table), 3, shown)
+        self.assertEqual(len({r.index(" │ ") for r in table}), 1, table)
+        self.assertTrue(table[-1].endswith("…"), table)
+        self.assertNotIn("TABLE-END", shown)
+        self.assertTrue(any("┼" in r for r in rows))
+        # nothing goes past column 100, though the terminal has 140: long lines wrap there, and rules are 100 wide
+        self.assertEqual(max(len(r) for r in rows), 100, shown)
+        self.assertIn("─" * 100, rows)
+        self.assertIn("WRAP-END", shown)
+        self.assertEqual(self.quit(), 0)
 
     def test_unreachable_github_shows_the_saved_copy_and_when_it_was_read(self):
         read_at = time.time() - 600

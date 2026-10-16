@@ -32,6 +32,7 @@ const LOG_TAIL: u64 = 1 << 20; // the log's last 1 MB, when the reader opens it 
 const LOG_MAX: u64 = 4 << 20; // the most it grows to while the reader stays on older output
 const WHEEL: isize = 3; // rows per notch of the mouse wheel
 const SIDEWAYS: usize = 8; // columns per ← or → in the diff
+const TEXT_MAX: u16 = 100; // the Issue's widest rows, so that its lines stay easy to read in a wide terminal
 
 fn color(status: &str) -> Color {
     match status {
@@ -237,16 +238,21 @@ fn same_place(old: &[usize], new: &[usize], top: usize) -> usize {
     new.iter().take(line).sum::<usize>() + within
 }
 
-/// Draws the lines that fit in area from screen row `top` and, unwrapped, from column `left`. Only those lines are
-/// laid out, from the line that holds the top row.
-fn draw_rows(f: &mut Frame, area: Rect, lines: &[Line<'static>], rows: &[usize], wrap: bool, top: usize, left: usize) {
+/// Draws the lines that fit in area from screen row `top` and, unwrapped, from column `left`, line `mark` reversed.
+/// Only those lines are laid out, from the line that holds the top row.
+fn draw_rows(f: &mut Frame, area: Rect, lines: &[Line<'static>], rows: &[usize], wrap: bool, top: usize, left: usize,
+             mark: Option<usize>) {
     let (first, skip) = locate(rows, top);
     let (mut last, mut shown) = (first, 0);
     while last < lines.len() && shown < skip + area.height as usize {
         shown += rows[last];
         last += 1;
     }
-    let p = Paragraph::new(Text::from(lines[first..last].to_vec()));
+    let mut shown = lines[first..last].to_vec();
+    if let Some(l) = mark.and_then(|m| m.checked_sub(first)).and_then(|m| shown.get_mut(m)) {
+        *l = std::mem::take(l).reversed();
+    }
+    let p = Paragraph::new(Text::from(shown));
     let at = |n: usize| n.min(u16::MAX as usize) as u16;
     f.render_widget(if wrap { p.wrap(Wrap { trim: false }).scroll((at(skip), 0)) } else { p.scroll((0, at(left))) }, area);
 }
@@ -428,18 +434,30 @@ struct Comments {
     error: String,
 }
 
+/// A comment's heading in the reader's Issue: its line, the key that keeps it open or closed across reloads, and
+/// whether it is open.
+struct Head {
+    line: usize,
+    key: String,
+    open: bool,
+}
+
 /// The Issue: its Goal from the local copy of the board, then its comments, oldest first, as last read from GitHub.
-fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64) -> Vec<Line<'static>> {
+/// Each comment has a rule and a heading; the newest Report is open, the others are one line until opened (`opened`
+/// says which the person opened or closed). `width` is the text's width: rules and tables fit it.
+fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64, width: usize,
+               opened: &HashMap<String, bool>) -> (Vec<Line<'static>>, Vec<Head>) {
     let mut lines = vec![
         Line::from(format!("#{} {}", t.id, t.title)).bold(),
         Line::from(format!("{} (local copy from {} ago)", t.url, ago(age))).dim(),
         Line::default(),
     ];
+    let mut heads = vec![];
     if t.body.trim().is_empty() {
         lines.push(Line::from("no body").dim());
     }
-    markdown_lines(&t.body, &mut lines);
-    let Some(c) = comments else { return lines };
+    markdown_lines(&t.body, width, &mut lines);
+    let Some(c) = comments else { return (lines, heads) };
     let list = c.saved["comments"].as_array().map_or(&[][..], Vec::as_slice);
     let total = c.saved["total"].as_u64().map_or(list.len(), |n| n as usize);
     let at = c.saved["fetched_at"].as_f64().map(|at| local_at(at, offset, false));
@@ -458,42 +476,247 @@ fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64) -> 
     if total > list.len() {
         lines.push(Line::from(format!("{} older comment(s) only on GitHub: b opens the Issue", total - list.len())).dim());
     }
-    for comment in list {
+    // task-hub's own comments start with a mark: <!-- task-hub report -->, <!-- task-hub replan -->
+    let marked = |body: &str| -> Option<(String, String)> {
+        let (kind, rest) = body.trim_start().strip_prefix("<!-- task-hub ")?.split_once("-->")?;
+        Some((kind.trim().to_string(), rest.trim_start_matches(['\r', '\n']).to_string()))
+    };
+    let latest = list.iter().rposition(|c| marked(&text(c, "body")).is_some_and(|(kind, _)| kind == "report"));
+    for (i, comment) in list.iter().enumerate() {
         let author = comment["author"]["login"].as_str().unwrap_or("ghost"); // GitHub's name for a deleted account
         let body = text(comment, "body");
-        // task-hub's own comments start with a mark: <!-- task-hub report -->, <!-- task-hub replan -->
-        let marked = body.trim_start().strip_prefix("<!-- task-hub ").and_then(|rest| rest.split_once("-->"));
-        let mut head = vec![Span::raw("── ")];
-        if let Some((kind, _)) = marked {
-            let kind = kind.trim();
-            let label = kind.get(..1).unwrap_or("").to_uppercase() + kind.get(1..).unwrap_or("");
-            head.extend([label.bold().green(), Span::raw(" · ")]);
+        let (kind, body) = marked(&body).unwrap_or_else(|| (String::new(), body.clone()));
+        let label = match kind.as_str() {
+            "" => "Comment".bold().blue(),
+            "report" => "Report".bold().green(),
+            k => (k.get(..1).unwrap_or("").to_uppercase() + k.get(1..).unwrap_or("")).bold().yellow(),
+        };
+        let created = text(comment, "createdAt");
+        let key = format!("{created} {author}");
+        let open = opened.get(&key).copied().unwrap_or(Some(i) == latest);
+        let name = label.content.to_string();
+        let mut head = vec![Span::raw(if open { "▾ " } else { "▸ " }), label, Span::raw(" · "), author.to_string().bold(),
+                            format!(" · {}", epoch(&created).map_or(String::new(), |at| local_at(at, offset, true))).dim()];
+        if !open {
+            // one line: the heading, then as much of the start of the body as fits
+            let room = width.saturating_sub(Line::from(head.clone()).width() + 2);
+            let start = summary(&body, &name);
+            if room > 1 && !start.is_empty() {
+                head.extend([Span::raw("  "), clip(&start, room).dim()]);
+            }
         }
-        head.extend([author.to_string().bold(),
-                     format!(" · {}", epoch(&text(comment, "createdAt")).map_or(String::new(), |at| local_at(at, offset, true))).dim()]);
         lines.push(Line::default());
+        lines.push(Line::from("─".repeat(width)).dim());
+        heads.push(Head { line: lines.len(), key, open });
         lines.push(Line::from(head));
-        markdown_lines(marked.map_or(body.as_str(), |(_, rest)| rest).trim_start_matches(['\r', '\n']), &mut lines);
+        if open {
+            lines.push(Line::default());
+            markdown_lines(&body, width, &mut lines);
+        }
     }
-    lines
+    (lines, heads)
 }
 
-/// Markdown as it is written, with its headings in color and its code blocks dim.
-fn markdown_lines(markdown: &str, lines: &mut Vec<Line<'static>>) {
-    let mut code = false;
-    for l in markdown.lines() {
-        let l = l.replace('\t', "    ");
-        if l.trim_start().starts_with("```") {
-            code = !code;
-            lines.push(Line::from(l).dim());
-        } else if code {
-            lines.push(Line::from(l).dim());
-        } else if l.starts_with('#') {
-            lines.push(Line::from(l.trim_start_matches('#').trim().to_string()).bold().cyan());
-        } else {
-            lines.push(Line::from(l));
+/// The start of a comment as plain words, for its line while it is closed; a heading that only repeats its kind
+/// ("## Report") is left out.
+fn summary(markdown: &str, kind: &str) -> String {
+    let mut words = vec![];
+    for l in markdown.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```") && !l.starts_with("<!--")) {
+        if heading(l).is_some_and(|(_, title)| title.eq_ignore_ascii_case(kind)) {
+            continue;
+        }
+        let l = l.trim_start_matches(['#', '>', '|']).trim_start();
+        let l = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).unwrap_or(l);
+        words.push(l.replace("**", "").replace('`', ""));
+        if words.iter().map(String::len).sum::<usize>() > 400 {
+            break;
         }
     }
+    words.join("  ")
+}
+
+/// Columns on screen of a text: a wide character (Japanese) takes two.
+fn cols(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// The text cut to `max` columns, with "…" where it was cut.
+fn clip(s: &str, max: usize) -> String {
+    if cols(s) <= max {
+        return s.to_string();
+    }
+    let (mut out, mut used) = (String::new(), 0);
+    let mut buf = [0u8; 4];
+    for ch in s.chars() {
+        let w = cols(ch.encode_utf8(&mut buf));
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out + "…"
+}
+
+/// Spans cut to `max` columns ("…" where they were cut), then padded with spaces to `max` when `pad`.
+fn clip_spans(spans: Vec<Span<'static>>, max: usize, pad: bool) -> Vec<Span<'static>> {
+    let mut out = vec![];
+    let mut used = 0;
+    let total: usize = spans.iter().map(Span::width).sum();
+    for s in spans {
+        let w = s.width();
+        if total <= max || used + w < max {
+            used += w;
+            out.push(s);
+            continue;
+        }
+        let cut = clip(&s.content, max - used);
+        used += cols(&cut);
+        out.push(Span::styled(cut, s.style));
+        break;
+    }
+    if pad && used < max {
+        out.push(Span::raw(" ".repeat(max - used)));
+    }
+    out
+}
+
+/// `**bold**` and `code` in a line of Markdown, over the line's own style.
+fn inline_spans(text: &str, style: Style) -> Vec<Span<'static>> {
+    let (mut spans, mut plain, mut rest) = (vec![], String::new(), text);
+    let flush = |plain: &mut String, spans: &mut Vec<Span<'static>>| {
+        if !plain.is_empty() {
+            spans.push(Span::styled(std::mem::take(plain), style));
+        }
+    };
+    while let Some(ch) = rest.chars().next() {
+        if let Some((code, after)) = rest.strip_prefix('`').and_then(|r| r.split_once('`')) {
+            flush(&mut plain, &mut spans);
+            spans.push(Span::styled(code.to_string(), style.fg(Color::Yellow)));
+            rest = after;
+        } else if let Some((bold, after)) = rest.strip_prefix("**").and_then(|r| r.split_once("**")).filter(|(b, _)| !b.is_empty()) {
+            flush(&mut plain, &mut spans);
+            spans.extend(inline_spans(bold, style.add_modifier(Modifier::BOLD)));
+            rest = after;
+        } else {
+            plain.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    flush(&mut plain, &mut spans);
+    spans
+}
+
+/// The cells of a Markdown table's row: `| a | b |` -> ["a", "b"].
+fn cells(row: &str) -> Vec<&str> {
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let row = row.strip_suffix('|').unwrap_or(row);
+    row.split('|').map(str::trim).collect()
+}
+
+/// A Markdown table with its columns lined up. When it is wider than `width`, the widest columns are cut ("…").
+fn table_lines(rows: &[&str], width: usize, lines: &mut Vec<Line<'static>>) {
+    let rule = |c: &&str| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '));
+    let rows: Vec<Vec<&str>> = rows.iter().map(|r| cells(r)).collect();
+    let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0; n];
+    for row in rows.iter().filter(|r| !r.iter().all(rule)) {
+        for (w, c) in widths.iter_mut().zip(row) {
+            *w = (*w).max(cols(&c.replace("**", "").replace('`', "")));
+        }
+    }
+    let room = width.saturating_sub(3 * n.saturating_sub(1));
+    while widths.iter().sum::<usize>() > room {
+        let widest = (0..n).max_by_key(|&i| widths[i]).unwrap_or(0);
+        if widths[widest] <= 3 {
+            break; // too many columns to fit: the rows wrap
+        }
+        widths[widest] -= 1;
+    }
+    let header = rows.iter().any(|r| r.iter().all(rule));
+    let mut above = true; // the rows above the |---| line are the header
+    for row in &rows {
+        if row.iter().all(rule) {
+            above = false;
+            lines.push(Line::from(widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("─┼─")).dim());
+            continue;
+        }
+        let style = if header && above { Style::new().bold() } else { Style::new() };
+        let mut spans = vec![];
+        for (i, w) in widths.iter().enumerate() {
+            if i > 0 {
+                spans.push(" │ ".dim());
+            }
+            spans.extend(clip_spans(inline_spans(row.get(i).copied().unwrap_or(""), style), *w, i + 1 < n));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Markdown drawn for reading: headings in bold and color, lists with even indents, `**bold**` and `code`, code
+/// blocks in a frame, and tables with their columns lined up within `width`.
+fn markdown_lines(markdown: &str, width: usize, lines: &mut Vec<Line<'static>>) {
+    let code_style = Style::new().fg(Color::Yellow);
+    let source: Vec<String> = markdown.lines().map(|l| l.replace('\t', "    ")).collect();
+    let mut code = false;
+    let mut i = 0;
+    while i < source.len() {
+        let l = &source[i];
+        let trimmed = l.trim_start();
+        let indent = l.len() - trimmed.len();
+        i += 1;
+        if let Some(lang) = trimmed.strip_prefix("```") {
+            code = !code;
+            lines.push(if code { Line::from(format!("┌─ {}", lang.trim())).dim() } else { Line::from("└─").dim() });
+        } else if code {
+            lines.push(Line::from(vec!["│ ".dim(), Span::styled(l.clone(), code_style)]));
+        } else if trimmed.starts_with('|') {
+            let start = i - 1;
+            while i < source.len() && source[i].trim_start().starts_with('|') {
+                i += 1;
+            }
+            let rows: Vec<&str> = source[start..i].iter().map(String::as_str).collect();
+            table_lines(&rows, width, lines);
+        } else if let Some((level, title)) = heading(trimmed) {
+            let style = match level {
+                1 => Style::new().bold().cyan().underlined(),
+                2 => Style::new().bold().cyan(),
+                3 => Style::new().bold().light_blue(),
+                _ => Style::new().bold().light_magenta(),
+            };
+            lines.push(Line::from(inline_spans(title, style)));
+        } else if let Some((mark, item)) = list_item(trimmed) {
+            let mut spans = vec![Span::raw(format!("{}{mark} ", "  ".repeat(indent / 2 + 1)))];
+            spans.extend(inline_spans(item, Style::new()));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(inline_spans(l, Style::new())));
+        }
+    }
+}
+
+/// A Markdown heading's level (1 to 6) and title: "## Report" -> (2, "Report").
+fn heading(l: &str) -> Option<(usize, &str)> {
+    let level = l.len() - l.trim_start_matches('#').len();
+    let title = &l[level..];
+    ((1..=6).contains(&level) && (title.is_empty() || title.starts_with(' '))).then(|| (level, title.trim()))
+}
+
+/// A list item's mark as shown, and its text: "- [x] done" -> ("• ☑", "done"), "2. two" -> ("2.", "two").
+fn list_item(l: &str) -> Option<(String, &str)> {
+    if let Some(item) = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).or_else(|| l.strip_prefix("+ ")) {
+        for (box_, shown) in [("[ ] ", "• ☐"), ("[x] ", "• ☑"), ("[X] ", "• ☑")] {
+            if let Some(rest) = item.strip_prefix(box_) {
+                return Some((shown.into(), rest));
+            }
+        }
+        return Some(("•".into(), item));
+    }
+    let digits = l.len() - l.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = &l[digits..];
+    let item = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))?;
+    (digits > 0 && digits < 10).then(|| (format!("{}.", &l[..digits]), item))
 }
 
 /// The full-screen reader: one task's Issue, diff or log. It stays on the task it opened on, by id: the arrows scroll
@@ -515,6 +738,11 @@ struct Reader {
     size: (u16, u16), // the body's width and height at the last draw
     comments: Option<Comments>, // the Issue's comments; None until the Issue is first shown
     offset: i64,
+    age: f64,                       // the local board's age at the last fill
+    heads: Vec<Head>,               // the Issue's comment headings, in its lines
+    cursor: Option<usize>,          // the heading on screen that Enter and `o` open or close, as an index in heads
+    opened: HashMap<String, bool>,  // comments opened or closed by hand, kept while the reader is open
+    issue_width: u16,               // the width the Issue's lines were made for
 }
 
 impl Reader {
@@ -522,7 +750,8 @@ impl Reader {
         let log = Pos { follow: true, ..Pos::default() }; // the log opens at its end
         Reader { task, gone: false, view, pos: [Pos::default(), Pos::default(), log], lines: vec![], rows: None, stale: true,
                  log_path: String::new(), log_from: 0, log_seen: None, page: 1, bottom: 0, right: 0, size: (0, 0),
-                 comments: None, offset }
+                 comments: None, offset, age: 0.0, heads: vec![], cursor: None, opened: HashMap::new(),
+                 issue_width: TEXT_MAX }
     }
 
     /// Reads the Issue's comments from GitHub in the background (one call), showing the copy read last meanwhile.
@@ -564,9 +793,16 @@ impl Reader {
         if self.view == View::Issue && self.comments.is_none() {
             self.read_comments();
         }
+        self.age = age;
+        self.heads.clear();
         let t = &self.task;
         self.lines = match self.view {
-            View::Issue => issue_lines(t, age, self.comments.as_ref(), self.offset),
+            View::Issue => {
+                let (lines, heads) = issue_lines(t, age, self.comments.as_ref(), self.offset, self.issue_width as usize,
+                                                 &self.opened);
+                self.heads = heads;
+                lines
+            }
             View::Diff => diff_lines(t),
             View::Log if t.log.is_empty() => vec![Line::from("no run of this task on this machine").dim()],
             View::Log => {
@@ -600,6 +836,36 @@ impl Reader {
         p.follow = log && p.top >= bottom;
     }
 
+    /// The Issue's comment heading under the cursor, if one is on screen.
+    fn on_head(&self) -> bool {
+        self.view == View::Issue && self.cursor.is_some_and(|i| i < self.heads.len())
+    }
+
+    /// Opens or closes the comment under the cursor. Nothing above it changes, so it stays where it is on screen.
+    fn toggle(&mut self) {
+        let Some(h) = self.cursor.and_then(|i| self.heads.get(i)).filter(|_| self.view == View::Issue) else { return };
+        self.opened.insert(h.key.clone(), !h.open);
+        self.fill(self.age);
+    }
+
+    /// Moves the cursor to the next (or previous) comment and scrolls its rule to the top. With no cursor, to the first
+    /// comment below the top row (or the last one above it).
+    fn jump(&mut self, forward: bool) {
+        let Some((_, rows, _)) = self.rows.as_ref().filter(|_| self.view == View::Issue) else { return };
+        let row = |line: usize| rows.iter().take(line).sum::<usize>();
+        let top = self.pos[View::Issue as usize].top;
+        let to = match self.cursor.filter(|&i| i < self.heads.len()) {
+            Some(i) if forward => (i + 1 < self.heads.len()).then_some(i + 1),
+            Some(i) => i.checked_sub(1),
+            None if forward => self.heads.iter().position(|h| row(h.line) > top),
+            None => self.heads.iter().rposition(|h| row(h.line) < top),
+        };
+        if let Some(i) = to {
+            self.pos[View::Issue as usize].top = row(self.heads[i].line.saturating_sub(1));
+            self.cursor = Some(i);
+        }
+    }
+
     fn sideways(&mut self, by: isize) {
         let right = self.right;
         let p = &mut self.pos[self.view as usize];
@@ -620,7 +886,10 @@ impl Reader {
             KeyCode::End => self.scroll(isize::MAX),
             KeyCode::Right => self.sideways(SIDEWAYS as isize),
             KeyCode::Left => self.sideways(-(SIDEWAYS as isize)),
+            KeyCode::Enter if self.on_head() => self.toggle(),
             KeyCode::Enter => self.switch(View::Issue, age),
+            KeyCode::Char('n') => self.jump(true),
+            KeyCode::Char('p') => self.jump(false),
             KeyCode::Char('d') => self.switch(View::Diff, age),
             KeyCode::Char('l') => self.switch(View::Log, age),
             _ => {}
@@ -628,6 +897,12 @@ impl Reader {
     }
 
     fn draw(&mut self, f: &mut Frame, head: Rect, body: Rect) {
+        // the Issue is at most TEXT_MAX wide; its rules and tables are made for the width it has
+        let body = if self.view == View::Issue { Rect { width: body.width.min(TEXT_MAX), ..body } } else { body };
+        if self.view == View::Issue && self.issue_width != body.width {
+            self.issue_width = body.width;
+            self.fill(self.age);
+        }
         let (width, height, wrap) = (body.width, body.height as usize, self.view.wraps());
         let p = &mut self.pos[self.view as usize];
         // a new size keeps the reader at the end when it was there, else on the line it showed at the top
@@ -656,6 +931,12 @@ impl Reader {
         p.left = p.left.min(self.right);
         p.width = width;
         let p = *p;
+        // the cursor stays on its heading while that is on screen, else goes to the first heading on screen
+        let shown = |line: usize| (p.top..p.top + height).contains(&rows.iter().take(line).sum::<usize>());
+        if !self.cursor.is_some_and(|i| self.heads.get(i).is_some_and(|h| shown(h.line))) {
+            self.cursor = self.heads.iter().position(|h| shown(h.line));
+        }
+        let mark = self.cursor.and_then(|i| self.heads.get(i)).map(|h| h.line);
 
         let mut right = vec![];
         if self.gone {
@@ -677,7 +958,7 @@ impl Reader {
         let title = format!(" #{} {}", self.task.id, self.task.title);
         f.render_widget(Line::from(vec![format!(" {} ", self.view.name()).bold().reversed(), title.bold()]), left);
         f.render_widget(right, right_area);
-        draw_rows(f, body, &self.lines, rows, wrap, p.top, p.left);
+        draw_rows(f, body, &self.lines, rows, wrap, p.top, p.left, mark);
     }
 }
 
@@ -832,6 +1113,12 @@ impl App {
                 let url = self.focused().map(|t| self.pr_of(t).unwrap_or_else(|| t.url.clone())).unwrap_or_default();
                 self.status = open_url(&url);
             }
+            // on a comment's heading in the reader's Issue, `o` opens or closes it (as Enter does)
+            KeyCode::Char('o') if self.reader.as_ref().is_some_and(Reader::on_head) => {
+                if let Some(r) = self.reader.as_mut() {
+                    r.toggle();
+                }
+            }
             KeyCode::Char('o') => {
                 if let Some(id) = self.focused().map(|t| t.id.clone()) {
                     self.status = match Command::new("task").args(["open", &id]).stdin(Stdio::null()).output() {
@@ -911,7 +1198,8 @@ impl App {
             None => KEYS.to_string(),
             Some(r) => {
                 let sideways = if r.view == View::Diff { "←→ sideways  " } else { "" };
-                format!("↑↓ jk scroll  {sideways}PgUp/PgDn/Space page  Home/End  ⏎ issue  d diff  l log  g lazygit  \
+                let issue = if r.view == View::Issue { "n p comment  ⏎ o open/close" } else { "⏎ issue" };
+                format!("↑↓ jk scroll  {sideways}PgUp/PgDn/Space page  Home/End  {issue}  d diff  l log  g lazygit  \
                          b browser  Esc back  q quit")
             }
         };
@@ -1039,7 +1327,7 @@ impl App {
         let rows = screen_rows(&lines, inner.width, true);
         self.details_page = (inner.height as usize).max(1);
         self.details = self.details.min(rows.iter().sum::<usize>().saturating_sub(inner.height as usize));
-        draw_rows(f, inner, &lines, &rows, true, self.details, 0);
+        draw_rows(f, inner, &lines, &rows, true, self.details, 0, None);
     }
 
     fn draw_events(&self, f: &mut Frame, area: Rect) {
