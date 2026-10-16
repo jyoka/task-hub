@@ -14,7 +14,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、build_prompt、<br/>run_agent_process、Steps、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、run_setup、human_comments、build_prompt、<br/>run_agent_process、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -200,7 +200,8 @@ sequenceDiagram
     L->>G: ensure_clone、ensure_worktree(task/<id>)
     L->>L: copy_env_files([env])
     L->>GH: issue(本文、ラベル、前回のレポート)
-    L->>L: build_prompt → prompts/<id>.md
+    L->>GH: human_comments(再実行のときだけ。REST)
+    L->>L: build_prompt → prompts/<id>.md、prompts/<id>-comments.md
     L->>H: task_workspace(タブを開く)
     L->>L: save_run(記録を先に)
     L->>GH: set_status(In progress)
@@ -335,6 +336,7 @@ GitHub を読むことはありません(実行の中は `launch` が読んで `
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
+| `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
 
@@ -342,7 +344,8 @@ GitHub を読むことはありません(実行の中は `launch` が読んで `
 
 GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-hub report -->`(レポート)、`<!-- task-hub replan -->`
 (仕分け)、`<!-- task-hub link -->`(つなぎ先。次の行に `Shared to org/app#12: <URL>`)。チームの Issue の本文の先頭の
-`<!-- task-hub shared -->` と上書きの注意(`SHARE_NOTICE`)。
+`<!-- task-hub shared -->` と上書きの注意(`SHARE_NOTICE`)。`human_comments` は、`<!-- task-hub` で始まるコメントを
+人のものとして数えません(task-hub は人と同じアカウントで書くので、書いた人では分けられません)。
 
 ### 出来事(events.jsonl の 1 行)
 
@@ -403,6 +406,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `ARCHIVE_ITEM` | GraphQL | 1 枚ごとに 1 | 100 枚を超えたとき |
 | `ADD_BLOCKED_BY` | GraphQL | 1 | `task new --blocked-by` |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
+| 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
 | チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |

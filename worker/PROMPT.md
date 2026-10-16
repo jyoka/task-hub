@@ -1,7 +1,9 @@
 # task-hub worker instructions
 
-`task` sends everything below the line to the agent at the start of every run, followed by
-the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
+`task` sends the part between the first and the second line to the agent at the start of every run,
+followed by the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
+The part below the second line comes only on a re-run that people commented on since the earlier run,
+at the end, followed by their comments on the Issue and the pull request.
 It is the same for every agent (Claude Code, Codex, Pi, Kiro, ...). Edits apply to the next run.
 
 ---
@@ -114,3 +116,16 @@ One line: exactly what you need from the human.
 
 task-hub then opens the pull request as a draft and marks the task blocked. When the human
 re-runs the task, you continue on the same branch, and the earlier report is included below.
+
+---
+
+# Comments since the earlier run
+
+People commented on this task's Issue or its pull request after the earlier run started. Their comments
+are below, oldest first; a line comment names the file and line it is on. Treat each comment as an
+instruction added to the Goal. If a comment asks for something the Goal rules out, contradicts another
+comment, or cannot be done, do not guess: leave it, and say why.
+
+In the Report section, add a list that starts with the line `Comments:` and has one item per comment:
+its number, then what you did about it, or why you did not act on it. Answer a comment that only asks a
+question there. Add no heading for it.

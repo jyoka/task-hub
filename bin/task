@@ -896,10 +896,50 @@ def issue(t):
     replans = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPLAN_MARK)]
     links = [m[1] for c in data.get("comments", []) if c["body"].startswith(LINK_MARK)
              for m in [re.search(r"([\w.-]+/[\w.-]+#\d+)", c["body"])] if m]
+    reported = [c.get("createdAt") or "" for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else "",
-            "replans": replans, "link": links[-1] if links else "",
+            "reported": reported[-1] if reported else "", "replans": replans, "link": links[-1] if links else "",
             "own_comments": [c["body"] for c in data.get("comments", []) if c["body"].startswith((REPORT_MARK, REPLAN_MARK))],
             "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
+
+
+def human_comments(t, since):
+    """What people wrote on the task's Issue and on its PR from `since` (the earlier run's start) on, oldest first:
+    Issue comments, and the PR's conversation comments, review bodies, and line comments (with their place).
+    task-hub's own comments (they start with "<!-- task-hub") and bots' are left out. REST, like pr_merged:
+    the first 100 of each kind changed since then is plenty for one re-run."""
+    def human(c, at):
+        user, body = c.get("user") or {}, (c.get("body") or "").strip()
+        return bool(at) and at >= since and body and not body.startswith("<!-- task-hub") \
+            and user.get("type") != "Bot" and not (user.get("login") or "").endswith("[bot]")
+
+    def place(c):
+        line, first, old = c.get("line"), c.get("start_line"), ""
+        if line is None and c.get("original_line") is not None:  # the line changed since: where it was
+            line, first, old = c["original_line"], c.get("original_start_line"), " (outdated: an earlier version)"
+        span = f"lines {first}-{line}" if first and first != line else f"line {line}" if line else "the whole file"
+        return f" on `{c.get('path')}` {span}{old}"
+
+    found = [("Issue comment", c, c.get("created_at"))
+             for c in gh_json("api", f"repos/{board()['issues']}/issues/{t['id']}/comments?since={since}&per_page=100")]
+    m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
+    if m:
+        pulls = f"repos/{m[1]}/pulls/{m[2]}"
+        found += [("PR comment", c, c.get("created_at"))
+                  for c in gh_json("api", f"repos/{m[1]}/issues/{m[2]}/comments?since={since}&per_page=100")]
+        found += [(f"PR review ({r.get('state', '').lower().replace('_', ' ')})", r, r.get("submitted_at"))
+                  for r in gh_json("api", f"{pulls}/reviews?per_page=100") if r.get("state") != "PENDING"]
+        found += [("PR line comment" + place(c), c, c.get("created_at"))
+                  for c in gh_json("api", f"{pulls}/comments?since={since}&per_page=100")]
+    return sorted(([kind, (c.get("user") or {}).get("login") or "someone", at, c["body"].strip()]
+                   for kind, c, at in found if human(c, at)), key=lambda x: x[2])
+
+
+def comments_text(comments):
+    """The comments as the agent and the reviewer read them, numbered so a report can answer each."""
+    return "\n\n".join(f"## Comment {n}: {kind}, by @{who} at {at}\n\n" + "\n".join(f"> {line}".rstrip()
+                                                                                 for line in body.splitlines())
+                       for n, (kind, who, at, body) in enumerate(comments, 1))
 
 
 # ---------- run state on this machine ----------
@@ -1380,16 +1420,24 @@ def launch(t):
     wt = ensure_worktree(t)
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
+    earlier = load_run(t["id"])  # what this machine last ran of the task: the comments since then are new
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
     t["stage"] = "preparing"
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     i = issue(t)
+    # a re-run: since this machine's last start, or the last report (the run was on another machine); a first run, none
+    since = earlier.get("started") or i["reported"]
+    comments = comments_text(human_comments({**t, "pr": earlier.get("pr", "")}, since)) if since else ""
     t["research"] = "yes" if i["research"] else ""
     t["link"] = i["link"]
     # the Goal as it is now (an answer added before Ready again too), whatever the team changed in the copy
     to_team(t, "the title and Goal", lambda team, n: team.edit(n, share_config(team.repo)["title"] + t["title"],
                                                                share_body(i["body"])))
-    prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
+    prompt_file(t).write_text(build_prompt(t, i, comments))  # kept, so you can always see what the agent was told
+    if comments:
+        comments_file(t).write_text(comments + "\n")
+    else:
+        comments_file(t).unlink(missing_ok=True)
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
     if herdr_available():
@@ -1456,8 +1504,18 @@ def prompt_file(t):
     return DATA / "prompts" / f"{t['id']}.md"
 
 
-def build_prompt(t, i):
-    instructions = WORKER_PROMPT.read_text().split("\n---\n", 1)[-1].strip()
+def comments_file(t):
+    """The comments the run's prompt gave the agent (human_comments), for its reviewer; none, no file."""
+    return DATA / "prompts" / f"{t['id']}-comments.md"
+
+
+def instruction_parts(path):
+    """A worker/*.md file without its header: the instructions, then the part sent only with comments (or "")."""
+    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), ""][:2]
+
+
+def build_prompt(t, i, comments=""):
+    instructions, about_comments = instruction_parts(WORKER_PROMPT)
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
@@ -1474,6 +1532,8 @@ def build_prompt(t, i):
         lines += ["", "# Replanner notes", "",
                   "Another agent answered what the earlier run was blocked on, from the repository. "
                   "Check its evidence before you rely on it:", "", answered[-1].replace(REPLAN_MARK, "").strip()]
+    if comments:
+        lines += ["", about_comments, "", comments]
     return "\n".join(lines) + "\n"
 
 
@@ -2084,13 +2144,15 @@ def shown_path(path, wt):
 
 
 def build_review_prompt(t, report, diff):
-    instructions = WORKER_REVIEW.read_text().split("\n---\n", 1)[-1].strip()
+    instructions, about_comments = instruction_parts(WORKER_REVIEW)
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
+    comments = comments_file(t).read_text().strip() if comments_file(t).exists() else ""
     return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
                       f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
-                      issue(t)["body"].strip(), "", "# Agent report", "",
+                      issue(t)["body"].strip(), *(["", about_comments, "", comments] if comments else []),
+                      "", "# Agent report", "",
                       report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
 
 

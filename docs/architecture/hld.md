@@ -152,7 +152,7 @@ sequenceDiagram
     Task->>Task: 待ち先と枠を確かめる
     Task->>GH: In progress にする
     Task->>Run: 起動(herdr のタブ、またはバックグラウンド)
-    Run->>Agent: プロンプト(Goal、前回のレポート)
+    Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
     Run->>Agent: reviewer(新しいコンテキスト)
     Agent-->>Run: .task-review.md(pass / needs changes)
@@ -164,7 +164,8 @@ sequenceDiagram
 ```
 
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
-理由を仕分けて Issue にコメントします。人が Goal に答えを書き足して Ready に戻すと、同じブランチと PR で続きます。
+理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
+PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
 
 ### 4.2 出来事と通知
 

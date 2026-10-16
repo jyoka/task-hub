@@ -185,7 +185,8 @@ elif cmd == ["issue", "create"]:
                             "labels": [{"name": opt("--label")}] if opt("--label") else []}
     print(f"https://github.com/{db['issues_repo']}/issues/{n}")
 elif cmd == ["issue", "comment"]:
-    db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read()})
+    db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read(),
+                                           "createdAt": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())})
 elif cmd == ["issue", "view"]:
     db["issue_view_calls"] = db.get("issue_view_calls", 0) + 1
     if a[2] not in db["issues"]:
@@ -215,6 +216,16 @@ elif cmd == ["pr", "view"]:
     out = {"body": pr["body"], "state": pr["state"]}
 elif cmd == ["pr", "edit"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["body"] = open(opt("--body-file")).read()
+elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/(issues|pulls)/\d+/(comments|reviews)\?.*", a[1]):
+    # REST: an Issue's or a PR's conversation comments, a PR's reviews, a PR's line comments; GitHub's `since`
+    # (changed since) is left to task-hub, which keeps only those written since
+    repo, where, number, what = re.fullmatch(r"repos/([\w.-]+/[\w.-]+)/(\w+)/(\d+)/(\w+)\?.*", a[1]).groups()
+    if repo == db["issues_repo"]:
+        out = [{"body": c["body"], "user": c.get("user") or {"login": "jyoka", "type": "User"},
+                "created_at": c.get("createdAt")} for c in db["issues"][number]["comments"]]
+    else:
+        pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
+        out = pr.get({"issues": "comments", "pulls": "line_comments"}[where] if what == "comments" else "reviews", [])
 elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<number>
     repo, number = a[1].split("/", 1)[1].rsplit("/pulls/", 1)
     if repo in db.get("broken_repos", []):
@@ -3456,6 +3467,96 @@ class TaskTest(unittest.TestCase):
         second = self.agent_calls()[1]["prompt"]
         self.assertIn("An earlier run of this task stopped", second)
         self.assertIn("Need the Stripe test key.", second)
+
+    def test_rerun_gives_the_agent_and_reviewer_what_people_commented_since_the_earlier_run(self):
+        self.write_config(reviewer=True)
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        human, bot = {"login": "jyoka", "type": "User"}, {"login": "github-actions[bot]", "type": "Bot"}
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        db["issues"][tid]["comments"] += [
+            {"body": "Written before the earlier run.", "createdAt": "2000-01-01T00:00:00Z", "user": human},
+            {"body": "The test key is in the vault.", "createdAt": at, "user": human},
+            {"body": "<!-- task-hub replan -->\n\nWritten by task-hub.", "createdAt": at, "user": human},
+            {"body": "CI ran on the Issue.", "createdAt": at, "user": bot}]
+        pr = db["prs"][f"jyoka/app task/{tid}"]
+        pr["comments"] = [{"body": "Also say goodbye.", "created_at": at, "user": human},
+                          {"body": "Dependencies are out of date.", "created_at": at,
+                           "user": {"login": "dependabot", "type": "Bot"}}]
+        pr["reviews"] = [{"body": "Use a capital H.", "state": "CHANGES_REQUESTED", "submitted_at": at, "user": human},
+                         {"body": "Not sent yet.", "state": "PENDING", "submitted_at": None, "user": human},
+                         {"body": "", "state": "COMMENTED", "submitted_at": at, "user": human}]
+        pr["line_comments"] = [{"body": "Say hi here.", "path": "hello.txt", "line": 1, "created_at": at, "user": human},
+                               {"body": "Was this line needed?", "path": "hello.txt", "line": None, "original_line": 2,
+                                "created_at": at, "user": human},
+                               {"body": "Whole file.", "path": "hello.txt", "line": 3, "start_line": 1,
+                                "created_at": at, "user": human}]
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
+        first, second = self.agent_calls()[0]["prompt"], self.agent_calls()[1]["prompt"]
+        self.assertNotIn("# Comments since the earlier run", first)
+        comments = second.split("# Comments since the earlier run", 1)[1]
+        self.assertIn("one item per comment", comments)  # worker/PROMPT.md: the report answers each one
+        found = re.findall(r"(?m)^## Comment (\d+): (.+), by @(\S+) at .*\n\n> (.+)$", comments)
+        self.assertEqual([(kind, who, body) for _, kind, who, body in found], [
+            ("Issue comment", "jyoka", "The test key is in the vault."),
+            ("PR comment", "jyoka", "Also say goodbye."),
+            ("PR review (changes requested)", "jyoka", "Use a capital H."),
+            ("PR line comment on `hello.txt` line 1", "jyoka", "Say hi here."),
+            ("PR line comment on `hello.txt` line 2 (outdated: an earlier version)", "jyoka", "Was this line needed?"),
+            ("PR line comment on `hello.txt` lines 1-3", "jyoka", "Whole file.")])
+        self.assertEqual([n for n, *_ in found], ["1", "2", "3", "4", "5", "6"])
+        for left_out in ("Written before", "Written by task-hub", "CI ran", "Dependencies", "Not sent yet"):
+            self.assertNotIn(left_out, second)
+        review = self.reviewer_calls()[-1]["prompt"]
+        goal = review.split("## Goal", 1)[1].split("# Agent report", 1)[0]
+        self.assertIn("Check them as acceptance\ncriteria too", goal)  # worker/REVIEW.md
+        self.assertIn("> Say hi here.", goal)
+        self.assertNotIn("Written by task-hub", review)
+        self.assertNotIn("Comment", self.gh()["issues"][tid]["body"])  # the Goal is left as the human wrote it
+
+    def test_rerun_without_new_comments_sends_the_prompts_of_before(self):
+        self.write_config(reviewer=True)
+        tid = self.new("blocked")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        db["issues"][tid]["comments"].append({"body": "Old.", "createdAt": "2000-01-01T00:00:00Z"})
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
+        instructions = (BIN.parent.parent / "worker" / "PROMPT.md").read_text().split("\n---\n")[1].strip()
+        second = self.agent_calls()[1]["prompt"]
+        self.assertTrue(second.startswith(instructions + "\n\n# Your task\n"))
+        self.assertTrue(second.endswith(self.comments(tid)[0].split("## Please review")[1].rstrip() + "\n"),
+                        second[-300:])  # the earlier report is still the last part
+        review = self.reviewer_calls()[-1]["prompt"]
+        self.assertRegex(review, r"## Goal\n\nSay hello. MODE:ok\n\n# Agent report\n")
+        self.assertNotIn("Comments since the earlier run", second + review)
+        self.assertFalse((self.root / f".local/share/task-hub/prompts/{tid}-comments.md").exists())
+
+    def test_rerun_after_a_run_on_another_machine_takes_the_comments_since_its_report(self):
+        tid = self.new("stuck")  # no PR: its report on the Issue is all the earlier run left
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        (self.root / f".local/state/task-hub/runs/{tid}.json").unlink()
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok"
+        db["issues"][tid]["comments"].append({"body": "The key is in the vault.",
+                                              "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
+        self.assertIn("by @jyoka at", self.agent_calls()[1]["prompt"])
+        self.assertIn("> The key is in the vault.", self.agent_calls()[1]["prompt"])
 
     def test_rerun_takes_in_what_a_human_pushed_to_the_task_branch(self):
         # "Update branch" on the PR, or a fix pushed by hand: the re-run starts from it, or its push is refused

@@ -184,7 +184,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 ```
 worker      「Stripe のテスト用キーが要る」と書いて止まる                          Blocked
 replanner   answered(リポジトリにある答えを根拠付きで)/ human(あなたへの質問を 1 行に)/ goal-conflict
-あなた      Goal に答えを書き足して Ready に戻す     → 同じブランチと PR で続きから
+あなた      Goal に答えを書き足すか Issue や PR にコメントして Ready に戻す → 同じブランチと PR で続きから(コメントも渡る)
 ```
 
 ### スキルの呼び方、自動で始める、通知
