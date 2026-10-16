@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, SystemTime};
 use std::{env, fs, thread};
+use unicode_width::UnicodeWidthStr;
 
 /// Columns in the order a person acts on them: what needs you first.
 const ORDER: [&str; 7] = ["In review", "Blocked", "In progress", "Ready", "wait for merge", "Backlog", "Done"];
@@ -209,12 +210,94 @@ struct Pos {
 
 /// Rows on screen of each line at this width: a wrapped line wider than the screen takes more than one.
 fn screen_rows(lines: &[Line<'static>], width: u16, wrap: bool) -> Vec<usize> {
-    lines.iter().map(|l| {
-        if !wrap || l.width() <= width as usize {
-            1
+    lines.iter().map(|l| if !wrap || l.width() <= width as usize { 1 } else { wrap_line(l, width as usize).len() })
+        .collect()
+}
+
+/// Characters a row never starts with ("、", "。", closing brackets), and characters it never ends with (opening ones).
+const NO_START: &str = "、。，．・：；？！ー」』）】〕〉》］｝”’,.:;!?)]}";
+const NO_END: &str = "「『（【〔〈《［｛“‘([{";
+
+/// Columns a list item's text starts at: its indent and its mark ("  • ", "    1. "), or the indent alone.
+fn hang(text: &str) -> usize {
+    let item = text.trim_start_matches(' ');
+    let digits = item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let mark = ["• ☐ ", "• ☑ ", "• "].iter().find(|m| item.starts_with(**m)).map(|m| cols(m))
+        .or_else(|| (digits > 0 && item[digits..].starts_with(". ")).then_some(digits + 2));
+    text.len() - item.len() + mark.unwrap_or(0)
+}
+
+/// A line cut into rows of at most `width` columns, for reading. Wide (Japanese) characters can end a row anywhere,
+/// words of letters and digits only at a space, unless one is wider than a row. No row starts with "、", "。" or a
+/// closing bracket. The rows after the first start under the text: past the line's indent and list mark.
+fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 || line.width() <= width {
+        return vec![line.clone()];
+    }
+    let cells: Vec<(&str, usize, Style)> = line.spans.iter().flat_map(|s| s.styled_graphemes(Style::default()))
+        .map(|g| (g.symbol, UnicodeWidthStr::width(g.symbol), g.style)).collect();
+    let indent = hang(&line.spans.iter().map(|s| s.content.as_ref()).collect::<String>());
+    let indent = if indent * 2 > width { 0 } else { indent };
+    let has = |set: &str, s: &str| s.chars().next().is_some_and(|c| set.contains(c));
+    let breaks = |(a, aw, _): &(&str, usize, Style), (b, bw, _): &(&str, usize, Style)| {
+        if *b == " " || has(NO_START, b) || has(NO_END, a) {
+            false
         } else {
-            Paragraph::new(l.clone()).wrap(Wrap { trim: false }).line_count(width).max(1)
+            *a == " " || *aw > 1 || *bw > 1
         }
+    };
+    // pieces that stay on one row: a word with the spaces after it, or a wide character with what sticks to it
+    let mut pieces: Vec<&[(&str, usize, Style)]> = vec![];
+    let mut start = 0;
+    for i in 1..=cells.len() {
+        if i == cells.len() || breaks(&cells[i - 1], &cells[i]) {
+            pieces.push(&cells[start..i]);
+            start = i;
+        }
+    }
+    let mut rows: Vec<Vec<(&str, usize, Style)>> = vec![vec![]];
+    let mut used = 0;
+    for piece in pieces {
+        let room = if rows.len() == 1 { width } else { width - indent };
+        let shown: usize = piece.iter().rposition(|c| c.0 != " ").map_or(0, |end| piece[..=end].iter().map(|c| c.1).sum());
+        // to the next row when it fits there; a word wider than a row is cut where it is
+        if used > 0 && used + shown > room && shown <= width - indent {
+            rows.push(vec![]);
+            used = 0;
+        }
+        for &cell in piece {
+            let room = if rows.len() == 1 { width } else { width - indent };
+            if used > 0 && used + cell.1 > room {
+                if cell.0 == " " {
+                    continue; // spaces past the end of a row are not shown
+                }
+                rows.push(vec![]);
+                used = 0;
+            }
+            rows.last_mut().unwrap().push(cell);
+            used += cell.1;
+        }
+    }
+    let last = rows.len() - 1;
+    rows.into_iter().enumerate().map(|(i, mut row)| {
+        if i < last {
+            while row.len() > 1 && row.last().is_some_and(|c| c.0 == " ") {
+                row.pop();
+            }
+        }
+        let mut spans: Vec<Span<'static>> = vec![];
+        for (symbol, _, style) in row {
+            match spans.last_mut() {
+                Some(s) if s.style == style => s.content.to_mut().push_str(symbol),
+                _ => spans.push(Span::styled(symbol.to_string(), style)),
+            }
+        }
+        if i > 0 && indent > 0 {
+            spans.insert(0, Span::raw(" ".repeat(indent)));
+        }
+        let mut row = Line::from(spans).style(line.style);
+        row.alignment = line.alignment;
+        row
     }).collect()
 }
 
@@ -239,22 +322,25 @@ fn same_place(old: &[usize], new: &[usize], top: usize) -> usize {
 }
 
 /// Draws the lines that fit in area from screen row `top` and, unwrapped, from column `left`, line `mark` reversed.
-/// Only those lines are laid out, from the line that holds the top row.
+/// Only those lines are laid out (wrap_line), from the line that holds the top row.
 fn draw_rows(f: &mut Frame, area: Rect, lines: &[Line<'static>], rows: &[usize], wrap: bool, top: usize, left: usize,
              mark: Option<usize>) {
     let (first, skip) = locate(rows, top);
-    let (mut last, mut shown) = (first, 0);
-    while last < lines.len() && shown < skip + area.height as usize {
-        shown += rows[last];
-        last += 1;
+    let mut shown = vec![];
+    for (i, l) in lines.iter().enumerate().skip(first) {
+        if shown.len() >= skip + area.height as usize {
+            break;
+        }
+        let l = if mark == Some(i) { l.clone().reversed() } else { l.clone() };
+        if wrap {
+            shown.extend(wrap_line(&l, area.width as usize));
+        } else {
+            shown.push(l);
+        }
     }
-    let mut shown = lines[first..last].to_vec();
-    if let Some(l) = mark.and_then(|m| m.checked_sub(first)).and_then(|m| shown.get_mut(m)) {
-        *l = std::mem::take(l).reversed();
-    }
-    let p = Paragraph::new(Text::from(shown));
+    let p = Paragraph::new(Text::from(shown.split_off(skip.min(shown.len()))));
     let at = |n: usize| n.min(u16::MAX as usize) as u16;
-    f.render_widget(if wrap { p.wrap(Wrap { trim: false }).scroll((at(skip), 0)) } else { p.scroll((0, at(left))) }, area);
+    f.render_widget(if wrap { p } else { p.scroll((0, at(left))) }, area);
 }
 
 fn git(wt: &str, args: &[&str]) -> String {
@@ -511,7 +597,7 @@ fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64, wid
         lines.push(Line::from(head));
         if open {
             lines.push(Line::default());
-            markdown_lines(&body, width, &mut lines);
+            markdown_lines(untitled(&body, &name), width, &mut lines);
         }
     }
     (lines, heads)
@@ -678,13 +764,16 @@ fn markdown_lines(markdown: &str, width: usize, lines: &mut Vec<Line<'static>>) 
             }
             let rows: Vec<&str> = source[start..i].iter().map(String::as_str).collect();
             table_lines(&rows, width, lines);
-        } else if let Some((level, title)) = heading(trimmed) {
+        } else if let Some((level, title)) = heading(trimmed).or_else(|| bold_heading(trimmed).map(|t| (3, t))) {
             let style = match level {
                 1 => Style::new().bold().cyan().underlined(),
                 2 => Style::new().bold().cyan(),
                 3 => Style::new().bold().light_blue(),
                 _ => Style::new().bold().light_magenta(),
             };
+            if lines.last().is_some_and(|l| l.width() > 0) {
+                lines.push(Line::default()); // a blank row above, so that the heading stands apart from the text
+            }
             lines.push(Line::from(inline_spans(title, style)));
         } else if let Some((mark, item)) = list_item(trimmed) {
             let mut spans = vec![Span::raw(format!("{}{mark} ", "  ".repeat(indent / 2 + 1)))];
@@ -701,6 +790,30 @@ fn heading(l: &str) -> Option<(usize, &str)> {
     let level = l.len() - l.trim_start_matches('#').len();
     let title = &l[level..];
     ((1..=6).contains(&level) && (title.is_empty() || title.starts_with(' '))).then(|| (level, title.trim()))
+}
+
+/// A line that is all bold, used as a heading: "**作ったもの**" -> "作ったもの".
+fn bold_heading(l: &str) -> Option<&str> {
+    let inner = l.trim_end().strip_prefix("**")?;
+    let title = ["**", "**:", "**："].iter().find_map(|end| inner.strip_suffix(end))?;
+    (!title.trim().is_empty() && !title.contains("**")).then_some(title)
+}
+
+/// A comment's text without the heading it starts with when that only repeats the comment's kind ("## Report"):
+/// its own heading says it already.
+fn untitled<'a>(markdown: &'a str, kind: &str) -> &'a str {
+    let blank_lines = |mut s: &'a str| {
+        while let Some((_, rest)) = s.split_once('\n').filter(|(l, _)| l.trim().is_empty()) {
+            s = rest;
+        }
+        s
+    };
+    let rest = blank_lines(markdown);
+    let (first, after) = rest.split_once('\n').unwrap_or((rest, ""));
+    match heading(first.trim()) {
+        Some((_, title)) if title.eq_ignore_ascii_case(kind) => blank_lines(after),
+        _ => markdown,
+    }
 }
 
 /// A list item's mark as shown, and its text: "- [x] done" -> ("• ☑", "done"), "2. two" -> ("2.", "two").
@@ -1489,4 +1602,173 @@ fn open_in_herdr_pane() -> bool {
     herdr_out(&["pane", "run", &new, &format!("'{}' tui", exe.replace('\'', "'\\''"))]);
     super::out(&[format!("tui: opened in herdr pane {new}, to the right of {pane}")]);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn rows(line: &str, width: usize) -> Vec<String> {
+        wrap_line(&Line::from(line.to_string()), width).iter().map(|l| l.to_string()).collect()
+    }
+
+    fn task(body: &str) -> Task {
+        let s = String::new;
+        Task { id: "5".into(), url: "https://github.com/someone/tasks/issues/5".into(), body: body.into(), base: s(),
+               worktree: s(), pr: s(), log: s(), started: s(), num: 5, title: "Alpha".into(), updated: s(), status: s(),
+               repo: s(), agent: s(), stage: s(), running: false, waits_for: s() }
+    }
+
+    /// The Markdown's lines as text, each wrapped at `width`.
+    fn markdown_rows(markdown: &str, width: usize) -> Vec<String> {
+        let mut lines = vec![];
+        markdown_lines(markdown, width, &mut lines);
+        lines.iter().flat_map(|l| wrap_line(l, width)).map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn japanese_fills_each_row_before_it_wraps() {
+        let line = "`rust/src/tui.rs` のあと 日本語の長い文がスペースなしで続くので、その手前のスペースで改行されると短い行が残ってしまう";
+        let rows = rows(line, 30);
+        assert!(rows.len() > 2, "{rows:?}");
+        for r in &rows[..rows.len() - 1] {
+            assert!(cols(r) >= 29, "a short row before the end: {rows:?}");
+        }
+        assert!(rows.iter().all(|r| cols(r) <= 30), "{rows:?}");
+        assert_eq!(rows.concat().replace(' ', ""), line.replace(' ', ""));
+    }
+
+    #[test]
+    fn words_wrap_at_spaces_and_only_a_word_wider_than_a_row_is_cut() {
+        assert_eq!(rows("alpha beta gamma delta", 11), ["alpha beta", "gamma delta"]);
+        assert_eq!(rows("see some/very/long/path/name.rs here", 10), ["see some/v", "ery/long/p", "ath/name.r", "s here"]);
+        // between Japanese and a word: a break before the word, never inside it
+        assert_eq!(rows("あいうえおかきくけこLINEPoC", 22), ["あいうえおかきくけこ", "LINEPoC"]);
+    }
+
+    #[test]
+    fn no_row_starts_with_a_comma_a_period_or_a_closing_bracket() {
+        assert_eq!(rows("あいうえお。かきく", 10), ["あいうえ", "お。かきく"]);
+        assert_eq!(rows("あいうえお、かきく", 10), ["あいうえ", "お、かきく"]);
+        assert_eq!(rows("あいう「えお」かきく", 10), ["あいう「え", "お」かきく"]);
+        assert_eq!(rows("あいうえ（C フォーム）", 10), ["あいうえ", "（C フォー", "ム）"]);
+        for r in rows(&"日本語の文、閉じ括弧」と句点。".repeat(9), 17) {
+            assert!(!r.starts_with(|c: char| NO_START.contains(c)), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn list_items_wrap_under_their_text() {
+        let long = "箇条書きの続きの行は、本文の開始位置にそろえて字下げされるので、どこまでが一つの項目か分かる";
+        let md = format!("- {long}\n  - {long}\n1. {long}\n- [x] {long}");
+        let rows = markdown_rows(&md, 40);
+        // each item's first row, and the column its text starts at, which the rows after it start at too
+        for (mark, text_at) in [("  • 箇", 4), ("    • 箇", 6), ("  1. 箇", 5), ("  • ☑ 箇", 6)] {
+            let first = rows.iter().position(|r| r.starts_with(mark)).unwrap_or_else(|| panic!("{mark}: {rows:#?}"));
+            let next = &rows[first + 1];
+            assert_eq!(next.len() - next.trim_start().len(), text_at, "{mark}: {rows:#?}");
+            assert!(!next.trim_start().starts_with(['•', '1']), "{rows:#?}");
+            assert!(cols(&rows[first]) >= 39, "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn headings_stand_apart_with_a_blank_row_above() {
+        let mut lines = vec![];
+        markdown_lines("text\n## Big\n**作ったもの**\n- item\n**not** a heading", 80, &mut lines);
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, ["text", "", "Big", "", "作ったもの", "  • item", "not a heading"]);
+        for i in [2, 4] {
+            let style = lines[i].spans[0].style;
+            assert!(style.add_modifier.contains(Modifier::BOLD) && style.fg.is_some(), "{:?}", lines[i]);
+        }
+        assert_eq!(lines[6].spans[0].style.fg, None);
+    }
+
+    fn comments(bodies: &[&str]) -> Comments {
+        let list: Vec<Value> = bodies.iter().enumerate().map(|(i, b)| serde_json::json!({
+            "author": {"login": "jyoka"}, "createdAt": format!("2026-10-1{i}T05:30:00Z"), "body": b})).collect();
+        Comments { saved: serde_json::json!({"fetched_at": 0.0, "total": list.len(), "comments": list}), ..Comments::default() }
+    }
+
+    #[test]
+    fn a_comment_does_not_repeat_its_own_heading() {
+        let c = comments(&["<!-- task-hub report -->\n\n## Report\n\n**作ったもの**\n- a file\n\n## Please review\n\n- this"]);
+        let (lines, heads) = issue_lines(&task("goal"), 0.0, Some(&c), 0, 80, &HashMap::new());
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let head = heads[0].line;
+        assert!(text[head].starts_with("▾ Report · jyoka"), "{text:#?}");
+        assert_eq!(text[head + 1..head + 4], ["", "作ったもの", "  • a file"]);
+        assert!(!text.iter().any(|l| l == "Report"), "{text:#?}");
+        assert!(text.iter().any(|l| l == "Please review"));
+        // a heading with other words stays
+        assert_eq!(untitled("## Blocked\n\nneed a key", "Report"), "## Blocked\n\nneed a key");
+        assert_eq!(untitled("\n## report\n\n\nbody", "Report"), "body");
+    }
+
+    /// The reader's header and body rows, as text, after a draw: a header row, then the body.
+    fn draw(r: &mut Reader, term: &mut Terminal<TestBackend>) -> (String, Vec<String>) {
+        let buf = term.draw(|f| {
+            let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area());
+            r.draw(f, head, body);
+        }).unwrap().buffer.clone();
+        let row = |y: u16| {
+            let mut s = String::new();
+            let mut x = 0;
+            while x < buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                s.push_str(sym);
+                x += UnicodeWidthStr::width(sym).max(1) as u16;
+            }
+            s.trim_end().to_string()
+        };
+        (row(0), (1..buf.area.height).map(row).collect())
+    }
+
+    #[test]
+    fn scrolling_and_the_row_count_follow_the_new_wrapping() {
+        let long = "日本語の長い文が行の幅いっぱいまで埋まってから折り返されることを、スクロールでも確かめる。".repeat(4);
+        let goal = format!("first line\n- {long}\n{long}\nlast line");
+        let others: Vec<String> = (1..=3).map(|n| format!("C{n}-BODY")).collect();
+        let mut bodies: Vec<&str> = others.iter().map(String::as_str).collect();
+        let report = format!("<!-- task-hub report -->\n\n## Report\n\n{long}\n\nREPORT-END");
+        bodies.push(&report);
+        let (w, h) = (40u16, 11u16); // a body of 10 rows
+        let mut r = Reader::new(task(&goal), View::Issue, 0);
+        r.issue_width = w;
+        r.comments = Some(comments(&bodies));
+        let (lines, heads) = issue_lines(&r.task, 0.0, r.comments.as_ref(), 0, w as usize, &r.opened);
+        (r.lines, r.heads) = (lines, heads);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let (header, body) = draw(&mut r, &mut term);
+        let total: usize = r.lines.iter().map(|l| wrap_line(l, w as usize).len()).sum();
+        assert!(header.ends_with(&format!(" 1-10 of {total}")), "{header}");
+        assert_eq!(body.len(), 10);
+        // every row on screen is a row of wrap_line, at the place screen_rows says
+        let all: Vec<String> = r.lines.iter().flat_map(|l| wrap_line(l, w as usize)).map(|l| l.to_string().trim_end().to_string()).collect();
+        assert_eq!(body, all[..10]);
+        for (key, top) in [(KeyCode::Down, 1), (KeyCode::PageDown, 11), (KeyCode::PageUp, 1), (KeyCode::End, total - 10),
+                           (KeyCode::Home, 0)] {
+            r.key(key, 0.0);
+            let (header, body) = draw(&mut r, &mut term);
+            assert!(header.ends_with(&format!(" {}-{} of {total}", top + 1, top + 10)), "{key:?}: {header}");
+            assert_eq!(body, all[top..top + 10], "{key:?}");
+        }
+        // n and p bring each comment's rule to the top row, its heading under it
+        for (key, who) in [(KeyCode::Char('n'), "10-10 05:30"), (KeyCode::Char('n'), "10-11 05:30"),
+                           (KeyCode::Char('p'), "10-10 05:30")] {
+            r.key(key, 0.0);
+            let (_, body) = draw(&mut r, &mut term);
+            assert!(body[0].starts_with("────") && body[1].contains(who), "{key:?}: {body:#?}");
+        }
+        for _ in 0..3 {
+            r.key(KeyCode::Char('n'), 0.0);
+        }
+        let (_, body) = draw(&mut r, &mut term);
+        assert!(body[1].starts_with("▾ Report"), "{body:#?}");
+        r.key(KeyCode::End, 0.0);
+        let (_, body) = draw(&mut r, &mut term);
+        assert_eq!(body[9], "REPORT-END");
+    }
 }

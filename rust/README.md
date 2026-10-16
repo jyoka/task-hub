@@ -72,10 +72,12 @@ The reader stays on the task you opened it on. No key in it selects another card
 
 The Issue and the log wrap long lines, and every row of a long line can be scrolled to. The header shows the rows on
 screen and how many there are. The Issue is at most 100 columns wide, so that its lines stay easy to read in a wide
-terminal.
+terminal. task-rs wraps them itself: Japanese text fills each row and wraps between any two of its characters, words
+of letters and digits wrap at spaces (only a word wider than a row, a long path say, is cut), and no row starts with
+`、`, `。` or a closing bracket. The rows after the first of a list item start under its text, not under its mark.
 
-The Issue's Markdown is drawn for reading: headings (`#` to `####`) in bold and color without their `#`, lists with
-even indents (`•`, `1.`, `☐` and `☑` for `- [ ]` and `- [x]`), `**bold**` in bold, `` `code` `` in yellow, code blocks
+The Issue's Markdown is drawn for reading: headings (`#` to `####`, and a line that is all `**bold**`) in bold and
+color without their `#`, with a blank row above, lists with even indents (`•`, `1.`, `☐` and `☑` for `- [ ]` and `- [x]`), `**bold**` in bold, `` `code` `` in yellow, code blocks
 in a frame (`┌─`, `│`, `└─`), and tables with their columns lined up. A table wider than the Issue has its widest
 columns cut (`…`); a table with too many columns wraps.
 
@@ -117,7 +119,8 @@ in local time: `Report · jyoka · 2026-10-10 14:30` for a report task-hub wrote
 `Replan · …` for the replanner's answer, and `Comment · alice · 2026-10-09 13:09` for a person's comment. A line under
 `Comments (n)` says when they were read.
 
-Only the newest Report is open (`▾`). The other comments, older Reports included, are closed (`▸`): one line with
+An open comment does not repeat its own heading: a `## Report` it starts with is left out under
+`▾ Report · …`. Only the newest Report is open (`▾`). The other comments, older Reports included, are closed (`▸`): one line with
 their heading and the start of their text. The cursor (the heading drawn reversed) is on the first heading on screen,
 or on the comment `n` or `p` went to. Enter or `o` opens or closes it, and the comments you opened or closed stay so
 while the reader is open, across reloads and `f`. An open comment's long lines wrap and scroll as the Goal does, and
