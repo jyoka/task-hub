@@ -124,18 +124,31 @@ sudo -u task-agent -H npx playwright install chromium     # /var/lib/task-agent/
 - worktree を **あなたのユーザーで** 開く(`task open`、エディタ、git を見るシェルのプロンプトで `cd` する)と、
   エディタやプロンプトの git があなたの権限で動き、エージェントの仕込んだ設定(`core.fsmonitor` など)を動かします。
   中を見るときは `sudo -u task-agent -H git -C <worktree> diff` のように、`task-agent` で見るか、PR で見ます
-- **`user` から `off` に戻すときは、先に `sudo scripts/setup_agent_user.sh uninstall`(workenv_setting)で
-  セットアップを戻し、`sudo pkill -u task-agent` でエージェントが裏に残したプロセス(`nohup … &` など)を止めてから、
-  `~/.local/share/task-hub/repos` と `worktrees` をフォルダごと消します**(中の作業は先に push するか保存します)。
+- **task-hub のボードの画面にも、あなたのユーザーで worktree に git を動かすものがあります。`mode = user` の間
+  (と、`off` に戻して両方のフォルダを消すまで)は、エージェントの worktree では使いません。**
+  - task-rs のカードの diff の欄と、`g`(Lazygit)。`git diff` や Lazygit があなたの権限で動き、エージェントが
+    clone の `.git/config` に書いた `core.fsmonitor` や、`diff.<名前>.textconv`(`.gitattributes` と組み合わせたもの)を動かします
+  - Kiro の拡張の inspect の画面。`core.fsmonitor` は切っていますが、`git diff` はあなたで動くので、仕込まれた
+    textconv や外部の diff のコマンドは動きます
+
+  これらを `task-agent` で動かすか、`mode = user` では断るようにするのは、別のタスク(フォローアップ)で直します。
+  それまでは、上のように `task-agent` で見るか、PR で見ます
+- **`user` から `off` に戻すときは、次の順で、あなたが手で行います**(task-hub はどれも自分では動かしません)。
+  1. `sudo scripts/setup_agent_user.sh uninstall`(workenv_setting)でセットアップを戻す
+  2. エージェントが裏に残したプロセス(`nohup … &` など)を止める(たとえば `sudo pkill -u task-agent`)
+  3. `~/.local/share/task-hub/repos` と `worktrees` の中の作業を push するか保存する
+  4. その 2 つを **フォルダごと** 消す(中を空にするだけでは足りません)
+
   `off` では task-hub があなたのユーザーで clone と worktree に git を動かすので、エージェントが仕込んだ
   `core.fsmonitor` や hook があなたの権限で動くからです。uninstall は ACL を外して持ち主をあなたに戻すだけで、
-  仕込まれた設定や hook は clone に残ります。中を空にするだけでは、ACL が残っていれば次の clone もまた
-  `task-agent` が書けます。そこで `off` の task-hub は、次のどちらかの間、開始を Blocked にし、後片付けもせずに残し、
-  メッセージで上の手順を促します。
+  仕込まれた設定や hook は clone に残ります。中を空にしただけのフォルダは、既定の ACL や、まだ動いている
+  エージェントのプロセスから、次の clone にまた書かれることがあります。そこで `off` の task-hub は、次のどちらかの間、
+  開始を Blocked にし、後片付けもせずに残し、メッセージで上の手順を促します。
   - `repos` か `worktrees` に `task-agent` か `task-agents` の ACL(access か default)が一つでもある
     (`getfacl` で見えるもの。空かどうかでは決めません)
-  - `user` が動いたあと(印は `~/.local/share/task-hub/sandbox-used`)、`repos` か `worktrees` に何か残っている。
-    印は、`user` で動いたときと、`off` で ACL を見つけたとき(印ができる前に `user` を使ったマシン)に作られ、
-    ACL がなく両方が空か無くなったときに消えます
+  - `user` が動いた印(`~/.local/share/task-hub/sandbox-used`)があり、`repos` か `worktrees` がまだある
+    (空でも、リンクやファイルでも)。印は、タスクを始めるときにモードを決めるところ(`check_sandbox`)でだけ
+    作ります。`user` のときと、`off` で ACL を見つけたとき(印ができる前に `user` を使ったマシン)です。
+    `off` で ACL がなく、両方のフォルダが無くなったときに消えます
 - `off` から `user` に変えたときにすでにある clone と worktree は、共有のフォルダの ACL が付いていれば
   そのまま使えます。付いていなければ、セットアップのスクリプトをもう一度動かします

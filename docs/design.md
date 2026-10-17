@@ -245,10 +245,15 @@
     `worktrees` を消します。`off` では task-hub があなたのユーザーで git を動かすので、エージェントが clone に
     仕込んだ設定や hook があれば、あなたの権限で動くからです。uninstall は ACL を外すだけで、仕込まれたものは
     残ります。`off` の task-hub は、`repos` と `worktrees` の実際の ACL(access と default)に `task-agent` か
-    `task-agents` のエントリーが残る間と、`user` が動いた印(`share/sandbox-used`)があって両方のどちらかに
-    何か残る間は、開始と後片付けを断ります。印は `user` で動いたときと、`off` で ACL を見つけたときに作るので、
-    印ができる前に `user` を使ったマシンも ACL から拾えます。空かどうかだけでは決めません。空にしても既定の ACL
-    が残れば、次の clone もエージェントが書けるからです。
+    `task-agents` のエントリーが残る間と、`user` が動いた印(`share/sandbox-used`)があって両方のどちらかが
+    まだある間は、開始と後片付けを断ります。空にしただけでは足りません。既定の ACL や残ったプロセスから、
+    次の clone もエージェントが書けるからです。印は、開始のときにモードを決めるところ(`check_sandbox`)で、
+    `user` のときと、`off` で ACL を見つけたときにだけ作るので、印ができる前に `user` を使ったマシンも ACL から
+    拾えます。断るメッセージの手順(uninstall、プロセスを止める、フォルダを消す)は人がするもので、task-hub は
+    どれも動かしません。
+    task-hub のボードの画面のうち、task-rs の diff の欄と `g`、Kiro の拡張の inspect の画面は、まだあなたの
+    ユーザーで worktree に git を動かします。`user` の間はエージェントの worktree で使わないよう sandbox.md に
+    書き、直すのは別のタスクにしました。
     詳しくは [sandbox.md](sandbox.md)。
 23. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
     Custom Rules(ひとりでしてよい、承認が要る、禁止)と同じ 3 段階を、`can:` / `ask:` / `never:` の行で書きます。

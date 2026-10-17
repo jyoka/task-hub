@@ -1708,7 +1708,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid2)
         self.assertEqual(self.status(tid2), "Blocked")
         self.assertEqual(len(self.agent_calls()), 1)
-        self.assertIn("nobody (or group task-agents) still has an ACL on", self.comments(tid2)[-1])
+        self.assertIn("nobody still has an ACL on", self.comments(tid2)[-1])
         self.assertIn("setup_agent_user.sh uninstall", self.comments(tid2)[-1])
         self.assertFalse(ran.exists())
         # emptied folders keep their default ACL, so what off mode makes there next is the agent's to write
@@ -1723,6 +1723,12 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.status(tid2), "Blocked")
         self.assertIn("still has an ACL on ~/.local/share/task-hub/worktrees", self.comments(tid2)[-1])
         subprocess.run(["setfacl", "-b", str(data / "worktrees")], check=True)  # what uninstall does
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")  # emptied, not deleted
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
         self.move(tid2, "Ready")
         self.task()
         self.assertEqual(self.wait(tid2), "In review")
@@ -1747,15 +1753,26 @@ class TaskTest(unittest.TestCase):
         tid2 = self.new("ok")
         self.task("start", tid2)
         self.assertEqual(self.status(tid2), "Blocked")
-        self.assertIn("then delete ~/.local/share/task-hub/repos", self.comments(tid2)[-1])
+        self.assertIn("For you, not task-hub: sudo scripts/setup_agent_user.sh uninstall",
+                      self.comments(tid2)[-1])
+        self.assertIn("(not just empty them): docs/sandbox.md", self.comments(tid2)[-1])
         # uninstall takes the ACLs away, but what the agent planted is still in the clone
         subprocess.run(["setfacl", "-bR", str(data / "repos")], check=True)
         self.move(tid2, "Ready")
         self.task()
         self.assertEqual(self.status(tid2), "Blocked")
-        self.assertIn("still holds what nobody wrote in mode = user", self.comments(tid2)[-1])
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
         self.assertEqual(len(self.agent_calls()), 1)
         self.assertFalse(ran.exists())
+        # emptied folders are not enough either: the marker stays until both are gone
+        for d in (data / "repos", data / "worktrees"):
+            for c in d.iterdir():
+                shutil.rmtree(c)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        self.assertTrue((data / "sandbox-used").exists())
         # with no ACL left, what off mode makes there next is yours
         for d in (data / "repos", data / "worktrees"):
             shutil.rmtree(d)
@@ -1809,6 +1826,8 @@ class TaskTest(unittest.TestCase):
             self.assertEqual(set((self.root / "shared/ran-by").read_text().split()), {agent})
             metrics = json.loads((self.root / ".local/state/task-hub/metrics.jsonl").read_text().splitlines()[-1])
             self.assertEqual(metrics["files"], 2)  # seen.txt and hello.txt: the PR's size, as GitHub has it
+            # going back to off now needs both shared folders deleted (docs/sandbox.md)
+            self.assertTrue((self.root / ".local/share/task-hub/sandbox-used").exists())
         finally:  # what the agent's user made: removed as that user, before the test's folder goes
             for d in shared:
                 subprocess.run(["sudo", "-n", "-u", agent, "-D", "/", "--", "rm", "-rf", "--", str(d)],

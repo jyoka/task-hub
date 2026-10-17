@@ -506,30 +506,29 @@ def mark_sandbox_used():
 def refuse_after_user():
     """Raise when mode = off would run your git on clones or worktrees the agent's user wrote: its core.fsmonitor or
     hooks would run as you. That is while it still has an ACL on them (the setup of mode = user is not undone), and,
-    after mode = user ran here, until both folders are deleted: undoing the setup leaves what the agent planted."""
-    dirs = (DATA / "repos", DATA / "worktrees")
-    delete = (f"then delete {home(dirs[0])} and {home(dirs[1])} (push or save any work in them first), "
-              "then run again (docs/sandbox.md)")
+    after mode = user ran here, until both folders are deleted: undoing the setup, or emptying them, leaves what the
+    agent planted or lets it write what comes next. Only reads: check_sandbox writes and clears the marker."""
+    dirs, user = (DATA / "repos", DATA / "worktrees"), sandbox_user()
+    steps = "then stop its processes, save work, delete repos and worktrees (not just empty them): docs/sandbox.md"
     for d in dirs:
         if agent_acl(d):
-            mark_sandbox_used()  # also on machines that ran mode = user before the marker existed
-            raise RuntimeError(f"[sandbox] mode = off, but {sandbox_user()} (or group {SANDBOX_GROUP}) still has an "
-                               f"ACL on {home(d)}: your git would run what it planted there. Run "
-                               f"`sudo scripts/setup_agent_user.sh uninstall` (workenv_setting) first, {delete}")
-    if not SANDBOX_USED.exists():
-        return
-    for d in dirs:
-        if os.path.islink(d) or (d.exists() and (not d.is_dir() or any(d.iterdir()))):
-            raise RuntimeError(f"[sandbox] mode = off, but {home(d)} still holds what {sandbox_user()} wrote in "
-                               f"mode = user: your git would run the hooks or git config it planted there. "
-                               f"Stop its processes (`sudo pkill -u {sandbox_user()}`), {delete}")
-    SANDBOX_USED.unlink(missing_ok=True)  # empty, and no default ACL: what off mode makes there next is yours
+            raise RuntimeError(f"[sandbox] mode = off, but {user} still has an ACL on {home(d)}: your git would run "
+                               "what it planted. For you, not task-hub: sudo scripts/setup_agent_user.sh "
+                               f"uninstall, {steps}")
+    if SANDBOX_USED.exists():
+        for d in dirs:
+            if os.path.lexists(d):
+                raise RuntimeError(f"[sandbox] mode = off, but {home(d)} is still there after mode = user ran here: "
+                                   f"your git would run what {user} planted. For you, not task-hub: {steps}")
 
 
 def check_sandbox():
     """Raise when [sandbox] asks for a sandbox this machine cannot give: at launch, before any credit is spent."""
     if sandbox_mode() == "off":
+        if any(agent_acl(d) for d in (DATA / "repos", DATA / "worktrees")):
+            mark_sandbox_used()  # mode = user ran here, maybe before the marker existed: it outlives the ACLs
         refuse_after_user()
+        SANDBOX_USED.unlink(missing_ok=True)  # both folders gone, no ACL: what off mode makes there next is yours
         return
     if not sys.platform.startswith("linux"):
         raise RuntimeError(f"[sandbox] mode = user works on Linux only; set mode = off in {home(CONFIG)}")
@@ -540,6 +539,7 @@ def check_sandbox():
             raise RuntimeError(f"[sandbox] user {user} is you; it must be a user of its own (docs/sandbox.md)")
     except KeyError:
         raise RuntimeError(f"[sandbox] user {user} does not exist on this machine; create it (docs/sandbox.md)") from None
+    mark_sandbox_used()  # before anything runs as that user: going back to off then needs both folders deleted
     for d in (DATA / "repos", DATA / "worktrees"):
         r = run(*as_agent(["test", "-d", d, "-a", "-w", d]))
         if r.returncode != 0:  # no NOPASSWD rule (sudo asks for a password, -n refuses), or no shared folder
@@ -553,7 +553,6 @@ def as_agent(argv, cwd="/", keep=()):
     sign-ins and git config) and of this environment only the variables named in keep."""
     if sandbox_mode() == "off":
         return argv
-    mark_sandbox_used()
     return ["sudo", "-n", "-u", sandbox_user(), "-H", "-D", str(cwd),
             *([f"--preserve-env={','.join(keep)}"] if keep else []), "--", *map(str, argv)]
 
