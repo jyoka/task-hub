@@ -11,7 +11,8 @@ task-hub が何でできていて、データがどこを流れるかの全体�
 
 GitHub Project をかんばんにして、そのカードをコーディングエージェントに実行させます。人が決めるのは
 「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする)」の 2 つだけです。その間の準備、実行、レビュー、
-PR、止まったときの仕分け、後片付けを task-hub が行います。
+PR、止まったときの仕分け、後片付けを task-hub が行います。人が選んだタスクは、チームの GitHub(組織のリポジトリの Issue と
+Project)にも写せます(`task share`。写す向きは個人 → チームだけ)。
 
 範囲外: タスクの中身を決めること(人と `/chief`)、コードの品質の最終判断(人のレビュー)、複数マシンの調停。
 
@@ -25,6 +26,7 @@ flowchart LR
     phone["スマートフォン<br/>ntfy のトピックに送る"]
     th["task-hub<br/>あなたの Mac で動く"]
     gh[("GitHub<br/>Issue、Project、PR")]
+    team[("チームの GitHub<br/>組織のリポジトリ、Project")]
     agents["エージェントの CLI<br/>claude -p、codex、pi、kiro-cli"]
     herdr["herdr<br/>タブ、通知"]
     os["OS の通知<br/>macOS、Windows"]
@@ -37,6 +39,7 @@ flowchart LR
     phone -- "task intake(Backlog だけ)" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
+    th -- "task share: Issue、カード。その後の Status、本文、コメント、閉じる(gh)" --> team
     th -- "起動する" --> agents
     agents -- "worktree を編集" --> th
     th -- "タブ、通知" --> herdr
@@ -44,7 +47,8 @@ flowchart LR
     th -- "出来事(events.jsonl)" --> chat
 ```
 
-状態の正本は GitHub です。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+状態の正本は GitHub の個人のボードです。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+チームの GitHub は写しです。task-hub がそこを読むのは、写すときのチームの Project の列と、つないだカードの今の列だけです。
 
 ## 3. 部品(C4 レベル 2)
 
@@ -66,6 +70,7 @@ flowchart TB
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
         trig["トリガー<br/>check_triggers(task watch だけ)"]
+        links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -80,6 +85,7 @@ flowchart TB
 
     subgraph ext["外のもの"]
         gh[("GitHub")]
+        team[("チームの GitHub")]
         agents["エージェントの CLI"]
         herdr["herdr、OS の通知"]
         ntfy["ntfy<br/>(任意。スマートフォンへ)"]
@@ -103,6 +109,11 @@ flowchart TB
     sync --> board
     sync -- "起動" --> runner
     board -- "gh" --> gh
+    cli --> links
+    links --> board
+    links -- "gh" --> team
+    board -. "set_status、comment(つないだタスク)" .-> links
+    sync -. "開始、マージで閉じる" .-> links
     runner --> board
     runner -- "起動" --> agents
     runner -- "git、gh pr" --> gh
@@ -120,6 +131,7 @@ flowchart TB
 |---|---|---|
 | `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md)) | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
@@ -151,7 +163,7 @@ sequenceDiagram
     Task->>Task: 待ち先と枠を確かめる
     Task->>GH: In progress にする
     Task->>Run: 起動(herdr のタブ、またはバックグラウンド)
-    Run->>Agent: プロンプト(Goal、前回のレポート)
+    Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
     Run->>Agent: reviewer(新しいコンテキスト)
     Agent-->>Run: .task-review.md(pass / needs changes)
@@ -163,7 +175,8 @@ sequenceDiagram
 ```
 
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
-理由を仕分けて Issue にコメントします。人が Goal に答えを書き足して Ready に戻すと、同じブランチと PR で続きます。
+理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
+PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
 
 ### 4.2 出来事と通知
 
@@ -224,6 +237,7 @@ flowchart LR
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
+- 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
 - `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
   記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです
 
@@ -272,4 +286,4 @@ flowchart TB
 | 出来事の種類 | `emit` を呼び、`[notify] events` と読む側のフィルタに足す | [lld.md](lld.md) の 6 章 |
 | Status の列 | `StatusLifecycle` と design.md の図を一緒に変える | [design.md](../design.md) |
 | 実行の段階 | `set_stage` を呼び、design.md の段階の表に足す | [design.md](../design.md) |
-| トリガーの種類 | `*_occurrences` 関数を足して `check_triggers` から呼ぶ。1 回のことを表す記録のキーを決める | [lld.md](lld.md) の 4.5 節、[triggers.md](../triggers.md) |
+| トリガーの種類 | `*_occurrences` 関数を足して `check_triggers` から呼ぶ。1 回のことを表す記録のキーを決める | [lld.md](lld.md) の 4.7 節、[triggers.md](../triggers.md) |

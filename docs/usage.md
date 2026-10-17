@@ -93,6 +93,60 @@ deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 
+## チームのボードに出す(task share)
+
+個人のボードのタスクのうち、選んだものだけをチームの GitHub(組織のリポジトリの Issue と、組織の Project のカード)に
+出します。正本は個人のボードのままで、写す向きは個人 → チームだけです(設計は
+[architecture/designs/team-sync.md](architecture/designs/team-sync.md))。
+
+```
+task share 12 --to org/app [--project org/7]
+```
+
+- チームのリポジトリに Issue を 1 つ作ります。タイトルは `[share]` の接頭辞 + 個人の Issue のタイトル、本文は
+  「task-hub が上書きするので意見はコメントへ」という注意のあとに Goal をそのまま、担当はあなた(`--assignee @me`)です
+- 個人の Issue にある task-hub のコメント(Report、Blocked の仕分け)も写します。人のコメントは写しません
+- チームの Project(`--project`、なければ `[share]`。どちらもなければ Issue だけ)にカードを足し、Status と既定の欄を入れます
+- 個人の Issue に、つなぎ先のコメント(`<!-- task-hub link -->` で始まる)を書きます。選んだ Project も残すので、あとから設定を変えてもその Project に写します。2 回目からは同じ Issue を出すだけです
+- つなぎ先は、今 `gh` でログインしているアカウントが書いたコメントだけを読みます。ほかの人のコメントでは、別の Issue を書き換えたり閉じたりしません
+- そのあとの実行の PR は、本文に `Closes` を 2 つ(個人の Issue とチームの Issue)持ちます。マージで両方が閉じます。
+  開いている PR がすでにあれば、`task share` がその場で足します(実行中なら、終わってからもう一度 `task share`)
+- 出したくない部分があるタスクは共有しません(本文を変えて出す方法はありません)。本文に同じリポジトリの Issue の
+  URL や `#番号` があると、チームのリポジトリではその Issue への参照になります。個人の Issue へのリンクは、チームの人には開けません
+
+つないだあとも、task-hub が変えたものはチームに写ります(向きは個人 → チームだけ)。
+
+- Status が変わると、チームのカードを下の対応表の列に動かします。チームのカードがもうその列にあれば何もしません。
+  スマホで Ready に移したときは写さず、実行が始まって In progress にするときに写します
+- 実行を始めるたびに、チームの Issue のタイトルと本文を個人の Issue から写し直します。Goal に答えを書き足して Ready に
+  戻したときも、次の実行で新しい Goal になります。チームの人が本文を直していても上書きします
+- task-hub がコメント(Report、Blocked の仕分け)を書くと、同じ本文をチームの Issue にもコメントします。人のコメントは写しません
+- `task done` でチームの Issue も閉じます。デフォルトブランチ以外へのマージで GitHub が閉じなかったときは、マージを見つけた
+  同期がチームの Issue も閉じます
+- 写すのに失敗しても、個人のカードと実行は止まりません。stderr(実行の中ならログ)に `warning: task <番号>: could not copy ...`
+  を 1 行出します
+- 実行中に共有したタスクは、その実行が終わるまで写しません(次の実行から写します)
+
+```ini
+[share]
+org/app = org/7                      ; org/app に出した Issue を足すチームの Project
+org/app.title = 【Sprint 3】          ; タイトルの接頭辞。末尾に空白を残すなら "[Sprint 3] " と引用符で囲む
+org/app.field.Sprint = Sprint 3      ; カードに入れる単一選択の欄と値(いくつでも)
+status.Blocked = Todo                ; 個人の列 = チームの列(すべての共有先)
+org/app.status.In review = Review    ; この共有先だけの対応
+```
+
+チームの列は、`[share]` の対応、チームの同じ名前の列、次の既定の順で決めます。
+
+| 個人の列 | チームの列(既定) |
+|---|---|
+| Backlog | Todo |
+| Ready、In progress、In review、wait for merge、Blocked | In progress |
+| Done | Done |
+
+`[share]` に書いた列、欄、値がチームの Project になければ、何も作らずに `error:` で止まります。チームのリポジトリに
+書けないとき(権限、別のアカウント)も、`error:` と `help:` を出して終わり、個人のカードと PR は変えません。
+
 ## 役割と分担
 
 ### 役割
@@ -146,7 +200,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 ```
 worker      「Stripe のテスト用キーが要る」と書いて止まる                          Blocked
 replanner   answered(リポジトリにある答えを根拠付きで)/ human(あなたへの質問を 1 行に)/ goal-conflict
-あなた      Goal に答えを書き足して Ready に戻す     → 同じブランチと PR で続きから
+あなた      Goal に答えを書き足すか Issue や PR にコメントして Ready に戻す → 同じブランチと PR で続きから(コメントも渡る)
 ```
 
 ### スキルの呼び方、自動で始める、通知
