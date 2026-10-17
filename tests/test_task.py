@@ -1688,7 +1688,9 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
         self.assertIn("user no-such-task-agent does not exist", self.comments(tid)[-1])
 
-    def test_mode_off_after_mode_user_refuses_the_clones_the_agent_could_write(self):
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_the_clones_while_the_agent_user_still_has_an_acl_on_them(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
@@ -1701,21 +1703,67 @@ class TaskTest(unittest.TestCase):
         hook.chmod(0o755)
         subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
                        check=True)
-        (data / "sandbox-used").write_text("")  # as as_agent writes it when mode = user runs
+        subprocess.run(["setfacl", "-m", "u:nobody:rwx", str(data / "repos")], check=True)
         tid2 = self.new("ok")
         self.task("start", tid2)
         self.assertEqual(self.status(tid2), "Blocked")
         self.assertEqual(len(self.agent_calls()), 1)
-        self.assertIn("mode = user was used here", self.comments(tid2)[-1])
-        self.assertIn("Delete both folders", self.comments(tid2)[-1])
+        self.assertIn("nobody (or group task-agents) still has an ACL on", self.comments(tid2)[-1])
+        self.assertIn("setup_agent_user.sh uninstall", self.comments(tid2)[-1])
         self.assertFalse(ran.exists())
+        # emptied folders keep their default ACL, so what off mode makes there next is the agent's to write
+        subprocess.run(["setfacl", "-b", str(data / "repos")], check=True)
         shutil.rmtree(data / "repos")
-        shutil.rmtree(data / "worktrees")
+        (data / "repos").mkdir()
+        subprocess.run(["setfacl", "-d", "-m", "u:nobody:rwx", str(data / "worktrees")], check=True)
+        for d in (data / "worktrees").iterdir():
+            shutil.rmtree(d)
         self.move(tid2, "Ready")
         self.task()
-        self.assertEqual(self.wait(tid2), "In review")  # deleted: off is safe again
-        self.assertFalse((data / "sandbox-used").exists())
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("still has an ACL on ~/.local/share/task-hub/worktrees", self.comments(tid2)[-1])
+        subprocess.run(["setfacl", "-b", str(data / "worktrees")], check=True)  # what uninstall does
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
         self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_what_the_agent_planted_even_after_the_setup_is_undone(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        data = self.root / ".local/share/task-hub"
+        ran = self.root / "planted-ran"
+        clone = data / "repos/jyoka/app"
+        hook = clone / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
+        hook.chmod(0o755)
+        subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
+                       check=True)
+        subprocess.run(["setfacl", "-R", "-m", "u:nobody:rwX", str(data / "repos")], check=True)
+        tid2 = self.new("ok")
+        self.task("start", tid2)
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("then delete ~/.local/share/task-hub/repos", self.comments(tid2)[-1])
+        # uninstall takes the ACLs away, but what the agent planted is still in the clone
+        subprocess.run(["setfacl", "-bR", str(data / "repos")], check=True)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("still holds what nobody wrote in mode = user", self.comments(tid2)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertFalse(ran.exists())
+        # with no ACL left, what off mode makes there next is yours
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
+        self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
 
     @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl") and shutil.which("sudo")
                          and subprocess.run(["sudo", "-n", "-u", SANDBOX_USER, "-D", "/", "--", "true"],

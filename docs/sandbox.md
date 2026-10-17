@@ -124,10 +124,18 @@ sudo -u task-agent -H npx playwright install chromium     # /var/lib/task-agent/
 - worktree を **あなたのユーザーで** 開く(`task open`、エディタ、git を見るシェルのプロンプトで `cd` する)と、
   エディタやプロンプトの git があなたの権限で動き、エージェントの仕込んだ設定(`core.fsmonitor` など)を動かします。
   中を見るときは `sudo -u task-agent -H git -C <worktree> diff` のように、`task-agent` で見るか、PR で見ます
-- **`user` から `off` に戻すときは、先に `~/.local/share/task-hub/repos` と `~/.local/share/task-hub/worktrees`
-  を消します**(中の作業は push するか取っておいてから)。`off` では task-hub があなたのユーザーで clone と worktree に
-  git を動かすので、エージェントの仕込んだ `core.fsmonitor` や hook があなたの権限で動くからです。task-hub は
-  `mode = user` が一度動くと `~/.local/share/task-hub/sandbox-used` を書き、それがある間、`off` の開始は Blocked
-  になり、後片付けは残します。二つのフォルダが空になると、次の実行でこの印を消して、普通に動きます
+- **`user` から `off` に戻すときは、先に `sudo scripts/setup_agent_user.sh uninstall`(workenv_setting)で
+  セットアップを戻し、`sudo pkill -u task-agent` でエージェントが裏に残したプロセス(`nohup … &` など)を止めてから、
+  `~/.local/share/task-hub/repos` と `worktrees` をフォルダごと消します**(中の作業は先に push するか保存します)。
+  `off` では task-hub があなたのユーザーで clone と worktree に git を動かすので、エージェントが仕込んだ
+  `core.fsmonitor` や hook があなたの権限で動くからです。uninstall は ACL を外して持ち主をあなたに戻すだけで、
+  仕込まれた設定や hook は clone に残ります。中を空にするだけでは、ACL が残っていれば次の clone もまた
+  `task-agent` が書けます。そこで `off` の task-hub は、次のどちらかの間、開始を Blocked にし、後片付けもせずに残し、
+  メッセージで上の手順を促します。
+  - `repos` か `worktrees` に `task-agent` か `task-agents` の ACL(access か default)が一つでもある
+    (`getfacl` で見えるもの。空かどうかでは決めません)
+  - `user` が動いたあと(印は `~/.local/share/task-hub/sandbox-used`)、`repos` か `worktrees` に何か残っている。
+    印は、`user` で動いたときと、`off` で ACL を見つけたとき(印ができる前に `user` を使ったマシン)に作られ、
+    ACL がなく両方が空か無くなったときに消えます
 - `off` から `user` に変えたときにすでにある clone と worktree は、共有のフォルダの ACL が付いていれば
   そのまま使えます。付いていなければ、セットアップのスクリプトをもう一度動かします

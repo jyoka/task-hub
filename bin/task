@@ -71,6 +71,7 @@ LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/op
 # [sandbox] mode = user (docs/sandbox.md): the agent, and every git command and file task-hub touches in the shared
 # clones and worktrees, run as this Linux user, which cannot read your HOME (decision 22)
 SANDBOX_USER = "task-agent"
+SANDBOX_GROUP = "task-agents"  # what workenv_setting's setup_agent_user.sh gives the shared folders' ACLs to
 RULES_FILE = ".claude/settings.local.json"  # the Goal's Rules, as Claude Code permissions (docs/task-format.md)
 RULE_LEVELS = {"can": "allow", "ask": "ask", "never": "deny"}
 
@@ -80,12 +81,11 @@ WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
 WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
+# mode = user has run here: until repos/ and worktrees/ are gone, mode = off must not trust what the agent left there
+SANDBOX_USED = DATA / "sandbox-used"
 STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
-# written when [sandbox] mode = user first runs: from then on the clones and worktrees may hold what the agent's user
-# planted (config, hooks), so mode = off refuses them until they are deleted (docs/sandbox.md)
-SANDBOX_USED = DATA / "sandbox-used"
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
 # one line per status change task-hub makes, and per Done GitHub makes on a card this machine ran,
 # for whatever watches (see docs/operations.md)
@@ -469,17 +469,61 @@ def sandbox_user():
     return config()["sandbox"].get("user", "").strip() or SANDBOX_USER
 
 
+def agent_acl(d):
+    """True when folder d has an ACL entry, access or default, for the sandbox user or group (Linux only)."""
+    if not hasattr(os, "getxattr"):
+        return False
+    import grp, pwd  # Unix only
+    try:
+        uid = pwd.getpwnam(sandbox_user()).pw_uid
+    except KeyError:
+        uid = None
+    gids = set()
+    for name in (SANDBOX_GROUP, sandbox_user()):
+        try:
+            gids.add(grp.getgrnam(name).gr_gid)
+        except KeyError:
+            pass
+    for attr in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            data = os.getxattr(d, attr)
+        except OSError:  # no such folder, no ACL of that kind, or a file system without ACLs
+            continue
+        # a 4-byte version, then 8-byte entries: tag (2 = a named user, 8 = a named group), permissions, id
+        for i in range(4, len(data) - 7, 8):
+            tag, id_ = int.from_bytes(data[i:i + 2], "little"), int.from_bytes(data[i + 4:i + 8], "little")
+            if (tag == 2 and id_ == uid) or (tag == 8 and id_ in gids):
+                return True
+    return False
+
+
+def mark_sandbox_used():
+    if not SANDBOX_USED.exists():
+        DATA.mkdir(parents=True, exist_ok=True)
+        SANDBOX_USED.touch()
+
+
 def refuse_after_user():
-    """Raise when mode = off would run your git on clones or worktrees that a mode = user run let the agent's user
-    write: its core.fsmonitor or hooks would run as you. Once both folders are gone, off is safe again."""
+    """Raise when mode = off would run your git on clones or worktrees the agent's user wrote: its core.fsmonitor or
+    hooks would run as you. That is while it still has an ACL on them (the setup of mode = user is not undone), and,
+    after mode = user ran here, until both folders are deleted: undoing the setup leaves what the agent planted."""
+    dirs = (DATA / "repos", DATA / "worktrees")
+    delete = (f"then delete {home(dirs[0])} and {home(dirs[1])} (push or save any work in them first), "
+              "then run again (docs/sandbox.md)")
+    for d in dirs:
+        if agent_acl(d):
+            mark_sandbox_used()  # also on machines that ran mode = user before the marker existed
+            raise RuntimeError(f"[sandbox] mode = off, but {sandbox_user()} (or group {SANDBOX_GROUP}) still has an "
+                               f"ACL on {home(d)}: your git would run what it planted there. Run "
+                               f"`sudo scripts/setup_agent_user.sh uninstall` (workenv_setting) first, {delete}")
     if not SANDBOX_USED.exists():
         return
-    if any(d.is_dir() and any(d.iterdir()) for d in (DATA / "repos", DATA / "worktrees")):
-        raise RuntimeError(f"[sandbox] mode = off, but mode = user was used here: the agent's user could write "
-                           f"{home(DATA / 'repos')} and {home(DATA / 'worktrees')}, and your git would run what it "
-                           "planted there. Delete both folders (push or save any work in them first), then run "
-                           "again (docs/sandbox.md)")
-    SANDBOX_USED.unlink(missing_ok=True)
+    for d in dirs:
+        if os.path.islink(d) or (d.exists() and (not d.is_dir() or any(d.iterdir()))):
+            raise RuntimeError(f"[sandbox] mode = off, but {home(d)} still holds what {sandbox_user()} wrote in "
+                               f"mode = user: your git would run the hooks or git config it planted there. "
+                               f"Stop its processes (`sudo pkill -u {sandbox_user()}`), {delete}")
+    SANDBOX_USED.unlink(missing_ok=True)  # empty, and no default ACL: what off mode makes there next is yours
 
 
 def check_sandbox():
@@ -509,9 +553,7 @@ def as_agent(argv, cwd="/", keep=()):
     sign-ins and git config) and of this environment only the variables named in keep."""
     if sandbox_mode() == "off":
         return argv
-    if not SANDBOX_USED.exists():
-        DATA.mkdir(parents=True, exist_ok=True)
-        SANDBOX_USED.write_text("[sandbox] mode = user ran here; see docs/sandbox.md before setting mode = off\n")
+    mark_sandbox_used()
     return ["sudo", "-n", "-u", sandbox_user(), "-H", "-D", str(cwd),
             *([f"--preserve-env={','.join(keep)}"] if keep else []), "--", *map(str, argv)]
 
@@ -2661,7 +2703,7 @@ def sync(started_here=False):
                 report_comment(t, blocked=f"the run stopped unexpectedly, see `task log {t['id']}`"
                                if t.get("started") else "no run of this task on this machine",
                                report=report.strip())
-                kept.unlink(missing_ok=True)
+                shared_unlink(kept)
                 set_status(t, BLOCKED, reason="the run stopped unexpectedly" if t.get("started") else "no run here")
             elif before == IN_PROGRESS:  # alive: tell once if it runs much longer than usual
                 slow = check_slow(t)

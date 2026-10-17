@@ -278,7 +278,7 @@ sequenceDiagram
 | `share/repos/<owner>/<name>` | `ensure_clone`(`[sandbox] mode = user` では専用ユーザー) | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント(`[sandbox] mode = user` ではどちらも専用ユーザー。task-hub の読み書きも `shared_read`、`shared_write` でそのユーザーから) | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/worktrees/<id>/.claude/settings.local.json` | `write_rules`(Goal に Rules があるとき) | エージェント(Claude Code) | JSON。`permissions` の `allow` / `ask` / `deny`。`.git/info/exclude` でコミットしない |
-| `share/sandbox-used` | `as_agent`(`[sandbox] mode = user` で初めて動いたとき) | `refuse_after_user`(`mode = off` の開始、`git_shared`、`shared_*`、`cleanup`。`repos` と `worktrees` が空なら消す) | 1 行のテキスト。あることだけが意味を持つ |
+| `share/sandbox-used` | `as_agent`(`[sandbox] mode = user`)、`refuse_after_user`(`off` で専用ユーザーの ACL を見つけたとき) | `refuse_after_user`(`repos` と `worktrees` が ACL なしで空か無くなったら消す) | 空のファイル |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
@@ -417,7 +417,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 8. 手元の JSON は、書き込みの途中で読んでも壊れていない
 9. アンインストールは、インストーラが記録したものだけを消す。ジャンクションは先を消さずに外す。作業中のタスクがある
    あいだ、Windows のアンインストールは見張りだけを止める
-10. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = user` が一度動いたマシン(`share/sandbox-used`)では、`mode = off` でも、`repos` と `worktrees` が空になるまで、あなたのユーザーでそこに git を動かさない(`refuse_after_user`)
+10. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = off` でも、`repos` か `worktrees` に専用ユーザーかそのグループの ACL(access か default)が残る間と、`share/sandbox-used` があって `repos` か `worktrees` に何か残る間は、あなたのユーザーでそこに git を動かさず、ファイルも触らない(`refuse_after_user`、`agent_acl`)
 11. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
 
 ## 10. テストの仕組み
