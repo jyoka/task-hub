@@ -46,7 +46,7 @@ flowchart LR
 - **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
 - **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
-- **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications. No LLM is used.
+- **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used.
 - **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.
 - **Light.** Python standard library only. You install one clone.
 
@@ -132,6 +132,7 @@ archives the oldest Done cards.
 | `task new --title ... --repo owner/name --goal ...` | Registers a task (`--base`, `--agent`, `--research`, `--blocked-by 12,14`) |
 | `task start [<id>] [--agent name]` | Approves a Backlog card, or runs a Blocked card again |
 | `task watch` | Starts Ready cards automatically (every minute) |
+| `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |

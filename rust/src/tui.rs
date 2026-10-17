@@ -1057,15 +1057,20 @@ pub fn run() {
     if open_in_herdr_pane() {
         return;
     }
-    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        fail("the TUI needs a terminal, and stdout is not one", "run `task-rs tui` in a terminal, or `task-rs list` for plain output", 1);
+    if let Some(why) = no_terminal() {
+        fail(why, "run `task-rs tui` in a terminal, or `task-rs list` for plain output", 1);
     }
     let hook = std::panic::take_hook(); // ratatui's hook restores the screen, then this one turns the wheel reports off
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         hook(info);
     }));
-    let result = ratatui::run(main_loop);
+    let mut terminal = ratatui::try_init().unwrap_or_else(|e| {
+        ratatui::restore(); // raw mode may be on already
+        fail(&format!("could not set up the terminal: {e}"), "run `task-rs tui` in a terminal, or `task-rs list` for plain output", 1)
+    });
+    let result = main_loop(&mut terminal);
+    ratatui::restore();
     let _ = execute!(std::io::stdout(), DisableMouseCapture); // ratatui does not turn the wheel reports off
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -1073,11 +1078,24 @@ pub fn run() {
     }
 }
 
+/// Why there is no terminal for the TUI, if there is none: a screen to draw on (stdout) and keys to read, from stdin or else
+/// /dev/tty as crossterm does. Output on a pane with stdin elsewhere and no controlling terminal (an agent) has no keys.
+fn no_terminal() -> Option<&'static str> {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        return Some("the TUI needs a terminal, and stdout is not one");
+    }
+    if cfg!(unix) && !std::io::stdin().is_terminal() && fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_err() {
+        return Some("the TUI needs a terminal to read keys from, and neither stdin nor /dev/tty is one");
+    }
+    None
+}
+
 /// Started inside herdr but not on a terminal (by an agent, say): open a herdr pane to the right of this one and run
 /// the TUI there, instead of failing with no screen. TASK_HERDR=0 turns this off, as for bin/task.
 fn open_in_herdr_pane() -> bool {
     let Ok(pane) = env::var("HERDR_PANE_ID") else { return false };
-    if env::var("TASK_HERDR").as_deref() == Ok("0") || std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+    if env::var("TASK_HERDR").as_deref() == Ok("0") || no_terminal().is_none() {
         return false;
     }
     let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".into());
