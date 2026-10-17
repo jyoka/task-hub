@@ -69,7 +69,8 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 
 [sandbox]
-mode = bwrap            ; Linux だけ。エージェントに worktree だけを見せる(既定 off)
+mode = user             ; Linux だけ。エージェントを専用のユーザーで動かす(既定 off)
+user = task-agent       ; そのユーザー(これが既定)
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -78,7 +79,7 @@ mode = bwrap            ; Linux だけ。エージェントに worktree だけ�
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
-| `[sandbox]` | エージェントを bubblewrap の中で動かし、HOME の残り(ほかのリポジトリ、鍵、`gh` のログイン)を見せない([sandbox.md](sandbox.md)) | 中に何を足すか(`read`、`write`) |
+| `[sandbox]` | エージェントと、worktree への git を専用の Linux ユーザーで動かし、あなたの HOME(ほかのリポジトリ、鍵、`gh` のログイン)に届かせない([sandbox.md](sandbox.md)) | そのユーザーを用意し、GitHub のトークンをどこまで許すか |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 

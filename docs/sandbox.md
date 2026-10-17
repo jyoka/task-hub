@@ -1,168 +1,133 @@
 # サンドボックス(Linux)
 
-`[sandbox] mode = bwrap` にすると、エージェントは自分のタスクの worktree だけを見て動きます。
-あなたの HOME(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、デスクトップ)は見えません。
-既定は `off` で、Mac と Windows の動きは変わりません。なぜこの作りかは [design.md](design.md) の決定事項 22 にあります。
+`[sandbox] mode = user` にすると、エージェントを専用の Linux ユーザー(既定は `task-agent`)で動かします。
+あなたの HOME(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、task-hub の設定、デスクトップ)は、Unix の権限で
+そのユーザーから届きません。既定は `off` で、Mac と Windows の動きは変わりません。なぜこの作りかは
+[design.md](design.md) の決定事項 22 にあります。
 
-> **これから:専用ユーザーの mode(未実装)。** bwrap では、task-hub 自身の git を worktree の外で動かすところに、
-> エージェントの仕込んだ git 設定を動かす抜け道が繰り返し見つかりました(入れ子リポジトリの `filter.*.clean` など。
-> 決定事項 22)。これを閉じるため、エージェントとその worktree への git を権限の低い専用 Linux ユーザー `S` で動かす
-> mode に移ります。実装と検証には root/sudo でのマシンの用意(`S` の作成、NOPASSWD の sudo、worktree の共有)が要るため、
-> まだ入っていません。用意のしかたと手動の隔離確認は、実装と同じタスクで足します。それまでは下の bwrap が、特権なしで
-> 使える当座の mode です。
+## 用意する(マシンごとに 1 回、sudo で)
 
-## 使う
+専用ユーザー、共有のフォルダ、sudo の設定は、task-hub ではなく
+[workenv_setting](https://github.com/jyoka/workenv_setting) の `scripts/setup_agent_user.sh install` が作ります
+(root が要るので、無人の実行ではできません)。作るのは次のものです。
 
-[bubblewrap](https://github.com/containers/bubblewrap)(`bwrap`)を入れて、`~/.config/task-hub/config.ini` に書きます。
+| もの | 中身 |
+|---|---|
+| ユーザー | `task-agent`(グループ `task-agent`、`task-agents`)、HOME は `/var/lib/task-agent` |
+| 共有のフォルダ | `~/.local/share/task-hub/repos` と `~/.local/share/task-hub/worktrees`。グループ `task-agents`、setgid、あなたと `task-agent` に読み書きの ACL(既定の ACL も)。その上の `~`、`~/.local`、`~/.local/share`、`~/.local/share/task-hub` には、`task-agent` に通るだけ(`x`)の ACL |
+| sudo | `/etc/sudoers.d/task-agent`: あなたから `task-agent` へ、パスワードなし(`NOPASSWD`、`CWD=*`)。root にはなれない |
+| git | `task-agent` の git の名前とメール、`safe.directory`(共有のフォルダ)、`gh` を資格ヘルパーに |
+| GitHub | `task-agent` の `gh auth login`。トークンはタスクのリポジトリの contents と pull requests だけの fine-grained にします |
+
+そのあと、`task-agent` でエージェント CLI にログインします(Claude Code なら `sudo -u task-agent -H claude`、
+`/login`)。エージェント CLI が `task-agent` の `PATH`(`/usr/local/bin:/usr/bin` など。sudo の `secure_path`)に
+あることも確かめます。あなたの HOME の下に入れたもの(mise など)は、`task-agent` からは見えません。
+
+そして `~/.config/task-hub/config.ini` に書きます。
 
 ```ini
 [sandbox]
-mode = bwrap
-; エージェントが読めるだけのもの(任意)。カンマ区切り、~ と $変数 が使える
-read = ~/.local/share/mise/installs, ~/.cache/ms-playwright
-; エージェントが読み書きできるもの(任意)。ツールのキャッシュなど
-write = ~/.cache/uv, ~/.npm
+mode = user
+user = task-agent     ; 省略するとこれ
 ```
 
-- `bwrap` がない、Linux でない、user namespace が使えないときは、カードを Blocked にして理由をコメントします。
-  エージェントは起動しないので、クレジットは使いません
-- ログの先頭に `== sandbox: bwrap` と出ます(`task log <番号>`)
-- 包むのはエージェントの起動だけです。実装エージェント、reviewer、replanner のすべてです
-- `[setup]` はあなたが書いたコマンドなので、サンドボックスの外で動きます。ただし、2 回目からの実行では、前の実行で
-  エージェントが書き換えたかもしれない worktree のファイル(`package.json` の scripts など)の上で動きます
+- ユーザーがいない、Linux でない、`sudo -n -u task-agent` が通らない、共有のフォルダに書けないときは、カードを
+  Blocked にして理由をコメントします。エージェントは起動しないので、クレジットは使いません
+- ログの先頭に `== sandbox: user task-agent` と出ます(`task log <番号>`)
+- sudo は環境変数を消します。エージェントに渡したい変数(API キーなど)は `[runner] pass_env` に書くと、
+  `sudo --preserve-env` で渡ります。`GH_TOKEN` や `SSH_AUTH_SOCK` は書かなければ渡りません
 
-## 中から見えるもの
+## 専用ユーザーで動くもの
 
-| 場所 | 見え方 | 理由 |
+task-hub は、共有のフォルダ(clone と worktree)の上では、自分のユーザーで何も動かしません。エージェントは
+そこの git の設定も hook も書けるので、あなたのユーザーで git を動かすと、エージェントの仕込んだコマンドが
+あなたの権限で動くからです(決定事項 22)。
+
+| もの | 誰が | どうやって(`bin/task`) |
 |---|---|---|
-| タスクの worktree | 読み書き | エージェントの仕事場 |
-| worktree の `.git`(git ディレクトリの場所を書いたファイル) | 読むだけ | 下の「git の設定から外に出させない」 |
-| clone の `.git`(オブジェクト、ref、worktree の git ディレクトリ `.git/worktrees/<名前>`) | 読むだけ | ほかのブランチを書き換えさせない。`git status` と `git diff` は読むだけで動く |
-| `/usr`、`/etc`、`/opt`、`/nix`、`/sys` | 読むだけ | コンパイラ、Python、証明書、DNS の設定 |
-| `PATH` の中のフォルダと、エージェントのプログラムのあるフォルダ | 読むだけ | `claude`、`node` などを見つけるため。リンクは元の場所も見せる |
-| エージェント CLI 自身のファイル(`[sandbox] agent_files`) | 読み書き | ログイン、設定、記録。task-hub は記録から使用量を読む |
-| その中の、コードを動かす設定(下の一覧) | 読むだけ | 中から hook や MCP サーバーを書き残させない |
-| `[sandbox] read`、`[sandbox] write` | 読むだけ、読み書き | あなたが足すもの |
-| HOME、`/tmp`、`/run` | 空(実行ごとに消える) | ほかのファイルを見せない |
-| ネットワーク | 使える | エージェントの API、パッケージ、Web の調べもの |
+| エージェント(実装、reviewer、replanner、差し戻し) | `task-agent` | `as_agent`: `sudo -n -u task-agent -H -D <worktree> --` |
+| `[check]`、`[setup]` | `task-agent` | 同じ。`[check]` は `task-agent` のログインを確かめる |
+| clone、fetch、worktree、`git add`、`commit`、`diff`、`restore` | `task-agent` | `git_shared` |
+| push | `task-agent`(そのユーザーの `gh` のログイン) | `finish` |
+| worktree のファイルの読み書き(レポート、Rules、`[env]` のコピー、`.git/info/exclude`) | `task-agent` | `shared_read`、`shared_write`、`shared_unlink` |
+| PR を開く、Issue にコメント、カードを動かす | あなた | `gh`(GitHub の API だけ。git は動かさない) |
+| push した結果(先に進んでいるか、PR の大きさ) | あなた | `branch_compare`: `gh api repos/<repo>/compare/<base>...<branch>` |
 
-`agent_files` の既定は `~/.claude, ~/.claude.json, $CLAUDE_CONFIG_DIR, ~/.codex, ~/.pi, ~/.kiro, ~/.local/share/kiro-cli` です。
-あるものだけを見せます。変えたいときは `[sandbox] agent_files = ...` で全体を書き直します。
-
-そのうち、次に CLI を起動したときにコードを動かしたり指示を変えたりするものは、読むだけにします。中のエージェントが
-ここに hook や MCP サーバーを書き残すと、あなたが次にサンドボックスなしで CLI を起動したときに、外であなたの権限で
-動いてしまうからです。一覧は `bin/task` の `SANDBOX_AGENT_CODE` です。
-
-- Claude Code: `~/.claude.json`、`~/.claude/` の `settings.json`、`CLAUDE.md`、`hooks/`、`commands/`、`agents/`、
-  `skills/`、`plugins/`、`output-styles/`(`$CLAUDE_CONFIG_DIR` の下の同じもの)
-- Codex: `~/.codex/` の `config.toml`、`AGENTS.md`、`prompts/`、`skills/`
-- Pi: `~/.pi/agent/` の `settings.json`、`AGENTS.md`、`extensions/`、`prompts/`、`skills/`
-- Kiro: `~/.kiro/` の `settings/`、`agents/`、`hooks/`、`steering/`、`prompts/`
-
-読み書きのフォルダの中にあるのに、まだないものは、開始のときに空で作ります(フォルダ、空のファイル、JSON は `{}`)。
-ないままだと、エージェントが新しく作れてしまうからです。どれかがリンク(dotfiles の管理など)だと、開始の前に
-カードを Blocked にします。`bwrap` はリンクの上に重ねられず、エージェントがリンクを消して別のファイルに
-差し替えられるためです。ふつうのファイルにするか、`agent_files` から外してください。
-
-サンドボックスの中では、プラグインの更新や `claude mcp add` のように、これらを書く操作は失敗します。
-
-環境変数のうち、`GH_TOKEN`、`GITHUB_TOKEN`、`SSH_AUTH_SOCK`、`DBUS_SESSION_BUS_ADDRESS`、`WAYLAND_DISPLAY`、
-`DISPLAY`、`XDG_RUNTIME_DIR`、`TMPDIR` などは消します。API キーなど、ほかの変数はそのまま渡ります。
-
-## commit、push、PR はどうなるか
-
-変わりません。エージェントはファイルを編集するだけで、commit、push、PR は task-hub がサンドボックスの外で行います
-([design.md](design.md) の決定事項 3)。エージェントには `gh` のログインも SSH の鍵も渡しません。git のメタデータは
-読むだけなので、中のエージェントは `git add` や `git commit` ができません(しなくてよいものです)。
-
-### git の設定から外に出させない
-
-task-hub は、エージェントが書いた worktree で外から git を動かします(`git add -A`、`git commit`、`git push` など)。
-git は worktree の `.git` が指す git ディレクトリの設定を読み、`core.fsmonitor` や hook はコマンドとして動きます。
-中のエージェントが `.git` や `commondir` を自分の作った git ディレクトリに向けると、その設定のコマンドが外であなたの
-権限で動いてしまいます。そこで次の 2 つで防ぎます。
-
-- 中では git のメタデータを全部読むだけにします。worktree の `.git` は worktree の上に読むだけで重ね、
-  `.git/worktrees/<名前>`(`commondir`、`gitdir`、`config.worktree`、index)は clone の `.git` ごと読むだけです
-- 外の git(`bin/task` の `git_wt`)は `-c core.fsmonitor= -c core.hooksPath=/dev/null` で動かし、毎回その前に
-  `.git` と `commondir` が task-hub の clone を指したままかを確かめます(`check_git_links`)。指していなければ git を
-  動かさず、カードを Blocked にします
-- 同じ確認で、worktree の中にほかの `.git`(入れ子のリポジトリ、サブモジュール)があれば、外の git を動かさず、カードを
-  Blocked にします。外の git は入れ子のリポジトリの設定も読み、`add`、`status`、`diff` のたびに `filter.<名前>.clean` や
-  `diff.<名前>.textconv` のコマンドを動かすからです。コマンドを動かす設定は多く、`-c` で全部は切れません。
-  そのため、サブモジュールのあるリポジトリはサンドボックスでは動かせません(開始のときに Blocked になります)
-
-`mode = off` のときは、どちらもしません(エージェントがもともと外で動くので、守る意味がありません)。task-hub の
-commit でリポジトリの hook が動かないのは、サンドボックスがオンのときだけです。
+エージェントが worktree に置いたリンク(`.task-report.md` を `~/.ssh/id_ed25519` に向けるなど)も、`task-agent` で
+読むので、`task-agent` が読めるものにしか届きません。task-hub 自身のプロセス(herdr のペインのシェル、
+`task _run`)は、worktree ではなく `~/.local/share/task-hub` で動きます。git を見るシェルのプロンプト(starship など)が、
+worktree の中であなたの権限で git を動かさないようにするためです。
 
 ## 確かめ方
 
-テスト `test_sandboxed_agent_sees_only_its_worktree_yet_the_run_opens_a_pr`(`tests/test_task.py`)が、偽物の
-エージェントを `bwrap` の中で動かし、次を確かめます。`bwrap` が動かない環境では skip します。
+テスト `test_agent_run_as_the_sandbox_user_sees_only_its_worktree_yet_the_run_opens_a_pr`(`tests/test_task.py`)が、
+偽物のエージェントを本物の `task-agent` で動かします。`sudo -n -u task-agent` が通らないマシンでは skip します
+(ユーザーは `TASK_TEST_SANDBOX_USER` で変えられます)。テストのフォルダに、上の用意と同じ ACL を付けて確かめるのは次です。
 
 - worktree の `README.md` は読める
-- HOME の別のファイルと `config.ini` は読めない
-- `GH_TOKEN` は渡らない
-- Goal の Rules の設定ファイルは書き換えられない
-- `~/.claude/settings.json`、`~/.claude.json`、`~/.claude/hooks/` には書けない。`~/.claude/projects` には書ける
-- worktree の `.git`、git ディレクトリの `commondir` と `config.worktree` は書き換えられず、`.git` を差し替えられない。
-  エージェントが用意した `core.fsmonitor` と hook は、外の git で動かない
-- それでも task-hub が push して PR を作る
+- あなたのファイル(0600 の `secret.txt`、0700 のフォルダの中の `config.ini`)は読めない
+- `GH_TOKEN` は渡らない。エージェントは `task-agent` として動く
+- エージェントが clone に置いた pre-commit の hook と `core.fsmonitor` は、task-hub の commit で動くが、動いたのは
+  毎回 `task-agent` で、あなたのユーザーでは 1 度も動かない
+- それでも commit と push ができ、PR ができる。PR の大きさは GitHub の比較(偽物の `gh`)から読む
 
-テスト `test_sandboxed_host_git_runs_no_command_the_agent_set_up` は、外の git(`git_wt`)だけを確かめます。worktree の中の
-入れ子のリポジトリの `core.fsmonitor` は `git diff` で動かず、`.git` を別の git ディレクトリに向けると git を動かさずに止まります。
+本物のマシンでは、2026-10-17 に `task-agent` で次を手で確かめました(sudo 1.9.17p2、Arch 系の Linux)。
 
-本物の Claude Code では、2026-10-17 に次を手で確かめました(Claude Code 2.1.302、bubblewrap 0.12.0、Arch 系の Linux)。
+```sh
+sudo -n -u task-agent -H -D ~/.local/share/task-hub/worktrees/5 -- sh -c '
+  cat ~joka/.ssh/* ~joka/.config/gh/hosts.yml ~joka/.config/task-hub/config.ini ~joka/.claude.json  # すべて Permission denied
+  head -1 README.md                                  # 読める
+  git push --dry-run origin HEAD:task/5               # Everything up-to-date(task-agent の gh で)
+  gh api user -q .login'
+```
 
-- `claude -p --dangerously-skip-permissions` がサンドボックスの中で答えを返す
-- 記録が `~/.claude/projects` に残り、task-hub が使用量を読める
-- `~/.ssh`、`~/.config/gh`、`~/.config/task-hub` は見えない。clone の `.git` には書けない
-- `.claude/settings.local.json` の deny が `--dangerously-skip-permissions` でも効く
-- `~/.claude.json` と `~/.claude/settings.json` を読むだけにしても答えを返し、記録も残る。中から
-  `~/.claude/settings.json` に書こうとすると read-only で失敗し、ホストのファイルは変わらない
-
-Codex、Pi、Kiro はサンドボックスの中で動かしていません(未確認)。
+本物の Claude Code を `task-agent` で動かすのは、まだ確かめていません。`task-agent` に Claude Code が入っておらず、
+ログインもしていないためです(2026-10-17)。
 
 ## タスクごとの決まり(Rules)
 
 Goal に `Rules` の見出しを書くと、`can:` / `ask:` / `never:` の行が Claude Code の権限の設定になります。
-書き方は [task-format.md](task-format.md#rules-タスクごとの決まり) にあります。サンドボックスが on のときは、
-その設定ファイルをエージェントが書き換えられないようにします。off でも Rules は効きますが、エージェントが
-ファイルを書き換えると、同じ実行の reviewer や差し戻しの起動に効かなくなることがあります。
+書き方は [task-format.md](task-format.md#rules-タスクごとの決まり) にあります。サンドボックスとは別の仕組みで、
+off でも効きます。ただし、ファイルは worktree の中にあるので、エージェントは書き換えられます。書き換えは
+次の起動(同じ実行の reviewer、差し戻し、次の実行)から効き、開始のたびに task-hub が書き直します。
 
 ## ブラウザ(Web のタスク)
 
-ヘッドレスのブラウザは、Playwright の MCP サーバーでエージェントに渡せます。Claude Code なら、1 回だけ登録します。
+ヘッドレスのブラウザは、Playwright の MCP サーバーでエージェントに渡せます。登録もブラウザも `task-agent` の
+HOME に入れます。
 
 ```sh
-claude mcp add --scope user playwright -- npx @playwright/mcp@latest --headless --isolated
-npx playwright install chromium        # ブラウザを ~/.cache/ms-playwright に入れる
+sudo -u task-agent -H claude mcp add --scope user playwright -- npx @playwright/mcp@latest --headless --isolated
+sudo -u task-agent -H npx playwright install chromium     # /var/lib/task-agent/.cache/ms-playwright に入る
 ```
 
-サンドボックスの中から使うには、`[sandbox]` に足します。
-
-```ini
-read = ~/.cache/ms-playwright
-write = ~/.npm
-```
-
-- 登録は `~/.claude.json` に入るので、`agent_files` で中に届きます。中では読むだけなので、登録はサンドボックスの外で行います
+- `task-agent` には `npx`(Node.js)が要ります。`/usr/bin` に入れるか、`task-agent` の HOME に入れます
 - `--isolated` は、ブラウザのプロファイルを毎回まっさらにします。あなたのブラウザのログインは使いません
-- ネットワークはつながっているので、どのサイトでも開けます。サイトを絞るなら Goal の Rules で `never: mcp__playwright__*` などを書きます
+  (`task-agent` からはもともと届きません)
+- ネットワークは絞りません。サイトを絞るなら Goal の Rules で `never: mcp__playwright__*` などを書きます
 
-この手順は、2026-10-17 の時点でサンドボックスの中では確かめていません。
+この手順は、2026-10-17 の時点で確かめていません(`task-agent` に Claude Code がまだないため)。
 
 ## 制限
 
 - Linux だけです。Mac と Windows では `mode = off` のままにします
-- `[setup]` は外で動き、前の実行でエージェントが書き換えたかもしれないファイルを使います(`npm install` が
-  `package.json` の scripts を動かすなど)。これは守れません。気になるなら `[setup]` を使わないか、中身を確かめます
-- サブモジュールのあるリポジトリと、`.git` を中に持つフォルダ(git から入れた `node_modules` の依存など、`[setup]`
-  が作ったものも含みます)のある worktree は動かせません。上のとおり、外の git を動かす前に Blocked にします
-- 入れ子の `.git` の確認は、外の git を動かすたびに worktree 全体をたどります。ファイルがとても多い worktree では、
-  その分だけ遅くなります
-- ネットワークは絞りません。エージェントは worktree の中のもの(`[env]` でコピーした `.env` を含む)を外に送れます
-- `agent_files` は読み書きできるので、エージェントは同じ CLI のほかのプロジェクトの記録も読めます
-- HOME は毎回空なので、`~/.cache` などのキャッシュは残りません。遅いときは `write` に足します
-- mise のシムのように、HOME の中の設定を書き換えるツールは動かないことがあります。`PATH` で先に本物のプログラムが
-  見つかるようにするか、`read` に足します
+- **GitHub のトークンの範囲がそのまま守りの範囲です。** `task-agent` はそのトークンで、許されたリポジトリの
+  どのブランチにも push できます。fine-grained のトークンで、タスクのリポジトリの contents と pull requests
+  だけにします。`main` は GitHub のブランチ保護で守ります。classic のトークン(`ghp_`)は、アカウントの
+  すべてのリポジトリに届き、`delete_repo` などの scope もありうるので使いません。`sudo -u task-agent -H gh auth status`
+  で確かめられます
+- エージェントは、共有のフォルダにあるほかのタスクの worktree と clone も読み書きできます(`[env]` でコピーした
+  `.env` も)。同じマシンで同時に動く別のタスクから守るものではありません
+- ネットワークは絞りません。エージェントは worktree の中のもの(`.env` を含む)を外に送れます
+- エージェントの使用量(`task stats` のトークン)は読めません。記録が `task-agent` の HOME
+  (`/var/lib/task-agent/.claude/projects`)にあり、あなたからは読めないからです
+- worktree を **あなたのユーザーで** 開く(`task open`、エディタ、git を見るシェルのプロンプトで `cd` する)と、
+  エディタやプロンプトの git があなたの権限で動き、エージェントの仕込んだ設定(`core.fsmonitor` など)を動かします。
+  中を見るときは `sudo -u task-agent -H git -C <worktree> diff` のように、`task-agent` で見るか、PR で見ます
+- **`user` から `off` に戻すときは、先に `~/.local/share/task-hub/repos` と `~/.local/share/task-hub/worktrees`
+  を消します**(中の作業は push するか取っておいてから)。`off` では task-hub があなたのユーザーで clone と worktree に
+  git を動かすので、エージェントの仕込んだ `core.fsmonitor` や hook があなたの権限で動くからです。task-hub は
+  `mode = user` が一度動くと `~/.local/share/task-hub/sandbox-used` を書き、それがある間、`off` の開始は Blocked
+  になり、後片付けは残します。二つのフォルダが空になると、次の実行でこの印を消して、普通に動きます
+- `off` から `user` に変えたときにすでにある clone と worktree は、共有のフォルダの ACL が付いていれば
+  そのまま使えます。付いていなければ、セットアップのスクリプトをもう一度動かします
