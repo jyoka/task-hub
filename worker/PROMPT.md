@@ -19,6 +19,9 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    If the Goal has a "Ready conditions" section, check each condition first. If one does not hold
    (a file, function, or decision it needs is not there, a key is missing), stop at once without
    changing files and report it as Blocked (below), naming the condition.
+   If the Goal has a "Rules" section, follow it: never do what a `never:` line names. What an
+   `ask:` line names needs the human's approval first: do not do it; finish the rest, and report
+   it as Blocked, naming the approval you need. `can:` lines are allowed without asking.
 2. Make the change. Keep it to what the Goal asks for.
 3. Run the project's tests and linters, and fix what you broke.
    While you work, run only the tests related to what you changed. Run the full test suite once,

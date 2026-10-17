@@ -260,6 +260,25 @@ if mode == "env":  # proves the agent got the env files: writes what it read
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
+if mode == "sandbox":  # proves what a sandboxed agent can reach: the worktree, but not the rest of HOME
+    def seen(path):
+        try:
+            return Path(path).expanduser().read_text().strip()
+        except OSError:
+            return "hidden"
+    Path("seen.txt").write_text(f"readme: {seen('README.md')}\nsecret: {seen('~/secret.txt')}\n"
+                                 f"config: {seen('~/.config/task-hub/config.ini')[:7]}\n"
+                                 f"gh token: {os.environ.get('GH_TOKEN', 'unset')}\n"
+                                 f"rules: {seen('.claude/settings.local.json')[:1]}\n")
+    for path in (".claude/settings.local.json", "~/.claude/settings.json", "~/.claude.json", "~/.claude/hooks/x.sh"):
+        try:  # a hook or MCP server left here would run later, outside the sandbox
+            Path(path).expanduser().write_text('{"hooks": "curl evil"}')
+            Path("seen.txt").write_text(Path("seen.txt").read_text() + f"changed {path}\n")
+        except OSError:
+            pass
+    Path("~/.claude/projects/t.jsonl").expanduser().write_text("transcript\n")  # the CLI's record stays writable
+if mode == "rules":  # what the Goal's Rules became in Claude Code's settings
+    Path("seen.txt").write_text(Path(".claude/settings.local.json").read_text())
 if mode == "needsetup":  # proves [setup] ran first: writes what setup left in the virtualenv
     Path("hello.txt").write_text("setup seen: " + Path(".venv/marker").read_text().strip() + "\n")
     Path(".task-report.md").write_text(report)
@@ -1597,6 +1616,80 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertEqual(len(self.agent_calls()), 1)
+
+    def new_with_goal(self, goal):
+        out = self.task("new", "--title", "Add hello", "--repo", "jyoka/app", "--goal", goal)
+        return re.search(r"id: (\d+)", out).group(1)
+
+    def test_goal_rules_reach_claude_code_settings_but_never_the_pr(self):
+        tid = self.new_with_goal("Say hello. MODE:rules\n\n### Rules\n\nOnly the app folder, please.\n"
+                                 "- can: Bash(npm test *), `Read`\n- ask: Bash(git push *)\n"
+                                 "- never: Read(~/.ssh/**), Bash(curl a,b), WebFetch\n\n### Notes\n\n- see: x\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:seen.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(seen), {"permissions": {"allow": ["Bash(npm test *)", "Read"],
+                                                            "ask": ["Bash(git push *)"],
+                                                            "deny": ["Read(~/.ssh/**)", "Bash(curl a,b)", "WebFetch"]}})
+        self.assertNotIn(".claude", self.origin_files(f"task/{tid}"))
+
+    def test_rules_taken_out_of_the_goal_leave_no_settings_behind(self):
+        tid = self.new_with_goal("Say hello. MODE:blocked\n\n## Rules\n\n- never: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        settings = self.root / ".local/share/task-hub/worktrees" / tid / ".claude/settings.local.json"
+        self.assertTrue(settings.exists())
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok\n"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertFalse(settings.exists())
+
+    def test_unknown_rule_word_stops_the_start(self):
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Rules\n\n- maybe: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn('starting "maybe:"', self.comments(tid)[-1])
+
+    def test_unknown_sandbox_mode_stops_the_start(self):
+        self.write_config("\n[sandbox]\nmode = docker\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("[sandbox] mode must be off or bwrap", self.comments(tid)[-1])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("bwrap") and subprocess.run(
+        ["bwrap", "--ro-bind", "/", "/", "--unshare-all", "--share-net", "--", "true"],
+        capture_output=True).returncode == 0, "bwrap runs on Linux only, with user namespaces")
+    def test_sandboxed_agent_sees_only_its_worktree_yet_the_run_opens_a_pr(self):
+        (self.root / "secret.txt").write_text("my ssh key\n")
+        tools = self.root / "tools"  # a folder of HOME the config names; HOME itself is never bound
+        tools.mkdir()
+        shutil.copy2(self.root / "agent", tools / "agent")
+        self.calls.touch()
+        (self.root / ".claude/projects").mkdir(parents=True)
+        (self.root / ".claude/settings.json").write_text('{"model": "opus"}')
+        (self.root / ".claude.json").write_text('{"mcpServers": {}}')
+        self.write_config(f"boxed = {tools}/agent {{prompt}}\n\n[sandbox]\nmode = bwrap\nwrite = {self.calls}\n")
+        self.env["GH_TOKEN"] = "gho_secret"  # the fake gh ignores it; the agent must not get it
+        tid = self.new_with_goal("Say hello. MODE:sandbox\n\n## Rules\n\n- never: WebFetch\n")
+        self.task("start", tid, "--agent", "boxed")
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("== sandbox: bwrap", self.task("log", tid, "--full"))
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:seen.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "readme: app\nsecret: hidden\nconfig: hidden\ngh token: unset\nrules: {\n")
+        self.assertTrue(self.gh()["prs"])  # task-hub, outside the sandbox, committed, pushed and opened the PR
+        self.assertEqual((self.root / ".claude/settings.json").read_text(), '{"model": "opus"}')
+        self.assertEqual((self.root / ".claude.json").read_text(), '{"mcpServers": {}}')
+        self.assertFalse((self.root / ".claude/hooks/x.sh").exists())
+        self.assertEqual((self.root / ".claude/projects/t.jsonl").read_text(), "transcript\n")
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
