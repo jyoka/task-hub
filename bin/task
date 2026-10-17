@@ -73,6 +73,7 @@ LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/op
 SANDBOX_AGENT_FILES = "~/.claude, ~/.claude.json, $CLAUDE_CONFIG_DIR, ~/.codex, ~/.pi, ~/.kiro, ~/.local/share/kiro-cli"
 # what of those starts code or steers the CLI the next time it runs, sandboxed or not (hooks, MCP servers, plugins,
 # instructions): read-only over the read-write folder, made first (empty) when missing. A trailing / is a folder
+HOST_GIT = ["-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]  # git outside on what a sandboxed agent wrote
 SANDBOX_AGENT_CODE = ["~/.claude.json", "~/.claude/settings.json", "~/.claude/CLAUDE.md", "~/.claude/hooks/",
                       "~/.claude/commands/", "~/.claude/agents/", "~/.claude/skills/", "~/.claude/plugins/",
                       "~/.claude/output-styles/", "$CLAUDE_CONFIG_DIR/.claude.json", "$CLAUDE_CONFIG_DIR/settings.json",
@@ -555,20 +556,52 @@ def sandboxed(argv, wt):
     for p in dict.fromkeys(q for p in read for q in (Path(os.path.normpath(p)), p.resolve())):
         if outside_system(p) and outside_system(p.resolve()):
             args += ["--ro-bind", str(p), str(p)]
-    git_common = Path(run("git", "-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
-    git_dir = Path(run("git", "-C", wt, "rev-parse", "--absolute-git-dir").stdout.strip())
+    git_common = Path(git_wt(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
     args += ["--ro-bind", str(git_common), str(git_common)]  # the repository's objects and refs: read only
     for p in dict.fromkeys(p.resolve() for p in sandbox_paths("agent_files") + sandbox_paths("write")):
         if outside_system(p):
             args += ["--bind", str(p), str(p)]
     for p in sandbox_guarded():  # over the read-write folders: no hook or MCP server left for a later run
         args += ["--ro-bind", str(p), str(p)]
-    args += ["--bind", str(git_dir), str(git_dir), "--bind", str(wt), str(wt)]  # its index, HEAD; the work
+    # the work, but not the .git that says which git directory (and so which config, hooks) task-hub's own git
+    # uses outside: git_dir lies in git_common, read only, so the agent cannot commit, only task-hub can
+    args += ["--bind", str(wt), str(wt), "--ro-bind", str(wt / ".git"), str(wt / ".git")]
     if (wt / RULES_FILE).is_file():  # the Goal's Rules hold for every launch of the run, whatever the agent edits
         args += ["--ro-bind", str(wt / RULES_FILE), str(wt / RULES_FILE)]
     for name in SANDBOX_UNSET:
         args += ["--unsetenv", name]
     return [*args, "--chdir", str(wt), "--", *argv]
+
+
+def git_wt(wt, *args, check=False):
+    """git on a task's worktree, run outside any sandbox. With [sandbox] on, the agent wrote that worktree: its
+    hooks and fsmonitor stay off, and its .git must still lead into task-hub's own clone (decision 22)."""
+    if sandbox_mode() == "off":
+        return run("git", "-C", wt, *args, check=check)
+    check_git_links(wt)
+    return run("git", *HOST_GIT, "-C", wt, *args, check=check)
+
+
+def check_git_links(wt):
+    """Raise unless wt/.git leads to a git directory of one of task-hub's clones, and that one's commondir back to
+    the same clone: pointed elsewhere, git outside the sandbox would run the agent's own config (core.fsmonitor).
+    Raise too on any other .git in the worktree: git outside reads a nested repository's config (filter.*.clean,
+    diff.*.textconv) for add, status and diff, and no list of -c flags covers every key that runs a command."""
+    dot_git = Path(wt) / ".git"
+    m = re.fullmatch(r"gitdir: (.+?)\r?\n?", dot_git.read_text(errors="replace")) \
+        if dot_git.is_file() and not dot_git.is_symlink() else None
+    git_dir = (Path(wt) / m.group(1)).resolve() if m else None  # relative with worktree.useRelativePaths
+    common = None
+    if git_dir and (git_dir / "commondir").is_file() and not (git_dir / "commondir").is_symlink():
+        common = (git_dir / (git_dir / "commondir").read_text(errors="replace").strip()).resolve()
+    if not common or git_dir.parent != common / "worktrees" or common.name != ".git" \
+            or common.parent.parent.parent != (DATA / "repos").resolve():
+        raise RuntimeError(f"{home(dot_git)} no longer leads to task-hub's clone; git was not run on it "
+                           "(the agent may have changed it, docs/sandbox.md)")
+    for top, dirs, files in os.walk(wt):  # links are listed, never followed
+        if ".git" in dirs + files and Path(top) != Path(wt):
+            raise RuntimeError(f"{home(Path(top) / '.git')} is a repository inside the worktree; git was not run on "
+                               "it (its config, such as filter.*.clean, would run outside the sandbox, docs/sandbox.md)")
 
 
 def check_agent(name):
@@ -1312,7 +1345,7 @@ def base_ref(t, git_dir):
 
 
 def exclude_file(wt):
-    exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
+    exclude = Path(git_wt(wt, "rev-parse", "--git-common-dir").stdout.strip())
     return (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
 
 
@@ -1356,7 +1389,7 @@ def copy_env_files(t, wt):
         if rel in copies:
             raise RuntimeError(f"env destination {dest} is given twice; fix [env] in {home(CONFIG)}")
         copies[rel] = src
-        if run("git", "-C", wt, "ls-files", "--error-unmatch", rel).returncode == 0:
+        if git_wt(wt, "ls-files", "--error-unmatch", rel).returncode == 0:
             raise RuntimeError(f"env file {rel} is tracked in {t['repo']}; copying it would change the PR")
     for rel, src in copies.items():
         (wt / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1402,7 +1435,7 @@ def write_rules(t, wt, body):
     .claude/settings.json; a deny holds even with --dangerously-skip-permissions). Never committed. Other agents
     get the Rules as part of the Goal in their prompt."""
     rules = goal_rules(body)
-    if run("git", "-C", wt, "ls-files", "--error-unmatch", RULES_FILE).returncode == 0:
+    if git_wt(wt, "ls-files", "--error-unmatch", RULES_FILE).returncode == 0:
         if rules:
             raise RuntimeError(f"{RULES_FILE} is tracked in {t['repo']}; the Goal's Rules cannot be written to it")
         return
@@ -1434,8 +1467,8 @@ def run_setup(t, wt, say):
         return ""
     set_stage(t, "setup")
     say(f"== setup: {cmd}")
-    before = set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
-    changed_before = set(run("git", "-C", wt, "diff", "--name-only", "HEAD").stdout.split("\n"))
+    before = set(git_wt(wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
+    changed_before = set(git_wt(wt, "diff", "--name-only", "HEAD").stdout.split("\n"))
     # Windows has no sh: PowerShell, stopping at a failing cmdlet, ending with the last program's exit code
     shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
              "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $ErrorActionPreference = 'Stop'\n" + cmd
@@ -1447,12 +1480,12 @@ def run_setup(t, wt, say):
     code = proc.wait()
     if code != 0:
         return f"setup failed (exit {code}), see `task log {t['id']}`"
-    new = sorted(set(run("git", "-C", wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n")) - before)
+    new = sorted(set(git_wt(wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n")) - before)
     if [f for f in new if f]:
         shown = ", ".join(f for f in new if f)[:200]
         return f"setup left files git would commit ({shown}); ignore them in the repository or change [setup]"
     # a file of the repository it rewrote (npm install and package-lock.json) would be committed as the agent's work
-    changed = sorted(set(run("git", "-C", wt, "diff", "--name-only", "HEAD").stdout.split("\n")) - changed_before)
+    changed = sorted(set(git_wt(wt, "diff", "--name-only", "HEAD").stdout.split("\n")) - changed_before)
     if [f for f in changed if f]:
         shown = ", ".join(f for f in changed if f)[:200]
         return (f"setup changed files of the repository ({shown}); change [setup] so it leaves them as they are "
@@ -1469,7 +1502,7 @@ def ensure_worktree(t):
     repo_dir = clone_dir(t["repo"])
     wt = DATA / "worktrees" / t["id"]
     if (wt / ".git").exists():
-        common = run("git", "-C", wt, "rev-parse", "--git-common-dir", check=True).stdout.strip()
+        common = git_wt(wt, "rev-parse", "--git-common-dir", check=True).stdout.strip()
         if not (repo_dir / ".git").exists() or not (wt / common).samefile(repo_dir / ".git"):
             raise RuntimeError("existing worktree belongs to another repository; restore its Target repo, "
                                "or create a new task for the other repository")
@@ -1495,8 +1528,8 @@ def ensure_worktree(t):
         # what a human pushed to the task branch since (the PR's "Update branch", a fix by hand): the agent starts
         # from it, and the push at the end is not refused for being behind
         remote = f"origin/{t['branch']}"
-        if run("git", "-C", wt, "rev-parse", "--verify", "-q", remote).returncode == 0 and \
-                run("git", "-C", wt, "merge", "--ff-only", "-q", remote).returncode != 0:
+        if git_wt(wt, "rev-parse", "--verify", "-q", remote).returncode == 0 and \
+                git_wt(wt, "merge", "--ff-only", "-q", remote).returncode != 0:
             raise RuntimeError(f"branch {t['branch']} on GitHub and this machine's worktree {home(wt)} have both "
                                f"changed; merge {remote} in that worktree (or delete it to start from GitHub's), "
                                "then move the card to Ready again")
@@ -1634,16 +1667,16 @@ def build_prompt(t, i):
 def staged_diff(t):
     """The whole PR as it will be pushed: all files, new ones included, from where the branch left its base."""
     wt = t["worktree"]
-    run("git", "-C", wt, "add", "-A", check=True)
-    fork = run("git", "-C", wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
-    return run("git", "-C", wt, "diff", "--cached", fork, "--").stdout
+    git_wt(wt, "add", "-A", check=True)
+    fork = git_wt(wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
+    return git_wt(wt, "diff", "--cached", fork, "--").stdout
 
 
 def pr_size(t, wt):
     """(files, lines added, lines removed) of the whole branch since it left its base: what the PR asks you to review."""
-    fork = run("git", "-C", wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip()
+    fork = git_wt(wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip()
     files = added = removed = 0
-    for line in run("git", "-C", wt, "diff", "--numstat", fork, "HEAD").stdout.splitlines() if fork else []:
+    for line in git_wt(wt, "diff", "--numstat", fork, "HEAD").stdout.splitlines() if fork else []:
         plus, minus, _ = line.split("\t", 2)
         files += 1
         added += int(plus) if plus.isdigit() else 0  # "-" for a binary file
@@ -1653,9 +1686,9 @@ def pr_size(t, wt):
 
 def snapshot(wt):
     """Everything in the worktree, staged, as (tree, HEAD): what a read-only helper must leave as it found it."""
-    run("git", "-C", wt, "add", "-A", check=True)
-    return (run("git", "-C", wt, "write-tree", check=True).stdout.strip(),
-            run("git", "-C", wt, "rev-parse", "HEAD", check=True).stdout.strip())
+    git_wt(wt, "add", "-A", check=True)
+    return (git_wt(wt, "write-tree", check=True).stdout.strip(),
+            git_wt(wt, "rev-parse", "HEAD", check=True).stdout.strip())
 
 
 def restore(wt, snap):
@@ -1665,15 +1698,15 @@ def restore(wt, snap):
     New files it never staged are leftovers of test runs: removed, but not an offence. Ignored files stay.
     """
     tree, head = snap
-    moved = run("git", "-C", wt, "rev-parse", "HEAD").stdout.strip() != head
-    edited = moved or run("git", "-C", wt, "write-tree").stdout.strip() != tree \
-        or run("git", "-C", wt, "diff", "--quiet").returncode != 0
+    moved = git_wt(wt, "rev-parse", "HEAD").stdout.strip() != head
+    edited = moved or git_wt(wt, "write-tree").stdout.strip() != tree \
+        or git_wt(wt, "diff", "--quiet").returncode != 0
     if edited:
         if moved:
-            run("git", "-C", wt, "reset", "-q", "--soft", head, check=True)  # its commit never reaches the PR
-        run("git", "-C", wt, "read-tree", tree, check=True)
-        run("git", "-C", wt, "checkout-index", "-a", "-f", check=True)
-    run("git", "-C", wt, "clean", "-fdq", check=True)  # also removes new files it had staged
+            git_wt(wt, "reset", "-q", "--soft", head, check=True)  # its commit never reaches the PR
+        git_wt(wt, "read-tree", tree, check=True)
+        git_wt(wt, "checkout-index", "-a", "-f", check=True)
+    git_wt(wt, "clean", "-fdq", check=True)  # also removes new files it had staged
     return edited
 
 
@@ -2316,8 +2349,8 @@ def unverified_evidence(wt, evidence):
         ok = False
         if m and len(m.group(3).strip()) >= 3:
             path = (wt / m.group(1)).resolve()
-            if path.is_relative_to(wt.resolve()) and path.is_file() and run(
-                    "git", "-C", wt, "ls-files", "--error-unmatch", "--", path.relative_to(wt.resolve())).returncode == 0:
+            if path.is_relative_to(wt.resolve()) and path.is_file() and git_wt(
+                    wt, "ls-files", "--error-unmatch", "--", path.relative_to(wt.resolve())).returncode == 0:
                 lines = path.read_text(errors="replace").splitlines()
                 n = int(m.group(2))
                 ok = 1 <= n <= len(lines) and m.group(3).strip() in lines[n - 1]
@@ -2483,11 +2516,11 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
     """Commit and push the agent's work, open or update the PR, report on the Issue, move the card."""
     parsed = AgentReport(report, auto_review=auto_review)
     wt = t["worktree"]
-    run("git", "-C", wt, "add", "-A", check=True)
-    if run("git", "-C", wt, "diff", "--cached", "--quiet").returncode != 0:
-        run("git", "-C", wt, "commit", "-q", "-m", f"task {t['id']}: {t['title']}", check=True)
+    git_wt(wt, "add", "-A", check=True)
+    if git_wt(wt, "diff", "--cached", "--quiet").returncode != 0:
+        git_wt(wt, "commit", "-q", "-m", f"task {t['id']}: {t['title']}", check=True)
     base = base_ref(t, wt)
-    ahead = run("git", "-C", wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
+    ahead = git_wt(wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
 
     if not report.strip():
         parsed.blocked = f"agent exited without a report (exit {code}), see `task log {t['id']}`"
@@ -2496,7 +2529,7 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
     elif not parsed.blocked and not ahead and not t.get("research"):  # a research task's report is its result
         parsed.blocked = "agent wrote a report but changed no files"
     if ahead:
-        run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
+        git_wt(wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
     body = parsed.issue_comment(t.get("pr", "") if ahead else "")
