@@ -164,9 +164,11 @@ def home(p):
 
 
 def run(*cmd, cwd=None, check=False):
-    r = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True)
+    # not text=True: its universal newlines split a line git redraws with \r, which git_said keeps whole
+    r.stdout, r.stderr = (b.decode(errors="replace").replace("\r\n", "\n") for b in (r.stdout, r.stderr))
     if check and r.returncode != 0:
-        raise RuntimeError(f"{' '.join(map(str, cmd[:3]))} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        raise RuntimeError(f"{' '.join(map(str, cmd[:3]))} failed: {git_said(r)}")
     return r
 
 
