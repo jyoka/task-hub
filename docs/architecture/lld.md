@@ -389,6 +389,9 @@ stateDiagram-v2
   `<<<<<<<`、`>>>>>>>` の行もない、を確かめてから `git commit --no-edit`(親が 2 つ)と push をします。どれかが
   だめなら `git merge --abort`、`reset --hard`、`clean -fd` で元に戻し、カードを Blocked にします。push だけが
   失敗したときは、作ったマージコミットを戻さずに worktree に残して Blocked にします(`push_failed`。`merge_update` も同じ)
+  理由に入れる git の出力は `git_said` で整えます。`\r` で描き直された行は最後の描画だけ、ANSI の消去コードと
+  sideband の空白は消し、300 文字ほどに収まるよう行ごとに `remote:`(フックのことば)、`! [rejected]` の順に残します。
+  長すぎる行は 300 文字で切るので、少なくとも 1 行は必ず残ります
 
 ## 5. 手元のファイル
 

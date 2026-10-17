@@ -3004,7 +3004,7 @@ def merge_update(t, e, pr, settings):
     conflicted = unmerged(wt)
     run("git", "-C", wt, "merge", "--abort")
     if not conflicted:
-        raise RuntimeError(f"git merge origin/{base} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        raise RuntimeError(f"git merge origin/{base} failed: {git_said(r)}")
     files = ", ".join(conflicted)
     if e.get("fixed") == base_sha:  # the fix ran for this very base and the conflict is still there
         return merge_block(t, e, f"the conflict fix did not resolve the conflicts with {base} ({files})")
@@ -3022,7 +3022,36 @@ def push_failed(wt, head):
     r = run("git", "-C", wt, "push", "-q", "origin", f"HEAD:{head}")
     if r.returncode == 0:
         return ""
-    return f"pushing {head} failed, the merge commit is kept in {home(wt)}: {(r.stderr or r.stdout).strip()[-300:]}"
+    return f"pushing {head} failed, the merge commit is kept in {home(wt)}: {git_said(r)}"
+
+
+TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]")
+
+
+def git_said(r, limit=300):
+    """What a failed git command said, for a reason: one clean line per message, at most about `limit` characters.
+    Sideband output (`remote: `, a hook's message) comes padded with spaces or ANSI clear-line codes and
+    redrawn with \\r, more so on macOS; only the last drawing of each line is kept. Cut to size by whole lines,
+    the `remote:` ones first, then a ref's `! [rejected]`: they say why, where `To <url>` and `error: failed to
+    push` only say where."""
+    lines = []
+    for line in (r.stderr or r.stdout or "").split("\n"):  # not splitlines(): that splits at \r too
+        drawn = [d.strip() for d in TERMINAL_ESCAPE.sub("", line).split("\r")]
+        if last := next((d for d in reversed(drawn) if d not in ("", "remote:")), ""):
+            lines.append(last[:limit])
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    order = sorted(reversed(range(len(lines))), key=lambda i: 0 if lines[i].startswith("remote:") else
+                   1 if lines[i].startswith("! ") else 2)
+    kept, size = set(), 0
+    for i in order:  # the first one always fits: every line is at most `limit`, and \n only goes between lines
+        need = len(lines[i]) + (1 if kept else 0)
+        if size + need > limit:
+            continue
+        kept.add(i)
+        size += need
+    return "\n".join(lines[i] for i in sorted(kept))
 
 
 def merge_ci(t, e, pr, settings):
@@ -3167,7 +3196,7 @@ def fix_conflicts(t, wt, base, say):
     conflicted = unmerged(wt)
     merging = lambda: run("git", "-C", wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0
     if r.returncode != 0 and not conflicted:
-        return f"git merge {base} failed: {(r.stderr or r.stdout).strip()[-300:]}", "", [], False
+        return f"git merge {base} failed: {git_said(r)}", "", [], False
     if not merging():  # up to date: nothing to fix
         say(f"== {t['branch']} already has {base}")
         return "", "", [], False
