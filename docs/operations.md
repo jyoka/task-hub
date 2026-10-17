@@ -349,6 +349,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
+| トリガーが作ったものの記録([triggers.md](triggers.md)) | `~/.local/state/task-hub/triggers.json` |
 | 直近に読んだボード(`task list` が共有) | `~/.local/state/task-hub/board-cache.json`、`board-meta.json` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | worktree | `~/.local/share/task-hub/worktrees/<番号>` |

@@ -69,6 +69,7 @@ flowchart TB
         sync["同期と開始<br/>sync、launch"]
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
+        trig["トリガー<br/>check_triggers(task watch だけ)"]
         links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
     end
 
@@ -101,6 +102,10 @@ flowchart TB
     khook -. "task events" .-> cli
     piext -. "task events --next" .-> cli
     cli --> sync
+    cli --> trig
+    trig -- "カードを作る(create_task)" --> board
+    trig -- "gh run list、gh issue list" --> gh
+    trig --> state
     sync --> board
     sync -- "起動" --> runner
     board -- "gh" --> gh
@@ -124,7 +129,7 @@ flowchart TB
 
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
-| `bin/task` | CLI、同期、開始、ボードの読み書き、通知 | GitHub のボード、手元の状態、作業場所 |
+| `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md)) | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
@@ -190,7 +195,21 @@ flowchart LR
 
 通知は LLM を使いません。会話のエージェントを起こすのは、出来事が書かれたときだけです。
 
-### 4.3 ボードの読み取り
+### 4.3 トリガー
+
+`[triggers]` を書いたときだけ、`task watch` の 1 回の確認で `sync` のあとに `check_triggers` が動きます(5 分に 1 回まで)。
+
+```mermaid
+flowchart LR
+    watch["task watch<br/>sync のあと"] --> trig["check_triggers"]
+    trig -- "gh run list(REST)、gh issue list" --> gh[("GitHub")]
+    trig -- "まだ記録にないものだけ" --> seen[("triggers.json")]
+    trig -- "create_task(Backlog、ready なら Ready)" --> gh
+```
+
+Ready に入ったカードは、次の確認の `sync` が始めます。詳しくは [triggers.md](../triggers.md) です。
+
+### 4.4 ボードの読み取り
 
 ```mermaid
 flowchart LR
@@ -249,7 +268,7 @@ flowchart TB
 
 | 項目 | 目標と、守っている仕組み |
 |---|---|
-| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST |
+| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST。トリガーは 5 分に 1 回まで(リポジトリごとに 1 時間 12〜24 ポイント) |
 | 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない |
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |
@@ -267,3 +286,4 @@ flowchart TB
 | 出来事の種類 | `emit` を呼び、`[notify] events` と読む側のフィルタに足す | [lld.md](lld.md) の 6 章 |
 | Status の列 | `StatusLifecycle` と design.md の図を一緒に変える | [design.md](../design.md) |
 | 実行の段階 | `set_stage` を呼び、design.md の段階の表に足す | [design.md](../design.md) |
+| トリガーの種類 | `*_occurrences` 関数を足して `check_triggers` から呼ぶ。1 回のことを表す記録のキーを決める | [lld.md](lld.md) の 4.7 節、[triggers.md](../triggers.md) |

@@ -92,6 +92,8 @@ Use any of the three ways, or mix them.
 | **Terminal only** | Register with `task new`, start with `task start <id>`, and watch with `task list` |
 
 To start Ready cards automatically, keep `task watch` running. It checks every minute.
+With `[triggers]` in the config, `task watch` also makes cards on its own: for failing CI, for Issues assigned to
+you, and for recurring goals. They go to Backlog for you to approve ([docs/triggers.md](docs/triggers.md)).
 
 Example: you ask to fix the login, then merge.
 
@@ -155,6 +157,7 @@ The docs are in Japanese.
 | [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
 | [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
+| | [triggers.md](docs/triggers.md) Cards task-hub makes on its own | | |
 
 ## Bug reports and feature requests
 
