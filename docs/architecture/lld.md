@@ -13,7 +13,7 @@ flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、build_prompt、<br/>run_agent_process、sandboxed、sandbox_guarded、Steps、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、build_prompt、<br/>run_agent_process、sandboxed、sandbox_guarded、git_wt、check_git_links、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -415,7 +415,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 8. 手元の JSON は、書き込みの途中で読んでも壊れていない
 9. アンインストールは、インストーラが記録したものだけを消す。ジャンクションは先を消さずに外す。作業中のタスクがある
    あいだ、Windows のアンインストールは見張りだけを止める
-10. `[sandbox] mode = bwrap` のエージェントは、worktree の外の HOME と `GH_TOKEN` に届かず、Rules の設定も、エージェント CLI のコードを動かす設定(`SANDBOX_AGENT_CODE`、`sandbox_guarded`)も書き換えられない。それでも PR はできる
+10. `[sandbox] mode = bwrap` のエージェントは、worktree の外の HOME と `GH_TOKEN` に届かず、Rules の設定も、エージェント CLI のコードを動かす設定(`SANDBOX_AGENT_CODE`、`sandbox_guarded`)も、git のメタデータ(worktree の `.git`、`commondir`、`config.worktree`)も書き換えられない。サンドボックスがオンのとき、外の git(`git_wt`)は fsmonitor と hook を切り、`.git` が clone を指したままか、worktree の中にほかの `.git`(入れ子のリポジトリ)がないかを毎回確かめ、外れたら git を動かさない(`check_git_links`)。エージェントの用意した設定のコマンドは外で動かない。それでも PR はできる
 11. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
 
 ## 10. テストの仕組み

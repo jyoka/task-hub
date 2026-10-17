@@ -277,6 +277,37 @@ if mode == "sandbox":  # proves what a sandboxed agent can reach: the worktree, 
         except OSError:
             pass
     Path("~/.claude/projects/t.jsonl").expanduser().write_text("transcript\n")  # the CLI's record stays writable
+    # a git directory of its own whose config runs a command, for task-hub's git outside to pick up through .git
+    import shutil
+    git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout.strip()
+    git_dir, common = Path(git("rev-parse", "--absolute-git-dir")), Path(git("rev-parse", "--git-common-dir")).resolve()
+    shutil.copytree(common, ".evil", ignore=shutil.ignore_patterns("worktrees"))
+    Path(".evil/hooks").mkdir(exist_ok=True)
+    Path(".evil/hooks/pre-commit").write_text("#!/bin/sh\ntouch \"$HOME/PWNED\"\n")
+    Path(".evil/hooks/pre-commit").chmod(0o755)
+    with open(".evil/config", "a") as f:
+        f.write(f'[core]\n\tfsmonitor = touch "$HOME/PWNED"; false\n\thooksPath = {Path(".evil/hooks").resolve()}\n')
+    Path(".evil-link").write_text(f"gitdir: {Path('.evil').resolve()}\n")
+    for path, text in ((".git", f"gitdir: {Path('.evil').resolve()}\n"), (git_dir / "commondir", str(Path(".evil").resolve())),
+                       (git_dir / "config.worktree", f'[core]\n\tfsmonitor = touch "$HOME/PWNED"; false\n')):
+        try:
+            Path(path).write_text(text)
+            Path("seen.txt").write_text(Path("seen.txt").read_text() + f"changed {Path(path).name}\n")
+        except OSError:
+            pass
+    try:
+        os.replace(".evil-link", ".git")
+        Path("seen.txt").write_text(Path("seen.txt").read_text() + "replaced .git\n")
+    except OSError:
+        os.remove(".evil-link")
+if mode == "nestedrepo":  # a repository of its own in the worktree whose clean filter would run in task-hub's git
+    subprocess.run(["git", "init", "-q", "nested"], check=True)
+    Path("nested/.gitattributes").write_text("* filter=x\n")
+    Path("nested/a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", "nested", "add", "-A"], check=True)
+    subprocess.run(["git", "-C", "nested", "-c", "user.name=a", "-c", "user.email=a@b", "commit", "-qm", "x"], check=True)
+    subprocess.run(["git", "-C", "nested", "config", "filter.x.clean", 'sh -c "touch $HOME/PWNED; cat"'], check=True)
+    Path("nested/a.txt").write_text("b\n")
 if mode == "rules":  # what the Goal's Rules became in Claude Code's settings
     Path("seen.txt").write_text(Path(".claude/settings.local.json").read_text())
 if mode == "needsetup":  # proves [setup] ran first: writes what setup left in the virtualenv
@@ -1690,6 +1721,61 @@ class TaskTest(unittest.TestCase):
         self.assertEqual((self.root / ".claude.json").read_text(), '{"mcpServers": {}}')
         self.assertFalse((self.root / ".claude/hooks/x.sh").exists())
         self.assertEqual((self.root / ".claude/projects/t.jsonl").read_text(), "transcript\n")
+        self.assertFalse((self.root / "PWNED").exists())  # task-hub's git never ran the agent's fsmonitor or hook
+
+    def test_sandboxed_host_git_runs_no_command_the_agent_set_up(self):
+        self.write_config("\n[sandbox]\nmode = bwrap\n")  # git_wt only reads the mode: no bwrap needed
+        clone, wt, marker = self.root / ".local/share/task-hub/repos/jyoka/app", self.root / "wt", self.root / "PWNED"
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@b", *map(str, a)],
+                                        check=True, capture_output=True)
+        git("init", "-q", clone)
+        git("-C", clone, "commit", "-q", "--allow-empty", "-m", "x")
+        git("-C", clone, "worktree", "add", "-q", wt)
+        # what the agent left in the worktree: a repository whose clean filter runs for `git add` and `git diff` of
+        # the parent once it is a gitlink there, and whose fsmonitor would too
+        nested = wt / "nested"
+        git("init", "-q", nested)
+        (nested / ".gitattributes").write_text("* filter=x\n")
+        (nested / "a.txt").write_text("a\n")
+        git("-C", nested, "add", "-A")
+        git("-C", nested, "commit", "-q", "-m", "x")
+        git("-C", nested, "config", "filter.x.clean", f"sh -c 'touch {marker}; cat'")
+        git("-C", nested, "config", "core.fsmonitor", f"touch {marker}; false")
+        git("-C", wt, "add", "-A")
+        (nested / "a.txt").write_text("b\n")
+        marker.unlink(missing_ok=True)
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            for args in (("diff", "--quiet"), ("add", "-A"), ("status", "--porcelain")):  # restore(), finish()
+                with self.assertRaisesRegex(RuntimeError, "is a repository inside the worktree"):
+                    task.git_wt(wt, *args)
+            self.assertFalse(marker.exists())
+            shutil.rmtree(nested)
+            task.git_wt(wt, "status", check=True)  # without it, git runs again
+            evil = self.root / "evil"  # ... or .git pointed at a git directory of its own
+            shutil.copytree(clone / ".git", evil)
+            (wt / ".git").write_text(f"gitdir: {evil}\n")
+            with self.assertRaisesRegex(RuntimeError, "no longer leads to task-hub's clone"):
+                task.git_wt(wt, "status")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("bwrap") and subprocess.run(
+        ["bwrap", "--ro-bind", "/", "/", "--unshare-all", "--share-net", "--", "true"],
+        capture_output=True).returncode == 0, "bwrap runs on Linux only, with user namespaces")
+    def test_sandboxed_agent_nested_repository_blocks_the_card_without_running_its_filter(self):
+        tools = self.root / "tools"  # HOME itself is never bound
+        tools.mkdir()
+        shutil.copy2(self.root / "agent", tools / "agent")
+        self.calls.touch()
+        self.write_config(f"boxed = {tools}/agent {{prompt}}\n\n[sandbox]\nmode = bwrap\nwrite = {self.calls}\n")
+        tid = self.new("Say hello. MODE:nestedrepo")
+        self.task("start", tid, "--agent", "boxed")
+        status = self.wait(tid)
+        self.assertFalse((self.root / "PWNED").exists())  # task-hub's git never ran the nested repository's filter
+        self.assertEqual(status, "Blocked")
+        self.assertIn("is a repository inside the worktree", "\n".join(self.comments(tid)))
+        self.assertFalse(self.gh()["prs"])
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")

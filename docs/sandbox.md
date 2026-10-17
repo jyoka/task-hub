@@ -21,15 +21,16 @@ write = ~/.cache/uv, ~/.npm
   エージェントは起動しないので、クレジットは使いません
 - ログの先頭に `== sandbox: bwrap` と出ます(`task log <番号>`)
 - 包むのはエージェントの起動だけです。実装エージェント、reviewer、replanner のすべてです
-- `[setup]` はあなたが書いたコマンドなので、サンドボックスの外で動きます
+- `[setup]` はあなたが書いたコマンドなので、サンドボックスの外で動きます。ただし、2 回目からの実行では、前の実行で
+  エージェントが書き換えたかもしれない worktree のファイル(`package.json` の scripts など)の上で動きます
 
 ## 中から見えるもの
 
 | 場所 | 見え方 | 理由 |
 |---|---|---|
 | タスクの worktree | 読み書き | エージェントの仕事場 |
-| worktree の git ディレクトリ(`.git/worktrees/<番号>`) | 読み書き | `git status` と `git diff` のため |
-| clone の `.git`(オブジェクトと ref) | 読むだけ | ほかのブランチを書き換えさせない |
+| worktree の `.git`(git ディレクトリの場所を書いたファイル) | 読むだけ | 下の「git の設定から外に出させない」 |
+| clone の `.git`(オブジェクト、ref、worktree の git ディレクトリ `.git/worktrees/<名前>`) | 読むだけ | ほかのブランチを書き換えさせない。`git status` と `git diff` は読むだけで動く |
 | `/usr`、`/etc`、`/opt`、`/nix`、`/sys` | 読むだけ | コンパイラ、Python、証明書、DNS の設定 |
 | `PATH` の中のフォルダと、エージェントのプログラムのあるフォルダ | 読むだけ | `claude`、`node` などを見つけるため。リンクは元の場所も見せる |
 | エージェント CLI 自身のファイル(`[sandbox] agent_files`) | 読み書き | ログイン、設定、記録。task-hub は記録から使用量を読む |
@@ -64,7 +65,28 @@ write = ~/.cache/uv, ~/.npm
 ## commit、push、PR はどうなるか
 
 変わりません。エージェントはファイルを編集するだけで、commit、push、PR は task-hub がサンドボックスの外で行います
-([design.md](design.md) の決定事項 3)。エージェントには `gh` のログインも SSH の鍵も渡しません。
+([design.md](design.md) の決定事項 3)。エージェントには `gh` のログインも SSH の鍵も渡しません。git のメタデータは
+読むだけなので、中のエージェントは `git add` や `git commit` ができません(しなくてよいものです)。
+
+### git の設定から外に出させない
+
+task-hub は、エージェントが書いた worktree で外から git を動かします(`git add -A`、`git commit`、`git push` など)。
+git は worktree の `.git` が指す git ディレクトリの設定を読み、`core.fsmonitor` や hook はコマンドとして動きます。
+中のエージェントが `.git` や `commondir` を自分の作った git ディレクトリに向けると、その設定のコマンドが外であなたの
+権限で動いてしまいます。そこで次の 2 つで防ぎます。
+
+- 中では git のメタデータを全部読むだけにします。worktree の `.git` は worktree の上に読むだけで重ね、
+  `.git/worktrees/<名前>`(`commondir`、`gitdir`、`config.worktree`、index)は clone の `.git` ごと読むだけです
+- 外の git(`bin/task` の `git_wt`)は `-c core.fsmonitor= -c core.hooksPath=/dev/null` で動かし、毎回その前に
+  `.git` と `commondir` が task-hub の clone を指したままかを確かめます(`check_git_links`)。指していなければ git を
+  動かさず、カードを Blocked にします
+- 同じ確認で、worktree の中にほかの `.git`(入れ子のリポジトリ、サブモジュール)があれば、外の git を動かさず、カードを
+  Blocked にします。外の git は入れ子のリポジトリの設定も読み、`add`、`status`、`diff` のたびに `filter.<名前>.clean` や
+  `diff.<名前>.textconv` のコマンドを動かすからです。コマンドを動かす設定は多く、`-c` で全部は切れません。
+  そのため、サブモジュールのあるリポジトリはサンドボックスでは動かせません(開始のときに Blocked になります)
+
+`mode = off` のときは、どちらもしません(エージェントがもともと外で動くので、守る意味がありません)。task-hub の
+commit でリポジトリの hook が動かないのは、サンドボックスがオンのときだけです。
 
 ## 確かめ方
 
@@ -76,7 +98,12 @@ write = ~/.cache/uv, ~/.npm
 - `GH_TOKEN` は渡らない
 - Goal の Rules の設定ファイルは書き換えられない
 - `~/.claude/settings.json`、`~/.claude.json`、`~/.claude/hooks/` には書けない。`~/.claude/projects` には書ける
+- worktree の `.git`、git ディレクトリの `commondir` と `config.worktree` は書き換えられず、`.git` を差し替えられない。
+  エージェントが用意した `core.fsmonitor` と hook は、外の git で動かない
 - それでも task-hub が push して PR を作る
+
+テスト `test_sandboxed_host_git_runs_no_command_the_agent_set_up` は、外の git(`git_wt`)だけを確かめます。worktree の中の
+入れ子のリポジトリの `core.fsmonitor` は `git diff` で動かず、`.git` を別の git ディレクトリに向けると git を動かさずに止まります。
 
 本物の Claude Code では、2026-10-17 に次を手で確かめました(Claude Code 2.1.302、bubblewrap 0.12.0、Arch 系の Linux)。
 
@@ -121,6 +148,12 @@ write = ~/.npm
 ## 制限
 
 - Linux だけです。Mac と Windows では `mode = off` のままにします
+- `[setup]` は外で動き、前の実行でエージェントが書き換えたかもしれないファイルを使います(`npm install` が
+  `package.json` の scripts を動かすなど)。これは守れません。気になるなら `[setup]` を使わないか、中身を確かめます
+- サブモジュールのあるリポジトリと、`.git` を中に持つフォルダ(git から入れた `node_modules` の依存など、`[setup]`
+  が作ったものも含みます)のある worktree は動かせません。上のとおり、外の git を動かす前に Blocked にします
+- 入れ子の `.git` の確認は、外の git を動かすたびに worktree 全体をたどります。ファイルがとても多い worktree では、
+  その分だけ遅くなります
 - ネットワークは絞りません。エージェントは worktree の中のもの(`[env]` でコピーした `.env` を含む)を外に送れます
 - `agent_files` は読み書きできるので、エージェントは同じ CLI のほかのプロジェクトの記録も読めます
 - HOME は毎回空なので、`~/.cache` などのキャッシュは残りません。遅いときは `write` に足します
