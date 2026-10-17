@@ -134,7 +134,8 @@ flowchart LR
 | `task watch` | `archive_overflow`、ループで `sync` | 同上 + 開始時のアーカイブの確認 | 同上 |
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
-| `task new` | `cmd_new` | Issue、カード、欄、Blocked by | events、asked |
+| `task new` | `cmd_new`、`new_task` | Issue、カード、欄、Blocked by | events、asked |
+| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`new_task` | 文ごとに Issue、カード、欄(Backlog) | intake、events |
 | `task done <id>` | `cleanup`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ | runs を消す、events |
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
@@ -262,7 +263,7 @@ sequenceDiagram
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[intake]`(`topic`、`secret`、`repo`))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
@@ -274,6 +275,7 @@ sequenceDiagram
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/intake.json` | `cmd_intake`(文を 1 つ扱う前に) | `cmd_intake`(つなぎ直すとき、起動したとき) | `{since}`。最後に扱った ntfy の文の id(ntfy の `since=` に渡す) |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
@@ -347,6 +349,7 @@ sequenceDiagram
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
+| ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る) | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
@@ -399,6 +402,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする |
 | 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」 |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
+| `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
+| `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 

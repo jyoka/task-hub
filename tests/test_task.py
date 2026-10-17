@@ -2486,8 +2486,23 @@ class TaskTest(unittest.TestCase):
         """A stand-in ntfy server on localhost: it keeps each POST (path, headers, JSON) in self.ntfy_posts."""
         import http.server
         posts = self.ntfy_posts = []
+        gets, stream = self.ntfy_gets, self.ntfy_stream = [], []  # a subscriber's GETs; the lines it is sent
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # ntfy's JSON stream: one message per line; this one ends after the messages it has
+                gets.append({"path": self.path, "headers": dict(self.headers)})
+                if self.headers.get("Authorization") != "Bearer tk_secret":
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                since = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("since", [""])[0]
+                ids = [m.get("id") if isinstance(m, dict) else None for m in stream]
+                after = stream[ids.index(since) + 1:] if since in ids else stream  # as ntfy: those after that one
+                for m in [{"id": "open1", "event": "open", "topic": "phone"}, *after]:
+                    self.wfile.write(json.dumps(m).encode() + b"\n" if isinstance(m, dict) else m)
+
             def do_POST(self):
                 data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 posts.append({"path": self.path, "headers": dict(self.headers), "json": json.loads(data)})
@@ -2552,6 +2567,104 @@ class TaskTest(unittest.TestCase):
             self.assertEqual(p["headers"]["Authorization"], "Bearer tk")
             p = post("ntfy = https://ntfy.sh/abc", event="update", id=None)
             self.assertNotIn("click", p["json"])  # no task, no Issue
+
+    def intake_config(self, url, intake="topic = phone\nsecret = s3cret-phone-0123456789\n"):
+        self.write_config(extra=f"\n[notify]\nevents = Done\nntfy = {url}/notes\nntfy_token = tk_secret\n"
+                                f"\n[intake]\n{intake}")
+
+    def test_intake_turns_a_phone_message_into_a_backlog_card_and_replies_with_its_link(self):
+        url = self.ntfy_server()
+        self.intake_config(url, "topic = phone\nsecret = s3cret-phone-0123456789\nrepo = jyoka/app\n")
+        self.origin("jyoka/web")
+        secret = "s3cret-phone-0123456789"
+        self.ntfy_stream += [
+            {"id": "m1", "time": 1790000000, "event": "message", "topic": "phone",
+             "message": f"{secret} jyoka/web: Fix the login button on mobile\nIt overlaps the footer."},
+            {"id": "keep", "event": "keepalive", "topic": "phone"},
+            b"not json\n",
+            {"id": "m2", "event": "message", "topic": "phone", "title": "Docs typo",
+             "message": f"{secret} fix the typo in the README"},
+            {"id": "m3", "event": "message", "topic": "phone", "message": "jyoka/web: delete everything"},
+            {"id": "m4", "event": "message", "topic": "phone", "message": "guess-0123456789 jyoka/web: rm -rf"},
+            {"id": "m5", "event": "message", "topic": "phone", "message": secret},
+        ]
+        self.env["TASK_WATCH_ONCE"] = "1"
+        out = self.task("intake")
+        db = self.gh()
+        self.assertEqual(len(db["issues"]), 2)  # m1 and m2 only
+        web, app = db["issues"]["1"], db["issues"]["2"]
+        self.assertEqual(web["title"], "Fix the login button on mobile")
+        self.assertTrue(web["body"].startswith("Fix the login button on mobile\nIt overlaps the footer.\n"))
+        self.assertIn("ntfy message m1, 2026-09-21T", web["body"])  # where it came from
+        self.assertNotIn(secret, web["body"] + app["body"])
+        self.assertEqual(db["items"]["PVTI_1"]["values"], {"status": "Backlog", "target repo": "jyoka/web"})
+        self.assertEqual((app["title"], db["items"]["PVTI_2"]["values"]["target repo"]), ("Docs typo", "jyoka/app"))
+        self.assertEqual(self.agent_calls(), [])  # Backlog: nothing starts until a human approves it
+        self.assertIn("intake: ignored: wrong secret (message m3", out)  # its first word is no secret
+        self.assertIn("intake: ignored: wrong secret (message m4", out)
+        self.assertIn("intake: rejected: the goal is empty (message m5)", out)
+        self.assertNotIn(secret, out)
+        self.assertIn("since=", self.ntfy_gets[0]["path"])
+        self.assertTrue(self.ntfy_gets[0]["path"].startswith("/phone/json?"))
+        # replies on [notify] ntfy's topic: the two cards with their links, and the empty goal; nothing to m3, m4
+        self.wait_for(lambda: len(self.ntfy_posts) == 3)
+        replies = sorted((p["json"] for p in self.ntfy_posts), key=lambda j: j["title"])
+        issue = "https://github.com/jyoka/tasks/issues/"
+        self.assertEqual([(j["topic"], j["title"], j.get("click")) for j in replies],
+                         [("notes", "#1 Backlog: Fix the login button on mobile", issue + "1"),
+                          ("notes", "#2 Backlog: Docs typo", issue + "2"),
+                          ("notes", "task intake: not registered", None)])
+        self.assertIn("repo: jyoka/web", replies[0]["message"])
+        self.assertIn("task start 1", replies[0]["message"])
+        # a restart goes on after the last message it handled, and never registers it twice
+        self.task("intake")
+        self.assertIn("since=m5", self.ntfy_gets[1]["path"])
+        self.write_config(extra=f"\n[notify]\nntfy = {url}/notes\nntfy_token = tk_wrong\n"
+                                f"\n[intake]\ntopic = phone\nsecret = {secret}\n")
+        self.assertIn("intake: HTTPError: HTTP Error 403", self.task("intake"))  # logged; the service tries again
+        self.assertEqual(len(self.gh()["issues"]), 2)
+
+    def test_intake_needs_a_secret_a_topic_of_its_own_and_the_notifier(self):
+        url = self.ntfy_server()
+        for intake, says in (("topic = phone\nsecret = short\n", "[intake] secret must be at least 16"),
+                             ("topic = notes\nsecret = s3cret-phone-0123456789\n", "[intake] topic must be"),
+                             ("secret = s3cret-phone-0123456789\n", "[intake] topic must be"),
+                             ("topic = phone\nsecret = s3cret-phone-0123456789\nrepo = app\n", "[intake] repo")):
+            self.intake_config(url, intake)
+            self.assertIn(says, self.task("intake", code=1))
+        self.write_config(extra="\n[intake]\ntopic = phone\nsecret = s3cret-phone-0123456789\n")
+        self.assertIn("needs [notify] ntfy", self.task("intake", code=1))
+        self.assertEqual(self.ntfy_gets, [])  # it never listened
+
+    def test_intake_parse_and_auth(self):
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+        secret = "s3cret-phone-0123456789"
+
+        def parse(message, repo="", **m):
+            return task.parse_intake({"id": "x", "message": message, **m}, secret, repo)
+
+        self.assertEqual(parse(""), (None, "ignored: no secret"))
+        self.assertEqual(parse("do it", "a/b"), (None, "ignored: wrong secret"))
+        self.assertEqual(parse(secret[:-1] + " a/b: do it"), (None, "ignored: wrong secret"))
+        self.assertEqual(parse(secret + "x a/b: do it"), (None, "ignored: wrong secret"))
+        self.assertEqual(parse(f"x {secret} a/b: do it"), (None, "ignored: wrong secret"))  # only the first word
+        self.assertEqual(parse(f"{secret} do it")[1], "rejected: no repo (start the goal with `owner/name:`, "
+                                                        "or set [intake] repo)")
+        self.assertEqual(parse(f"{secret}   ", "a/b"), (None, "rejected: the goal is empty"))
+        self.assertEqual(parse(f"{secret} a/b:", "c/d"), (None, "rejected: the goal is empty"))
+        card, _ = parse(f"  {secret}\n jyoka/my.app:  Add   a dark mode\n\nKeep the colours.", "c/d")
+        self.assertEqual((card["title"], card["repo"]), ("Add a dark mode", "jyoka/my.app"))
+        self.assertTrue(card["goal"].startswith("Add   a dark mode\n\nKeep the colours.\n\n---\nFrom the phone"))
+        card, _ = parse(f"{secret} fix http://x/y: it 404s", "c/d")  # no `owner/name:` prefix: the default repo
+        self.assertEqual((card["repo"], card["title"]), ("c/d", "fix http://x/y: it 404s"))
+        card, _ = parse(f"{secret} " + "word " * 40, "c/d")
+        self.assertLessEqual(len(card["title"]), 72)
+        self.assertTrue(card["title"].endswith("word..."))
+        card, _ = parse(f"{secret} c/d: the goal", title="  A  title ")
+        self.assertEqual(card["title"], "A title")
 
     def test_an_unreachable_or_hanging_ntfy_server_never_slows_a_command_or_the_run(self):
         hang = socket.socket()  # listens, never answers: the request would wait for its whole timeout
