@@ -44,7 +44,7 @@ flowchart LR
 
 - **1 task = 1 branch = 1 worktree = 1 PR.** Up to 5 tasks run at the same time.
 - **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
-- **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
+- **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
 - **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used.
 - **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.
@@ -115,7 +115,7 @@ the full config.
 | **Ready** | Approved. Starts when one of the 5 slots is free. Waits until its dependencies are done | Nothing |
 | **In progress** | The worker runs. The auto review and its send-back also happen here | Nothing |
 | **In review** | The PR is ready (a research task has only a report) | Review and merge the PR |
-| **Blocked** | The agent needs something, the auto review failed, or the run failed | Add the answer to the Goal and move to Ready |
+| **Blocked** | The agent needs something, the auto review failed, or the run failed | Add the answer to the Goal, or comment on the Issue or the PR, and move to Ready |
 | **Done** | The PR is merged. task-hub cleans up, and tasks that waited for this one start | Nothing |
 
 The card at the top of a column is the one that moved last. When the board has more than 100 cards, task-hub
@@ -130,6 +130,7 @@ archives the oldest Done cards.
 | `task new --title ... --repo owner/name --goal ...` | Registers a task (`--base`, `--agent`, `--research`, `--blocked-by 12,14`) |
 | `task start [<id>] [--agent name]` | Approves a Backlog card, or runs a Blocked card again |
 | `task watch` | Starts Ready cards automatically (every minute) |
+| `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
@@ -137,6 +138,7 @@ archives the oldest Done cards.
 | `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
 | `task digest [--since 24h]` | Summarizes what finished, awaits review, is blocked, and runs (`[digest] at` sends it to ntfy daily) |
 | `task done <id>` | Closes or cancels a task by hand |
+| `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project, then keeps its Status and reports in step |
 | `task update` | Updates task-hub to the newest release |
 | `task feedback [--feature]` | Opens the bug report or feature request form |
 

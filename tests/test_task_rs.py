@@ -4,9 +4,11 @@ and the full-screen reader (Enter, d, l).
 Each test builds task-rs (cargo, debug) once, then runs `task-rs tui` in a PTY with a temporary HOME: a config, a
 local board, runs/<id>.json, logs and real git worktrees. `lazygit` on PATH is a fake that records where and how it ran
 (working directory, arguments, whether its stdin and stdout are a terminal, the terminal's mode), talks to the
-person through the terminal, and can change the board or exit with a code meanwhile. `gh` (TASK_GH) notes any call.
+person through the terminal, and can change the board or exit with a code meanwhile. `gh` (TASK_GH) notes any call:
+the reader may ask it for an Issue's comments only, and IssueCommentsTest's fake answers that.
 Skipped without cargo, and on Windows (no PTY).
 """
+import calendar
 import json
 import os
 import re
@@ -596,7 +598,9 @@ class ReaderTest(TuiCase):
         self.settle(1)
 
     def assert_no_gh_and_read_only(self):
-        self.assertFalse(self.gh_calls.exists(), "task-rs called gh")
+        """gh was asked for the Issue's comments at most (the reader shows them), never for the board."""
+        calls = self.gh_calls.read_text() if self.gh_calls.exists() else ""
+        self.assertEqual(calls.count("api graphql"), calls.count("comments(last: 100)"), calls)
         self.assertEqual(snapshot(self.state / "runs"), self.before)  # no run file written
 
     # ---------- the tests ----------
@@ -925,6 +929,272 @@ class BrokenConfigTest(TuiCase):
         self.assertEqual(self.wait_exit(), 0)
 
 
+def local(stamp_or_epoch, year=True):
+    """A time as the reader shows it, in this machine's time zone: "2026-10-09 13:09"; without year, "13:09" today
+    and "10-09 13:09" before."""
+    at = stamp_or_epoch if isinstance(stamp_or_epoch, float) else \
+        calendar.timegm(time.strptime(stamp_or_epoch, "%Y-%m-%dT%H:%M:%SZ"))
+    t = time.localtime(at)
+    if year:
+        return time.strftime("%Y-%m-%d %H:%M", t)
+    return time.strftime("%H:%M" if t[:3] == time.localtime()[:3] else "%m-%d %H:%M", t)
+
+
+FAKE_GH = r"""#!/bin/sh
+# a fake gh: notes each call, answers the comments query from $GH/comments.json, or fails as $GH/fail says
+echo "$@" >> "$GH/calls"
+case "$*" in *"comments(last: 100)"*) ;; *) echo "not this one" >&2; exit 1 ;; esac
+if [ -f "$GH/fail" ]; then cat "$GH/fail" >&2; exit 1; fi
+cat "$GH/comments.json"
+"""
+
+
+class IssueCommentsTest(TuiCase):
+    """The reader's Issue shows the Issue's comments under its Goal. They are read from GitHub (one call) when the
+    Issue opens and when f is pressed on it, and kept in task-rs's own file, never in the shared board-cache.json."""
+
+    HUMAN = {"author": {"login": "alice"}, "createdAt": "2026-10-09T04:09:00Z", "body": "HUMAN-COMMENT please check"}
+    REPORT = {"author": {"login": "dip-ka-jo"}, "createdAt": "2026-10-10T05:30:00Z",
+              "body": "<!-- task-hub report -->\n\n## Report\n\nREPORT-TEXT done\n\n## Please review\n\n- a file"}
+
+    def setUp(self):
+        super().setUp()
+        self.gh = self.tmp / "ghdir"
+        self.gh.mkdir()
+        self.gh_calls = self.gh / "calls"
+        fake = self.tmp / "gh"  # TASK_GH
+        fake.write_text(FAKE_GH.replace("$GH", str(self.gh)))
+        fake.chmod(0o755)
+        self.write_board(with_body(item(5, "Alpha", "In review"), "### Goal\nGOAL-LINE"))
+        self.cache = self.state / "task-rs" / "comments-someone_tasks-5.json"
+
+    def answer(self, *comments):
+        (self.gh / "comments.json").write_text(json.dumps({"data": {"repository": {"issue": {"comments": {
+            "totalCount": len(comments), "nodes": list(comments)}}}}}))
+
+    def body(self):
+        return self.screen.text(rows=(1, self.screen.rows - 3))
+
+    def test_comments_follow_the_goal_oldest_first_with_author_time_and_the_report_marked(self):
+        self.answer(self.HUMAN, self.REPORT)
+        board_before = (self.state / "board-cache.json").read_bytes()
+        self.start()
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        shown = self.body()
+        human = f"▸ Comment · alice · {local(self.HUMAN['createdAt'])}"  # closed: one line, the start of its body
+        report = f"▾ Report · dip-ka-jo · {local(self.REPORT['createdAt'])}"  # the newest Report is open
+        order = [shown.find(s) for s in ("GOAL-LINE", "Comments (2)", "read from GitHub at", human,
+                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "▸ Please review")]
+        self.assertNotIn(-1, order, shown)
+        self.assertEqual(order, sorted(order), shown)  # the Goal, then the comments, oldest first
+        self.assertNotIn("<!-- task-hub", shown)
+        rows = shown.split("\n")
+        for heading in (human, report):  # a rule above each comment's heading
+            at = next(i for i, r in enumerate(rows) if heading in r)
+            self.assertTrue(rows[at - 1].startswith("─" * 40), shown)
+        calls = self.gh_calls.read_text()
+        self.assertEqual(calls.count("api graphql"), 1, calls)  # one call when the Issue opens
+        for words in ("owner=someone", "name=tasks", "number=5"):
+            self.assertIn(words, calls)
+        # f reads them again
+        self.answer(self.HUMAN, self.REPORT, {"author": {"login": "bob"}, "createdAt": "2026-10-11T00:00:00Z",
+                                              "body": "NEWER-COMMENT"})
+        self.press("f")
+        self.wait_screen("NEWER-COMMENT")
+        self.wait_screen("Comments (3)")
+        self.assertEqual(self.quit(), 0)
+        # kept in task-rs's own file; the board-cache.json bin/task shares is not touched (the board fetch failed)
+        self.assertEqual([c["body"] for c in json.loads(self.cache.read_text())["comments"]][-1], "NEWER-COMMENT")
+        self.assertEqual((self.state / "board-cache.json").read_bytes(), board_before)
+
+    def rows_with(self, text):
+        return [r for r in self.body().split("\n") if text in r]
+
+    def test_only_the_newest_report_is_open_and_enter_or_o_opens_and_closes_a_comment(self):
+        old = {"author": {"login": "dip-ka-jo"}, "createdAt": "2026-10-08T00:00:00Z",
+               "body": "<!-- task-hub report -->\n\n## Report\n\nOLD-START " + "x " * 80 + "\n\nOLD-END"}
+        human = {"author": {"login": "alice"}, "createdAt": "2026-10-09T04:09:00Z",
+                 "body": "HUMAN-FIRST " + "y " * 80 + "\n\nHUMAN-END"}
+        self.answer(old, human, self.REPORT)
+        self.start()
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        old_head, human_head = f"Report · dip-ka-jo · {local(old['createdAt'])}", f"Comment · alice · {local(human['createdAt'])}"
+        # the older Report and the person's comment are one line each: their heading and the start of their body
+        self.assertTrue(self.rows_with(old_head)[0].startswith("▸ "), self.body())
+        self.assertIn("OLD-START", self.rows_with(old_head)[0])
+        self.assertTrue(self.rows_with(human_head)[0].startswith("▸ "), self.body())
+        self.assertNotIn("OLD-END", self.body())
+        self.assertNotIn("HUMAN-END", self.body())
+        self.assertIn("▾ Report · dip-ka-jo", self.body())
+        self.assertIn("▸ Please review", self.body())  # its sections after the first: their headings only
+        self.assertNotIn("• a file", self.body())
+        self.assertIn("n p comment", self.status())
+        # the cursor is on the first heading on screen: Enter opens it, o closes it
+        self.press("\r")
+        self.wait_screen("OLD-END")
+        self.assertTrue(self.rows_with(old_head)[0].startswith("▾ "), self.body())
+        self.assertIn("Issue", self.header())  # Enter on a heading stays on the Issue
+        self.press("o")
+        self.settle(0.5)
+        self.assertNotIn("OLD-END", self.body())
+        self.assertNotIn("task open", self.status())  # o on a heading is not `task open`
+        # n moves the cursor to the next comment: o opens that one, and the others stay as they are
+        self.press("n")
+        self.settle(0.3)
+        self.press("o")
+        self.wait_screen("HUMAN-END")
+        self.assertNotIn("OLD-END", self.body())
+        self.assertIn("REPORT-TEXT done", self.body())
+        # p goes back to the older Report, Enter opens it; then n twice, to the newest Report, and Enter closes it
+        self.press("p")
+        self.settle(0.3)
+        self.press("\r")
+        self.wait_screen("OLD-END")
+        self.press("n")
+        self.settle(0.3)
+        self.press("n")
+        self.settle(0.3)
+        self.press("\r")
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())  # only the one line
+        self.assertTrue(self.rows_with("Report · dip-ka-jo · " + local(self.REPORT["createdAt"]))[0].startswith("▸ "))
+        # a reload keeps what was opened and closed
+        self.write_board(with_body(item(5, "Alpha", "In review"), "### Goal\nGOAL-LINE RELOADED"))
+        self.wait_screen("GOAL-LINE RELOADED", timeout=5)
+        self.assertIn("OLD-END", self.body())
+        self.assertIn("HUMAN-END", self.body())
+        self.assertNotIn("• a file", self.body())  # only the one line
+        self.assertEqual(self.quit(), 0)
+
+    def test_a_reports_sections_open_with_enter_or_o_and_all_at_once_with_a(self):
+        self.answer(self.REPORT)
+        self.start()
+        self.press("\r")
+        self.wait_screen("▸ Please review")
+        self.assertNotIn("• a file", self.body())
+        self.assertIn("a all sections", self.status())
+        self.press("n")  # the cursor, from the comment's heading to its section's
+        self.settle(0.3)
+        self.press("o")
+        self.wait_screen("• a file")
+        self.assertNotIn("task open", self.status())
+        self.press("\r")
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())
+        self.press("a")  # all of them
+        self.wait_screen("• a file")
+        self.press("a")  # all were open: all closed
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())
+        self.assertIn("REPORT-TEXT done", self.body())  # the text before the first heading stays
+        self.assertEqual(self.quit(), 0)
+
+    def test_n_and_p_jump_between_comments_and_bring_each_to_the_top(self):
+        others = [{"author": {"login": f"c{n}"}, "createdAt": f"2026-10-0{n}T00:00:00Z", "body": f"C{n}-BODY"}
+                  for n in range(1, 6)]
+        report = {"author": {"login": "dip-ka-jo"}, "createdAt": "2026-10-07T00:00:00Z",
+                  "body": "<!-- task-hub report -->\n\n## Report\n\n" + "\n".join(f"report line {n:02}" for n in range(1, 41))}
+        self.answer(*others, report)
+        self.start(rows=20, cols=80)
+        self.press("\r")
+        self.wait_screen("C1-BODY")
+
+        def top_heading():
+            rows = self.body().split("\n")
+            self.assertTrue(rows[0].startswith("─" * 80), self.body())  # the comment's rule, on the top row
+            return rows[1]
+
+        self.press("n")  # the cursor was on c1, the first heading on screen
+        self.settle(0.3)
+        self.assertIn("Comment · c2 ·", top_heading())
+        for _ in range(4):
+            self.press("n")
+            self.settle(0.2)
+        self.assertIn("▾ Report · dip-ka-jo", top_heading())
+        self.press("p")
+        self.settle(0.3)
+        self.assertIn("Comment · c5 ·", top_heading())
+        # with no heading on screen, p goes to the comment being read, and o is `task open` as before
+        self.press(END)
+        self.wait_screen("report line 40")
+        self.assertNotIn("Comment · ", self.body())
+        self.assertNotIn("Report · ", self.body())
+        self.press("o")
+        self.wait_screen("task open", self.status)
+        self.press("p")
+        self.settle(0.3)
+        self.assertIn("▾ Report · dip-ka-jo", top_heading())
+        self.assertEqual(self.quit(), 0)
+
+    def test_markdown_is_drawn_for_reading_within_about_100_columns(self):
+        goal = "\n".join([
+            "## Big heading", "#### Small heading", "plain with **strong words** and `some_code()` inside",
+            "- first item", "  - nested item", "1. numbered one", "10. numbered ten", "- [ ] open box", "- [x] done box",
+            "```sh", "make build", "```",
+            "| Key | What it does |", "|---|---|", "| a | short |", "| **bb** | " + "long " * 40 + "TABLE-END |",
+            WORDS[:1200] + " WRAP-END"])
+        self.write_board(with_body(item(5, "Alpha", "In review"), goal))
+        self.answer(self.REPORT)
+        self.start(rows=70)  # 140 columns
+        self.press("\r")
+        self.wait_screen("REPORT-TEXT done")
+        shown = self.body()
+        rows = [r.rstrip() for r in shown.split("\n")]
+        self.assertIn("Big heading", shown)
+        self.assertNotIn("# ", shown)  # headings without their marks
+        self.assertIn("■ Small heading", rows)
+        self.assertIn("plain with strong words and some_code() inside", shown)  # no ** or `
+        self.assertIn("  • first item", rows)
+        self.assertIn("    • nested item", rows)
+        self.assertIn("  1. numbered one", rows)
+        self.assertIn("  • ☐ open box", rows)
+        self.assertIn("  • ☑ done box", rows)
+        self.assertIn("┌─ sh", rows)  # the code block in a frame
+        self.assertIn("│ make build", rows)
+        self.assertIn("└─", rows)
+        # the table's columns line up, and its too long cell is cut to fit
+        table = [r for r in rows if " │ " in r]
+        self.assertEqual(len(table), 3, shown)
+        self.assertEqual(len({r.index(" │ ") for r in table}), 1, table)
+        self.assertTrue(table[-1].endswith("…"), table)
+        self.assertNotIn("TABLE-END", shown)
+        self.assertTrue(any("┼" in r for r in rows))
+        # nothing goes past column 100, though the terminal has 140: long lines wrap there, and rules are 100 wide
+        self.assertEqual(max(len(r) for r in rows), 100, shown)
+        self.assertIn("─" * 100, rows)
+        self.assertIn("WRAP-END", shown)
+        self.assertEqual(self.quit(), 0)
+
+    def test_unreachable_github_shows_the_saved_copy_and_when_it_was_read(self):
+        read_at = time.time() - 600
+        saved = {"key": ["someone/tasks", 5], "fetched_at": read_at, "total": 1, "comments": [self.HUMAN]}
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps(saved))
+        (self.gh / "fail").write_text("error connecting to api.github.com\n")
+        self.start()
+        self.press("\r")
+        self.wait_screen(f"could not read the comments: error connecting to api.github.com; the copy read at "
+                         f"{local(read_at, year=False)}")
+        self.assertIn("HUMAN-COMMENT please check", self.body())
+        self.assertIn("GOAL-LINE", self.body())
+        self.assertEqual(json.loads(self.cache.read_text()), saved)  # a failed read keeps the copy
+        self.assertEqual(self.quit(), 0)
+
+    def test_unreachable_github_and_no_copy_shows_the_goal_and_why(self):
+        (self.gh / "fail").write_text("error connecting to api.github.com\n")
+        self.start()
+        self.press("\r")
+        self.wait_screen("could not read the comments: error connecting to api.github.com")
+        self.assertIn("GOAL-LINE", self.body())
+        self.assertNotIn("──", self.body())
+        self.press("\x1b")  # still answers keys
+        self.wait_screen(" Board ")
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.quit(), 0)
+
+
 class HerdrPaneTest(TuiCase):
     """`task-rs tui` started inside herdr with no terminal (by an agent): it opens a herdr pane to the right and runs
     there. `herdr` (HERDR_BIN_PATH) is a fake that notes each call and answers `pane split` with a new pane's id."""
@@ -948,8 +1218,49 @@ class HerdrPaneTest(TuiCase):
                               env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
                                    "HERDR_BIN_PATH": str(self.herdr), **env})
 
+    def tui_on_pty_without_tty(self, **env):
+        """stdout on a PTY but no terminal to read keys from: stdin not one and, in a new session, no /dev/tty, as when
+        an agent runs `task-rs tui` with its output on a pane. Returns (exit code, stdout, stderr)."""
+        master, slave = os.openpty()
+        p = subprocess.Popen([str(self.binary), "tui"], cwd=self.repo, stdin=subprocess.DEVNULL, stdout=slave,
+                             stderr=subprocess.PIPE, start_new_session=True,
+                             env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
+                                  "HERDR_BIN_PATH": str(self.herdr), **env})
+        os.close(slave)
+        chunks = []
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # the other end closed
+                break
+            if not data:
+                break
+            chunks.append(data)
+        os.close(master)
+        code = p.wait(timeout=30)
+        err = p.stderr.read().decode()
+        p.stderr.close()
+        return code, b"".join(chunks).decode().replace("\r\n", "\n"), err
+
     def calls(self):
         return self.herdr_calls.read_text().splitlines() if self.herdr_calls.exists() else []
+
+    def test_with_output_on_a_pty_but_no_terminal_to_read_it_opens_a_pane_too(self):
+        code, out, err = self.tui_on_pty_without_tty(HERDR_PANE_ID="p1")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(out.strip(), "tui: opened in herdr pane p9, to the right of p1")
+        self.assertEqual(self.calls(), [
+            f"pane split --pane p1 --direction right --cwd {os.path.realpath(self.repo)} --focus",
+            f"pane run p9 '{self.binary}' tui"])
+
+    def test_with_output_on_a_pty_but_no_terminal_to_read_and_no_herdr_it_is_an_error_not_a_panic(self):
+        for env in ({"HERDR_PANE_ID": "p1", "TASK_HERDR": "0"}, {}):
+            with self.subTest(env):
+                code, out, err = self.tui_on_pty_without_tty(**env)
+                self.assertEqual(code, 1, out + err)  # not -6 (SIGABRT) with a core
+                self.assertIn("error: the TUI needs a terminal", out)
+                self.assertNotIn("panicked", err)
+                self.assertEqual(self.calls(), [])
 
     def test_with_no_terminal_it_opens_a_pane_to_the_right_and_runs_the_same_binary_there(self):
         r = self.tui(HERDR_PANE_ID="p1")
