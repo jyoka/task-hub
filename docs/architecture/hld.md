@@ -77,7 +77,8 @@ flowchart TB
     subgraph ext["外のもの"]
         gh[("GitHub")]
         agents["エージェントの CLI"]
-        herdr["herdr"]
+        herdr["herdr、OS の通知"]
+        ntfy["ntfy<br/>(任意。スマートフォンへ)"]
     end
 
     skills --> cli
@@ -101,6 +102,7 @@ flowchart TB
     sync --> data
     notify --> state
     notify --> herdr
+    notify -. "[notify] ntfy" .-> ntfy
     board --> state
     runner --> state
     cli --> cfg
