@@ -290,7 +290,7 @@ class AgentReport:
                            [f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
-DIGEST_KEYS = ["verdict", "reason", "review", "report", "decision", "question", "answer", "goal_change", "pr"]
+DIGEST_KEYS = ["verdict", "reason", "report", "review", "decision", "question", "answer", "goal_change", "pr"]
 DIGEST_ITEM, DIGEST_TEXT, DIGEST_REVIEW_ITEMS = 120, 240, 3  # the caps keep one digest under ~1000 chars
 
 
@@ -304,6 +304,14 @@ def subsection(body, name):
     """The first paragraph under '### name', or '' (what follows it in a replan comment is task-hub's own advice)."""
     m = re.search(rf"(?m)^### {re.escape(name)}[ \t]*\n(.*?)(?=^##|\Z)", body, re.S)
     return m.group(1).strip().split("\n\n")[0] if m else ""
+
+
+def summary(report):
+    """The head of a Report: the bullets under its first '### ' heading (worker/PROMPT.md asks for '### Summary'),
+    or, in a report without one, everything before its first '### ' heading. Bullet marks dropped, one line."""
+    m = re.match(r"\s*### [^\n]*\n(.*?)(?=^### |\Z)", report, re.S | re.M)
+    head = m.group(1) if m else re.split(r"(?m)^### ", report)[0]
+    return " ".join(re.sub(r"^\s*([-*+]|\d+[.)])\s+", "", l).strip() for l in head.splitlines() if l.strip())
 
 
 def digest(report="", replan=""):
@@ -323,7 +331,7 @@ def digest(report="", replan=""):
             d["review"].append(f"(+{len(items) - DIGEST_REVIEW_ITEMS} more)")
         d["pr"] = pr
         if not pr and not d["reason"]:  # In review without a PR is a research task: its report is the result
-            d["report"] = clip(section(report, "Report"), DIGEST_TEXT)
+            d["report"] = clip(summary(section(report, "Report")), DIGEST_TEXT)
     if replan:
         d["decision"] = clip((re.findall(r"(?m)^Decision: (.+)$", replan) or [""])[0], 40)
         d["question"] = clip(subsection(replan, "Question for you"), DIGEST_TEXT)
@@ -1521,8 +1529,8 @@ def build_prompt(t, i, comments=""):
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
              *([f"Came after: {', '.join(x['ref'] + ' ' + x['title'] for x in t['blockers'])} "
                 "(finished before this run started)"] if t.get("blockers") else []),
-             *(["Kind: research. Your report is the deliverable: put your findings in its Report section. Change "
-                "files only if the Goal asks for a file."] if t.get("research") else []),
+             *(["Kind: research. Your report is the deliverable: put the answer in its Report's Summary and the findings "
+                "under its Details. Change files only if the Goal asks for a file."] if t.get("research") else []),
              "", i["body"].strip()]
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",

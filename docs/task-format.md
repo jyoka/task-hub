@@ -58,6 +58,14 @@ Need the Stripe test key.
 
 ## Report
 
+### Summary                <- 3 to 5 bullets: what was done, the check's result, what to decide
+
+- Added the save check for required fields.
+- The tests pass.
+- Decide whether an empty name is an error.
+
+### Details                <- per-file changes, commands and results, what was not done
+
 What changed, how it was verified, what was not done.
 
 ## Please review
@@ -72,6 +80,20 @@ Exact files, decisions, and risks to check.
   - Check: ...
   - Explain yourself: ...
 ```
+
+Report は、人が判断に要る結論を先に置くため、`### Summary`(要点)と `### Details`(詳細)の 2 つに分けます。
+
+- 要点: 3〜5 行の箇条書き。何をしたか(結論)、確かめた結果を 1 行、人に判断してほしいことがあればその 1 行。
+  コマンド、コミットのハッシュ、行番号は入れません
+- 詳細: 変えたファイルごとの説明、実行したコマンドと結果、やっていないこと。人のコメントへの `Comments:` の
+  箇条書き([人のコメント](#人のコメント))もここに書きます
+- research タスクでは、要点に調べた結論(Goal の問いへの答え)を、詳細に調べたことと根拠を書きます
+- `## Blocked` の 1 行も同じ考えで、人に求めること(決めてほしいこと、鍵、権限)とその理由だけを書き、
+  試したことは Report の詳細に回します
+
+区切りは `##` より下の `###` 見出しなので、task-hub が読み取る `##` の見出しは変わらず、PR の本文と Issue の
+コメントにはどちらもそのまま載ります。research タスクの digest の `report`([operations.md](operations.md#判断用の要点digest))
+と通知には、要点だけが出ます。
 
 Please review の最後の項目は、人がコードを自分で探して理解するための学習ルート(Learning route)です。
 変えた中でいちばん大事な動きについて、次の 6 行を 1 つの項目の下に字下げして書きます。
@@ -155,7 +177,7 @@ Decision: answered
   タスクの PR は、手元の記録の PR だけを見ます
 - task-hub 自身のコメント(`<!-- task-hub` で始まるもの: レポート、仕分け、つなぎ先)と bot のコメント(GitHub の
   ユーザーの種類が Bot、または名前が `[bot]` で終わる)は入れません
-- エージェントは、コメントを Goal への追加の指示として扱い、レポートの Report の中に `Comments:` で始まる箇条書きで、
+- エージェントは、コメントを Goal への追加の指示として扱い、レポートの Report の詳細(`### Details`)の中に `Comments:` で始まる箇条書きで、
   コメントごとに何をしたか、しなかったならその理由を書きます([worker/PROMPT.md](../worker/PROMPT.md) の最後の部分)
 - reviewer にも同じコメントが Goal のすぐ後に渡り、受け入れ条件と同じように 1 つずつ確かめます
   ([worker/REVIEW.md](../worker/REVIEW.md) の最後の部分)。渡したコメントは `~/.local/share/task-hub/prompts/<番号>-comments.md`

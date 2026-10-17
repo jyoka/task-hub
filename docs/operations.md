@@ -151,8 +151,8 @@ In review、Blocked、replan のイベントには、人が判断するための
 |---|---|---|
 | `verdict` | 自動レビューがあるとき | 自動レビューの判定(`pass`、`needs changes`、`blocked`) |
 | `reason` | Blocked | 止まった理由の 1 行 |
+| `report` | PR のない In review(research タスク) | Report の要点(`### Summary` の箇条書きを 1 行にしたもの。要点のない古いレポートは、最初の `###` 見出しより前) |
 | `review` | レポートに Please review があるとき | 項目を最大 3 つ。多いときは `(+N more)` を足す |
-| `report` | PR のない In review(research タスク) | Report の頭 |
 | `decision` | replan | replanner の判定(`answered`、`human`、`goal-conflict`) |
 | `question` / `answer` / `goal_change` | replan | 人への質問、replanner の答え、Goal の変更案 |
 | `pr` | PR があるとき | PR の URL |
@@ -175,7 +175,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 だけで、LLM も GitHub も使いません。知らせを受けるために `/chief` を開いておく必要はありません。
 
 - 見出し: `#<番号> <出来事>: <タイトル>`(例: `#41 In review: 保存できる項目に…`)
-- 本文: 要点を `verdict: pass`、`reason: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
+- 本文: 要点を `verdict: pass`、`reason: ...`、`report: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
   最後の行が PR の URL(あれば)
 - 出し方: herdr が動いていれば `herdr notification show`(Blocked と replan は `--sound request`、ほかは
   `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)。どちらもなければ出しません
