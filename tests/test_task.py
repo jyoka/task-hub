@@ -2602,6 +2602,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("board: https://github.com/users/jyoka/projects/2", out)  # the board read the runs saved
         self.assertIn("since", self.task("digest", "--since", "90m"))
         self.assertIn("--since takes a period", self.task("digest", "--since", "yesterday", code=2))
+        self.assertIn("--since takes a period", self.task("digest", "--since", "99999999d", code=2))  # no traceback
 
     def test_digest_groups_by_each_tasks_latest_status_and_blocked_shows_the_replanners_question(self):
         task = self.load_bin()
@@ -2632,6 +2633,18 @@ class TaskTest(unittest.TestCase):
             {"status": "Blocked", "seconds": 900}]), "runs: 2 finished (1 In review, 1 Blocked), 2.0k tokens, "
                                                      "1.50 credits, 1h05m")
 
+    def test_digest_body_fits_ntfys_4096_bytes_even_with_japanese_titles(self):
+        task = self.load_bin()
+        lines = [f"  #{n} ログイン画面のエラーメッセージを日本語に直して表示を整える | https://github.com/jyoka/app/pull/{n}"
+                 for n in range(40)]
+        body = task.clip_lines(lines, task.NTFY_MESSAGE_MAX)
+        self.assertLessEqual(len(body.encode()), 4096)  # bytes, not chars: over it, ntfy.sh sends an attachment
+        *kept, last = body.split("\n")
+        self.assertEqual(last, "...")
+        self.assertEqual(kept, lines[:len(kept)])  # whole lines only
+        self.assertGreater(len("\n".join(lines[:len(kept) + 1] + ["..."]).encode()), 4096)  # as many as fit
+        self.assertEqual(task.clip_lines(lines[:3], task.NTFY_MESSAGE_MAX), "\n".join(lines[:3]))  # fits: as is
+
     def test_digest_is_due_once_a_day_after_its_time(self):
         task = self.load_bin()
         at = datetime.datetime(2026, 10, 17, 8, 0)
@@ -2660,6 +2673,16 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(post["json"]["click"], "https://github.com/users/jyoka/projects/2")
         self.write_config(extra="\n[digest]\nat = 8am\n")
         self.assertIn("[digest] at must be a time like 08:00", self.task("watch", code=1))
+
+    def test_watch_goes_on_when_the_daily_digest_fails_and_does_not_retry_it_that_day(self):
+        url = self.ntfy_server()
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.write_config(extra=f"\n[notify]\nntfy = {url}/my-topic\n\n[digest]\nat = 00:00\n")
+        (self.root / ".local/state/task-hub/metrics.jsonl").mkdir(parents=True)  # reading it raises OSError
+        self.assertIn("digest: error: unexpected IsADirectoryError", self.task("watch"))  # exit 0: the watch goes on
+        self.assertNotIn("digest:", self.task("watch"))
+        time.sleep(1)
+        self.assertEqual(self.ntfy_posts, [])
 
     def test_digest_has_a_length_cap_and_a_research_task_gets_its_report(self):
         tid = self.new("long")
