@@ -346,7 +346,7 @@ stateDiagram-v2
     update --> Blocked: 同じ base でまた競合
     ci --> ci: チェック待ち(ci-wait はコミットごとに 1 回)
     ci --> update: BEHIND、DIRTY、CONFLICTING
-    ci --> merged: CLEAN、HAS_HOOKS(gh pr merge --merge --match-head-commit)
+    ci --> merged: CLEAN、HAS_HOOKS、checks = required なら UNSTABLE も(gh pr merge --merge --match-head-commit)
     ci --> Blocked: チェックが落ちた、ci_minutes を過ぎた、ほかの mergeStateStatus
 ```
 
@@ -366,7 +366,8 @@ stateDiagram-v2
 - `cmd_fix`(`fix_conflicts`)は `git merge --no-ff --no-commit origin/<base>` で止まった競合をエージェントに渡し、
   レポートに `## Blocked` がない、`MERGE_HEAD` が残っている、`git add -A` のあとに未解決のファイルも
   `<<<<<<<`、`>>>>>>>` の行もない、を確かめてから `git commit --no-edit`(親が 2 つ)と push をします。どれかが
-  だめなら `git merge --abort`、`reset --hard`、`clean -fd` で元に戻し、カードを Blocked にします
+  だめなら `git merge --abort`、`reset --hard`、`clean -fd` で元に戻し、カードを Blocked にします。push だけが
+  失敗したときは、作ったマージコミットを戻さずに worktree に残して Blocked にします(`push_failed`。`merge_update` も同じ)
 
 ## 5. 手元のファイル
 
@@ -533,7 +534,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
-| マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。base を取り込んだあとの push が失敗したら worktree を `origin/<head>` に戻してから出すので、次の確認は GitHub の枝から取り込み直す(push するかは worktree の前の位置ではなく `origin/<head>` と比べて決める)。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus` はカードを Blocked(`merge queue: ...`)にしてキューから外す |
+| マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
 | `task _fix` の失敗 | マージを取り消して何も push しない。カードを Blocked にしてコメント。それも書けなければカードは元の列のまま、キューの次の確認が同じ base でまた競合を見つけて Blocked にする |
 | `task share` の失敗 | チームの Project の列、欄、値がない、チームのリポジトリに書けない: 何も作らずに `error:` と `help:`。Issue を作ったあとの失敗: 作った Issue の URL を出して終わる(つなぎ先のコメントは書いてあるので、もう一度でも Issue は増えない) |
 | つないだタスクの写しの失敗(4.6) | 無視して stderr に `warning:` を 1 行(実行の中ならログに)。個人のカード、コメント、PR、実行は写しがないときと同じに進む。次の変化のときにまた写す(`move` は今の列を読むので、取りこぼした Status も次で合う) |

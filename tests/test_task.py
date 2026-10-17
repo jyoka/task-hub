@@ -245,7 +245,7 @@ elif cmd == ["pr", "checks"]:  # db["checks"][url]: [{name, bucket, link, requir
 elif cmd == ["pr", "merge"]:  # a real merge commit on the base branch of the bare repo
     key, pr = pr_of(a[2])
     head, base = key.split(" ", 1)[1], pr.get("base") or "main"
-    if pr["state"] != "OPEN" or merge_state(key, pr) not in ("CLEAN", "HAS_HOOKS"):
+    if pr["state"] != "OPEN" or merge_state(key, pr) not in ("CLEAN", "HAS_HOOKS", "UNSTABLE"):
         fail("Pull request is not mergeable")
     if opt("--match-head-commit") and opt("--match-head-commit") != git("-C", bare(key), "rev-parse", head).stdout.strip():
         fail("Head branch was modified. Review and try the merge again.")
@@ -4892,7 +4892,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["merged_order"], [self.pr(second)["url"]])
         self.assertEqual(self.queue_events(second), ["queued", "merged", "Done"])
 
-    def test_a_push_that_fails_once_is_sent_again_and_the_pr_still_merges(self):
+    def test_a_push_that_fails_blocks_the_card_and_keeps_the_merge_commit(self):
         self.queue_on()
         tid, = self.in_review("first")
         self.push_to_main("other.txt", "someone else's feature\n")  # main moved: its branch needs main merged in
@@ -4900,16 +4900,41 @@ class TaskTest(unittest.TestCase):
         hook.write_text(f"#!/bin/sh\nrm {hook}\necho 'rejected once' >&2\nexit 1\n")  # a network blip, once
         hook.chmod(0o755)
         self.task("merge", tid)
-        self.assertIn("rejected once", self.task())
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        reason = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertIn(f"merge queue: pushing task/{tid} failed", reason)
+        self.assertIn("rejected once", reason)
         self.assertNotIn("merged_order", self.gh())
         wt = self.run_state(tid)["worktree"]
-        rev = lambda ref: subprocess.run(["git", "-C", wt, "rev-parse", ref], capture_output=True, text=True).stdout
-        self.assertEqual(rev("HEAD"), rev(f"origin/task/{tid}"), "the worktree is back on GitHub's branch")
-        self.assertIn(f"merged main into task/{tid} and pushed", self.task())  # the next check merges main in again
+        git = lambda *a: subprocess.run(["git", "-C", wt, *a], capture_output=True, text=True).stdout
+        self.assertIn("other.txt", git("ls-tree", "--name-only", "HEAD"), "the merge commit is not thrown away")
+        self.assertNotEqual(git("rev-parse", "HEAD"), git("rev-parse", f"origin/task/{tid}"))
+        self.task("merge", tid)  # the human queues it again: the kept merge commit is pushed, then it merges
+        self.assertIn(f"merged main into task/{tid} and pushed", self.task())
         self.assertIn("other.txt", self.on_origin(f"task/{tid}", "ls-tree", "--name-only"))
         self.assertIn("merged", self.task())
         self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
-        self.assertEqual(self.on_origin("main:other.txt", "show"), "someone else's feature\n")
+        self.assertEqual(self.status(tid), "Done")
+
+    def test_required_checks_only_merge_an_unstable_pr_once_the_required_ones_pass(self):
+        self.queue_on("checks = required\n")
+        tid, = self.in_review("first")
+        db = self.gh()
+        url = self.pr(tid)["url"]
+        db["checks"] = {url: [{"name": "test", "bucket": "pending", "link": "https://ci.example/1", "required": True},
+                              {"name": "lint", "bucket": "pending", "link": "https://ci.example/2"},
+                              {"name": "style", "bucket": "fail", "link": "https://ci.example/3"}]}
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "UNSTABLE"  # GitHub: some check is not passing
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for its checks: test", self.task())  # a required one is still running
+        self.assertNotIn("merged_order", self.gh())
+        db = self.gh()
+        db["checks"][url][0]["bucket"] = "pass"  # the optional ones are still running or failed
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [url])
         self.assertEqual(self.status(tid), "Done")
 
     def test_nothing_merges_that_the_human_did_not_approve_and_a_conflict_is_told_once(self):
