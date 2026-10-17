@@ -241,10 +241,14 @@
     用意します(workenv_setting の `setup_agent_user.sh`)。エージェント CLI にも `task-agent` で一度ログインします。
     使用量の記録は `task-agent` の HOME に残るので、`task stats` はトークンを読めません(フォローアップ)。
     エージェントは、共有のフォルダにあるほかのタスクの worktree にも届きます。ネットワークは絞りません。
-    `user` から `off` に戻すときは、`~/.local/share/task-hub/repos` と `worktrees` を先に消します。`off` では
-    task-hub があなたのユーザーで git を動かすので、残った clone にエージェントの仕込んだ設定や hook があれば、
-    あなたの権限で動くからです。`mode = user` が一度動くと `~/.local/share/task-hub/sandbox-used` を書き
-    (エージェントからは書けない場所)、それがある間、`off` は二つのフォルダが空になるまで開始と後片付けを断ります。
+    `user` から `off` に戻すときは、`setup_agent_user.sh uninstall` でセットアップを戻し、そのうえで `repos` と
+    `worktrees` を消します。`off` では task-hub があなたのユーザーで git を動かすので、エージェントが clone に
+    仕込んだ設定や hook があれば、あなたの権限で動くからです。uninstall は ACL を外すだけで、仕込まれたものは
+    残ります。`off` の task-hub は、`repos` と `worktrees` の実際の ACL(access と default)に `task-agent` か
+    `task-agents` のエントリーが残る間と、`user` が動いた印(`share/sandbox-used`)があって両方のどちらかに
+    何か残る間は、開始と後片付けを断ります。印は `user` で動いたときと、`off` で ACL を見つけたときに作るので、
+    印ができる前に `user` を使ったマシンも ACL から拾えます。空かどうかだけでは決めません。空にしても既定の ACL
+    が残れば、次の clone もエージェントが書けるからです。
     詳しくは [sandbox.md](sandbox.md)。
 23. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
     Custom Rules(ひとりでしてよい、承認が要る、禁止)と同じ 3 段階を、`can:` / `ask:` / `never:` の行で書きます。
