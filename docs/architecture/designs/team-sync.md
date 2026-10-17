@@ -1,8 +1,10 @@
 # 個人のタスクとチームのボードをつなぐ
 
-調べもの(task 157、2026-10-11)の設計メモです。実装はまだしません。選択肢と、人が決めることを並べます。
-2026-10-11 に人が決めたことを「決まったこと」に書きました。本文はそれに合わせて直してあります。
-残りは末尾の「まだ決めてほしいこと」です。
+調べもの(task 157、2026-10-11)の設計メモです。選択肢と、人が決めたことを並べます。
+2026-10-11 と 2026-10-13 に人が決めたことを「決まったこと」に書きました。本文はそれに合わせて直してあります。
+第 1 段階の `task share` と、第 2 段階の Status、本文、コメント、閉じることの写しは実装しました(使い方は
+[usage.md の「チームのボードに出す」](../../usage.md#チームのボードに出すtask-share)、作りは [lld.md の 4.6](../lld.md))。
+第 3 段階から先はまだです。
 
 ## 何を、なぜ
 
@@ -32,6 +34,25 @@
 - 共有先を「つなぎ手」(connector)にする。最初のつなぎ手はチームの GitHub(リポジトリと Project)。Jira などは後でつなぎ手を足す(「変わる部品」)
 - 認証は既定で 1 つ(今の `gh`)。届かない共有先(個人のアカウントから会社のボードへ、など)だけ、共有先ごとに別の認証を選べるようにする
 - 同時に動かすタスクの数を設定にする(4 章の「メモリ」)。性能の低い PC では、Rust より効く
+
+## 決まったこと(2026-10-13)
+
+残っていた問い 1〜4 と、手で写した試しの結果です。
+
+| # | 問い | 決まったこと |
+|---|---|---|
+| 10 | 人のコメント | どちらの向きにも写さない。task-hub が書くコメント(Report、Blocked の仕分け)だけを写す |
+| 11 | `--body` | 外す。出したくない部分があるタスクは共有しない |
+| 12 | チームの人が本文を直したとき | task-hub が上書きする。チームの Issue の本文の先頭に「この本文は task-hub が個人のボードから上書きします。意見はコメントへ」という注意を書く |
+| 13 | 列がないときの Status | 対応表を `[share]` の設定にする。既定は、Backlog → Todo、Ready・In progress・In review・wait for merge・Blocked → In progress、Done → Done。チームに個人と同じ名前の列があればそれを使う |
+| 14 | チームの独自の欄とタイトルの慣習 | 共有先ごとに、既定で入れる単一選択の欄(例: Project の「Sprint」= Sprint 3)とタイトルの接頭辞(例: `【Sprint 3】`)を `[share]` に書けるようにする |
+
+手で写した試し(個人の Issue 1 つを、組織のリポジトリの Issue と組織の Project のカードにした)で分かったこと:
+
+- チームの Project は列が少ない(Todo、In progress、Done だけのことがある)。13 の既定はこれに合わせた
+- チームのボードには独自の単一選択の欄とタイトルの慣習がある(14)
+- 本文に同じリポジトリの Issue の URL があると、その Issue に参照が付く(写す前に知らせる対象。第 1 段階では知らせていない)
+- 個人の Issue(非公開)へのリンクは、チームの人には開けない
 
 ## 1. つなぐ先のモデル
 
@@ -83,7 +104,7 @@ flowchart LR
 | Status | 個人 → チーム | Status が変わるたび(In progress、In review、Blocked、Done) | チームの列の名前は対応表で写す。Done はマージで GitHub が動かす(下) |
 | Status(チームで閉じられた) | チーム → 個人 | 見つけたとき | 個人のカードは動かさず、出来事で知らせるだけ |
 | task-hub のコメント | 個人 → チーム | 書いたとき(Report、Blocked の仕分け) | 同じ本文をチームの Issue にもコメントする |
-| 人のコメント | 写さない | - | まだ決めてほしいこと 1 |
+| 人のコメント | 写さない | - | どちらの向きにも写さない(決まったこと 10) |
 | PR | 両方から参照 | PR を作るとき | PR の本文に `Closes org/repo#M` を足す。マージで両方の Issue が閉じる |
 | マージなしで閉じた(`task done`) | 個人 → チーム | 閉じたとき | チームの Issue も閉じる(決まったこと 5) |
 
@@ -285,7 +306,7 @@ flowchart TB
 | 0. 実験(コードなし) | チームの Issue を人が作り、Goal の末尾に「つなぎ先: org/repo#M」と書く。PR を人が編集して `Closes` を足す | なし | なし |
 | 1. `task share`(最小の一歩、推奨) | 選んだタスクのチームの Issue を作り、チームの Project に足し、つなぎ先を記録する。`finish` が PR の本文に `Closes org/repo#M` を足す | なし。Ready に移す、マージする、は同じ。`task share` を使わなければ何も変わらない | 1 回あたり Issue の作成 1、カードの追加 1、欄 1〜2、コメント 1。watch は増えない |
 | 1'. `task new --from <URL>`(取り込みの最小) | チームの Issue から個人のタスクを作り、同時につなぐ。タイトルと本文の引用を Goal のたたき台にする | なし | 登録 1 回あたり読み 1 回 |
-| 2. Status と本文とコメントを写す | つないだタスクの `set_status` で、チームのカードの Status も変える(すべての列)。実行を始めるときにタイトルと Goal を写し、Report と仕分けのコメントもチームの Issue に書く。`task done` でチームの Issue も閉じる | なし | Status の変化 1 回につき mutation 1(+ チームの Project の id を 1 時間取っておく) |
+| 2. Status と本文とコメントを写す(実装した) | つないだタスクの `set_status` で、チームのカードの Status も変える(すべての列)。実行を始めるときにタイトルと Goal を写し、Report と仕分けのコメントもチームの Issue に書く。`task done` でチームの Issue も閉じる | なし | Status の変化 1 回につき、カードと列を読む GraphQL 1 + 列が変わるときだけ mutation 1 |
 | 3. チームの変化を知らせる | watch がつないだ Issue のうち開いているものだけを読み、チームで閉じられた、担当が変わったら出来事を出す | なし(知らせるだけ) | 1 回の問い合わせでまとめれば 1 分 1 ポイント、1 時間 +60 |
 | 4. Jira | PR のタイトルにキーを入れる(GitHub for Jira 頼み)。次に REST で遷移を動かす | なし | Jira の API トークンと権限 |
 | 5. 正本の見直し | 1〜4 の実績で、ローカル正本(案 B)やボードの複数化(案 C)、Rust を考え直す | 変わる | - |
@@ -297,7 +318,9 @@ task share <id> --to <owner>/<repo> [--project <owner>/<number>]
 ```
 
 - `--project` を省くと `[share]` の対応(リポジトリ → チームの Project)を使う。どちらもなければ Issue だけ作る
-- 本文は既定で個人の Issue の Goal をそのまま写す(決まったこと 3)。今までの Report のコメントも写す。`--body` は外す案(まだ決めてほしいこと 2)
+- 本文は、先頭の上書きの注意(決まったこと 12)のあとに、個人の Issue の Goal をそのまま写す(決まったこと 3)。
+  今までの task-hub のコメント(Report、Blocked の仕分け)も写す。人のコメントは写さない(決まったこと 10)。`--body` はない(決まったこと 11)
+- タイトルは `[share]` の接頭辞 + 個人の Issue のタイトル。Status は対応表で、既定の単一選択の欄は `[share]` の値で入れる(決まったこと 13、14)
 - 担当者はあなた(`gh issue create --assignee @me`)
 - もうつないであれば何もしない(AXI の「同じ変更の繰り返しは何もしない」)
 - 実行中でも、終わったあとでも使える。PR があれば、次の `finish` か、`task share` がその場で PR の本文を直す
@@ -309,10 +332,10 @@ task share <id> --to <owner>/<repo> [--project <owner>/<number>]
 | 部品 | 変わること |
 |---|---|
 | `bin/task` の CLI | `task share`、(1' を選べば)`task new --from` を `COMMANDS` に足す |
-| `bin/task` のボードの読み書き | `set_status` が、つなぎ先のあるタスクではチームのカードにも写す(第 2 段階)。失敗しても止めない |
+| `bin/task` のボードの読み書き | `set_status` が、つなぎ先のあるタスクではチームのカードにも写す(第 2 段階)。`comment` が task-hub のコメント(Report、仕分け)をチームの Issue にも書く。どちらも `to_team` を通し、失敗しても止めない |
 | `task _run` の finish | `AgentReport.pr_body` に、つなぎ先の `Closes` を足す |
 | 設定 | `[share]`: リポジトリ → チームの Project、列の対応、(必要なときだけ)別の認証 |
-| つなぎ手(新規) | 共有先の種類ごとの小さな部品。できることは「Issue を作る、本文を書く、コメントする、Status を変える、閉じる」の 5 つ。最初はチームの GitHub だけ。Jira などは後でつなぎ手を足し、`task share` と `set_status` は変えない |
+| つなぎ手(新規) | 共有先の種類ごとの小さな部品。できることは「Issue を作る、本文を書く、コメントする、Status を変える、閉じる」の 5 つ(`TeamGitHub` の `create_issue`、`edit`、`comment`、`move`、`close`。`prepare` と `add_card` は `task share` だけ)。最初はチームの GitHub だけ。Jira などは後でつなぎ手を足し、`task share` と `set_status` は変えない |
 | `[runner] parallel`(新規、`task share` とは別) | 同時に動かすタスクの数。既定は今と同じ 5 |
 
 ## 流れ(LLD)
@@ -346,9 +369,25 @@ Status、段階、出来事の種類は増えません(第 3 段階で、チー�
 
 | もの | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| つなぎ先 | `task share`、`task new --from` | `finish`(`issue()` が読むコメントに含まれる)、`set_status` | 個人の Issue のコメント。`<!-- task-hub link -->` で始まり、`org/repo#M` か Jira のキー |
-| `[share]` | 人 | `task share`、`set_status` | INI。例: `org/app = org/7`、`status.In review = Review`。別の認証が要る共有先だけ `gh` の設定の場所(`GH_CONFIG_DIR`)を書く案 |
-| `board-meta` の写し | `task share` | 同 | チームの Project の id と欄(1 時間取っておく。今の `board-meta.json` と同じ考え) |
+| つなぎ先 | `task share`、`task new --from` | `finish`(`issue()` が読むコメントに含まれる)、`set_status`、`comment`、`task done`、同期のマージの処理 | 個人の Issue のコメント。`<!-- task-hub link -->` で始まり、`org/repo#M` か Jira のキー。第 1 段階は次の行に `Shared to org/app#12: <URL>`、Project があれば `Project: org/7`。`viewerDidAuthor` が true のコメントだけを受け付ける |
+| つなぎ先(実行の中) | `launch`(`issue()` で読んだもの) | `finish`(`AgentReport.pr_body`)、実行の中と同期の `set_status` と `comment`、同期のマージの処理 | `runs/<id>.json` の `link`。実行の中で GitHub をもう一度読まないため |
+| `[share]` | 人 | `task share`(第 2 段階で `set_status` も) | INI。下の例。別の認証が要る共有先だけ `gh` の設定の場所(`GH_CONFIG_DIR`)を書く案は、まだ入れていない |
+| チームの Project の id と欄 | 取っておかない | `task share`、`move` | `task share` は `PROJECT_QUERY` を 1 回。第 2 段階の `move` は `TEAM_CARD_QUERY` 1 回でカード、列、今の列を一緒に読む(今の列が分かるので、同じ列への mutation を省ける。手元のファイルは増えない) |
+
+第 1 段階の `[share]` の形(名前は大文字と小文字を区別しない):
+
+```ini
+[share]
+org/app = org/7                      ; org/app に出した Issue を足すチームの Project(--project が優先)
+org/app.title = 【Sprint 3】          ; タイトルの接頭辞。末尾に空白を残すなら "[Sprint 3] " と引用符で囲む
+org/app.field.Sprint = Sprint 3      ; カードに入れる単一選択の欄と値(いくつでも)
+status.Blocked = Todo                ; 個人の列 = チームの列(すべての共有先)
+org/app.status.In review = Review    ; この共有先だけの対応(status. より優先)
+```
+
+Status の決め方は、`<repo>.status.<列>`、`status.<列>`、チームの同じ名前の列、既定の対応表(決まったこと 13)の順です。
+`[share]` に書いた列、欄、値がチームの Project にないときは、何も作らずに `error:` で止めます。既定の対応表の列もないときは、
+Status を入れずに `help:` で設定を案内します。
 
 つなぎ先を手元のファイルでなく Issue のコメントに置く案にしたのは、別のマシンでも、手元の記録を消したあとでも
 読めるからです。`issue()` は今もコメントを読んでいる(レポートと replan)ので、読み取りは増えません。
@@ -362,24 +401,25 @@ Goal の本文には書きません(決定事項 12 と同じく、本文は人�
 | Issue の作成 | `gh issue create`(内容を作る要求 1) | `task share` |
 | カードの追加、Status | GraphQL の mutation 2 | `task share` |
 | 個人の Issue へのコメント | `gh issue comment` 1 | `task share` |
-| チームのカードの Status | GraphQL の mutation 1 | 第 2 段階: つないだタスクの Status が変わるとき |
+| チームのカードの Status | GraphQL 1(`TEAM_CARD_QUERY`)+ 列が変わるときだけ mutation 1 | 第 2 段階: つないだタスクの Status が変わるとき |
 | チームの Issue のタイトルと本文 | `gh issue edit` 1 | 第 2 段階: つないだタスクの実行を始めるとき |
 | チームの Issue へのコメント | `gh issue comment` 1 | 第 2 段階: Report か仕分けを書くとき |
 | チームの Issue を閉じる | `gh issue close` 1 | 第 2 段階: `task done` のとき |
-| つなぎ先の読み取り | `gh issue view` 1 | 第 2 段階: 実行の中は `launch` が読んだ `issue()` の結果を `runs/<id>.json` に入れて使うので増えない。`task done` など実行の外で Status を変えるときだけ 1 回 |
+| つなぎ先の読み取り | 0 | 第 2 段階: 実行の中と同期は `launch` が読んだ `issue()` の結果(`runs/<id>.json` の `link`)を使う。`task done` は前から読んでいた `issue()` の結果を使う。`task start` は手元の記録だけを使い、記録がなければ写さない(次の開始の In progress で合う) |
 
-`task watch` の 1 時間あたりの費用(約 60 ポイント)は、第 1、2 段階では変わりません。第 3 段階で約 +60 です。
+`task watch` の 1 時間あたりの費用(約 60 ポイント)は、第 1、2 段階では変わりません(毎分の同期は、つないだタスクでも Status が
+変わらなければチームを呼ばない)。第 3 段階で約 +60 です。
 
 ## 失敗したとき
 
 | 失敗 | 扱い |
 |---|---|
 | チームのリポジトリに書けない(権限、届かないアカウント) | `task share` が `error:` と `help:` を出して終わる。個人のカードは変えない |
-| Issue は作れたが、カードの追加か記録のコメントに失敗 | 作った Issue の URL を出し、もう一度の `task share --to` が同じ Issue を拾えるようにする(要検討: タイトルで探すか、URL を渡すか) |
-| 第 2 段階の Status の写しに失敗 | 無視して stderr に 1 行(通知とキャッシュの失敗と同じ。lld.md 8 章) |
+| Issue は作れたが、カードの追加か記録のコメントに失敗 | Issue を作ったらすぐに、個人の Issue につなぎ先のコメントを書く。そのあとの失敗(コメントの写し、カード)は、作った Issue の URL と「残りは手で」を出す。もう一度の `task share` は同じ Issue を出すだけで、もう 1 つ作らない。つなぎ先のコメントそのものに失敗したときは、URL と「閉じてやり直すか、手でコメントする」を出す |
+| 第 2 段階の写し(Status、本文、コメント、閉じる)に失敗 | 無視して stderr に 1 行(通知とキャッシュの失敗と同じ。lld.md 8 章)。個人のカードと実行は写しがないときと同じに進む |
 | チームのワークフローが Status を上書きした | 直さない。写すのは task-hub が Status を変えたときだけ |
 | PR がデフォルトブランチ以外にマージされた、または GitHub が閉じなかった(決定事項 10) | 今の個人の Issue と同じく、マージを見つけた同期がチームの Issue も閉じる |
-| 写した本文をチームの人が直した | 次に写すときに上書きされる。チームの人には本文でなくコメントに書いてもらう(まだ決めてほしいこと 3) |
+| 写した本文をチームの人が直した | 次に写すとき(第 2 段階)に上書きされる。本文の先頭の注意で、チームの人には本文でなくコメントに書いてもらう(決まったこと 12) |
 
 並行: つなぎ先のコメントを書くのは `task share` だけです。`runs/<id>.json` には書きません(lessons.md「1 つのファイルに
 書くのは 1 者だけ」)。
@@ -407,7 +447,7 @@ Goal の本文には書きません(決定事項 12 と同じく、本文は人�
 
 0. (調べもの、コードなし)別のリポジトリの Issue 2 つに `Closes` を書いた PR をマージし、両方が閉じるかを確かめる。閉じなければ、1 の `Closes` の代わりに task-hub が閉じる
 1. (0 のあと)`task share`(つなぎ手の形、チームの GitHub のつなぎ手、Issue の作成と Goal の写し、カードの追加、つなぎ先のコメント)と、PR の本文の `Closes`
-2. (1 のあと)`set_status` からチームのカードの Status を写す、`[share]` の列の対応、タイトルと本文とコメントの写し、`task done` で閉じる
+2. (1 のあと)`set_status` からチームのカードの Status を写す、タイトルと本文とコメントの写し、`task done` で閉じる(`[share]` の列の対応は 1 で入れた)
 3. (1 のあと、任意)`task new --from <URL>`
 4. (2 のあと)watch がつないだ Issue の変化を出来事にする
 5. (`task share` とは別、今すぐできる)同時に動かすタスクの数を `[runner] parallel` で設定できるようにする
@@ -426,12 +466,3 @@ Goal の本文には書きません(決定事項 12 と同じく、本文は人�
 - lld.md 1 章の「約 2,900 行」は今 2,864 行で、合っている
 - 2026-10-11 の会話の値(Python の起動 0.05 秒、キャッシュの `task list` 0.07 秒、GitHub を読む `task list` 2.1 秒)は、
   今回の測り直し(0.060、0.091、1.764 秒)と同じ桁。ずれは GitHub の応答の揺れと、ラッパーの sh の分と思われる(推測)
-
-## まだ決めてほしいこと
-
-1〜9 は 2026-10-11 に決まりました(「決まったこと」)。残りは次のとおりです。
-
-1. 人のコメント: チームの Issue の人のコメントを個人の Issue に写すか。個人の Issue の人のコメントをチームに写すか
-2. `--body`: すべて写すと決めたので外してよいか。チームに出したくない部分があるタスクはどうするか(共有しない、で足りるか)
-3. チームの人がチームの Issue の本文を直したとき、上書きしてよいか。上書きしないなら、どちらを勝たせるかの規則が要る(向きが 2 つになる)
-4. Blocked をチームの Project のどの列に写すか(チームに Blocked の列がないとき)
