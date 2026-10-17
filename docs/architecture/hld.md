@@ -169,6 +169,9 @@ flowchart LR
     events --> mod["mod と Kiro の拡張<br/>経過、判定、PR"]
     metrics[("metrics.jsonl")] --> stats["task stats"]
     metrics --> mod
+    events --> digest["task digest<br/>task watch の毎日のまとめ"]
+    metrics --> digest
+    digest -. "[digest] at" .-> ntfy["ntfy"]
 ```
 
 通知は LLM を使いません。会話のエージェントを起こすのは、出来事が書かれたときだけです。

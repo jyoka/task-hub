@@ -129,6 +129,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
 | `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
 | `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
+| `task digest [--since 24h]` | 終わったもの、レビュー待ち、Blocked、実行中のまとめ(`[digest] at` で毎日 ntfy に送る) |
 | `task done <番号>` | 手で閉じる・取り消す |
 | `task update` | 最新のリリースに更新する |
 | `task feedback [--feature]` | バグ報告・機能の要望のフォームを開く |

@@ -68,6 +68,9 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 [notify]
 events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
+
+[digest]
+at =                      ; 08:00 のように書くと、task watch が毎日その時刻に ntfy でまとめを送る(既定は空)
 ```
 
 | 設定 | 有効にすると | 人が決めること |

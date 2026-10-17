@@ -7,6 +7,7 @@
   use_herdr(), which put a fake herdr (workspaces, tabs, panes in one JSON file) on PATH.
 """
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import importlib.machinery
@@ -2578,6 +2579,87 @@ class TaskTest(unittest.TestCase):
             self.task()  # the sync writes Done, and notifies
             self.assertLess(time.time() - began, 8)
             self.wait_for(lambda: self.notifications_of(tid, "Done"))
+
+    def test_task_digest_groups_the_tasks_with_their_prs_reasons_and_the_runs_totals(self):
+        first, rest = self.task("digest").split("\n", 1)
+        self.assertRegex(first, r"^digest: since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(0 done, 0 in review, 0 blocked, 0 running\)$")
+        self.assertEqual(rest, "done: none\nin_review: none\nblocked: none\nrunning: none\nruns: none finished\n")
+        ok, stuck, merged = self.new("ok"), self.new("blocked"), self.new("ok", "Add bye")
+        for tid in (ok, stuck, merged):
+            self.task("start", tid)
+        for tid in (ok, stuck, merged):
+            self.wait(tid)
+        self.metrics(3)
+        self.task("done", merged)
+        out = self.task("digest")
+        self.assertIn("(1 done, 1 in review, 1 blocked, 0 running)", out.splitlines()[0])
+        self.assertIn(f"done[1]:\n  #{merged} Add bye | {self.pr(merged)['url']}\n", out)
+        self.assertIn(f"in_review[1]:\n  #{ok} Add hello | {self.pr(ok)['url']}\n", out)
+        self.assertIn(f"blocked[1]:\n  #{stuck} Add hello | reason: Need the Stripe test key. | {self.pr(stuck)['url']}\n",
+                      out)
+        self.assertIn("running: none\nruns: 3 finished (", out)
+        self.assertIn("2 In review, 1 Blocked", out)
+        self.assertIn("board: https://github.com/users/jyoka/projects/2", out)  # the board read the runs saved
+        self.assertIn("since", self.task("digest", "--since", "90m"))
+        self.assertIn("--since takes a period", self.task("digest", "--since", "yesterday", code=2))
+
+    def test_digest_groups_by_each_tasks_latest_status_and_blocked_shows_the_replanners_question(self):
+        task = self.load_bin()
+        ev = lambda time, tid, event, **e: {"time": f"2026-10-{time}Z", "id": tid, "title": f"t{tid}", "event": event, **e}
+        groups = task.digest_groups([
+            ev("15T09:00:00", "1", "Done", pr="https://x/pull/1"),  # before the period: not news any more
+            ev("16T09:00:00", "2", "In review", pr="https://x/pull/2"),
+            ev("16T10:00:00", "2", "Done", pr="https://x/pull/2"),
+            ev("10T09:00:00", "3", "In review", pr="https://x/pull/3"),  # long ago, but still waits for review
+            ev("16T09:00:00", "4", "Blocked", reason="no key"),
+            ev("16T09:05:00", "4", "replan", decision="human", digest={"question": "Which key?"}),
+            ev("16T09:00:00", "5", "Blocked", reason="old"),
+            ev("16T09:05:00", "5", "replan", decision="answered", digest={"answer": "A"}),
+            ev("16T09:10:00", "5", "Ready"),
+            ev("16T09:11:00", "5", "In progress"),  # re-run after the answer: running, not Blocked
+            ev("16T09:12:00", "5", "slow", reason="long"),
+            ev("16T11:00:00", "6", "Blocked", reason="gone"),
+        ], "2026-10-16T00:00:00Z")
+        self.assertEqual({s: [e["id"] for e in g] for s, g in groups.items()},
+                         {"Done": ["2"], "In review": ["3"], "Blocked": ["6", "4"], "In progress": ["5"]})
+        lines = {e["id"]: task.digest_item(e) for g in groups.values() for e in g}
+        self.assertEqual(lines["4"], "#4 t4 | question: Which key?")
+        self.assertEqual(lines["6"], "#6 t6 | reason: gone")
+        self.assertEqual(lines["3"], "#3 t3 | https://x/pull/3")
+        self.assertEqual(lines["5"], "#5 t5 | since 2026-10-16T09:11:00Z")
+        self.assertEqual(task.run_totals([
+            {"status": "In review", "seconds": 3000, "usage": [{"output": 10, "input": 1990}, {"credits": 1.5}]},
+            {"status": "Blocked", "seconds": 900}]), "runs: 2 finished (1 In review, 1 Blocked), 2.0k tokens, "
+                                                     "1.50 credits, 1h05m")
+
+    def test_digest_is_due_once_a_day_after_its_time(self):
+        task = self.load_bin()
+        at = datetime.datetime(2026, 10, 17, 8, 0)
+        self.assertFalse(task.digest_due(None, at, None))  # unset: never
+        self.assertFalse(task.digest_due((8, 1), at, None))  # not yet
+        self.assertTrue(task.digest_due((8, 0), at, None))
+        self.assertTrue(task.digest_due((8, 0), at.replace(hour=23), "2026-10-16"))  # yesterday's was sent
+        self.assertFalse(task.digest_due((8, 0), at.replace(hour=23), "2026-10-17"))  # today's was sent
+
+    def test_watch_sends_the_daily_digest_to_ntfy_once_even_after_a_restart(self):
+        url = self.ntfy_server()
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.write_config(extra=f"\n[notify]\nntfy = {url}/my-topic\n")
+        self.assertNotIn("digest:", self.task("watch"))  # [digest] at unset: nothing
+        time.sleep(1)
+        self.assertEqual(self.ntfy_posts, [])
+        self.write_config(extra=f"\n[notify]\nntfy = {url}/my-topic\n\n[digest]\nat = 00:00\n")
+        self.assertIn("digest: sent to ntfy (0 done, 0 in review, 0 blocked, 0 running)", self.task("watch"))
+        self.assertNotIn("digest:", self.task("watch"))  # a restarted watch: today's is already sent
+        self.wait_for(lambda: self.ntfy_posts)
+        time.sleep(1)  # a second post would arrive here
+        [post] = self.ntfy_posts
+        self.assertEqual(post["json"]["topic"], "my-topic")
+        self.assertEqual(post["json"]["title"], "task-hub digest: 0 done, 0 in review, 0 blocked, 0 running")
+        self.assertIn("in_review: none", post["json"]["message"])
+        self.assertEqual(post["json"]["click"], "https://github.com/users/jyoka/projects/2")
+        self.write_config(extra="\n[digest]\nat = 8am\n")
+        self.assertIn("[digest] at must be a time like 08:00", self.task("watch", code=1))
 
     def test_digest_has_a_length_cap_and_a_research_task_gets_its_report(self):
         tid = self.new("long")
