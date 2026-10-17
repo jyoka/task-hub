@@ -135,6 +135,7 @@ archives the oldest Done cards.
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
 | `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
 | `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
+| `task digest [--since 24h]` | Summarizes what finished, awaits review, is blocked, and runs (`[digest] at` sends it to ntfy daily) |
 | `task done <id>` | Closes or cancels a task by hand |
 | `task update` | Updates task-hub to the newest release |
 | `task feedback [--feature]` | Opens the bug report or feature request form |

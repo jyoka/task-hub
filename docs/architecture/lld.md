@@ -131,7 +131,7 @@ flowchart LR
 | コマンド | 主な関数 | GitHub | 手元に書くもの |
 |---|---|---|---|
 | `task` | `sync(started_here=True)`、`cmd_home` | ボードを読む、開始、片付け | runs、events、asked |
-| `task watch` | `archive_overflow`、ループで `sync` | 同上 + 開始時のアーカイブの確認 | 同上 |
+| `task watch` | `archive_overflow`、ループで `sync`、`daily_digest` | 同上 + 開始時のアーカイブの確認 | 同上、digest |
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new` | Issue、カード、欄、Blocked by | events、asked |
@@ -139,6 +139,7 @@ flowchart LR
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
 | `task events`、`task stats` | `events_named`、`cmd_stats` | なし | なし |
+| `task digest` | `digest_report`(`digest_groups`、`digest_item`、`run_totals`)、`board_url` | なし(ボードの URL は board-meta から) | なし |
 | `task update` | `cmd_update`、`restart_watch`、`copy_kiro`。かんたんセットアップで入れた clone は `update_by_installer`(新しい版のインストーラを動かす) | なし(origin のタグを読む) | LIB を新しい版に、Kiro のフックとワークフローのコピー |
 | `task feedback` | `cmd_feedback`、`open_in_browser` | なし(ブラウザで Issue の画面を開くだけ) | なし |
 | `task _run <id>` | `cmd_run` | 3.3 の図 | runs、logs、metrics、events |
@@ -262,18 +263,19 @@ sequenceDiagram
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[digest]`(`at`))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
-| `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
-| `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
+| `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events`、`task digest` | JSON Lines |
+| `state/metrics.jsonl` | `record_run`(追記) | `task stats`、`task digest`、mod の実績、`slow_threshold` | JSON Lines |
 | `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list`、Kiro の拡張(Goal のタブ。`items[].content.body`) | `{key, fetched_at, items}` |
 | `state/board-cache.stale` | `gh()`(ボードを変える呼び出しのあと) | `cached_items` | UNIX 時刻 |
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/digest.json` | `daily_digest`(送る前に書く) | `daily_digest` | `{sent: このマシンの日付, time}` |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
@@ -348,6 +350,7 @@ sequenceDiagram
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る) | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
+| 毎日のまとめの ntfy への送信(`[digest] at` と `[notify] ntfy` があるときだけ) | 上と同じ(`daily_digest` が `ntfy_send` で) | 同上 | `task watch` が 1 日 1 回、`[digest] at` を過ぎた最初の確認で |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
 
