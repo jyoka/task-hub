@@ -88,6 +88,8 @@ GitHub Project の準備(列と欄)、スキルのインストール、常駐の
 | **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` で様子を見ます |
 
 Ready のカードを自動で始めるには、`task watch` を動かしておきます(1 分ごとに確認)。
+設定に `[triggers]` を書くと、`task watch` は CI の失敗、あなたに割り当てられた Issue、繰り返しの目標のカードを
+自分で作ります。カードは Backlog に入り、承認するのはあなたです([docs/triggers.md](docs/triggers.md))。
 
 例: 「ログインを直す」を頼んで、マージするまで。
 
@@ -145,6 +147,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+| | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
 
 ## バグ報告と要望
 
