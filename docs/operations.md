@@ -215,6 +215,8 @@ ntfy_token = tk_...                ; 任意。アクセス制御のあるトピ�
   そのまま届きます。使うのは Python 標準ライブラリの `urllib` だけです
 - 優先度: Blocked と replan は高(4)、ほかは既定(3)
 - タップしたときに開く URL: PR があれば PR、なければ Issue(`[board] issues` から作ります)。`update` には付けません
+- ボタン: `task intake` を設定していれば、実行が終わって In review になった通知に Merge、Reject、View PR の
+  ボタンが付きます([スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
 - 値が空、または `<サーバー>/<トピック>` の形でないときは送りません(それまでと同じ動き)
 
 送るのも、通知のコマンドと同じく切り離した別のプロセス(`python -I -c`、待つのは 10 秒まで)です。サーバーが
@@ -292,6 +294,76 @@ ntfy アプリで登録のトピックを開き、次の形で送ります:
 - 1 つの文からカードを 2 枚作らないよう、id はカードを作る前に書きます。GitHub の失敗で登録できなかった文は
   もう一度は試さないので、送り直します
 
+## スマートフォンから PR を承認する(ボタン)
+
+`task intake` を設定していると、実行が終わって In review になったときの ntfy の通知に、ボタンが 3 つ付きます。
+外出先でも、通知を 1 回タップするだけでマージキューに入れたり、PR を閉じたりできます。LLM は使いません。
+
+| ボタン | すること | 付くとき |
+|---|---|---|
+| Merge | その PR をマージキューに入れる(`task merge <番号>` と同じ) | `[merge] queue = on` のときだけ |
+| Reject | PR を閉じ、カードを Blocked にする(下記) | いつも |
+| View PR | PR をブラウザで開く(task-hub には何も送らない) | いつも |
+
+Merge と Reject は、ntfy アプリが `[intake] topic` に 1 行の文を送るボタンです(ntfy の `http` アクション)。
+`task intake` がそれを受け取り、確かめてから実行し、`[notify] ntfy` のトピックに結果を返します。設定は
+`task intake` と同じで、増えるものはありません。`task intake` を設定していない(`[intake] topic` か `secret` が
+正しくない)ときは、ボタンは付かず、今までの通知のままです。
+
+ボタンが付くのは、`task _run` が push して In review にした通知だけです(`task merge --cancel` で In review に
+戻したときの通知などには付きません)。
+
+### Reject のあと
+
+Reject は PR を閉じ(`gh pr close`、「Rejected from the phone」のコメントつき)、マージキューに入っていれば外し、
+Issue に「Rejected」のコメントを書いて、カードを **Blocked**(`rejected from the phone: the PR was closed`)にします。
+Done にしないのは、Reject は「この PR は要らない」であって、タスクが済んだかは分からないからです。Issue も
+ブランチも残るので、あとで次のどちらかを選びます。
+
+- 直してほしいことを Issue にコメントしてから `task start <番号>` で再実行する(同じブランチで続け、新しい PR を開きます)
+- やめるなら `task done <番号>`
+
+In review、wait for merge、Blocked 以外のカード、実行中のカードには Reject は効きません(理由を返します)。
+
+### 安全の仕組み
+
+ボタンの文は、公開の ntfy.sh なら名前を知っている人が誰でも送れるトピックに届きます。そこで、ボタンごとに
+使い捨てのトークンを付け、`task intake` が確かめてから動きます。
+
+- ボタンの文は `task-hub <merge|reject> <カードの番号> <owner/name>#<PR の番号> <PR の先頭のコミット> <トークン>` です。
+  トークンは、これらの値(する事、カード、リポジトリ、PR、コミット)の HMAC-SHA256 の先頭 32 文字です
+- HMAC の鍵は、このマシンだけにある `~/.local/state/task-hub/action.key` です(初めて要るときに作る。0600。
+  どこにも送りません)。`[intake] secret`(合言葉)は通知に入れません。鍵を消すと、それまでのボタンはすべて効かなくなります
+- トークンは 1 つのカード、1 つの PR、1 つのコミット、1 つの操作にしか合いません。Merge のトークンで Reject はできず、
+  別の PR にも使えません
+- **古いコミット**: `task intake` はボタンを受けると `gh pr view` で PR の今の先頭のコミットを読み、トークンのものと
+  違えば断ります。PR に新しい push があれば(競合の修正、再実行、手での push)、その前の通知のボタンでは承認できません。
+  最新のコミットを見たうえで、`task merge <番号>` で入れます
+- **使い捨て**: 実行したトークンは `~/.local/state/task-hub/intake-actions.json` に記録し、同じボタンを 2 度押しても
+  2 回目は断ります(新しい順に 2000 個まで覚えます)。断ったとき(古い、閉じた PR など)や GitHub の失敗では記録しないので、
+  理由を直せば同じボタンをもう一度押せます
+- **偽物**: トークンが合わない文、ボタンの形でない文は、ログに 1 行書くだけで、何もせず、返事もしません
+  (合言葉の違う文と同じく、外から確かめられないように)
+- ボタンが送る先は `[intake] topic` です。サーバーがトークンを求めるとき(`[notify] ntfy_token`)は、ボタンが
+  `Authorization` ヘッダーにそのトークンを持ちます。通知のトピックを読める人にはそのトークンも見えるので、
+  `ntfy_token` は通知と登録の 2 つのトピックにだけ使えるものにします。トークンが漏れても、ボタンの HMAC の鍵は
+  漏れないので、勝手にマージや Reject はできません
+- Merge は承認するだけです。マージするのは、チェックが通ったあとのマージキューです(`--match-head-commit` で、
+  チェックを通ったコミットに限ります)
+
+### 返事と記録
+
+| こんなとき | ntfy への返事(`[notify] ntfy` のトピック) | ログの 1 行 |
+|---|---|---|
+| Merge した | `#<番号> PR queued: <タイトル>`、本文にキューの位置 | `intake: queued <PR> at position <n>: merge #<番号> (...)` |
+| もうキューにある | `#<番号> already queued: <タイトル>` | `intake: already queued: ...` |
+| Reject した | `#<番号> rejected: <タイトル>` | `intake: closed <PR>, the card is Blocked: reject #<番号> (...)` |
+| 使ったボタン、古いコミット、閉じた PR、キューがオフ、カードがない、など | `#<番号> merge refused`(または `reject refused`)、本文に理由(優先度 4) | `intake: refused: <理由>: ...` |
+| GitHub の失敗 | 同上(`GitHub: ...`) | `intake: error: ...` |
+| トークンが合わない、ボタンの形でない | なし | `intake: refused: forged token: ...`、`intake: refused: not a button's message ...` |
+
+ログの 1 行には、する事、カード、PR、コミットの先頭 7 文字、ntfy の文の id が入ります。トークンは書きません。
+
 ## マージキュー
 
 いくつものタスクを並べて動かすと、1 つの PR がマージされるたびに残りの PR が古くなり、main と競合します。
@@ -315,6 +387,7 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
   wait for merge の列があればカードをそこに動かし、なければ In review のままです。Blocked のカードを直したあとに
   入れ直すときも同じです
 - カードを wait for merge の列に動かす(GitHub の画面やスマートフォンで): 次の確認でキューの最後に入ります(動かした順)
+- In review の通知の Merge ボタンを押す(`task intake` が要ります。[スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
 
 `task merge` は今のキューを、`task merge <番号> --cancel` はキューから外します(wait for merge のカードは In review に
 戻します)。カードを wait for merge(列がなければ In review)から別の列に動かしても外れます。

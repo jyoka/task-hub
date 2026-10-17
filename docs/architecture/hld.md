@@ -36,7 +36,7 @@ flowchart LR
     you -- "コピー" --> slack
     slack -- "タスクの案" --> th
     you -- "合言葉つきの文" --> phone
-    phone -- "task intake(Backlog だけ)" --> th
+    phone -- "task intake(Backlog だけ。ボタン: Merge、Reject)" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
     th -- "task share: Issue、カード。その後の Status、本文、コメント、閉じる(gh)" --> team
@@ -142,7 +142,7 @@ flowchart TB
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
-| `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする | Backlog のカードの登録と、ntfy への返事だけ(Ready には動かさない) |
+| `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする。In review の通知のボタン(Merge、Reject)の文も受ける | Backlog のカードの登録、トークンの合ったボタンの PR をマージキューに入れる、または PR を閉じてカードを Blocked にする、ntfy への返事だけ(Ready には動かさない) |
 | マージキュー(`[merge] queue`、既定はオフ) | 人が承認した PR(`task merge`、wait for merge の列)を、リポジトリごとに 1 つずつ base に追いつかせ、チェックを待ってマージする。競合は `task _fix` がエージェントに解かせる。キューにない In review の PR の競合は知らせるだけ | `merge-queue.json`、PR のブランチへのマージコミットの push、承認した PR のマージ、止めたときの Blocked とコメント |
 | `task _fix <番号> <base>` | 1 回の競合の解消(base のマージを始め、エージェントがファイルを直し、task-hub がマージコミットを作って push) | そのタスクの worktree、PR のブランチ、Issue のコメント、カード(Blocked のときだけ) |
 
@@ -283,6 +283,9 @@ sequenceDiagram
 - 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
 - `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
   記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです
+- 通知の Merge と Reject のボタンには合言葉を入れず、カード、PR、PR の先頭のコミット、する事の HMAC(鍵は
+  このマシンの `state/action.key`)を付けます。`task intake` は、合わないトークン、使ったトークン、PR に新しい
+  push があったあとのトークンを断ります
 
 ## 7. 配置
 

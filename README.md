@@ -132,7 +132,7 @@ archives the oldest Done cards.
 | `task new --title ... --repo owner/name --goal ...` | Registers a task (`--base`, `--agent`, `--research`, `--blocked-by 12,14`) |
 | `task start [<id>] [--agent name]` | Approves a Backlog card, or runs a Blocked card again |
 | `task watch` | Starts Ready cards automatically (every minute) |
-| `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
+| `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards, and handles the Merge and Reject buttons of In review notifications ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
