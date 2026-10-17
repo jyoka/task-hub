@@ -22,11 +22,14 @@ flowchart TB
     config["config<br/>config、board_config、parallel、agent_command、check_ready"]
     output["output(TOON)<br/>out、table、fail、q"]
     updates["updates<br/>UpdateCheck、cmd_update"]
+    triggers["triggers<br/>check_triggers、trigger_config、parse_schedule、due_period、*_occurrences"]
 
     commands --> sync
     commands --> runone
     commands --> boardl
     commands --> updates
+    commands --> triggers
+    triggers --> boardl
     commands --> sharing
     commands --> mergeq
     sync --> mergeq
@@ -142,11 +145,11 @@ flowchart LR
 | コマンド | 主な関数 | GitHub | 手元に書くもの |
 |---|---|---|---|
 | `task` | `sync(started_here=True)`、`cmd_home` | ボードを読む、開始、片付け | runs、events、asked |
-| `task watch` | `archive_overflow`、ループで `sync` | 同上 + 開始時のアーカイブの確認 | 同上 |
+| `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.7 節) | 同上 + triggers |
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
-| `task new` | `cmd_new`、`new_task` | Issue、カード、欄、Blocked by | events、asked |
-| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`new_task` | 文ごとに Issue、カード、欄(Backlog) | intake、events |
+| `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
+| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task` | 文ごとに Issue、カード、欄(Backlog) | intake、events |
 | `task merge [<id>] [--cancel]` | `merge_config`、`get`、`queue_entry`(PR がなければ `find_pr`)、`change_queue`、`set_status(wait for merge)`(列があるとき。Blocked からは列がなければ In review) | 読む、Status | merge-queue、events |
 | `task done <id>` | `cleanup`、`issue`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ。つないだタスクはチームの Issue も閉じ、カードを Done に | runs を消す、events |
 | `task share <id> --to` | `get`、`issue`、`share_config`、`TeamGitHub`、`share_pr` | 読む、チームの Project を読む、チームの Issue とコメントとカード、個人の Issue につなぎ先のコメント、開いている PR の本文 | なし(つなぎ先は GitHub のコメント) |
@@ -191,7 +194,7 @@ sequenceDiagram
         end
     end
     opt [merge] queue = on
-        S->>S: merge_queue(4.7)
+        S->>S: merge_queue(4.8)
     end
     opt 何かが Done になった
         S->>GH: archive_overflow
@@ -331,7 +334,25 @@ GitHub を読むことはありません(実行の中は `launch` が読んで `
 - チームの Issue が複数の Project にあるときは、共有時に保存した Project のカードだけを動かします。古いコメントでは `[share]` の Project を使い、どちらにも指定がないときだけ最初のカードを使います。指定した Project のカードがなければ、ほかのカードは動かしません
 - 実行中に共有したタスクは、その実行の `link` が空なので、その実行の間は写しません(PR の `Closes` と同じ)
 
-### 4.7 マージキュー(`merge_queue`、`[merge] queue = on` のときだけ)
+### 4.7 トリガー(`check_triggers`)
+
+`task watch` の 1 回の確認で、`sync` が返した開いているカードを渡して呼びます。`trigger_config` が `None`
+(`[triggers]` がない、または何も書いていない)なら、GitHub にもファイルにも触りません。
+`trigger_config` は `ci` と `issues` のリポジトリを、大文字と小文字を区別せずに 1 つにまとめます(最初の書き方を使う)。
+
+1. `triggers.json` の `checked_at` から `TRIGGER_SECONDS`(既定 300、テストは `TASK_TRIGGER_SECONDS`)たっていなければ何もしない
+2. `checked_at` を先に書く(失敗するリポジトリにも 5 分に 1 回しか聞かない)
+3. 1 回のこと(occurrence)を集める。どれも `seen` にあるキーは除く
+   - `ci_occurrences`: 同じタイトルの開いたカードがあれば何もしない。`default_branch`(1 日取っておく)の
+     `gh run list` から、ワークフローごとに最後に終わった実行を取り、`CI_FAILED` のものを 1 枚にまとめる。キーは `ci:<repo>:<run id>`
+   - `issue_occurrences`: `gh issue list --assignee @me`、`issue_label` があれば `--label` も。キーは `issue:<repo>#<番号>`
+   - `recurring_occurrences`: `due_period` が今の周期を返したもの。キーは `every:<名前>:<周期>`
+4. occurrence ごとに `create_task`。キーがもう `seen` にあれば(同じ確認の前の occurrence が書いた)作らない。`created` で Issue の URL が分かった直後に `seen` に書く。`ready` なら Backlog のあと `set_status(Ready)`
+
+GitHub の失敗はリポジトリごと、カードごとに `trigger_errors` に出し、ほかは続けます。`triggers.json` が書けなければ
+何も作らずに `error:` を返します。
+
+### 4.8 マージキュー(`merge_queue`、`[merge] queue = on` のときだけ)
 
 `sync` は、カードごとの確認(マージの確認を含む)のあとで `merge_queue` を呼びます。wait for merge の列にあって
 キューにないカードを、動かした順(`updated`)にキューの最後に足し(`queued`)、そのあとリポジトリごとに先頭の 1 つだけ
@@ -373,7 +394,7 @@ stateDiagram-v2
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`))。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
@@ -387,6 +408,7 @@ stateDiagram-v2
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/triggers.json` | `check_triggers`(`task watch` だけ) | `check_triggers` | `{checked_at, seen: {キー: {at, issue}}, default_branch: {repo: [名前, UNIX 時刻]}}` |
 | `state/intake.json` | `cmd_intake`(文を 1 つ扱う前に) | `cmd_intake`(つなぎ直すとき、起動したとき) | `{since}`。最後に扱った ntfy の文の id(ntfy の `since=` に渡す) |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
@@ -466,6 +488,9 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `MOVE_TO_TOP` | GraphQL | 1 | Status を変えるとき |
 | `ARCHIVE_ITEM` | GraphQL | 1 枚ごとに 1 | 100 枚を超えたとき |
 | `ADD_BLOCKED_BY` | GraphQL | 1 | `task new --blocked-by` |
+| `gh run list`(既定のブランチの 20 件) | REST | 1 回 | `[triggers] ci` のリポジトリごと、5 分に 1 回まで |
+| `gh repo view`(既定のブランチ) | GraphQL(gh) | 1 前後 | `[triggers] ci` のリポジトリごと、1 日 1 回 |
+| `gh issue list`(割り当て、ラベル) | GraphQL(gh) | 1 前後 | `[triggers] issues` のリポジトリごとに 1〜2、5 分に 1 回まで |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
 | 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
@@ -533,6 +558,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
+| トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 | マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
 | `task _fix` の失敗 | マージを取り消して何も push しない。カードを Blocked にしてコメント。それも書けなければカードは元の列のまま、キューの次の確認が同じ base でまた競合を見つけて Blocked にする |
@@ -556,7 +582,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 11. つないだタスクの Status はチームのカードに対応表で写り、チームの列が変わらない変化では mutation を呼ばない。Report と仕分けは
     同じ本文がチームの Issue にも付き、人のコメントは写らない。開始ごとにチームの本文が今の Goal になる。`task done` と、GitHub が
     閉じなかったマージでチームの Issue も閉じる。チームへの写しが失敗しても、個人のカードと実行は写しがないときと同じに進む
-12. マージキューは、人が承認した PR(`task merge`、wait for merge の列)だけをマージし、リポジトリごとに承認した順に 1 つずつ
+12. トリガーは同じ CI の実行、Issue、周期にカードを 2 枚作らない。`ci` と `issues` のカードは Backlog に入る。`[triggers]` がなければ何も変わらない
+13. マージキューは、人が承認した PR(`task merge`、wait for merge の列)だけをマージし、リポジトリごとに承認した順に 1 つずつ
     マージする。解けない競合と落ちたチェックではマージせず、カードを Blocked にする。`[merge] queue` がオフ(既定)なら、
     GitHub の呼び出しもカードの動きも足す前と同じ
 
