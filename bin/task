@@ -338,7 +338,7 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {},
-                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
     except UnicodeDecodeError:
@@ -820,7 +820,8 @@ $m::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShe
 
 
 def notify(e):
-    """Show the event on this machine if [notify] events lists it: herdr's notification if herdr runs, else macOS's.
+    """Show the event if [notify] events lists it: on this machine (herdr, else macOS, Windows or notify-send),
+    and on the phone too when [notify] ntfy is set.
     Fire and forget: a missing or hanging notifier must never cost the run or the command that wrote the event."""
     try:
         wanted = {x.strip().lower() for x in config()["notify"].get("events", "").split(",") if x.strip()}
@@ -837,13 +838,51 @@ def notify(e):
                "-e", "end run", title, body]
     elif WINDOWS:  # a toast from Windows PowerShell (5.1, which loads WinRT types); the text goes in as variables
         cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]
+    elif shutil.which("notify-send"):  # Linux without herdr
+        cmd = ["notify-send", "--app-name=task-hub", "--urgency", "critical" if e["event"] in (BLOCKED, "replan")
+               else "normal", title, body]
     else:
-        return
+        cmd = None
+    launch = [(cmd, {"TASK_HUB_TITLE": title, "TASK_HUB_BODY": body})] if cmd else []
+    if post := ntfy_post(e, title, body):  # in addition to this machine's: the phone is for when nobody is here
+        launch.append(([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)}))
+    for argv, env in launch:
+        try:
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env={**os.environ, **env}, **DETACHED)
+        except OSError:
+            pass
+
+
+# a detached `python -I -c`, so a down or hanging server costs only this process, never the command that wrote the event
+NTFY_POST = """import json, os, urllib.request
+p = json.loads(os.environ["TASK_HUB_NTFY"])
+urllib.request.urlopen(urllib.request.Request(p["url"], data=json.dumps(p["json"]).encode(), headers=p["headers"],
+                                              method="POST"), timeout=p["timeout"]).close()"""
+NTFY_TIMEOUT = 10  # seconds, for the whole request in its own process
+
+
+def ntfy_post(e, title, body):
+    """[notify] ntfy: the phone's copy of the notification, as ntfy's JSON publish (url, json, headers), or None
+    when it is off. JSON, not the Title/Click headers: a title in Japanese is not a valid HTTP header."""
     try:
-        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env={**os.environ, "TASK_HUB_TITLE": title, "TASK_HUB_BODY": body}, **DETACHED)
-    except OSError:
-        pass
+        n = config()["notify"]
+        url, token = n.get("ntfy", "").strip(), n.get("ntfy_token", "").strip()
+        issues = config()["board"].get("issues", "")
+    except configparser.Error:
+        return None
+    m = re.fullmatch(r"(https?://[^/?#\s]+(?:/[^?#\s]*)?)/([\w-]{1,64})", url.rstrip("/"))
+    if not m:  # empty: off. Not `<server>/<topic>`: nothing to send to
+        return None
+    msg = {"topic": m[2], "title": title, "message": body or title,
+           "priority": 4 if e["event"] in (BLOCKED, "replan") else 3, "tags": ["task-hub"]}
+    pr = e.get("pr") or (e.get("digest") or {}).get("pr")
+    if pr:
+        msg["click"] = pr
+    elif e.get("id") and re.fullmatch(r"[\w.-]+/[\w.-]+", issues):
+        msg["click"] = f"https://github.com/{issues}/issues/{e['id']}"
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+    return {"url": m[1], "json": msg, "headers": headers, "timeout": NTFY_TIMEOUT}
 
 
 def set_text(t, field, value):

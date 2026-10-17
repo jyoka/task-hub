@@ -178,7 +178,10 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 - 本文: 要点を `verdict: pass`、`reason: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
   最後の行が PR の URL(あれば)
 - 出し方: herdr が動いていれば `herdr notification show`(Blocked と replan は `--sound request`、ほかは
-  `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)。どちらもなければ出しません
+  `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)、Windows のトースト、
+  Linux の `notify-send`(Blocked と replan は `--urgency critical`)の順で、このマシンにあるもの。どれもなければ出しません
+- スマートフォンへ: `[notify] ntfy` を書くと、上のこのマシンの通知に**加えて**、同じ見出しと本文を
+  [ntfy](https://ntfy.sh) のトピックにも送ります(下記)
 
 通知はイベントを書いたプロセス(実行中の `task _run`、`task watch`、`task`、`task start` など)がそのまま出します。
 見張り役のプロセスを別に動かす必要はなく、`task watch` を止めていても、実行が終わった瞬間に届きます。通知のコマンドは
@@ -194,11 +197,29 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 ```ini
 [notify]
 events = In review, Blocked, replan, Done, slow, update   ; 既定。列の名前か replan、slow、update をカンマ区切りで。空にすると通知しない
+ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
+ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
 
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
 システム設定の「通知」で、herdr または「スクリプトエディタ」(osascript の通知はこの名前で出ます)が許可されて
 いるか確かめます。
+
+#### スマートフォンに届ける(ntfy)
+
+`ntfy` を書くと、`events` に入っている出来事を ntfy のトピックにも送ります。スマートフォンの ntfy アプリで
+そのトピックを購読しておけば、席を離れていても届きます。このマシンの通知(herdr、macOS など)はそのまま出ます。
+
+- 送り方: ntfy の JSON での送信(サーバーの URL に POST し、トピックは本文に入れる)。見出しに日本語が入っても
+  そのまま届きます。使うのは Python 標準ライブラリの `urllib` だけです
+- 優先度: Blocked と replan は高(4)、ほかは既定(3)
+- タップしたときに開く URL: PR があれば PR、なければ Issue(`[board] issues` から作ります)。`update` には付けません
+- 値が空、または `<サーバー>/<トピック>` の形でないときは送りません(それまでと同じ動き)
+
+送るのも、通知のコマンドと同じく切り離した別のプロセス(`python -I -c`、待つのは 10 秒まで)です。サーバーが
+落ちている、名前が引けない、つながったまま答えない、のどれでも、`task _run`、`task watch`、ほかのコマンドは
+待たずにそのまま続きます(その通知が届かないだけで、エラーも出しません)。トピックの名前は知っている人なら
+誰でも購読できるので、ntfy.sh を使うときは推測されにくい名前にするか、トークンで守ります。
 
 ## 実行の結果を集計する
 
