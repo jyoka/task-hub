@@ -199,79 +199,53 @@
     winget の GitHub CLI を消すのに UAC が要った)。入れたものは記録し、アンインストールはそれだけを消します。
     Windows の実機を毎回借りなくてよいように、CI が標準のユーザーでもインストーラを通し、版を出す前に本物のボードで
     1 枚を PR まで進めます([windows-easy-setup.md](architecture/designs/windows-easy-setup.md))。
-22. **Linux では、エージェントを bubblewrap の中で動かせます。既定は off です。** 誰も見ていない実行でも、
-    エージェントはあなたの権限で HOME 全体(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、デスクトップ)に届いていました。
-    `[sandbox] mode = bwrap` にすると、エージェントの起動(実装、reviewer、replanner)だけを `bwrap` で包み、
-    見えるのは worktree、その git ディレクトリ(clone の `.git` は読むだけ)、システムのプログラム(読むだけ)、`PATH` の
-    フォルダ(読むだけ)、エージェント CLI 自身のファイル(`~/.claude` など。読み書き)だけにします。HOME と `/tmp` は空です。
-    エージェント CLI のファイルのうち、次に CLI を起動したときにコードを動かすもの(`~/.claude/settings.json` の hook、
-    `~/.claude.json` の MCP サーバー、`hooks/`、`plugins/`、`skills/`、`CLAUDE.md`、`~/.codex/config.toml` など)は、
-    読み書きのフォルダの上に読むだけで重ねます。そうしないと、中のエージェントが hook を書き残し、あなたが次に
-    サンドボックスなしで `claude` を起動したときに外で動いてしまうからです。ないものは空で作ってから重ねます
-    (リンクだと重ねられず、エージェントが別のファイルに差し替えられるので、開始の前に Blocked にします)。
-    `~/.claude.json` を読むだけにしても、Claude Code 2.1.302 は答えを返し、記録も残すことを 2026-10-17 に確かめました。
-    同じ理由で、git のメタデータも中では読むだけにします。task-hub は外で worktree に git を動かし、git は worktree の
-    `.git`(と git ディレクトリの `commondir`)が指す先の設定を読みます。中のエージェントがそれを自分の git ディレクトリに
-    向けると、その `core.fsmonitor` や hook が外で動くからです。worktree の `.git` は読むだけで重ね、`.git/worktrees/<名前>`
-    は clone の `.git` ごと読むだけにします。もう一段、サンドボックスがオンのときの外の git は `-c core.fsmonitor=
-    -c core.hooksPath=/dev/null` で動かし、毎回 `.git` が task-hub の clone を指したままかを確かめます。worktree の中に
-    ほかの `.git`(入れ子のリポジトリ)があっても外の git を動かしません。外の git は入れ子のリポジトリの
-    `filter.*.clean` なども `add` や `diff` で動かし、コマンドを動かす設定は `-c` で切り尽くせないからです。入れ子の
-    `.git` を消して進める案もありましたが、エージェントの作ったものを黙って消すより、Blocked にして人に見せます。
-    サブモジュールのあるリポジトリはサンドボックスで動かせなくなります。代わりに
-    git ディレクトリを読み書きのまま `.git` のファイルだけを守る案もありましたが、`commondir` や `config.worktree` も
-    同じ穴になるので、メタデータ全部を読むだけにしました(2026-10-17、人が選択)。エージェントは commit できなくなりますが、
-    もともと commit は task-hub の仕事です。
-    commit、push、PR は決定事項 3 のとおり task-hub が外で行うので、エージェントに `gh` のログインも鍵も要りません。
-    この分担があるので、サンドボックスの中に GitHub の資格情報を入れずに済みました。検討した選択肢です(2026-10)。
+22. **Linux では、エージェントを専用の Linux ユーザーで動かせます(`[sandbox] mode = user`)。既定は off です。**
+    誰も見ていない実行でも、エージェントはあなたの権限で HOME 全体(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、
+    デスクトップ)に届いていました。`mode = user` では、エージェント(実装、reviewer、replanner)を権限の低いユーザー
+    `task-agent` で動かします(`sudo -n -u task-agent -H -D <worktree>`)。あなたの HOME には、Unix の権限で届きません。
+    検討した選択肢です(2026-10)。
 
-    | 選択肢 | 資格情報(エージェント CLI) | `[env]` | ネットワーク | ツール | 判定 |
+    | 選択肢 | エージェント CLI のログイン | git push と PR | `[env]` | ネットワーク | 判定 |
     |---|---|---|---|---|---|
-    | bubblewrap(`bwrap`) | 同じパスに bind するだけ。使用量の記録もそのまま読める | worktree にコピー済みなので届く | そのまま | ホストのものを読むだけで使う | **採用**。権限が要らず、パッケージ 1 つ。Claude Code の Linux のサンドボックスも同じ仕組み |
-    | rootless podman | イメージかマウントで渡す。ログインの更新がコンテナの外に残るよう工夫が要る | 届く | `--network` で絞れる | リポジトリごとの言語とエージェント CLI 入りのイメージを保つ手間。worktree のファイルの持ち主は `--userns=keep-id` が要る | 不採用。ネットワークを絞る段階で再検討 |
-    | 専用の Linux ユーザー | そのユーザーで別にログイン。記録は別の HOME で、task-hub が使用量を読めない | グループの権限で共有 | 絞れない | 同じ | **採用(2026-10-17、下記)**。作るのに root と sudo の設定が要るが、外の git の抜け道を principal の分離で閉じられる |
-    | エージェント自身のサンドボックス(Claude Code の `/sandbox`、Codex の `-s`) | 要らない | 届く | Claude Code は許可リスト | そのまま | 不採用(決定事項 4: ベンダーごとに設定が違う)。併用はできる |
-    | `systemd-run --user` の `ProtectHome` など | bind で渡す | 届く | 絞れる | そのまま | 不採用。ユーザーのサービスでは多くの項目が使えず、herdr のペインに出力をつなぐ作りが増える |
+    | 専用の Linux ユーザー | そのユーザーで一度ログイン。記録はそのユーザーの HOME に残る | そのユーザーが自分の GitHub のトークンで commit と push。PR はあなたの `gh` で API だけ | 共有のフォルダにコピー | 絞れない | **採用**。root での用意が要るが、外で動く git の抜け道を、動かす主体を分けて閉じられる |
+    | bubblewrap(`bwrap`) | 同じパスに bind するだけ | 外のあなたの git が、エージェントの書いた worktree で commit と push | worktree にコピー | そのまま | 実装したが取りやめ(下記) |
+    | rootless podman | イメージかマウントで渡す。ログインの更新が外に残るよう工夫が要る | bwrap と同じ問題か、中に資格情報を入れる | 届く | `--network` で絞れる | 不採用。言語とエージェント CLI 入りのイメージを保つ手間。ネットワークを絞る段階で再検討 |
+    | エージェント自身のサンドボックス(Claude Code の `/sandbox`、Codex の `-s`) | 要らない | そのまま | 届く | Claude Code は許可リスト | 不採用(決定事項 4: ベンダーごとに設定が違う)。併用はできる |
+    | `systemd-run --user` の `ProtectHome` など | bind で渡す | bwrap と同じ問題 | 届く | 絞れる | 不採用。ユーザーのサービスでは多くの項目が使えない |
 
-    `bwrap` がない、Linux でない、user namespace が使えないときは、エージェントを起動する前にカードを Blocked にします。
-    `[setup]` は人が書いたコマンドなので外で動きます。ただし 2 回目からは、前の実行でエージェントが書き換えたかもしれない
-    ファイル(`package.json` の scripts など)の上で動くので、ここはサンドボックスで守れません。ネットワークはまだ絞りません。エージェントが API を呼ぶのに要り、
-    絞るなら許可するホストの一覧(プロキシ)が要るためです。詳しくは [sandbox.md](sandbox.md)。
+    **bwrap をやめた理由(2026-10-17、人が選択)。** 最初は bwrap で、エージェントに worktree だけを見せ、commit と push は
+    決定事項 3 のとおり task-hub が外で行う作りにしました。ところが、外のあなたの git が、エージェントの書いた
+    ファイルの上で動きます。git は worktree の `.git`、`commondir`、clone の config、入れ子のリポジトリの config を読み、
+    `core.fsmonitor`、hook、`filter.*.clean`、`diff.*.textconv` などのコマンドを動かします。`.git` の向け替えを
+    読むだけの bind と `-c core.fsmonitor= -c core.hooksPath=/dev/null` で塞ぐと、次は入れ子のリポジトリの
+    `filter.*.clean` が見つかり、コマンドを動かす設定の種類は `-c` では尽くせませんでした。根の問題は、**あなたの
+    ユーザーが、エージェントの握るファイルの上でコードを動かしうる git を動かす**ことです。
 
-    **2026-10-17(2 回目、人が選択):bwrap をやめ、エージェントを専用の Linux ユーザーで動かします。** bwrap の作りでは、
-    task-hub 自身の git は worktree の外(ユーザー `R`)で動かし、中のエージェントが書いたファイルを読みます。この外の git が、
-    エージェントの仕込んだ設定を `R` の権限で動かしてしまう抜け道が、繰り返し見つかりました。最初は worktree の `.git` と
-    `commondir` を別の git ディレクトリに向け替えて `core.fsmonitor` を動かすもの、次に worktree の中に入れ子のリポジトリや
-    サブモジュールを作り、その `filter.*.clean` を `add`・`diff`・`status` で動かすものです。`git_wt` の `-c` フラグや `.git` の
-    検査、`os.walk` での入れ子リポジトリ探しで 1 つずつ塞いでも、`ext::` リモート、`url.*.insteadOf`、`diff.*.textconv`、
-    `credential.helper` など、コマンドを動かせる設定の種類が尽きません。根の問題は、**特権のある `R` が、エージェントの握る
-    ファイルの上でコードを動かしうる git を動かす**ことです。
+    そこで、次の約束にしました(2026-10-17、人が選択)。
 
-    専用ユーザーの作りは、この principal(実行する主体)を分けて抜け道を閉じます。
+    - **あなたのユーザーは、エージェントの握るファイルの上で git を動かさない。** clone と worktree への git
+      (clone、fetch、worktree、`add`、`commit`、`diff`、reviewer の後の `restore`、`cleanup`)は、すべて `task-agent` で
+      動かします(`git_shared`)。エージェントの仕込んだ hook や filter が動いても、`task-agent` の権限です。
+      そこのファイルの読み書き(レポート、Rules、`[env]` のコピー、`.git/info/exclude`)も `task-agent` で行います
+      (`shared_read`、`shared_write`)。エージェントの置いたリンクが、あなたのファイルに届かないようにするためです。
+      `[check]` と `[setup]` も `task-agent` で動きます。
+    - **commit と push は `task-agent` が自分のトークンで行う。** トークンは、タスクのリポジトリの contents と
+      pull requests だけの fine-grained にします。あなたの `gh` は、PR を開くこと、Issue とカードだけに使い、
+      push した結果(先に進んでいるか、PR の大きさ)は GitHub の API(`compare`)から読みます。決定事項 3 の
+      「エージェントは commit しない」は、エージェントの実行の中では変わりません。commit するのは、エージェントが
+      終わったあとの task-hub で、それを `task-agent` の権限で行うだけです。
+    - **task-hub 自身のプロセスは worktree の外で動く。** herdr のペインと `task _run` の作業フォルダは
+      `~/.local/share/task-hub` です。git を見るシェルのプロンプトが、worktree の中であなたの git を動かさないためです。
 
-    - エージェント(実装・reviewer・replanner)は、権限の低い専用ユーザー `S` で動かします(`sudo -n -u S`)。`S` は worktree に
-      だけ届き、`R` の HOME(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、デスクトップ)は Unix の権限で届きません。
-    - worktree に対する task-hub 自身の git(`add`・`commit`・`diff`・`status`・`write-tree`・`checkout-index`・`clean` など)も
-      `S` で動かします。エージェントが仕込んだ filter や hook が動いても、`S` の権限なので `R` には届きません。
-    - `R` の GitHub の資格情報が要る操作は push だけです。push は filter を動かさず、hook は `-c core.hooksPath=/dev/null` で
-      切ります。さらに `remote.origin.url` の細工(`ext::` など)を避けるため、`R` での push は `origin` ではなく repo スラグから
-      組み立てた URL に、`-c protocol.ext.allow=never` と資格ヘルパーの初期化を付けて動かします。これで `R` が動かす git が
-      エージェントの設定を読んでコマンドを動かすことはありません。これが bwrap で閉じきれなかった抜け道です。
-
-    代償(2026-10-17 の時点で未解決。フォローアップのタスクにします):
-
-    - **root と sudo の設定が要ります。** `S` を作り(`useradd`)、`R` に `S` への NOPASSWD の sudo(`sudoers`)を与え、worktree を
-      `S` が読み書きできるようにする(共有グループか ACL)必要があります。これは `task start` の無人の実行ではできないので、
-      人がマシンごとに一度用意します。用意がなければ、エージェントを起動する前(クレジットを使う前)にカードを Blocked にします。
-    - **使用量の記録。** エージェント CLI の記録(`~/.claude/projects/*.jsonl`)は `S` の HOME に残ります。`task stats` が読むには、
-      `S` の HOME を `R` が読めるようにするか、記録の場所を共有します。
-    - **エージェント CLI のログイン。** `S` でエージェント CLI に一度ログインしておきます。
-    - **実装と検証には上のマシンの用意が要ります。** 無人の worktree の実行(uid 1000、パスワードつき sudo、`S` なし)では、
-      隔離の動き(worktree の外を読めない・push はできる)を 1 度も動かして確かめられません。実装は fail-safe に倒し
-      (用意がなければ Blocked)、隔離自体は用意のあるマシンでの手動確認([sandbox.md](sandbox.md))で確かめます。
-
-    bwrap の作り(権限なしで動き、読みの隔離はテストで確認済み)は、専用ユーザーの実装と検証が済むまでの、特権なしで使える
-    当座の mode として残します。
+    代償です。ユーザー、共有のフォルダ(グループと ACL)、NOPASSWD の sudo を、人がマシンごとに一度 root で
+    用意します(workenv_setting の `setup_agent_user.sh`)。エージェント CLI にも `task-agent` で一度ログインします。
+    使用量の記録は `task-agent` の HOME に残るので、`task stats` はトークンを読めません(フォローアップ)。
+    エージェントは、共有のフォルダにあるほかのタスクの worktree にも届きます。ネットワークは絞りません。
+    `user` から `off` に戻すときは、`~/.local/share/task-hub/repos` と `worktrees` を先に消します。`off` では
+    task-hub があなたのユーザーで git を動かすので、残った clone にエージェントの仕込んだ設定や hook があれば、
+    あなたの権限で動くからです。`mode = user` が一度動くと `~/.local/share/task-hub/sandbox-used` を書き
+    (エージェントからは書けない場所)、それがある間、`off` は二つのフォルダが空になるまで開始と後片付けを断ります。
+    詳しくは [sandbox.md](sandbox.md)。
 23. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
     Custom Rules(ひとりでしてよい、承認が要る、禁止)と同じ 3 段階を、`can:` / `ask:` / `never:` の行で書きます。
     カードのラベルにしなかったのは、規則には中身(どのコマンドか、どのドメインか)があり、ラベルでは書けないからです。
@@ -384,8 +358,8 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
 
 - マシンがスリープすると実行は一時停止し、Ready のカードは Mac が起きて `task watch`(または `task`)が動くまで始まりません。
 - 組み込みのエージェントコマンド (Codex を除く) は承認のプロンプトをスキップします。[agents.md](agents.md#安全性) を参照してください。
-  Linux では `[sandbox] mode = bwrap` で、エージェントに worktree だけを見せられます(決定事項 22)。Mac と Windows には
-  まだありません。
+  Linux では `[sandbox] mode = user` で、エージェントを専用のユーザーで動かし、HOME に届かないようにできます
+  (決定事項 22)。Mac と Windows にはまだありません。
 - ネットワークが必要なテストコマンドは、Codex のデフォルトのサンドボックスでは失敗することがあります。そのコマンドを調整してください。
 - Blocked by は、最初の実行より前に付けたときだけ効きます。一度実行したタスクの再実行は、同じブランチの続きから
   なので、あとから付けた前提の変更は入りません。PR を閉じてリモートの `task/<番号>` を消しても、Base branch が

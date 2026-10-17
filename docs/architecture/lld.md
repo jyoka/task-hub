@@ -13,7 +13,7 @@ flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、build_prompt、<br/>run_agent_process、sandboxed、sandbox_guarded、git_wt、check_git_links、Steps、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -191,7 +191,7 @@ sequenceDiagram
     participant G as git
     participant GH as GitHub
     participant H as herdr
-    L->>L: check_ready(エージェントの準備)、check_sandbox([sandbox])
+    L->>L: check_sandbox([sandbox])、check_ready(エージェントの準備)
     L->>G: ensure_clone、ensure_worktree(task/<id>)
     L->>L: copy_env_files([env])
     L->>GH: issue(本文、ラベル、前回のレポート)
@@ -275,9 +275,10 @@ sequenceDiagram
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
-| `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
-| `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
+| `share/repos/<owner>/<name>` | `ensure_clone`(`[sandbox] mode = user` では専用ユーザー) | worktree の元 | git |
+| `share/worktrees/<id>` | `ensure_worktree`、エージェント(`[sandbox] mode = user` ではどちらも専用ユーザー。task-hub の読み書きも `shared_read`、`shared_write` でそのユーザーから) | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/worktrees/<id>/.claude/settings.local.json` | `write_rules`(Goal に Rules があるとき) | エージェント(Claude Code) | JSON。`permissions` の `allow` / `ask` / `deny`。`.git/info/exclude` でコミットしない |
+| `share/sandbox-used` | `as_agent`(`[sandbox] mode = user` で初めて動いたとき) | `refuse_after_user`(`mode = off` の開始、`git_shared`、`shared_*`、`cleanup`。`repos` と `worktrees` が空なら消す) | 1 行のテキスト。あることだけが意味を持つ |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
@@ -348,7 +349,8 @@ sequenceDiagram
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
-| `bwrap`(`[sandbox] mode = bwrap` のときだけ) | エージェントの CLI を包む子プロセス(`sandboxed`)。開始の前に `check_sandbox` が `bwrap ... true` で 1 回試す | - | エージェントの起動ごと、開始ごと |
+| `sudo -n -u <user> -H -D <dir> --`(`[sandbox] mode = user` のときだけ) | エージェントの CLI、`[check]`、`[setup]`、clone と worktree への git、そこのファイルの読み書き(`as_agent`)。開始の前に `check_sandbox` が共有のフォルダに書けるかを試す | - | エージェントの起動ごと、git ごと |
+| `gh api repos/<repo>/compare/<base>...<branch>`(`[sandbox] mode = user` のときだけ) | `branch_compare`: 専用ユーザーが push したあと、先に進んでいるか(`ahead_by`)と PR の大きさ(`files`)を GitHub から読む | REST 1 回 | 実行の終わりに 2 回 |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
 
@@ -415,7 +417,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 8. 手元の JSON は、書き込みの途中で読んでも壊れていない
 9. アンインストールは、インストーラが記録したものだけを消す。ジャンクションは先を消さずに外す。作業中のタスクがある
    あいだ、Windows のアンインストールは見張りだけを止める
-10. `[sandbox] mode = bwrap` のエージェントは、worktree の外の HOME と `GH_TOKEN` に届かず、Rules の設定も、エージェント CLI のコードを動かす設定(`SANDBOX_AGENT_CODE`、`sandbox_guarded`)も、git のメタデータ(worktree の `.git`、`commondir`、`config.worktree`)も書き換えられない。サンドボックスがオンのとき、外の git(`git_wt`)は fsmonitor と hook を切り、`.git` が clone を指したままか、worktree の中にほかの `.git`(入れ子のリポジトリ)がないかを毎回確かめ、外れたら git を動かさない(`check_git_links`)。エージェントの用意した設定のコマンドは外で動かない。それでも PR はできる
+10. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = user` が一度動いたマシン(`share/sandbox-used`)では、`mode = off` でも、`repos` と `worktrees` が空になるまで、あなたのユーザーでそこに git を動かさない(`refuse_after_user`)
 11. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
 
 ## 10. テストの仕組み
