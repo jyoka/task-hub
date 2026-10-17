@@ -22,6 +22,7 @@ flowchart LR
     you(["あなた"])
     chat["エージェントの会話<br/>Claude Code / Kiro / Codex / Pi<br/>/task、/chief"]
     slack["Slack のスレッド<br/>コピーして ⌃⌥S"]
+    phone["スマートフォン<br/>ntfy のトピックに送る"]
     th["task-hub<br/>あなたの Mac で動く"]
     gh[("GitHub<br/>Issue、Project、PR")]
     agents["エージェントの CLI<br/>claude -p、codex、pi、kiro-cli"]
@@ -32,6 +33,8 @@ flowchart LR
     you -- "Ready に移す、マージする" --> gh
     you -- "コピー" --> slack
     slack -- "タスクの案" --> th
+    you -- "合言葉つきの文" --> phone
+    phone -- "task intake(Backlog だけ)" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
     th -- "起動する" --> agents
@@ -78,7 +81,8 @@ flowchart TB
     subgraph ext["外のもの"]
         gh[("GitHub")]
         agents["エージェントの CLI"]
-        herdr["herdr"]
+        herdr["herdr、OS の通知"]
+        ntfy["ntfy<br/>(任意。スマートフォンへ)"]
     end
 
     skills --> cli
@@ -106,6 +110,7 @@ flowchart TB
     sync --> data
     notify --> state
     notify --> herdr
+    notify -. "[notify] ntfy" .-> ntfy
     board --> state
     runner --> state
     cli --> cfg
@@ -120,6 +125,7 @@ flowchart TB
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
+| `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする | Backlog のカードの登録と、ntfy への返事だけ(Ready には動かさない) |
 
 ## 4. データの流れ
 
@@ -218,6 +224,8 @@ flowchart LR
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
+- `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
+  記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです
 
 ## 7. 配置
 

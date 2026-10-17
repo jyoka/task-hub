@@ -43,7 +43,7 @@ flowchart LR
 - **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
 - **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書いて Ready に戻すと、同じ PR で続きます
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します(LLM は使いません)
+- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません)
 - **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
 - **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
@@ -126,6 +126,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task new --title ... --repo owner/name --goal ...` | タスクを登録する(`--base`、`--agent`、`--research`、`--blocked-by 12,14`) |
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
+| `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |

@@ -342,7 +342,7 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {},
-                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
     except UnicodeDecodeError:
@@ -824,7 +824,8 @@ $m::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShe
 
 
 def notify(e):
-    """Show the event on this machine if [notify] events lists it: herdr's notification if herdr runs, else macOS's.
+    """Show the event if [notify] events lists it: on this machine (herdr, else macOS, Windows or notify-send),
+    and on the phone too when [notify] ntfy is set.
     Fire and forget: a missing or hanging notifier must never cost the run or the command that wrote the event."""
     try:
         wanted = {x.strip().lower() for x in config()["notify"].get("events", "").split(",") if x.strip()}
@@ -841,13 +842,68 @@ def notify(e):
                "-e", "end run", title, body]
     elif WINDOWS:  # a toast from Windows PowerShell (5.1, which loads WinRT types); the text goes in as variables
         cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]
+    elif shutil.which("notify-send"):  # Linux without herdr
+        cmd = ["notify-send", "--app-name=task-hub", "--urgency", "critical" if e["event"] in (BLOCKED, "replan")
+               else "normal", title, body]
     else:
-        return
+        cmd = None
+    launch = [(cmd, {"TASK_HUB_TITLE": title, "TASK_HUB_BODY": body})] if cmd else []
+    if post := ntfy_post(e, title, body):  # in addition to this machine's: the phone is for when nobody is here
+        launch.append(([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)}))
+    for argv, env in launch:
+        detach(argv, env)
+
+
+def detach(argv, env):
+    """Start argv in its own session and never wait for it; a program that is not there is no error."""
     try:
-        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env={**os.environ, "TASK_HUB_TITLE": title, "TASK_HUB_BODY": body}, **DETACHED)
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={**os.environ, **env}, **DETACHED)
     except OSError:
         pass
+
+
+# a detached `python -I -c`, so a down or hanging server costs only this process, never the command that wrote the event
+NTFY_POST = """import json, os, urllib.request
+p = json.loads(os.environ["TASK_HUB_NTFY"])
+urllib.request.urlopen(urllib.request.Request(p["url"], data=json.dumps(p["json"]).encode(), headers=p["headers"],
+                                              method="POST"), timeout=p["timeout"]).close()"""
+NTFY_TIMEOUT = 10  # seconds, for the whole request in its own process
+
+
+def ntfy_post(e, title, body):
+    """[notify] ntfy: the phone's copy of the notification, as ntfy's JSON publish (url, json, headers), or None
+    when it is off. JSON, not the Title/Click headers: a title in Japanese is not a valid HTTP header."""
+    try:
+        issues = config()["board"].get("issues", "")
+    except configparser.Error:
+        return None
+    pr = e.get("pr") or (e.get("digest") or {}).get("pr")
+    click = pr or (f"https://github.com/{issues}/issues/{e['id']}"
+                   if e.get("id") and re.fullmatch(r"[\w.-]+/[\w.-]+", issues) else "")
+    return ntfy_message(title, body, 4 if e["event"] in (BLOCKED, "replan") else 3, click)
+
+
+def ntfy_target():
+    """[notify] ntfy and ntfy_token as (server URL, topic, token), or None when it is off."""
+    try:
+        n = config()["notify"]
+        url, token = n.get("ntfy", "").strip(), n.get("ntfy_token", "").strip()
+    except configparser.Error:
+        return None
+    m = re.fullmatch(r"(https?://[^/?#\s]+(?:/[^?#\s]*)?)/([\w-]{1,64})", url.rstrip("/"))
+    return (m[1], m[2], token) if m else None  # empty: off. Not `<server>/<topic>`: nothing to send to
+
+
+def ntfy_message(title, body, priority=3, click=""):
+    """A publish to [notify] ntfy's topic for NTFY_POST, or None when it is off."""
+    if not (target := ntfy_target()):
+        return None
+    server, topic, token = target
+    msg = {"topic": topic, "title": title, "message": body or title, "priority": priority, "tags": ["task-hub"],
+           **({"click": click} if click else {})}
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+    return {"url": server, "json": msg, "headers": headers, "timeout": NTFY_TIMEOUT}
 
 
 def set_text(t, field, value):
@@ -3199,6 +3255,128 @@ def cmd_watch(_):
             return
 
 
+# ---------- intake: cards from the phone (docs/operations.md) ----------
+
+INTAKE_STATE = STATE / "intake.json"  # the last ntfy message handled, so a restart goes on after it
+INTAKE_READ_TIMEOUT = 120  # seconds with nothing read: ntfy sends a keepalive every 45, so the connection is gone
+INTAKE_RETRY = (5, 300)  # seconds before connecting again: the first, doubled after each failure in a row up to the second
+INTAKE_SECRET_MIN = 16  # characters; a short secret can be guessed by anyone who can write to the topic
+INTAKE_TITLE_MAX = 72
+
+
+def intake_config():
+    """[intake] as (server, topic, token, secret, default repo), or fail(): the topic is on [notify] ntfy's server."""
+    target = ntfy_target()
+    i = config()["intake"] if config().has_section("intake") else {}
+    topic, secret, repo = (i.get(k, "").strip() for k in ("topic", "secret", "repo"))
+    if not target:
+        fail(f"task intake needs [notify] ntfy in {home(CONFIG)}: it replies there",
+             "add:  [notify]  ntfy = https://ntfy.sh/<topic for notifications>  (see docs/operations.md)")
+    if not re.fullmatch(r"[\w-]{1,64}", topic) or topic == target[1]:
+        fail(f"[intake] topic must be a topic name other than [notify] ntfy's; got {topic!r}",
+             "add:  [intake]  topic = <another hard-to-guess topic>  (see docs/operations.md)")
+    if len(secret) < INTAKE_SECRET_MIN or re.search(r"\s", secret):
+        fail(f"[intake] secret must be at least {INTAKE_SECRET_MIN} characters without spaces",
+             "make one with:  python3 -c \"import secrets; print(secrets.token_urlsafe(16))\"")
+    if repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        fail(f"[intake] repo must look like owner/name, got {repo!r}")
+    return target[0], topic, target[2], secret, repo
+
+
+def parse_intake(m, secret, default_repo):
+    """An ntfy message as (card, reason): card is {title, repo, goal}, or None with why it is not one.
+    The message is `<secret> [owner/name:] goal`; the ntfy title, if any, is the card's title.
+    reason starts with "ignored" when the secret is missing or wrong: nothing is said back to such a message."""
+    import hmac
+    word, rest = (re.split(r"\s+", (m.get("message") or "").strip(), maxsplit=1) + [""])[:2]
+    if not hmac.compare_digest(word.encode(), secret.encode()):
+        return None, "ignored: no secret" if not word else "ignored: wrong secret"
+    repo, goal = default_repo, rest.strip()
+    if r := re.match(r"([\w.-]+/[\w.-]+):\s*", goal):
+        repo, goal = r[1], goal[r.end():].strip()
+    if not goal:
+        return None, "rejected: the goal is empty"
+    if not repo:
+        return None, "rejected: no repo (start the goal with `owner/name:`, or set [intake] repo)"
+    title = " ".join((m.get("title") or "").split()) or " ".join(goal.splitlines()[0].split())
+    if len(title) > INTAKE_TITLE_MAX:
+        title = title[:INTAKE_TITLE_MAX - 3].rsplit(" ", 1)[0].rstrip(" ,.;:") + "..."
+    sent = datetime.datetime.fromtimestamp(m["time"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") \
+        if isinstance(m.get("time"), int) else now()
+    return {"title": title, "repo": repo,
+            "goal": f"{goal}\n\n---\nFrom the phone (`task intake`, ntfy message {m.get('id', '?')}, {sent})."}, ""
+
+
+def intake_message(m, secret, default_repo):
+    """Handle one ntfy message: a Backlog card and a reply with its link, or a log line saying why not."""
+    card, reason = parse_intake(m, secret, default_repo)
+    mid = m.get("id", "?")
+    if reason.startswith("ignored"):  # anyone who knows the topic can write to it: say nothing back
+        return [f"intake: {reason} (message {mid}, {len(m.get('message') or '')} chars)"]
+    if not card:
+        post = ntfy_message("task intake: not registered", reason.removeprefix("rejected: "), 4)
+        line = f"intake: {reason} (message {mid})"
+    else:
+        try:
+            t, url = create_task(card["title"], card["repo"], card["goal"], asked=remember_where_asked)
+        except (RuntimeError, SystemExit) as e:  # GitHub failed, or fail() wrote why to the log
+            post = ntfy_message("task intake: not registered", f"GitHub: {e}" if isinstance(e, RuntimeError)
+                                else "see the intake log on the machine", 4)
+            line = f"intake: error: message {mid}: {e}"
+        else:
+            post = ntfy_message(f"#{t['id']} {BACKLOG}: {card['title']}",
+                                f"repo: {card['repo']}\nApprove it on the board or with `task start {t['id']}`\n{url}",
+                                3, url)
+            line = f"intake: #{t['id']} {BACKLOG} in {card['repo']}: {q(card['title'])} {url} (message {mid})"
+    if post:
+        detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
+    return [line]
+
+
+def intake_stream(server, topic, token, since):
+    """The messages ntfy sends on topic from since (a message id or a Unix time), as they come."""
+    import urllib.request
+    url = f"{server}/{topic}/json?{urlencode({'since': since})}"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=INTAKE_READ_TIMEOUT) as r:
+        for line in r:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("event") == "message":
+                yield m
+
+
+def cmd_intake(_):
+    import http.client
+    server, topic, token, secret, repo = intake_config()
+    board()  # fail fast on a bad config
+    since = (read_json(INTAKE_STATE) or {}).get("since") or str(int(time.time()))  # the first start: from now on
+    out(f"intake: listening on {server}/{topic} for new cards (Ctrl-C to stop)")
+    delay = INTAKE_RETRY[0]
+    while True:
+        try:
+            for m in intake_stream(server, topic, token, since):
+                delay = INTAKE_RETRY[0]
+                since = str(m.get("id") or since)
+                write_atomic(INTAKE_STATE, json.dumps({"since": since}))  # before the card: never two of one message
+                out(*intake_message(m, secret, repo))
+            why = "the server closed the connection"
+        except (OSError, http.client.HTTPException) as e:  # down, no network, a wrong token (HTTPError), a timeout
+            why = f"{type(e).__name__}: {e}"
+        except KeyboardInterrupt:
+            return
+        if os.environ.get("TASK_WATCH_ONCE"):  # tests
+            return out(f"intake: {why}")
+        out(f"intake: {why}; connecting again in {delay}s")
+        try:
+            time.sleep(delay)
+        except KeyboardInterrupt:
+            return
+        delay = min(delay * 2, INTAKE_RETRY[1])
+
+
 def cmd_update(_):
     """Bring LIB to origin's newest release, then do what an update needs (docs/setup.md): restart the launchd
     `task watch` and copy Kiro's hook and workflow again. Changes nothing when the clone has changes of its own."""
@@ -3634,6 +3812,8 @@ COMMANDS = {
     "start": (cmd_start, ["id?"], {"agent": True},
               "task start [<id>] [--agent name]  # approve a Backlog task or re-run a Blocked one; no id = pick one"),
     "watch": (cmd_watch, [], {}, f"task watch  # start Ready cards automatically (checks every {WATCH_SECONDS}s)"),
+    "intake": (cmd_intake, [], {}, "task intake  # turn messages on the [intake] ntfy topic into Backlog cards (from "
+               "the phone)"),
     "show": (cmd_show, ["id"], {"full": False, "digest": False},
              "task show <id> [--full | --digest]  # the Issue and its latest report; --digest: only what to decide from"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
