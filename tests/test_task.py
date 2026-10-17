@@ -201,6 +201,8 @@ elif cmd == ["issue", "create"]:
                             "labels": [{"name": opt("--label")}] if opt("--label") else []}
     print(f"https://github.com/{db['issues_repo']}/issues/{n}")
 elif cmd == ["issue", "comment"]:
+    if db.get("comment_fails"):
+        fail("HTTP 502: Bad Gateway")
     db["issues"][a[2]]["comments"].append({"body": open(opt("--body-file")).read(),
                                            "viewerDidAuthor": True,
                                            "createdAt": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())})
@@ -224,6 +226,8 @@ elif cmd == ["pr", "create"]:
     if db.get("pr_create_fails"):
         fail("pull request create failed: GraphQL: Resource not accessible by integration")
     key = f"{opt('--repo')} {opt('--head')}"
+    if db.get("pr_create_once") and db["prs"].get(key, {}).get("state") == "OPEN":  # GitHub: one open PR per branch
+        fail(f'a pull request for branch "{opt("--head")}" into branch "{opt("--base")}" already exists')
     url = f"https://github.com/{opt('--repo')}/pull/{len(db['prs']) + 1}"
     db["prs"][key] = {"url": url, "state": "OPEN", "isDraft": "--draft" in a,
                       "body": open(opt("--body-file")).read(), "base": opt("--base")}
@@ -233,6 +237,8 @@ elif cmd == ["pr", "view"]:
     out = {"body": pr["body"], "state": pr["state"], "url": pr["url"], "isDraft": pr.get("isDraft", False),
            "headRefName": key.split(" ", 1)[1], "baseRefName": pr.get("base") or "main",
            "headRefOid": git("-C", bare(key), "rev-parse", key.split(" ", 1)[1]).stdout.strip()}
+    if "mergeCommit" in (opt("--json") or ""):
+        out["mergeCommit"] = {"oid": pr["merge_sha"]} if pr.get("merge_sha") else None
     if "mergeStateStatus" in (opt("--json") or ""):
         state = merge_state(key, pr) if pr["state"] == "OPEN" else "UNKNOWN"
         out.update(mergeStateStatus=state, mergeable="CONFLICTING" if state == "DIRTY" else "MERGEABLE")
@@ -256,6 +262,7 @@ elif cmd == ["pr", "merge"]:  # a real merge commit on the base branch of the ba
         r = git(*step)
         if r.returncode:
             fail(f"merge failed: {r.stderr}")
+    pr["merge_sha"] = git("-C", work, "rev-parse", "HEAD").stdout.strip()
     shutil.rmtree(work)
     pr.update(state="MERGED", merged=True)
     db.setdefault("merged_order", []).append(pr["url"])
@@ -297,8 +304,9 @@ elif cmd in (["repo", "view"], ["run", "list"], ["issue", "list"]):  # the trigg
     if cmd == ["repo", "view"]:
         out = {"defaultBranchRef": {"name": db.get("default_branches", {}).get(repo, "main")}}
     elif cmd == ["run", "list"]:  # db["runs"][repo]: newest first, as GitHub lists them
-        out = [r for r in db.get("runs", {}).get(repo, []) if r["headBranch"] == opt("--branch")][:int(opt("--limit"))]
-        out = [{k: r[k] for k in opt("--json").split(",")} for r in out]
+        out = [r for r in db.get("runs", {}).get(repo, []) if (not opt("--branch") or r["headBranch"] == opt("--branch"))
+               and (not opt("--commit") or r.get("headSha") == opt("--commit"))][:int(opt("--limit"))]
+        out = [{k: r.get(k) for k in opt("--json").split(",")} for r in out]
     else:  # db["repo_issues"][repo]: {number, title, assignees, labels}; gh's @me is "me"
         out = [{"number": i["number"], "title": i["title"], "url": f"https://github.com/{repo}/issues/{i['number']}"}
                for i in db.get("repo_issues", {}).get(repo, []) if i.get("state", "OPEN") == "OPEN"
@@ -5030,6 +5038,198 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.pr(tid)["state"], "OPEN")
         self.write_config("[merge]\nqueue = yes please\n")
         self.assertIn("[merge] queue must be on or off", self.task(code=1))
+
+    # --- the revert of a merge that turned the base red ([merge] revert, on with the queue) ---
+
+    def ci_runs(self, *runs):
+        """GitHub Actions runs on main, newest first: (commit, workflow, conclusion, or None while it runs)."""
+        db = self.gh()
+        db["runs"] = {"jyoka/app": [{"databaseId": n, "headSha": sha, "headBranch": "main", "workflowName": name,
+                                     "status": "completed" if c else "in_progress", "conclusion": c or "",
+                                     "url": f"https://ci.example/run/{n}", "displayTitle": "x"}
+                                    for n, (sha, name, c) in enumerate(runs, 1)]}
+        self.save_db(db)
+
+    def merged_by_queue(self, mode="first"):
+        """A card the queue merged: (its id, the merge commit on main, the commit of main before it)."""
+        tid, = self.in_review(mode)
+        self.task("merge", tid)
+        self.assertIn("merged", self.task())
+        sha = self.pr(tid)["merge_sha"]
+        return tid, sha, self.on_origin(f"{sha}^1", "rev-parse").strip()
+
+    def revert_prs(self):
+        return {k.split(" ", 1)[1]: p for k, p in self.gh()["prs"].items() if " task-hub/revert-" in k}
+
+    def test_a_red_base_after_a_queue_merge_opens_one_revert_pr_tells_and_pauses_the_queue(self):
+        url = self.ntfy_server()
+        self.queue_on(f"\n[notify]\nevents = Done\nntfy = {url}/my-topic\n")  # reverted is told though not listed
+        tid, sha, parent = self.merged_by_queue()
+        self.ci_runs((sha, "test", None), (parent, "test", "success"))
+        self.assertIn("waiting for the main CI of its merge: test", self.task())
+        self.ci_runs((sha, "test", "failure"), (parent, "test", "success"))
+        self.assertIn("opened the revert PR", self.task())
+        (branch, revert), = self.revert_prs().items()
+        self.assertEqual((revert["base"], revert["state"], revert["isDraft"]), ("main", "OPEN", False))
+        self.assertIn(f"git revert -m 1 {sha}", revert["body"])
+        self.assertIn("https://ci.example/run/1", revert["body"])
+        self.assertNotIn("hello.txt", self.on_origin(branch, "ls-tree", "--name-only"), "the merge is undone there")
+        self.assertEqual(self.on_origin(f"{branch}^", "rev-parse").strip(), sha)  # one revert commit on top of main
+        self.assertEqual(self.on_origin("main", "rev-parse").strip(), sha, "main itself is never pushed to")
+        note = self.comments(tid)[-1]
+        self.assertIn("<!-- task-hub merge -->", note)
+        self.assertIn(revert["url"], note)
+        reverted, = [e for e in self.events_of(tid) if e["event"] == "reverted"]
+        self.assertEqual(reverted["pr"], revert["url"])
+        self.assertIn(self.pr(tid)["url"], reverted["reason"])
+        self.wait_for(lambda: [p for p in self.ntfy_posts if p["json"]["title"].startswith(f"#{tid} reverted:")])
+        post, = [p for p in self.ntfy_posts if p["json"]["title"].startswith(f"#{tid} reverted:")]
+        self.assertEqual((post["json"]["priority"], post["json"]["click"]), (5, revert["url"]))
+        self.assertIn(self.pr(tid)["url"], post["json"]["message"])  # both links
+        self.assertIn(revert["url"], post["json"]["message"])
+        self.task()
+        self.task()
+        self.assertEqual(len(self.revert_prs()), 1, "exactly one revert PR")
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("reverted"), 1)
+        self.assertIn("paused[1]", self.task("merge"))
+        # the next approved PR waits while main is red
+        second, = self.in_review("second")
+        self.task("merge", second)
+        self.assertIn("the queue of jyoka/app is paused", self.task())
+        self.assertEqual(self.status(second), "In review")
+        self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
+        # main is green again (the revert, or a fix, was merged): the queue goes on
+        self.push_to_main("other.txt", "a fix\n")
+        fixed = self.on_origin("main", "rev-parse").strip()
+        self.ci_runs((fixed, "test", "success"), (sha, "test", "failure"), (parent, "test", "success"))
+        out = self.task()
+        self.assertIn("main of jyoka/app is green again", out)
+        self.assertNotIn("is paused", out)
+        self.assertIn(f"task {second}: merged main into task/{second}", out)
+        self.assertNotIn("paused[", self.task("merge"))
+
+    def test_a_failure_already_on_the_base_before_the_merge_is_not_reverted(self):
+        self.queue_on()
+        tid, sha, parent = self.merged_by_queue()
+        self.ci_runs((sha, "test", "failure"), (sha, "lint", "success"), (parent, "test", "failure"),
+                     (parent, "lint", "failure"))
+        self.assertIn("failed before it too: not reverted", self.task())
+        self.assertNotIn("merge: task", self.task())  # no longer watched
+        self.assertEqual(self.revert_prs(), {})
+        self.assertNotIn("reverted", [e["event"] for e in self.events_of(tid)])
+        self.assertNotIn("paused[", self.task("merge"))
+
+    def test_a_cancelled_run_is_never_green_and_the_commit_before_it_is_read_instead(self):
+        self.queue_on()
+        tid, sha, parent = self.merged_by_queue()
+        grand = self.on_origin(f"{parent}^1", "rev-parse").strip()
+        # its own run was cancelled, by a newer run on main say: not passed
+        self.ci_runs((sha, "test", "cancelled"))
+        self.assertIn("did not pass or fail (test: cancelled); not judged", self.task())
+        self.assertNotIn("merge: task", self.task())
+        # red after a commit whose run was cancelled, and the failure was there before that: not reverted
+        second, sha2, parent2 = self.merged_by_queue("second")
+        self.ci_runs((sha2, "test", "failure"), (parent2, "test", "cancelled"), (sha, "test", "cancelled"),
+                     (parent, "test", "failure"), (grand, "test", "failure"))
+        self.assertIn("failed before it too: not reverted", self.task())
+        self.assertEqual(self.revert_prs(), {})
+        self.assertNotIn("paused[", self.task("merge"))
+
+    def test_a_revert_that_failed_halfway_is_finished_at_the_next_check_with_one_pr(self):
+        self.queue_on()
+        tid, sha, parent = self.merged_by_queue()
+        self.ci_runs((sha, "test", "failure"), (parent, "test", "success"))
+        # the revert PR is opened, but the note on the Issue fails
+        db = self.gh()
+        db["comment_fails"] = db["pr_create_once"] = True
+        self.save_db(db)
+        self.task()
+        self.assertEqual(len(self.revert_prs()), 1)
+        self.assertNotIn("reverted", [e["event"] for e in self.events_of(tid)])
+        db = self.gh()
+        db["comment_fails"] = False
+        self.save_db(db)
+        self.assertIn("opened the revert PR", self.task())
+        self.task()
+        (branch, revert), = self.revert_prs().items()
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("reverted"), 1)
+        self.assertEqual(len([c for c in self.comments(tid) if revert["url"] in c and "## Merge queue" in c]), 1)
+        self.assertIn("paused[1]", self.task("merge"))
+
+    def test_a_revert_branch_pushed_before_gh_pr_create_failed_is_not_pushed_again(self):
+        self.queue_on()
+        tid, sha, parent = self.merged_by_queue()
+        self.ci_runs((sha, "test", "failure"), (parent, "test", "success"))
+        db = self.gh()
+        db["pr_create_fails"] = True
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.revert_prs(), {})
+        branch = f"task-hub/revert-{sha[:12]}"
+        pushed = self.on_origin(branch, "rev-parse").strip()
+        # main moves on: a second `git revert` on top of it could not be pushed over the branch
+        self.push_to_main("other.txt", "meanwhile\n")
+        db = self.gh()
+        db["pr_create_fails"] = False
+        self.save_db(db)
+        self.assertIn("opened the revert PR", self.task())
+        self.assertEqual(list(self.revert_prs()), [branch])
+        self.assertEqual(self.on_origin(branch, "rev-parse").strip(), pushed, "the branch is not pushed again")
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("reverted"), 1)
+
+    def test_resume_ack_waits_for_task_merge_resume_and_revert_off_watches_nothing(self):
+        self.queue_on("resume = ack\n")
+        tid, sha, parent = self.merged_by_queue()
+        self.ci_runs((sha, "test", "failure"))  # it did not run on the commit before: counts as not failing there
+        self.assertIn("opened the revert PR", self.task())
+        self.push_to_main("other.txt", "a fix\n")
+        self.ci_runs((self.on_origin("main", "rev-parse").strip(), "test", "success"), (sha, "test", "failure"))
+        self.task()
+        self.assertIn("paused[1]", self.task("merge"))  # green is not enough with resume = ack
+        self.assertIn("the queue of jyoka/app goes on", self.task("merge", "--resume", "jyoka/app"))
+        self.assertNotIn("paused[", self.task("merge"))
+        self.assertIn("is not paused (no-op)", self.task("merge", "--resume", "jyoka/app"))
+        self.queue_on("revert = off\n")
+        db = self.gh()
+        db["gh_calls"] = []
+        self.save_db(db)
+        second, sha2, parent2 = self.merged_by_queue("second")
+        self.ci_runs((sha2, "test", "failure"), (parent2, "test", "success"))
+        self.task()
+        self.assertEqual(len(self.revert_prs()), 1)
+        self.assertFalse([c for c in self.gh()["gh_calls"] if c == "run list"])
+
+    def test_ci_verdict_and_new_failures(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        run = lambda name, conclusion=None: {"workflowName": name, "status": "completed" if conclusion else "queued",
+                                             "conclusion": conclusion or "", "url": name}
+        self.assertEqual(task.ci_verdict([]), ("pending", []))
+        self.assertEqual(task.ci_verdict([run("test")])[0], "pending")
+        self.assertEqual(task.ci_verdict([run("test", "success"), run("lint", "skipped")])[0], "green")
+        self.assertEqual(task.ci_verdict([run("test", "failure"), run("lint")]), ("red", [run("test", "failure")]))
+        # a re-run replaces the run before it: only the newest of each workflow counts
+        self.assertEqual(task.ci_verdict([run("test", "success"), run("test", "failure")])[0], "green")
+        self.assertEqual(task.ci_verdict([run("test", "timed_out")])[0], "red")
+        # cancelled (by a newer run on the base, say) or only skipped: neither passed nor failed
+        self.assertEqual(task.ci_verdict([run("test", "cancelled")]), ("unknown", [run("test", "cancelled")]))
+        self.assertEqual(task.ci_verdict([run("test", "success"), run("lint", "cancelled")])[0], "unknown")
+        self.assertEqual(task.ci_verdict([run("test", "skipped")])[0], "unknown")
+        red = [run("test", "failure"), run("lint", "failure"), run("build", "failure")]
+        new, unknown = task.new_failures(red, [[run("test", "failure"), run("lint", "success"), run("test", "success")]])
+        self.assertEqual(([r["url"] for r in new], unknown), (["lint", "build"], []))  # build did not run before
+        self.assertEqual(task.new_failures(red[:1], [[run("test")]]), ([], red[:1]))  # still running before: wait
+        # cancelled, skipped or not run on the commit before: the nearest commit where it passed or failed says
+        before = [[run("test", "cancelled"), run("lint", "skipped")], [run("lint", "success")],
+                  [run("test", "failure"), run("lint", "failure")]]
+        new, unknown = task.new_failures(red[:2], before)
+        self.assertEqual(([r["url"] for r in new], unknown), (["lint"], []))  # test was failing two commits before
+        self.assertEqual(task.new_failures(red[:1], [[run("test", "cancelled")], [run("test")]]), ([], red[:1]))
+        self.assertEqual(task.new_failures(red[:1], [[run("test", "cancelled")]]), (red[:1], []))  # none to compare
+        read = []
+        task.new_failures(red[:1], (read.append(n) or [run("test", "failure")] for n in range(5)))
+        self.assertEqual(read, [0], "only as far back as needed")
 
     def test_design_diagram_matches_the_transitions(self):
         loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))

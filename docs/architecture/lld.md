@@ -11,7 +11,7 @@
 ```mermaid
 flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_merge、cmd_share、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
-    mergeq["merge queue<br/>merge_config、read_queue、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged"]
+    mergeq["merge queue<br/>merge_config、read_queue、read_merge_state、change_merge_state、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged、<br/>watch_merge、revert_watch、watch_step、ci_verdict、new_failures、revert_merge、push_revert、base_green"]
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
@@ -395,6 +395,38 @@ stateDiagram-v2
   例外の文(競合の修正の `git add`、`git commit` のフックの失敗など)も `git_said` を通します。`run` は
   `text=True` を使わずに自分で読みます(`text=True` の universal newlines は `\r` を改行に変え、描き直しが別の行になるため)
 
+#### revert(`[merge] revert = on`、既定)
+
+```mermaid
+stateDiagram-v2
+    [*] --> watch: merge_ci が gh pr merge(watch_merge。sha は gh pr view --json mergeCommit)
+    watch --> watch: 実行が動いている、または直前のコミットの同じワークフローが動いている(ci_minutes まで)
+    watch --> [*]: 通った、実行がない、時間切れ、落ちたワークフローがすべて直前のコミットでも落ちていた
+    watch --> paused: このマージで新しく落ちた(revert_merge)
+    paused --> [*]: resume = green で base が緑、または task merge --resume
+```
+
+- `merge_queue` は `MERGE_WORK_LOCK` を取ったあと、キューの先頭を進める前に `revert_watch` を呼びます。そのため、同じ確認で
+  マージしたコミットは次の確認から見ます。止めたリポジトリ(`paused`)の先頭は進めず、1 行出すだけです
+- `ci_verdict` は 1 つのコミットの実行(`gh run list --commit`、新しい順)をワークフローごとに一番新しいものだけにして、
+  `CI_FAILED`(`failure`、`timed_out`、`startup_failure`)が 1 つでもあれば `red`、終わっていないものがある(または 1 つもない)と
+  `pending`、すべて `CI_PASSED`(`success`、`neutral`)か `skipped` で `CI_PASSED` が 1 つはあれば `green`、ほか
+  (`cancelled` など)は `unknown` にします。`watch_step` は `unknown` なら戻さずに watch から外します
+- `new_failures` は落ちたワークフローを、マージコミットの 1 つ目の親から `git rev-list --first-parent --max-count=10`
+  (`CI_LOOKBACK`)でたどったコミットの実行と、近い順に比べます。そのワークフローが動いていない、`cancelled`、`skipped`
+  のコミットは飛ばし、最初に `CI_PASSED` なら新しく落ちた、`CI_FAILED` なら外し、動いているなら待ちます(`ci_minutes` を
+  過ぎたら新しく落ちたと数える)。どのコミットでも分からなければ新しく落ちたと数えます。`gh run list --commit` は
+  要るところまでしか呼びません
+- `revert_merge` はまず `gh pr list --head task-hub/revert-<sha の 12 文字>` で PR を探し、なければ(ブランチもまだ
+  なければ `push_revert` で、`DATA/worktrees/revert-<sha>` の一時的な worktree に `origin/<base>` を detach で出し、
+  `git revert -m 1 --no-edit <sha>`、`HEAD:refs/heads/<ブランチ>` に push。worktree はいつも消す)`gh pr create` します。
+  そのあと Issue にコメントし、`paused` に足して watch から外すのを 1 回の `change_merge_state` で行い、最後に `reverted` を
+  書きます。途中の失敗は `github_errors` に出し、次の確認で同じ watch をやり直します(PR はブランチから見つかるので増えない)
+- `git revert` が競合したら `revert --abort` し、PR なしで同じようにコメント、`paused`、`reverted`(理由付き)にします
+- `base_green` は `gh run list --branch <base>` の一番新しい実行のコミット(戻したマージのコミットではないもの)の
+  `ci_verdict` が `green` ならそのコミットを返します。`resume = green` のとき、止めたリポジトリごとに同期ごとに 1 回呼びます
+- `notify` は `reverted` を `[notify] events` に関係なく出し(`ALWAYS_NOTIFY`)、ntfy の優先度は 5 にします
+
 ## 5. 手元のファイル
 
 | ファイル | 書く者 | 読む者 | 形式 |
@@ -402,7 +434,7 @@ stateDiagram-v2
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
-| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
+| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_merge_state` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}], watch: [{id, title, repo, pr, base, sha, since}], paused: {<owner/name の小文字>: {id, repo, base, sha, pr, revert, since, reason}}}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット。`watch` は base の CI を見ているマージ(`sha` はマージコミット。まだ分からなければ空)、`paused` は revert でキューを止めたリポジトリ(`revert` は revert の PR、作れなかったら空)。`watch` と `paused` がない古いファイルは空として読む |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
@@ -437,7 +469,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ```
 
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
-マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict` のどれかです。`conflict` と
+マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict`、`reverted` のどれかです。
+`reverted` の `pr` は revert の PR(作れなかったときはなし)、`reason` に元の PR と落ちた実行のリンクが入ります。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
 空の欄は書きません。
 
@@ -501,6 +534,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
 | マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`git fetch`、`merge`、`push` | gh(GraphQL)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
+| revert: マージのあとの `gh pr view --json mergeCommit`、`gh run list --commit <sha>`(落ちたら直前のコミットにも 1 回)、`gh run list --branch <base>`(止めたリポジトリ)、作るときだけ `gh pr list --head`、`git fetch`、`revert`、`push`(新しいブランチ)、`gh pr create`、`gh issue comment` | gh(REST)、git | マージごとに 1 + 見ている間 1 分に 1。止めたリポジトリごとに 1 分に 1 | `[merge] revert = on`(既定)のとき、マージのあと `ci_minutes` まで。`resume = ack` なら止めたリポジトリは読まない |
 | チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
@@ -566,6 +600,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 | マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
+| revert の失敗(GitHub、git) | `github_errors` に出し、同じ watch を次の確認でやり直す。PR はブランチから探してから作るので 2 つにならない。`git revert` の競合は PR を作らず、理由を付けて知らせ、キューを止める |
 | `task _fix` の失敗 | マージを取り消して何も push しない。カードを Blocked にしてコメント。それも書けなければカードは元の列のまま、キューの次の確認が同じ base でまた競合を見つけて Blocked にする |
 | `task share` の失敗 | チームの Project の列、欄、値がない、チームのリポジトリに書けない: 何も作らずに `error:` と `help:`。Issue を作ったあとの失敗: 作った Issue の URL を出して終わる(つなぎ先のコメントは書いてあるので、もう一度でも Issue は増えない) |
 | つないだタスクの写しの失敗(4.6) | 無視して stderr に `warning:` を 1 行(実行の中ならログに)。個人のカード、コメント、PR、実行は写しがないときと同じに進む。次の変化のときにまた写す(`move` は今の列を読むので、取りこぼした Status も次で合う) |
@@ -591,13 +626,16 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 13. マージキューは、人が承認した PR(`task merge`、wait for merge の列)だけをマージし、リポジトリごとに承認した順に 1 つずつ
     マージする。解けない競合と落ちたチェックではマージせず、カードを Blocked にする。`[merge] queue` がオフ(既定)なら、
     GitHub の呼び出しもカードの動きも足す前と同じ
+14. キューのマージで base の CI が新しく落ちたら、revert の PR は 1 つだけで、`reverted` の通知も 1 回。直前のコミットでも
+    落ちていたワークフローだけなら戻さない。base には push しない。止めたキューは、緑に戻るか `task merge --resume` まで進まない
 
 ## 10. テストの仕組み
 
 - `tests/test_task.py`: `bin/task` を別プロセスで動かすブラックボックスのテスト。GitHub は 1 つの JSON ファイルを
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
   偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
-  bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます
+  bare リポジトリのブランチから計算します(マージキューのテスト)。`pr merge` はマージコミットを覚え、`pr view --json mergeCommit` で
+  返します。`run list` は `db["runs"]` を `--branch` と `--commit` で絞ります(revert のテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、
