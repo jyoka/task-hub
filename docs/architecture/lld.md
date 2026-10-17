@@ -149,8 +149,8 @@ flowchart LR
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
-| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task` | 文ごとに Issue、カード、欄(Backlog) | intake、events |
-| `task merge [<id>] [--cancel]` | `merge_config`、`get`、`queue_entry`(PR がなければ `find_pr`)、`change_queue`、`set_status(wait for merge)`(列があるとき。Blocked からは列がなければ In review) | 読む、Status | merge-queue、events |
+| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
+| `task merge [<id>] [--cancel]` | `merge_config`、`get`、`enqueue`(`queue_entry`。PR がなければ `find_pr`)、`change_queue`、`set_status(wait for merge)`(列があるとき。Blocked からは列がなければ In review) | 読む、Status | merge-queue、events |
 | `task done <id>` | `cleanup`、`issue`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ。つないだタスクはチームの Issue も閉じ、カードを Done に | runs を消す、events |
 | `task share <id> --to` | `get`、`issue`、`share_config`、`TeamGitHub`、`share_pr` | 読む、チームの Project を読む、チームの Issue とコメントとカード、個人の Issue につなぎ先のコメント、開いている PR の本文 | なし(つなぎ先は GitHub のコメント) |
 | `task show` | `get`、`issue` | 読むだけ | なし |
@@ -415,6 +415,8 @@ stateDiagram-v2
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
 | `state/triggers.json` | `check_triggers`(`task watch` だけ) | `check_triggers` | `{checked_at, seen: {キー: {at, issue}}, default_branch: {repo: [名前, UNIX 時刻]}}` |
 | `state/intake.json` | `cmd_intake`(文を 1 つ扱う前に) | `cmd_intake`(つなぎ直すとき、起動したとき) | `{since}`。最後に扱った ntfy の文の id(ntfy の `since=` に渡す) |
+| `state/action.key` | `action_key`(初めて要るとき。0600。一時ファイルから `os.link` で置くので、2 つのプロセスが同時に作っても 1 つ) | `action_token`(`task _run` の通知、`task intake`) | 64 文字の 16 進。ボタンのトークンの HMAC-SHA256 の鍵。どこにも送らない |
+| `state/intake-actions.json` | `action_message`(ボタンを実行したあと) | `action_message` | `{used: {トークン: 時刻}}`。実行したトークン(新しい順に `ACTIONS_USED_MAX` 個) |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
@@ -508,7 +510,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
-| ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る) | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
+| ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
+| ボタンの文(`task intake`) | `gh pr view`(PR の今の先頭のコミット)、Merge は `cmd_merge` と同じ呼び出し、Reject は `gh pr close --comment`、`gh issue comment`、Status | ボタン 1 回につき ボードの読み 1 + GraphQL 1 + 操作の分 | 人がボタンを押したときだけ。合わないトークン、使ったトークンは GitHub を呼ばない |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
 
@@ -562,6 +565,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
 | `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
+| `task intake` のボタンの失敗(GitHub)、断った(古いコミット、閉じた PR、キューがオフなど) | 1 行記録し、ntfy に「refused」を理由つきで返す。トークンは使ったことにしないので、理由を直せば同じボタンをまた押せる。合わないトークンは記録だけで返事なし |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
 | トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |

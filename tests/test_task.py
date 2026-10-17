@@ -259,6 +259,9 @@ elif cmd == ["pr", "merge"]:  # a real merge commit on the base branch of the ba
     shutil.rmtree(work)
     pr.update(state="MERGED", merged=True)
     db.setdefault("merged_order", []).append(pr["url"])
+elif cmd == ["pr", "close"]:
+    key, pr = pr_of(a[2])
+    pr.update(state="CLOSED", close_comment=opt("--comment"))
 elif cmd == ["pr", "edit"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["body"] = open(opt("--body-file")).read()
 elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/(issues|pulls)/\d+/(comments|reviews)\?.*", a[1]):
@@ -2782,6 +2785,116 @@ class TaskTest(unittest.TestCase):
         self.write_config(extra="\n[intake]\ntopic = phone\nsecret = s3cret-phone-0123456789\n")
         self.assertIn("needs [notify] ntfy", self.task("intake", code=1))
         self.assertEqual(self.ntfy_gets, [])  # it never listened
+
+    def test_phone_buttons_merge_once_and_refuse_reused_forged_and_stale_tokens(self):
+        url = self.ntfy_server()
+        self.intake_config(url, "topic = phone\nsecret = s3cret-phone-0123456789\n")
+        cfg = self.root / ".config" / "task-hub" / "config.ini"
+        cfg.write_text(cfg.read_text().replace("events = Done", "events = In review, Done") + "\n[merge]\nqueue = on\n")
+        first, second = self.new("first", "Task first"), self.new("second", "Task second")
+        for tid in (first, second):
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+        self.wait_for(lambda: len(self.ntfy_posts) == 2)
+        review = {p["json"]["title"].split(" ")[0]: p["json"] for p in self.ntfy_posts}
+        buttons = {b["label"]: b for b in review[f"#{first}"]["actions"]}
+        self.assertEqual(list(buttons), ["Merge", "Reject", "View PR"])
+        self.assertEqual(buttons["View PR"]["url"], self.pr(first)["url"])
+        merge = buttons["Merge"]
+        self.assertEqual((merge["url"], merge["method"], merge["headers"]),
+                         (f"{url}/phone", "POST", {"Authorization": "Bearer tk_secret"}))
+        self.assertNotIn("s3cret-phone", json.dumps(review))  # the intake secret never goes out
+        sha = self.on_origin(f"task/{first}", "rev-parse").strip()
+        self.assertRegex(merge["body"], rf"^task-hub merge {first} jyoka/app#\d+ {sha} [0-9a-f]{{32}}$")
+        forged = merge["body"][:-4] + ("0000" if not merge["body"].endswith("0000") else "1111")
+        other = {b["label"]: b for b in review[f"#{second}"]["actions"]}
+        swapped = other["Merge"]["body"].replace(f"merge {second} ", f"merge {first} ", 1)  # another card's token
+        self.ntfy_posts.clear()
+        self.ntfy_stream += [{"id": f"b{n}", "event": "message", "topic": "phone", "message": body}
+                             for n, body in enumerate([merge["body"], merge["body"], forged, swapped,
+                                                       "task-hub merge everything"], 1)]
+        self.env["TASK_WATCH_ONCE"] = "1"
+        out = self.task("intake")
+        queue = json.loads((self.root / ".local/state/task-hub/merge-queue.json").read_text())["queue"]
+        self.assertEqual([(e["id"], e["pr"]) for e in queue], [(first, self.pr(first)["url"])])
+        self.assertIn(f"intake: queued {self.pr(first)['url']} at position 1: merge #{first}", out)
+        self.assertIn(f"intake: refused: this button was already used (", out)
+        self.assertEqual(out.count("intake: refused: forged token:"), 2, out)
+        self.assertIn("intake: refused: not a button's message (message b5", out)
+        self.assertIn("queued", [e["event"] for e in self.events_of(first)])
+        self.wait_for(lambda: len(self.ntfy_posts) == 2)  # queued, and the reused one; nothing to b3, b4, b5
+        replies = sorted(p["json"]["title"] for p in self.ntfy_posts)
+        self.assertEqual(replies, [f"#{first} PR queued: Task first", f"#{first} merge refused"])
+        # a new push makes the notification's buttons stale
+        self.task("merge", first, "--cancel")
+        work = self.root / "push-first"
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{first}", str(self.root / "origins/jyoka/app.git"),
+                        str(work)], check=True, capture_output=True)
+        (work / "more.txt").write_text("more\n")
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(work), "commit", "-qm", "more"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(work), "push", "-q"], check=True, capture_output=True)
+        self.ntfy_posts.clear()
+        self.ntfy_stream += [{"id": "b6", "event": "message", "topic": "phone", "message": buttons["Reject"]["body"]}]
+        out = self.task("intake")
+        self.assertIn(f"intake: refused: stale: the PR has new commits since this notification; use the newest one: "
+                      f"reject #{first}", out)
+        self.assertEqual((self.pr(first)["state"], self.status(first)), ("OPEN", "In review"))
+        self.wait_for(lambda: len(self.ntfy_posts) == 1)
+        self.assertEqual(self.ntfy_posts[0]["json"]["title"], f"#{first} reject refused")
+
+    def test_phone_reject_closes_the_pr_and_blocks_the_card(self):
+        url = self.ntfy_server()
+        self.intake_config(url, "topic = phone\nsecret = s3cret-phone-0123456789\n")
+        cfg = self.root / ".config" / "task-hub" / "config.ini"
+        cfg.write_text(cfg.read_text().replace("events = Done", "events = In review"))
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.wait_for(lambda: len(self.ntfy_posts) == 1)
+        buttons = {b["label"]: b for b in self.ntfy_posts[0]["json"]["actions"]}
+        self.assertEqual(list(buttons), ["Reject", "View PR"])  # the merge queue is off: no Merge button
+        self.ntfy_posts.clear()
+        self.ntfy_stream += [{"id": "r1", "event": "message", "topic": "phone", "message": buttons["Reject"]["body"]}]
+        self.env["TASK_WATCH_ONCE"] = "1"
+        out = self.task("intake")
+        self.assertIn(f"intake: closed {self.pr(tid)['url']}, the card is Blocked: reject #{tid}", out)
+        self.assertEqual((self.pr(tid)["state"], self.status(tid)), ("CLOSED", "Blocked"))
+        self.assertIn("Rejected from the phone", self.pr(tid)["close_comment"])
+        self.assertIn("## Rejected", self.comments(tid)[-1])
+        self.assertEqual(self.gh()["issues"][tid]["state"], "OPEN")  # the human decides: run it again, or done
+        self.wait_for(lambda: self.ntfy_posts)
+        self.assertEqual(self.ntfy_posts[0]["json"]["title"], f"#{tid} rejected: {self.gh()['issues'][tid]['title']}")
+
+    def test_action_tokens(self):
+        cfg = self.root / ".config" / "task-hub" / "config.ini"
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            sha = "a" * 40
+            token = task.action_token("merge", "7", "jyoka/App", "3", sha)
+            self.assertRegex(token, r"^[0-9a-f]{32}$")
+            self.assertEqual(token, task.action_token("merge", "7", "jyoka/app", "3", sha))  # the key is kept
+            self.assertEqual(task.ACTION_KEY.stat().st_mode & 0o777, 0o600)
+            for other in (("reject", "7", "jyoka/app", "3", sha), ("merge", "8", "jyoka/app", "3", sha),
+                          ("merge", "7", "jyoka/web", "3", sha), ("merge", "7", "jyoka/app", "4", sha),
+                          ("merge", "7", "jyoka/app", "3", "b" * 40)):
+                self.assertNotEqual(token, task.action_token(*other), other)
+            task.ACTION_KEY.write_text("another-machine")
+            self.assertNotEqual(token, task.action_token("merge", "7", "jyoka/app", "3", sha))
+
+            def actions(text):
+                cfg.write_text("[board]\nissues = jyoka/tasks\n" + text)
+                task.config.cache_clear()
+                return [b["label"] for b in task.review_actions("7", "https://github.com/jyoka/app/pull/3", sha)]
+            ntfy = "[notify]\nntfy = https://ntfy.sh/notes\n"
+            intake = "[intake]\ntopic = phone\nsecret = s3cret-phone-0123456789\n"
+            self.assertEqual(actions(ntfy), [])  # no `task intake` to hear the buttons
+            self.assertEqual(actions(ntfy + intake.replace("phone\n", "notes\n", 1)), [])
+            self.assertEqual(actions(ntfy + intake), ["Reject", "View PR"])
+            self.assertEqual(actions(ntfy + intake + "[merge]\nqueue = on\n"), ["Merge", "Reject", "View PR"])
+            self.assertEqual(task.review_actions("7", "https://github.com/jyoka/app/pull/3", "short"), [])
 
     def test_intake_parse_and_auth(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
