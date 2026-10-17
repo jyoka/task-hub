@@ -85,6 +85,7 @@ deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 [merge]
 queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
 prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
+revert = on               ; キューのマージで base の CI が赤くなったら、revert の PR を作ってキューを止める
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -94,7 +95,7 @@ prefix = off              ; on: キューにない In review の PR も、競合
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
 | `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
-| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
+| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked。マージで base の CI が赤くなったら revert の PR を作り、そのリポジトリのキューを止める([operations.md](operations.md#マージで-base-が赤くなったときrevert)) | どの PR をマージしてよいか(`task merge`)、revert の PR をマージするか |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 

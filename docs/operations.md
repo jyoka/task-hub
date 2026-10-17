@@ -131,7 +131,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
 `replan`、実行がいつもより長引いているときの `slow`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
-`merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
+`merged`、`conflict`、`reverted`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
 GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
@@ -305,6 +305,8 @@ queue = on          ; 既定は off。キューを動かす
 prefix = off        ; on: キューに入れていない In review の PR も、競合したら承認の前に解いておく(マージはしない)
 checks = all        ; all(既定): PR のチェックをすべて待つ。required: ブランチの保護で必須のものだけ
 ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
+revert = on         ; 既定は on。キューがマージしたあとの base の CI を見て、そのマージで赤くなったら revert の PR を作る
+resume = green      ; green(既定): 止めたキューは base が緑に戻るか task merge --resume で再開。ack: task merge --resume だけ
 ```
 
 ### キューに入れる
@@ -362,9 +364,10 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 | `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
 | `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
 | `conflict` | キューにない In review の PR が競合した | 競合した base |
+| `reverted` | キューのマージで base の CI が赤くなり、revert の PR を作った(`pr` がその PR) | 落ちた base、元の PR、落ちた実行のリンク |
 
 どれも `task events`、`/chief`(`--only` に足したもの)、ntfy(`[notify] events` に足したもの)から見えます。通知の既定には
-`conflict` と(いつもの)`Blocked`、`Done` が入っています。
+`conflict` と(いつもの)`Blocked`、`Done` が入っています。`reverted` は `[notify] events` に関係なくいつも通知します。
 
 ### 止まったとき
 
@@ -379,6 +382,47 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 
 チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`)のときは、キューの同じリポジトリのほかの PR も待ちます。
 別のリポジトリのキューは止まりません。
+
+### マージで base が赤くなったとき(revert)
+
+人が見ていない間にマージするので、悪いマージはすぐに、目に見える形で戻します。`[merge] revert = on`(既定)のとき、
+キューがマージした PR ごとに、base のそのマージコミットの CI(GitHub Actions の実行、`gh run list --commit`)を
+次の確認から見ます。
+
+1. 実行が終わるまで待ちます(`ci_minutes` まで。過ぎたら見るのをやめます)。最初の確認で実行が 1 つもなければ、
+   その base には CI がないとして見ません。ワークフローごとに一番新しい実行だけを数えます(再実行は前の実行の代わり)。
+   `cancelled` は通ったとも落ちたとも数えません
+2. すべて通れば(`skipped` は通ったと数えますが、1 つは `success` が要ります)終わりです。落ちたものがなく、
+   `cancelled` のもの(新しいマージの実行が `cancel-in-progress` で止めた、など)があれば、何もせずに見るのをやめます。
+   そのあとの実行は、あとのマージを見るときに数えます
+3. 落ちた(`failure`、`timed_out`、`startup_failure`)ワークフローがあれば、マージの直前のコミット(マージコミットの
+   1 つ目の親)の同じワークフローを見ます。そこで動いていない、`cancelled`、`skipped` なら、その前のコミットを見ます
+   (1 つ目の親をたどって 10 コミットまで)。通ったか落ちたかが分かる一番近いコミットで落ちていたものは、このマージのせいでは
+   ないので戻しません。落ちたワークフローがすべてそうなら、何もせずに見るのをやめます。そのコミットでまだ動いて
+   いれば、終わるまで待ちます。10 コミットのどれでも通ったか落ちたかが分からないワークフローは、落ちていなかったと数えます
+4. このマージで新しく落ちたなら、次をします
+   - base の今の先頭から `task-hub/revert-<マージコミットの先頭 12 文字>` のブランチを作り、`git revert -m 1 <マージコミット>` を
+     して push し、base への PR を開きます(タイトルは `Revert "<カードのタイトル>"`、本文に落ちた実行のリンク)。
+     base には push しません。force-push もしません。マージするかは人が決めます
+   - タスクの Issue(もう閉じています)に `<!-- task-hub merge -->` のコメントで、落ちた実行と revert の PR を書きます
+   - `reverted` の出来事を書きます。`[notify] events` に関係なく通知し、ntfy には優先度 5(最高)で、元の PR と revert の
+     PR の 2 つのリンクを付けて送ります
+   - そのリポジトリのキューを止めます(下記)
+
+revert の PR は 1 つのマージにつき 1 つだけです。途中で GitHub が失敗しても、次の確認でブランチから PR を探してから
+作るので、2 つ目はできません。base が先に進んでいて `git revert` が競合したときは PR を作らず、理由を付けて同じように
+知らせ、キューを止めます(手で戻します)。止めたあとにキューが続けてマージした PR は、直前のコミット(戻すマージ)で
+もう落ちているので、2 つ目の revert にはなりません。
+
+止めたキューのリポジトリでは、先頭の PR を進めず、`task watch` が `the queue of <リポジトリ> is paused: ...` と出します。
+`task merge` の一覧にも `paused` として出ます。再開するのは次のときです。
+
+| `[merge] resume` | 再開するとき |
+|---|---|
+| `green`(既定) | base の一番新しい実行のコミット(戻したマージ以外)のワークフローがすべて通った(revert の PR か直す PR をマージした)とき。または `task merge --resume <owner/name>` |
+| `ack` | `task merge --resume <owner/name>` だけ(あなたが確かめてから) |
+
+`green` のときは、止めたリポジトリごとに 1 分に `gh run list` を 1 回足します。
 
 ## 実行の結果を集計する
 
@@ -436,7 +480,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | タスク(ボード) | GitHub: Issue リポジトリと Project(非公開) |
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
-| マージキュー | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
+| マージキュー(キュー、CI を見ているマージ、止めたリポジトリ) | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
 | トリガーが作ったものの記録([triggers.md](triggers.md)) | `~/.local/state/task-hub/triggers.json` |

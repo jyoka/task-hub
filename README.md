@@ -138,7 +138,7 @@ archives the oldest Done cards.
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
 | `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
 | `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
-| `task merge [<id>] [--cancel]` | Approves the PR for the merge queue (`[merge] queue = on`, off by default): `task watch` brings it up to date with its base, has an agent fix conflicts, waits for its checks, and merges it, one PR per repo at a time ([operations.md](docs/operations.md#マージキュー)) |
+| `task merge [<id>] [--cancel] [--resume <owner/name>]` | Approves the PR for the merge queue (`[merge] queue = on`, off by default): `task watch` brings it up to date with its base, has an agent fix conflicts, waits for its checks, and merges it, one PR per repo at a time. If a merge turns the base's CI red, it opens a revert PR and pauses that repo's queue; `--resume` restarts it ([operations.md](docs/operations.md#マージキュー)) |
 | `task done <id>` | Closes or cancels a task by hand |
 | `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project, then keeps its Status and reports in step |
 | `task update` | Updates task-hub to the newest release |

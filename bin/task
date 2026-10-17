@@ -66,6 +66,7 @@ WATCH_SECONDS = 60
 # [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`);
 # "conflict": an In review PR that conflicts with its base now ([merge] queue = on)
 NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict"
+ALWAYS_NOTIFY = {"reverted"}  # the merge queue undid a merge that turned the base red: told whatever [notify] events says
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
@@ -868,11 +869,11 @@ def notify(e):
         wanted = {x.strip().lower() for x in config()["notify"].get("events", "").split(",") if x.strip()}
     except configparser.Error:
         return
-    if e["event"].lower() not in wanted:
+    if e["event"].lower() not in wanted and e["event"] not in ALWAYS_NOTIFY:
         return
     title, body = notification(e)
     if herdr_available():
-        sound = "request" if e["event"] in (BLOCKED, "replan", "slow", "conflict") else "done"
+        sound = "request" if e["event"] in (BLOCKED, "replan", "slow", "conflict", "reverted") else "done"
         cmd = ["herdr", "notification", "show", title, "--body", body, "--sound", sound]
     elif shutil.which("osascript"):  # arguments, not a script built from the text: no quoting to get wrong
         cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
@@ -880,7 +881,7 @@ def notify(e):
     elif WINDOWS:  # a toast from Windows PowerShell (5.1, which loads WinRT types); the text goes in as variables
         cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]
     elif shutil.which("notify-send"):  # Linux without herdr
-        cmd = ["notify-send", "--app-name=task-hub", "--urgency", "critical" if e["event"] in (BLOCKED, "replan")
+        cmd = ["notify-send", "--app-name=task-hub", "--urgency", "critical" if e["event"] in (BLOCKED, "replan", "reverted")
                else "normal", title, body]
     else:
         cmd = None
@@ -918,7 +919,8 @@ def ntfy_post(e, title, body):
     pr = e.get("pr") or (e.get("digest") or {}).get("pr")
     click = pr or (f"https://github.com/{issues}/issues/{e['id']}"
                    if e.get("id") and re.fullmatch(r"[\w.-]+/[\w.-]+", issues) else "")
-    return ntfy_message(title, body, 4 if e["event"] in (BLOCKED, "replan") else 3, click)
+    return ntfy_message(title, body, 5 if e["event"] == "reverted" else 4 if e["event"] in (BLOCKED, "replan") else 3,
+                        click)
 
 
 def ntfy_target():
@@ -2791,15 +2793,20 @@ CONFLICT_MARKER = re.compile(r"(?m)^(<{7}|>{7})( |$)")
 
 def merge_config():
     """[merge]: queue (off by default), prefix (fix In review PRs that conflict before anyone approves them), checks
-    (all, or only the required ones), ci_minutes (how long to wait for them). A bad value stops before anything changes."""
+    (all, or only the required ones), ci_minutes (how long to wait for them), revert (watch the base's CI after each
+    merge, on by default), resume (when a paused queue goes on: green, or only ack). A bad value stops before anything
+    changes."""
     m = config()["merge"]
 
-    def switch(key):
-        value = m.get(key, "").strip().lower() or "off"
+    def switch(key, default="off"):
+        value = m.get(key, "").strip().lower() or default
         if value not in ("on", "off"):
             fail(f"[merge] {key} must be on or off; got {value!r}", f"set  [merge]  {key} = on  in {home(CONFIG)} "
-                                                                    "(off by default)")
+                                                                    f"({default} by default)")
         return value == "on"
+    resume = m.get("resume", "").strip().lower() or "green"
+    if resume not in ("green", "ack"):
+        fail(f"[merge] resume must be green or ack; got {resume!r}", f"fix it in {home(CONFIG)} (default green)")
     checks = m.get("checks", "").strip().lower() or "all"
     if checks not in ("all", "required"):
         fail(f"[merge] checks must be all or required; got {checks!r}", f"fix it in {home(CONFIG)} (default all)")
@@ -2808,7 +2815,7 @@ def merge_config():
         fail(f"[merge] ci_minutes must be a whole number, 1 or more; got {minutes!r}",
              f"fix it in {home(CONFIG)} (default {CI_MINUTES})")
     return {"queue": switch("queue"), "prefix": switch("prefix"), "required": checks == "required",
-            "ci_seconds": int(minutes) * 60}
+            "ci_seconds": int(minutes) * 60, "revert": switch("revert", "on"), "resume": resume}
 
 
 def read_queue():
@@ -2817,15 +2824,30 @@ def read_queue():
     return [e for e in q if isinstance(e, dict) and e.get("id") and e.get("pr")] if isinstance(q, list) else []
 
 
-def change_queue(change):
-    """Run change(entries) on the queue and write it back, under its lock: `task merge` and the sync both change it."""
+def read_merge_state():
+    """The whole MERGE_QUEUE file: queue, watch (merges whose base CI is still to be seen), paused ({repo: why})."""
+    data = read_json(MERGE_QUEUE)
+    watch, paused = data.get("watch"), data.get("paused")
+    return {"queue": read_queue(),
+            "watch": [w for w in watch if isinstance(w, dict) and w.get("id") and w.get("repo")]
+            if isinstance(watch, list) else [],
+            "paused": {k: v for k, v in paused.items() if isinstance(v, dict)} if isinstance(paused, dict) else {}}
+
+
+def change_merge_state(change):
+    """Run change(state) on the whole file and write it back, under its lock: `task merge` and the sync both change it."""
     with file_lock(MERGE_QUEUE_LOCK, wait=True) as mine:
         if not mine:
             raise RuntimeError(f"another task-hub holds {home(MERGE_QUEUE_LOCK)}; try again")
-        q = read_queue()
-        result = change(q)
-        write_atomic(MERGE_QUEUE, json.dumps({"queue": q}, indent=1))
+        state = read_merge_state()
+        result = change(state)
+        write_atomic(MERGE_QUEUE, json.dumps(state, indent=1))
         return result
+
+
+def change_queue(change):
+    """Run change(entries) on the queue and write it back, under its lock."""
+    return change_merge_state(lambda state: change(state["queue"]))
 
 
 def queue_drop(tid):
@@ -2948,10 +2970,16 @@ def merge_queue(open_, settings, lines, changed, errors):
         if not mine:
             lines.append("merge: another task-hub is working the queue")
             return
+        revert_watch(settings, lines, errors)  # before the merges below: a merge made now is first looked at next time
+        state = read_merge_state()
         heads = {}
-        for e in read_queue():
+        for e in state["queue"]:
             heads.setdefault(e["repo"].lower(), e)
         for e in heads.values():
+            if p := state["paused"].get(e["repo"].lower()):
+                lines.append(f"merge: the queue of {e['repo']} is paused: {p.get('reason', '')} "
+                             f"(`task merge --resume {e['repo']}`)")
+                continue
             t = cards.get(e["id"])
             before = t["status"] if t else ""
             try:
@@ -3085,6 +3113,8 @@ def merge_ci(t, e, pr, settings):
         # only the commit whose checks passed: a push since then waits for its own
         gh("pr", "merge", e["pr"], "--merge", "--match-head-commit", pr["headRefOid"])
         queue_drop(t["id"])
+        if settings["revert"]:
+            watch_merge(t, e, pr)
         emit(t, "merged", pr=e["pr"], reason=f"merged into {pr['baseRefName']} by the merge queue")
         close_merged(t)
         return f"merged {e['pr']}"
@@ -3092,6 +3122,230 @@ def merge_ci(t, e, pr, settings):
         return f"waiting for GitHub to allow the merge ({state or 'UNKNOWN'})"
     return merge_block(t, e, f"GitHub does not allow the merge ({state or 'UNKNOWN'}: "
                              f"{MERGE_STATES.get(state, 'see the PR')}): {e['pr']}")
+
+
+# ---------- revert: the base's CI after a merge the queue made; a revert PR when that merge turned it red ----------
+
+def watch_merge(t, e, pr):
+    """Note the merge just made, to read its base's CI from the next check on. The merge commit is asked for now;
+    a GitHub failure here leaves it to the watch."""
+    try:
+        sha = ((gh_json("pr", "view", e["pr"], "--json", "mergeCommit") or {}).get("mergeCommit") or {}).get("oid") or ""
+    except RuntimeError:
+        sha = ""
+    w = {"id": t["id"], "title": t.get("title", ""), "repo": e["repo"], "pr": e["pr"], "base": pr["baseRefName"],
+         "sha": sha, "since": now()}
+    change_merge_state(lambda state: state["watch"].append(w))
+
+
+def commit_runs(repo, sha):
+    """The GitHub Actions runs of one commit, newest first."""
+    return gh_json("run", "list", "--repo", repo, "--commit", sha, "--limit", "50",
+                   "--json", "databaseId,workflowName,status,conclusion,url,headSha") or []
+
+
+def ci_verdict(runs):
+    """(green, red, pending or unknown, the runs that say so) from one commit's runs, newest first: only the newest run
+    of each workflow counts (a re-run replaces the one before). Green only when every workflow passed (or was skipped)
+    and one at least succeeded; a cancelled one leaves it unknown, never green."""
+    latest = {}
+    for r in runs:
+        latest.setdefault(r.get("workflowName") or "?", r)
+    red = [r for r in latest.values() if r.get("status") == "completed" and r.get("conclusion") in CI_FAILED]
+    if red:
+        return "red", red
+    pending = [r for r in latest.values() if r.get("status") != "completed"]
+    if pending or not latest:
+        return "pending", pending
+    unsure = [r for r in latest.values() if r.get("conclusion") not in CI_PASSED | {"skipped"}]
+    if unsure or not any(r.get("conclusion") in CI_PASSED for r in latest.values()):
+        return "unknown", unsure or list(latest.values())
+    return "green", list(latest.values())
+
+
+def new_failures(red, history):
+    """(the red workflows that were not already failing before the merge, those still to be seen there).
+    history: the runs of each commit before the merge, newest first, the nearest commit first; read only as far as
+    needed. Each workflow is compared with the nearest commit where it passed or failed: one where it did not run,
+    was cancelled or skipped tells nothing, so the commit before that one is read. A workflow that never passed or
+    failed in history counts as not failing."""
+    commits, seen = iter(history), []
+
+    def latest_at(i):
+        while len(seen) <= i:
+            runs = next(commits, None)
+            if runs is None:
+                return None
+            latest = {}
+            for r in runs:
+                latest.setdefault(r.get("workflowName") or "?", r)
+            seen.append(latest)
+        return seen[i]
+
+    new, unknown = [], []
+    for r in red:
+        i = 0
+        while (latest := latest_at(i)) is not None:
+            old = latest.get(r.get("workflowName") or "?")
+            if old and old.get("status") != "completed":
+                unknown.append(r)
+                break
+            if old and old.get("conclusion") in CI_FAILED:
+                break
+            if old and old.get("conclusion") in CI_PASSED:
+                new.append(r)
+                break
+            i += 1
+        else:
+            new.append(r)
+    return new, unknown
+
+
+def watch_drop(w):
+    change_merge_state(lambda state: state.__setitem__("watch", [x for x in state["watch"] if x is not w and not (
+        x["id"] == w["id"] and x.get("since") == w.get("since"))]))
+
+
+def revert_watch(settings, lines, errors):
+    """One look at the base's CI of each merge the queue made, and at each paused repo's base."""
+    state = read_merge_state()
+    for w in state["watch"]:
+        try:
+            line = watch_step(w, settings)
+        except (RuntimeError, OSError) as err:  # GitHub or git: the same look again at the next check
+            errors.append({"id": w["id"], "error": f"merge queue: {w['base']} CI after #{w['id']}: {err}"})
+            continue
+        if line:
+            lines.append(f"merge: task {w['id']}: {line}")
+    if settings["resume"] != "green":
+        return
+    for repo, p in state["paused"].items():
+        try:
+            green = base_green(p.get("repo") or repo, p.get("base") or "main", p.get("sha") or "")
+        except RuntimeError as err:
+            errors.append({"id": p.get("id", ""), "error": f"merge queue: the CI of {p.get('base')}: {err}"})
+            continue
+        if green:
+            change_merge_state(lambda s: s["paused"].pop(repo, None))
+            lines.append(f"merge: {p.get('base')} of {p.get('repo') or repo} is green again ({green[:12]}); "
+                         "its queue goes on")
+
+
+def base_green(repo, base, bad):
+    """The newest commit of base with Actions runs, when they all passed and it is not the reverted merge itself;
+    else ""."""
+    runs = gh_json("run", "list", "--repo", repo, "--branch", base, "--limit", "20",
+                   "--json", "databaseId,workflowName,status,conclusion,url,headSha") or []
+    if not runs or runs[0].get("headSha") in ("", None, bad):
+        return ""
+    sha = runs[0]["headSha"]
+    verdict, _ = ci_verdict([r for r in runs if r.get("headSha") == sha])
+    return sha if verdict == "green" else ""
+
+
+def watch_step(w, settings):
+    """Look at the CI of one merge commit on its base: nothing to do yet, done (green, or already red before it),
+    or a revert."""
+    waited, limit = seconds_since(w.get("since") or now()), settings["ci_seconds"]
+    if not w.get("sha"):
+        sha = ((gh_json("pr", "view", w["pr"], "--json", "mergeCommit") or {}).get("mergeCommit") or {}).get("oid")
+        if not sha:
+            if waited >= limit:
+                watch_drop(w)
+                return f"GitHub did not name the merge commit of {w['pr']}; its {w['base']} CI is not watched"
+            return f"waiting for GitHub to name the merge commit of {w['pr']}"
+        w["sha"] = sha
+        change_merge_state(lambda s: [x.update(sha=sha) for x in s["watch"] if x["id"] == w["id"]
+                                      and x.get("since") == w.get("since")])
+    verdict, runs = ci_verdict(commit_runs(w["repo"], w["sha"]))
+    if verdict == "pending":
+        if not runs and waited >= CHECKS_GRACE:  # none at all by now: the base has no CI to watch
+            watch_drop(w)
+            return f"no CI ran on {w['base']} for its merge {w['sha'][:12]}; not watched"
+        if waited >= limit:
+            watch_drop(w)
+            return f"the {w['base']} CI of its merge did not finish in {limit // 60} min; no longer watched"
+        return f"waiting for the {w['base']} CI of its merge: {', '.join(r.get('workflowName') or '?' for r in runs) or '(none reported yet)'}"
+    if verdict == "green":
+        watch_drop(w)
+        return f"the {w['base']} CI of its merge passed"
+    if verdict == "unknown":  # cancelled, most often by a newer run on the base: that run's own watch judges it
+        watch_drop(w)
+        said = ", ".join(f"{r.get('workflowName') or '?'}: {r.get('conclusion')}" for r in runs)
+        return f"the {w['base']} CI of its merge did not pass or fail ({said}); not judged"
+    # the base before the merge, nearest first
+    before = git_out(ensure_clone(w["repo"]), "rev-list", "--first-parent", f"--max-count={CI_LOOKBACK}",
+                     f"{w['sha']}^1").split()
+    new, unknown = new_failures(runs, (commit_runs(w["repo"], c) for c in before))
+    if unknown and waited < limit:
+        return f"{w['base']} CI failed after its merge; waiting for the same workflows on the commit before it"
+    new += unknown
+    if not new:
+        watch_drop(w)
+        return (f"{w['base']} CI failed after its merge, but {', '.join(r.get('workflowName') or '?' for r in runs)} "
+                "failed before it too: not reverted")
+    return revert_merge(w, new)
+
+
+def revert_merge(w, failed):
+    """Open the one revert PR of a merge that turned its base red (`git revert -m 1` on a new branch: the base itself
+    is never pushed to), note it on the task's Issue, pause the repo's queue, and tell the human. A step that fails
+    is done again at the next check: the PR is found by its branch, never opened twice."""
+    repo, base, sha = w["repo"], w["base"], w["sha"]
+    branch = f"task-hub/revert-{sha[:12]}"
+    runs = "\n".join(f"- {r.get('workflowName') or 'workflow'}: {r.get('url') or '?'} ({r.get('conclusion')})"
+                     for r in failed)
+    title = f"Revert \"{w.get('title') or w['pr']}\""
+    found = gh_json("pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--limit", "1", "--json", "url")
+    revert_pr, why = (found[0]["url"], "") if found else ("", "")
+    if not revert_pr:
+        repo_dir = ensure_clone(repo)  # fetches
+        if run("git", "-C", repo_dir, "rev-parse", "-q", "--verify", f"origin/{branch}").returncode != 0:
+            why = push_revert(repo_dir, base, sha, branch)
+        if not why:
+            body = DATA / f"revert-{sha[:12]}.md"
+            body.parent.mkdir(parents=True, exist_ok=True)
+            body.write_text(f"Reverts {w['pr']} (merge commit {sha}), merged by task-hub's merge queue.\n\n"
+                            f"The CI of `{base}` failed after that merge, and had not failed before it:\n\n"
+                            f"{runs}\n\nMade with `git revert -m 1 {sha}`. Merge this PR to undo the merge, or close it "
+                            f"and fix `{base}` another way. Task: {board()['issues']}#{w['id']}\n")
+            revert_pr = gh("pr", "create", "--repo", repo, "--head", branch, "--base", base, "--title", title,
+                           "--body-file", body).strip().splitlines()[-1]
+            body.unlink(missing_ok=True)
+    t = {"id": w["id"], "title": w.get("title", ""), "repo": repo}
+    done = f"Opened the revert PR {revert_pr}." if revert_pr else f"Could not open a revert PR: {why}. Revert it by hand."
+    comment(t, f"{MERGE_MARK}\n\n## Merge queue\n\nThe CI of `{base}` failed after the queue merged {w['pr']} "
+               f"(merge commit {sha}), and had not failed before it:\n\n{runs}\n\n{done}\n\n"
+               f"The merge queue of {repo} is paused until `{base}` is green again or you run "
+               f"`task merge --resume {repo}`.")
+    reason = f"{base} CI failed after merging {w['pr']}: " + ", ".join(r.get("url") or "?" for r in failed)
+    paused = {"id": w["id"], "repo": repo, "base": base, "sha": sha, "pr": w["pr"], "revert": revert_pr,
+              "since": now(), "reason": f"{base} went red after #{w['id']} ({revert_pr or 'no revert PR: ' + why})"}
+
+    def record(state):
+        state["paused"][repo.lower()] = paused
+        state["watch"][:] = [x for x in state["watch"] if not (x["id"] == w["id"] and x.get("since") == w.get("since"))]
+    change_merge_state(record)
+    emit(t, "reverted", pr=revert_pr, reason=reason if revert_pr else f"{reason}; no revert PR: {why}")
+    return f"{reason}; " + (f"opened the revert PR {revert_pr}" if revert_pr else f"no revert PR: {why}") + \
+        f"; the queue of {repo} is paused"
+
+
+def push_revert(repo_dir, base, sha, branch):
+    """`git revert -m 1 <merge>` on top of the base as it is now, pushed as a new branch; "" when done, else why not."""
+    wt = DATA / "worktrees" / f"revert-{sha[:12]}"
+    run("git", "-C", repo_dir, "worktree", "remove", "--force", wt)
+    run("git", "-C", repo_dir, "worktree", "prune")
+    try:
+        run("git", "-C", repo_dir, "worktree", "add", "-q", "--detach", wt, f"origin/{base}", check=True)
+        r = run("git", "-C", wt, "revert", "-m", "1", "--no-edit", sha)
+        if r.returncode != 0:
+            run("git", "-C", wt, "revert", "--abort")
+            return f"git revert -m 1 {sha[:12]} failed: {git_said(r)}"
+        r = run("git", "-C", wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")  # a new branch, never the base
+        return "" if r.returncode == 0 else f"pushing {branch} failed: {git_said(r)}"
+    finally:
+        run("git", "-C", repo_dir, "worktree", "remove", "--force", wt)
 
 
 def watch_conflict(t, pull, settings):
@@ -3350,6 +3604,8 @@ def sync(started_here=False):
 
 TRIGGER_KEYS = {"ci", "issues", "issue_label", "ready"}  # any other name in [triggers] is a recurring goal
 CI_FAILED = {"failure", "timed_out", "startup_failure"}  # a run's conclusion that needs fixing
+CI_PASSED = {"success", "neutral"}  # a run's conclusion that passed
+CI_LOOKBACK = 10  # the commits before a merge read for a workflow's last pass or failure
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DEFAULT_BRANCH_MAX_AGE = 24 * 3600  # a repo's default branch, asked once a day
 
@@ -4598,10 +4854,19 @@ def cmd_merge(a):
     """Approve a PR for the merge queue (or, with --cancel, take it out); no id: the queue as it is."""
     if not merge_config()["queue"]:
         fail("the merge queue is off", f"set  [merge]  queue = on  in {home(CONFIG)} (docs/operations.md)")
+    if a.get("resume"):
+        repo = a["resume"]
+        p = change_merge_state(lambda state: state["paused"].pop(repo.lower(), None))
+        out(f"merge: the queue of {repo} " + (f"goes on (it was paused: {p.get('reason', '')})" if p else
+                                              "is not paused (no-op)"))
+        return
     if a.get("id") is None:
-        q = read_queue()
+        state = read_merge_state()
+        q = state["queue"]
         out(*(table("queue", [{**e, "position": position(q[:n + 1], e)} for n, e in enumerate(q)],
-                    ["position", "id", "repo", "step", "pr"]) if q else ["queue: empty"]))
+                    ["position", "id", "repo", "step", "pr"]) if q else ["queue: empty"]),
+            *(table("paused", [{"repo": p.get("repo") or r, **p} for r, p in state["paused"].items()],
+                    ["repo", "id", "revert", "reason"]) if state["paused"] else []))
         return
     t = get(a["id"])
     queued = next((e for e in read_queue() if e["id"] == t["id"]), None)
@@ -4697,10 +4962,11 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
-    "merge": (cmd_merge, ["id?"], {"cancel": False},
-              "task merge [<id>] [--cancel]  # approve the task's PR for the merge queue ([merge] queue = on): `task watch` "
-              "merges its base into it (an agent fixes conflicts), waits for its checks and merges it, one PR per repo at "
-              "a time; --cancel takes it out; no id: the queue"),
+    "merge": (cmd_merge, ["id?"], {"cancel": False, "resume": True},
+              "task merge [<id>] [--cancel] [--resume <owner/name>]  # approve the task's PR for the merge queue "
+              "([merge] queue = on): `task watch` merges its base into it (an agent fixes conflicts), waits for its checks "
+              "and merges it, one PR per repo at a time; --cancel takes it out; --resume: go on after a revert paused "
+              "the repo's queue; no id: the queue"),
     "share": (cmd_share, ["id"], {"to": True, "project": True},
               "task share <id> --to owner/name [--project owner/number]  # copy a task to a team's GitHub: an Issue "
               "with its Goal and task-hub's reports, and a card on the team's Project ([share] in the config); "
