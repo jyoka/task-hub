@@ -132,7 +132,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
 | `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
 | `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
-| `task merge [<番号>] [--cancel]` | PR をマージキューに入れる(`[merge] queue = on`。既定はオフ)。`task watch` が base に追いつかせ、競合はエージェントが解き、チェックが通ったらリポジトリごとに 1 つずつマージする([operations.md](docs/operations.md#マージキュー)) |
+| `task merge [<番号>] [--cancel] [--resume <owner/name>]` | PR をマージキューに入れる(`[merge] queue = on`。既定はオフ)。`task watch` が base に追いつかせ、競合はエージェントが解き、チェックが通ったらリポジトリごとに 1 つずつマージする。マージで base の CI が赤くなったら revert の PR を作り、そのリポジトリのキューを止める(`--resume` で再開)([operations.md](docs/operations.md#マージキュー)) |
 | `task done <番号>` | 手で閉じる・取り消す |
 | `task share <番号> --to owner/name [--project owner/番号]` | 選んだタスクをチームの Issue と Project に出す。その後の Status と Report も写す |
 | `task update` | 最新のリリースに更新する |
