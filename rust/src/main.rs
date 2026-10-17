@@ -1,7 +1,7 @@
 //! task-rs: a local-first Rust copy of `task list`, `task list --watch` and `task events`, for comparing speed and
 //! memory with bin/task. It reads the same local files (config.ini, board-cache.json, runs/, events.jsonl) and
-//! prints the same lines. It calls GitHub only when the user asks (`task-rs fetch`, `list --fetch`), and then only
-//! reads. Experimental: not part of task-hub, see rust/README.md.
+//! prints the same lines. It calls GitHub only when the user asks (`task-rs fetch`, `list --fetch`, an Issue opened
+//! in the TUI for its comments), and then only reads. Experimental: not part of task-hub, see rust/README.md.
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -276,6 +276,44 @@ fn fetch() -> Result<(usize, bool), String> {
         format!("cannot save the local board: {e}")
     })?;
     Ok((n, true))
+}
+
+// an Issue's newest comments, oldest first: never in ITEMS_QUERY, which bin/task also runs every minute
+const COMMENTS_QUERY: &str = r#"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
+  issue(number: $number) { comments(last: 100) { totalCount nodes { author { login } createdAt body } } } } }"#;
+
+/// Where task-rs keeps an Issue's comments: its own file, never board-cache.json, which bin/task shares.
+fn comments_path(issues: &str, number: u64) -> PathBuf {
+    // owners have no "_", so "<owner>_<repo>" is never another repository's
+    state(&format!("task-rs/comments-{}-{number}.json", issues.replacen('/', "_", 1)))
+}
+
+/// The comments last read from GitHub for this Issue: {"fetched_at", "total", "comments"}, or Null.
+fn saved_comments(issues: &str, number: u64) -> Value {
+    let saved = read_json(&comments_path(issues, number));
+    let ok = saved.get("key") == Some(&serde_json::json!([issues, number])) && saved["fetched_at"].is_f64()
+        && saved["comments"].is_array();
+    if ok { saved } else { Value::Null }
+}
+
+/// Reads the Issue's comments from GitHub (one call, reads only) and saves them for the next time it cannot.
+fn fetch_comments(issues: &str, number: u64) -> Result<Value, String> {
+    let (owner, name) = issues.split_once('/').unwrap_or((issues, ""));
+    let fetched_at = now();
+    let data = graphql(COMMENTS_QUERY, &[("owner", owner, false), ("name", name, false),
+                                         ("number", &number.to_string(), true)])?;
+    let comments = &data["repository"]["issue"]["comments"];
+    let Some(nodes) = comments["nodes"].as_array() else { return Err(format!("no Issue {issues}#{number} on GitHub")) };
+    let saved = serde_json::json!({"key": [issues, number], "fetched_at": fetched_at,
+                                   "total": comments["totalCount"].as_u64().unwrap_or(nodes.len() as u64),
+                                   "comments": nodes});
+    let path = comments_path(issues, number);
+    let tmp = path.with_extension(format!("json.{}.tmp", process::id()));
+    let _ = path.parent().map(fs::create_dir_all);
+    if fs::write(&tmp, saved.to_string()).and_then(|_| fs::rename(&tmp, &path)).is_err() {
+        let _ = fs::remove_file(&tmp); // shown all the same: only the next offline read misses it
+    }
+    Ok(saved)
 }
 
 fn fetched_line(result: &Result<(usize, bool), String>) -> String {
