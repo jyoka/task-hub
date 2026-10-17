@@ -2778,7 +2778,7 @@ CHECKS_GRACE = float(os.environ.get("TASK_CHECKS_GRACE_SECONDS") or 120)
 MERGE_READY = {"CLEAN", "HAS_HOOKS"}  # mergeStateStatus values GitHub merges at once
 MERGE_WAIT = {"BLOCKED", "UNKNOWN", ""}  # may still change by itself (GitHub recomputing): waited for up to ci_minutes
 MERGE_STATES = {"BLOCKED": "a required review or a rule of the branch is missing",
-                "UNSTABLE": "a check that is not required failed",
+                "UNSTABLE": "a check that is not required failed or has not finished",
                 "DRAFT": "the PR is a draft"}
 CONFLICT_MARKER = re.compile(r"(?m)^(<{7}|>{7})( |$)")
 
@@ -2991,11 +2991,9 @@ def merge_update(t, e, pr, settings):
         if git_out(wt, "rev-parse", "HEAD") == git_out(wt, "rev-parse", f"origin/{head}"):
             queue_set(e, step="ci", since=now())  # up to date already: its checks are the ones to wait for
             return merge_ci(t, e, pr, settings)
-        try:
-            run("git", "-C", wt, "push", "-q", "origin", f"HEAD:{head}", check=True)
-        except RuntimeError:  # the next check starts again from GitHub's branch (a human may have pushed to it)
-            run("git", "-C", wt, "reset", "-q", "--hard", f"origin/{head}")
-            raise
+        failed = push_failed(wt, head)
+        if failed:  # the merge commit stays in the worktree, never reset away: queued again, it is pushed then
+            return merge_block(t, e, failed)
         queue_set(e, step="ci", since=now())
         emit(t, "updated", pr=e["pr"], reason=f"merged {base} into {head}")
         return f"merged {base} into {head} and pushed; its checks come next"
@@ -3013,6 +3011,14 @@ def merge_update(t, e, pr, settings):
     queue_set(e, step="update", fixed=base_sha)
     emit(t, "conflict-fix", pr=e["pr"], reason=f"{files} conflict with {base}; {t['agent']} is resolving them")
     return f"{files} conflict with {base}; started the conflict fix (`task log {t['id']}`)"
+
+
+def push_failed(wt, head):
+    """Push the worktree's HEAD to the PR's branch: "" when it got there, else why not (the commit stays local)."""
+    r = run("git", "-C", wt, "push", "-q", "origin", f"HEAD:{head}")
+    if r.returncode == 0:
+        return ""
+    return f"pushing {head} failed, the merge commit is kept in {home(wt)}: {(r.stderr or r.stdout).strip()[-300:]}"
 
 
 def merge_ci(t, e, pr, settings):
@@ -3038,7 +3044,9 @@ def merge_ci(t, e, pr, settings):
     if pr.get("mergeable") == "CONFLICTING" or state in ("DIRTY", "BEHIND"):  # the base moved on meanwhile
         queue_set(e, step="update")
         return f"{pr['baseRefName']} moved on; merging it in at the next check"
-    if state in MERGE_READY:
+    # [merge] checks = required: the required ones all passed above, so the ones still running or failed are not
+    # required, and GitHub merges an UNSTABLE PR
+    if state in MERGE_READY or (state == "UNSTABLE" and settings["required"]):
         # only the commit whose checks passed: a push since then waits for its own
         gh("pr", "merge", e["pr"], "--merge", "--match-head-commit", pr["headRefOid"])
         queue_drop(t["id"])
@@ -3117,10 +3125,10 @@ def cmd_fix(a):
     say(f"== task {t['id']}: conflict fix of {t['branch']} with {base} | agent {t['agent']} | {now()}")
     start = git_out(wt, "rev-parse", "HEAD")
     try:
-        reason, report, conflicted = fix_conflicts(t, wt, base, say)
+        reason, report, conflicted, keep = fix_conflicts(t, wt, base, say)
     except RuntimeError as e:
-        reason, report, conflicted = f"the conflict fix failed: {e}", "", []
-    if reason:  # nothing of it reaches the PR
+        reason, report, conflicted, keep = f"the conflict fix failed: {e}", "", [], False
+    if reason and not keep:  # nothing of it reaches the PR
         say(f"== {reason}")
         run("git", "-C", wt, "merge", "--abort")
         run("git", "-C", wt, "reset", "-q", "--hard", start)
@@ -3149,15 +3157,16 @@ def cmd_fix(a):
 
 
 def fix_conflicts(t, wt, base, say):
-    """(why it cannot be merged or "", the agent's report, the conflicted files)."""
+    """(why it cannot be merged or "", the agent's report, the conflicted files, whether the merge commit is kept:
+    made but not pushed, so it is never undone)."""
     r = run("git", "-C", wt, "merge", "--no-ff", "--no-commit", base)
     conflicted = unmerged(wt)
     merging = lambda: run("git", "-C", wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0
     if r.returncode != 0 and not conflicted:
-        return f"git merge {base} failed: {(r.stderr or r.stdout).strip()[-300:]}", "", []
+        return f"git merge {base} failed: {(r.stderr or r.stdout).strip()[-300:]}", "", [], False
     if not merging():  # up to date: nothing to fix
         say(f"== {t['branch']} already has {base}")
-        return "", "", []
+        return "", "", [], False
     report = ""
     if conflicted:
         say(f"== conflicts: {', '.join(conflicted)}")
@@ -3165,21 +3174,23 @@ def fix_conflicts(t, wt, base, say):
         say(f"== agent exited with code {code}")
         report = read_agent_file(wt / REPORT_FILE) if (wt / REPORT_FILE).exists() else ""
         if not report.strip():
-            return f"the conflict fixer exited without a report (exit {code}), see `task log {t['id']}`", "", conflicted
+            return f"the conflict fixer exited without a report (exit {code}), see `task log {t['id']}`", "", conflicted, False
         if AgentReport(report).blocked:
-            return f"the conflict fixer could not resolve them: {AgentReport(report).blocked}", report, conflicted
+            return f"the conflict fixer could not resolve them: {AgentReport(report).blocked}", report, conflicted, False
         if not merging():
             return "the conflict fixer ended the merge itself (a commit, an abort or a reset); task-hub makes the " \
-                   "merge commit", report, conflicted
+                   "merge commit", report, conflicted, False
         run("git", "-C", wt, "add", "-A", check=True)
         left = unmerged(wt) + [f for f in conflicted if (wt / f).is_file()
                                and CONFLICT_MARKER.search((wt / f).read_text(errors="replace"))]
         if left:
-            return f"conflict markers are left in {', '.join(dict.fromkeys(left))}", report, conflicted
+            return f"conflict markers are left in {', '.join(dict.fromkeys(left))}", report, conflicted, False
     run("git", "-C", wt, "commit", "-q", "--no-edit", check=True)  # MERGE_HEAD: a commit with both parents
-    run("git", "-C", wt, "push", "-q", "origin", f"HEAD:{t['branch']}", check=True)
+    failed = push_failed(wt, t["branch"])
+    if failed:
+        return failed, report, conflicted, True
     say(f"== pushed the merge of {base} into {t['branch']}")
-    return "", report, conflicted
+    return "", report, conflicted, False
 
 
 # ---------- sync: board and runs in, new runs out ----------
