@@ -67,7 +67,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update, conflict   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
 
 [intake]
@@ -81,6 +81,10 @@ repo =                    ; 文に owner/name: がないときの作業先
 ci = jyoka/app                  ; 既定のブランチの CI が失敗した
 issues = jyoka/app              ; あなたに割り当てられた Issue
 deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
+
+[merge]
+queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
+prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -90,6 +94,7 @@ deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
 | `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
+| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 
@@ -237,6 +242,10 @@ worker のレポートの Please review には、確認すべき場所に加え�
 
 In review と Done の間に `wait for merge` の列を足せます。レビュー済みでマージ待ちのカードを置く列で、
 マージされた PR はいつもどおり Done に移します。列のないボードでは使いません。
+
+`[merge] queue = on` にすると、この列はマージキューの入口になります。カードをここに動かす(または `task merge <番号>`)と
+承認したことになり、`task watch` が base に追いつかせて、チェックが通ったらマージします
+([operations.md](operations.md#マージキュー))。
 
 ### 更新
 

@@ -36,7 +36,7 @@ KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.work
 UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
 
 FAKE_GH = r'''#!/usr/bin/env python3
-import fcntl, json, os, re, sys
+import fcntl, json, os, re, shutil, subprocess, sys, tempfile
 path = os.environ["TASK_TEST_GH_DB"]
 lock = open(path + ".lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)  # runs call gh concurrently
 db = json.load(open(path))
@@ -46,7 +46,23 @@ def opt(name):
 def fail(msg):
     print(msg, file=sys.stderr); sys.exit(1)
 out = None
+code = 0
 cmd = a[:2]
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True)
+def pr_of(url):  # (its "repo head" key, the PR)
+    return next((k, p) for k, p in db["prs"].items() if p["url"] == url)
+def bare(key):
+    return os.environ["TASK_CLONE_URL"].format(repo=key.split(" ")[0]).removeprefix("file://")
+def merge_state(key, pr):  # GitHub's mergeStateStatus, worked out from the real branches in the bare repo
+    if pr.get("merge_state"):
+        return pr["merge_state"]
+    if pr.get("isDraft"):
+        return "DRAFT"
+    head, base = key.split(" ", 1)[1], pr.get("base") or "main"
+    if git("-C", bare(key), "merge-base", "--is-ancestor", base, head).returncode == 0:
+        return "CLEAN"
+    return "DIRTY" if git("-C", bare(key), "merge-tree", "--write-tree", base, head).returncode == 1 else "BEHIND"
 fields = dict(x.split("=", 1) for x in a[3::2]) if cmd == ["api", "graphql"] else {}  # -f name=value pairs
 kind = cmd[1] if cmd[0] == "project" else ("item-list" if "items(" in fields.get("query", "") else
                                           "add-blocked-by" if "addBlockedBy" in fields.get("query", "") else
@@ -213,8 +229,36 @@ elif cmd == ["pr", "create"]:
                       "body": open(opt("--body-file")).read(), "base": opt("--base")}
     print(url)
 elif cmd == ["pr", "view"]:
-    pr = next(p for p in db["prs"].values() if p["url"] == a[2])
-    out = {"body": pr["body"], "state": pr["state"]}
+    key, pr = pr_of(a[2])
+    out = {"body": pr["body"], "state": pr["state"], "url": pr["url"], "isDraft": pr.get("isDraft", False),
+           "headRefName": key.split(" ", 1)[1], "baseRefName": pr.get("base") or "main",
+           "headRefOid": git("-C", bare(key), "rev-parse", key.split(" ", 1)[1]).stdout.strip()}
+    if "mergeStateStatus" in (opt("--json") or ""):
+        state = merge_state(key, pr) if pr["state"] == "OPEN" else "UNKNOWN"
+        out.update(mergeStateStatus=state, mergeable="CONFLICTING" if state == "DIRTY" else "MERGEABLE")
+elif cmd == ["pr", "checks"]:  # db["checks"][url]: [{name, bucket, link, required}]
+    checks = [c for c in db.get("checks", {}).get(a[2], []) if c.get("required") or "--required" not in a]
+    if not checks:
+        fail(f"no {'required ' if '--required' in a else ''}checks reported on the 'x' branch")
+    out = [{k: c[k] for k in ("name", "bucket", "link") if k in c} for c in checks]
+    code = 1 if any(c["bucket"] == "fail" for c in checks) else 8 if any(c["bucket"] == "pending" for c in checks) else 0
+elif cmd == ["pr", "merge"]:  # a real merge commit on the base branch of the bare repo
+    key, pr = pr_of(a[2])
+    head, base = key.split(" ", 1)[1], pr.get("base") or "main"
+    if pr["state"] != "OPEN" or merge_state(key, pr) not in ("CLEAN", "HAS_HOOKS", "UNSTABLE"):
+        fail("Pull request is not mergeable")
+    if opt("--match-head-commit") and opt("--match-head-commit") != git("-C", bare(key), "rev-parse", head).stdout.strip():
+        fail("Head branch was modified. Review and try the merge again.")
+    work = tempfile.mkdtemp()
+    for step in (["clone", "-q", bare(key), work], ["-C", work, "checkout", "-q", base],
+                 ["-C", work, "merge", "-q", "--no-ff", "-m", f"Merge pull request {pr['url']}", f"origin/{head}"],
+                 ["-C", work, "push", "-q", "origin", base]):
+        r = git(*step)
+        if r.returncode:
+            fail(f"merge failed: {r.stderr}")
+    shutil.rmtree(work)
+    pr.update(state="MERGED", merged=True)
+    db.setdefault("merged_order", []).append(pr["url"])
 elif cmd == ["pr", "edit"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["body"] = open(opt("--body-file")).read()
 elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/(issues|pulls)/\d+/(comments|reviews)\?.*", a[1]):
@@ -231,8 +275,11 @@ elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<n
     repo, number = a[1].split("/", 1)[1].rsplit("/pulls/", 1)
     if repo in db.get("broken_repos", []):
         fail("HTTP 404: Not Found")
-    pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
-    out = {"merged": pr.get("merged", False)}
+    key, pr = pr_of(f"https://github.com/{repo}/pull/{number}")
+    out = {"merged": pr.get("merged", False), "head": {"ref": key.split(" ", 1)[1], "sha": git(
+        "-C", bare(key), "rev-parse", key.split(" ", 1)[1]).stdout.strip()}, "base": {"ref": pr.get("base") or "main"}}
+    if pr["state"] == "OPEN" and os.path.isdir(bare(key)):
+        out["mergeable_state"] = merge_state(key, pr).lower()
 elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=...
     repo = a[1].split("/", 1)[1].split("/pulls?")[0]
     head = a[1].split("head=")[1].split("&")[0].split(":", 1)[1]
@@ -267,6 +314,7 @@ with open(tmp, "w") as f:
 os.replace(tmp, path)
 if out is not None:
     print(json.dumps(out))
+sys.exit(code)
 '''
 
 RUN_STAGE = r'''
@@ -287,6 +335,20 @@ with open(os.environ["TASK_TEST_AGENT_CALLS"], "a") as f:
     f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt),
                   "key": os.environ.get("FAKE_AGENT_KEY"), "other": os.environ.get("OTHER_SECRET"),
                   "launcher_left": launcher.exists()}) + "\n")
+if "You resolve the merge conflicts of one task-hub PR" in prompt:  # the merge queue's conflict fix; FIX=<kind> in the goal
+    kind = (re.findall(r"FIX=(\w+)", prompt) or ["both"])[-1]
+    files = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], capture_output=True, text=True).stdout.split()
+    if kind == "both":  # keeps both sides' lines
+        for name in files:
+            lines = Path(name).read_text().splitlines(True)
+            Path(name).write_text("".join(l for l in lines if not re.match(r"(<{7}|={7}|>{7})", l)))
+    report = f"## Report\n\nKept both greetings in {', '.join(files)}.\n\n## Please review\n\n- the order of the lines\n"
+    if kind == "giveup":
+        report = "## Blocked\n\nBoth sides rewrite the greeting; which one wins?\n\n" + report
+    if kind == "commit":  # breaks the rule: makes the merge commit itself
+        subprocess.run(["git", "commit", "-qam", "my own merge"], check=True)
+    Path(".task-report.md").write_text(report)
+    sys.exit(0)
 if "You triage one blocked task-hub run" in prompt:  # used as the replanner; REPLAN=<kind> picks the result
     kind = re.findall(r"REPLAN=(\w+)", prompt)[-1]
     if kind == "slow":  # keeps running, with the card already Blocked, until the test creates the release file
@@ -918,7 +980,8 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
                     "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl"),
                     "TASK_TEST_LAUNCHCTL": str(root / "launchctl.jsonl"),
-                    "TASK_NO_UPDATE_NOTIFIER": "1"}  # bin/task's own origin is GitHub: the update tests make their own
+                    "TASK_NO_UPDATE_NOTIFIER": "1",  # bin/task's own origin is GitHub: the update tests make their own
+                    "TASK_CHECKS_GRACE_SECONDS": "0"}  # the fake's PRs have no checks unless a test gives them some
         fakebin = root / "fakebin"
         fakebin.mkdir()
         (fakebin / "osascript").write_text(FAKE_OSASCRIPT)
@@ -945,7 +1008,7 @@ class TaskTest(unittest.TestCase):
                 continue
             try:
                 cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-                if "_run" not in cmd:
+                if "_run" not in cmd and "_fix" not in cmd:
                     continue
                 os.killpg(pid, signal.SIGTERM)
                 for _ in range(20):
@@ -4689,6 +4752,284 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.wait_for(lambda: self.status(tid) == "Blocked")  # wait() would stop at the drag
         self.assertEqual(self.unexpected_moves(), [f"warning: task {tid} moved Backlog -> Blocked, {UNEXPECTED_MOVE}"])
+
+    # --- the merge queue ([merge] queue = on) ---
+
+    def queue_on(self, extra=""):
+        self.write_config("[merge]\nqueue = on\n" + extra)
+
+    def in_review(self, *modes):
+        """One card per mode, each run to In review: every one writes hello.txt, so any two PRs conflict."""
+        ids = [self.new(mode, f"Task {mode.split()[0]}") for mode in modes]
+        for tid in ids:
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+        return ids
+
+    def push_to_main(self, filename, text):
+        """Someone else's PR, merged into main meanwhile."""
+        bare = self.root / "origins" / "jyoka/app.git"
+        seed = self.root / f"main-{filename}"
+        subprocess.run(["git", "clone", "-q", str(bare), str(seed)], check=True, capture_output=True)
+        (seed / filename).write_text(text)
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", "main moved"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True, capture_output=True)
+
+    def on_origin(self, ref, *args):
+        bare = self.root / "origins" / "jyoka/app.git"
+        return subprocess.run(["git", "-C", str(bare), *args, ref], capture_output=True, text=True).stdout
+
+    def fix_ended(self, tid):
+        """The conflict fix runs in the background: it has ended once its run record has a pid that is gone."""
+        def ended():
+            run = self.run_state(tid)
+            return run.get("pid") and not run.get("stage") and \
+                subprocess.run(["ps", "-p", run["pid"]], capture_output=True).returncode != 0
+        self.wait_for(ended, timeout=30)
+
+    def queue_events(self, tid):
+        merge_events = {"queued", "updated", "conflict-fix", "ci-wait", "merged", "conflict", "Blocked", "Done"}
+        return [e["event"] for e in self.events_of(tid) if e["event"] in merge_events]
+
+    def test_merge_queue_is_off_by_default(self):
+        db = self.gh()
+        next(f for f in db["fields"] if f["name"] == "Status")["options"].append({"id": "O_wait", "name": "wait for merge"})
+        self.save_db(db)
+        tid, = self.in_review("ok")
+        self.assertIn("the merge queue is off", self.task("merge", tid, code=1))
+        self.move(tid, "wait for merge")  # the human's own column, as before: it waits for the human's merge
+        self.task()
+        self.task()
+        self.assertEqual(self.status(tid), "wait for merge")
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
+        calls = self.gh()["gh_calls"]
+        self.assertFalse([c for c in calls if c in ("pr view", "pr checks", "pr merge")], calls)
+        self.assertFalse((self.root / ".local/state/task-hub/merge-queue.json").exists())
+
+    def test_two_conflicting_prs_are_both_merged_in_the_order_approved(self):
+        self.queue_on()
+        first, second = self.in_review("first", "second")  # both add hello.txt: whichever merges first, the other conflicts
+        self.assertIn("position: 1", self.task("merge", second))
+        self.assertIn("position: 2", self.task("merge", first))
+        self.assertIn("already queued", self.task("merge", second))
+        self.assertIn("merged", self.task())  # the first approved, as it is: nothing to merge in, no checks
+        self.assertEqual(self.gh()["merged_order"], [self.pr(second)["url"]])
+        self.assertEqual(self.status(second), "Done")
+        self.assertEqual(self.status(first), "In review")  # one at a time: it waited
+        out = self.task()  # main moved: merging it into the first one's branch conflicts, and the agent resolves it
+        self.assertIn("started the conflict fix", out)
+        self.fix_ended(first)
+        self.assertIn(f"Resolved the conflicts of task/{first} with origin/main (hello.txt)", self.comments(first)[-1])
+        head = self.on_origin(f"task/{first}", "rev-list", "--parents", "-n", "1").split()
+        self.assertEqual(len(head), 3, "a real merge commit, with both parents")
+        self.assertIn("merged", self.task())
+        db = self.gh()
+        self.assertEqual(db["merged_order"], [self.pr(second)["url"], self.pr(first)["url"]])
+        self.assertEqual((self.status(first), self.status(second)), ("Done", "Done"))
+        # both sides' features kept: the branch's own line, then what main gained
+        self.assertEqual(self.on_origin("main:hello.txt", "show"), "hello from mode first\nhello from mode second\n")
+        self.assertEqual(self.queue_events(second), ["queued", "merged", "Done"])
+        self.assertEqual(self.queue_events(first), ["queued", "conflict-fix", "updated", "merged", "Done"])
+        self.assertIn("queue: empty", self.task("merge"))
+        fixes = [c for c in self.agent_calls() if "You resolve the merge conflicts" in c["prompt"]]
+        self.assertEqual(len(fixes), 1)
+        self.assertIn("- hello.txt", fixes[0]["prompt"])
+        self.assertIn("MODE:first", fixes[0]["prompt"])  # the task's Goal, so both features are kept
+
+    def test_a_conflict_the_agent_cannot_resolve_blocks_the_card_and_nothing_merges(self):
+        self.queue_on()
+        first, second = self.in_review("first", "second FIX=giveup")
+        started = self.run_state(second)["started"]
+        self.task("merge", first)
+        self.task("merge", second)
+        self.task()  # first merged
+        self.task()  # second conflicts: the fix starts
+        self.fix_ended(second)
+        self.assertEqual(self.status(second), "Blocked")
+        # the last run's start stays: a re-run still gets the comments written on the PR since then
+        self.assertEqual(self.run_state(second)["started"], started)
+        blocked = [e for e in self.events_of(second) if e["event"] == "Blocked"][-1]
+        self.assertIn("merge queue: the conflict fixer could not resolve them: Both sides rewrite the greeting",
+                      blocked["reason"])
+        self.assertIn("<!-- task-hub merge -->", self.comments(second)[-1])
+        self.assertIn("left the queue (Blocked)", self.task())
+        self.task()
+        self.assertEqual(self.gh()["merged_order"], [self.pr(first)["url"]])
+        self.assertEqual(self.pr(second)["state"], "OPEN")
+        self.assertEqual(len(self.on_origin(f"task/{second}", "rev-list", "--parents", "-n", "1").split()), 2,
+                         "the failed fix pushed nothing")
+        self.assertEqual(subprocess.run(["git", "-C", self.run_state(second)["worktree"], "status", "--porcelain"],
+                                        capture_output=True, text=True).stdout, "", "the merge was undone")
+
+    def test_a_fix_that_leaves_conflict_markers_or_commits_itself_blocks(self):
+        self.queue_on()
+        first, markers, commit = self.in_review("first", "markers FIX=markers", "commit FIX=commit")
+        for tid in (first, markers, commit):
+            self.task("merge", tid)
+        self.task()  # first merged; the others conflict with it in turn
+        for tid, why in ((markers, "conflict markers are left in hello.txt"),
+                         (commit, "the conflict fixer ended the merge itself")):
+            self.task()
+            self.fix_ended(tid)
+            self.assertEqual(self.status(tid), "Blocked")
+            self.assertIn(why, self.events_of(tid)[-1]["reason"])
+            self.task()  # it leaves the queue: the next one goes on
+        self.assertEqual(self.gh()["merged_order"], [self.pr(first)["url"]])
+
+    def test_a_failing_check_blocks_the_card_with_its_link_and_the_next_waits_for_it(self):
+        self.queue_on()
+        db = self.gh()
+        next(f for f in db["fields"] if f["name"] == "Status")["options"].append({"id": "O_wait", "name": "wait for merge"})
+        self.save_db(db)
+        first, second = self.in_review("first", "second")
+        self.assertIn("status: wait for merge", self.task("merge", first))  # the board's column, when it has one
+        self.move(second, "wait for merge")  # dragged there by hand: approved too
+        checks = {self.pr(first)["url"]: [{"name": "test", "bucket": "pending", "link": "https://ci.example/1"}]}
+        db = self.gh()
+        db["checks"] = checks
+        self.save_db(db)
+        out = self.task()
+        self.assertIn(f"task {second} joined the queue", out)
+        self.assertIn("waiting for its checks: test", out)
+        self.task()
+        self.assertEqual([e["event"] for e in self.events_of(first)].count("ci-wait"), 1)  # once per commit
+        self.assertEqual(self.status(second), "wait for merge")  # behind the first one, though it could merge
+        db = self.gh()
+        db["checks"][self.pr(first)["url"]][0]["bucket"] = "fail"
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(first), "Blocked")
+        reason = [e for e in self.events_of(first) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertEqual(reason, "merge queue: check test failed: https://ci.example/1")
+        self.assertNotIn("merged_order", self.gh())
+        self.task()  # now the second one's turn
+        self.assertEqual(self.gh()["merged_order"], [self.pr(second)["url"]])
+        self.assertEqual(self.queue_events(second), ["queued", "merged", "Done"])
+
+    def test_a_push_that_fails_blocks_the_card_and_keeps_the_merge_commit(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.push_to_main("other.txt", "someone else's feature\n")  # main moved: its branch needs main merged in
+        hook = self.root / "origins" / "jyoka/app.git" / "hooks" / "pre-receive"
+        hook.write_text(f"#!/bin/sh\nrm {hook}\necho 'rejected once' >&2\nexit 1\n")  # a network blip, once
+        hook.chmod(0o755)
+        self.task("merge", tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        reason = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertIn(f"merge queue: pushing task/{tid} failed", reason)
+        self.assertIn("rejected once", reason)
+        self.assertNotIn("merged_order", self.gh())
+        wt = self.run_state(tid)["worktree"]
+        git = lambda *a: subprocess.run(["git", "-C", wt, *a], capture_output=True, text=True).stdout
+        self.assertIn("other.txt", git("ls-tree", "--name-only", "HEAD"), "the merge commit is not thrown away")
+        self.assertNotEqual(git("rev-parse", "HEAD"), git("rev-parse", f"origin/task/{tid}"))
+        self.task("merge", tid)  # the human queues it again: the kept merge commit is pushed, then it merges
+        self.assertIn(f"merged main into task/{tid} and pushed", self.task())
+        self.assertIn("other.txt", self.on_origin(f"task/{tid}", "ls-tree", "--name-only"))
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
+        self.assertEqual(self.status(tid), "Done")
+
+    def test_a_commit_hook_that_fails_in_the_conflict_fix_blocks_with_its_message_whole(self):
+        self.queue_on()
+        first, second = self.in_review("first", "second")
+        self.task("merge", first)
+        self.task("merge", second)
+        self.task()  # first merged: the second conflicts
+        hook = self.root / ".local/share/task-hub/repos/jyoka/app/.git/hooks/pre-commit"
+        why = "lint: " + "src/" * 40 + "app.py is not formatted"
+        hook.write_text(f"#!/bin/sh\nprintf 'x%.0s' $(seq 400) >&2\necho >&2\n"  # a long line, then the error
+                        f"printf 'checking...\\r\\033[1;31m{why}\\033[m\\033[K\\n' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.task()
+        self.fix_ended(second)
+        self.assertEqual(self.status(second), "Blocked")
+        reason = [e for e in self.events_of(second) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertIn("merge queue: the conflict fix failed: git -C", reason)
+        self.assertIn(why, reason)
+        self.assertNotIn("\x1b", reason)
+        self.assertNotIn("\r", reason)
+        self.assertNotIn("checking...", reason)
+
+    def test_a_reason_from_git_drops_sideband_padding_and_keeps_the_hook_message(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        url = "file:///var/folders/xy/" + "k" * 120 + "/T/tmpabc/origins/jyoka/app.git"
+        stderr = ("remote: Counting objects: 50%\rremote: Counting objects: 100%\x1b[K\n"  # redrawn with \r
+                  "remote: rejected once        \n"  # git's sideband padding, without a terminal
+                  "remote: \x1b[1;31mstay calm\x1b[m\x1b[K\r\n"
+                  f"To {url}\n ! [remote rejected] HEAD -> task/1 (pre-receive hook declined)\n"
+                  f"error: failed to push some refs to '{url}'\n")
+        said = task.git_said(subprocess.CompletedProcess([], 1, "", stderr))
+        self.assertLessEqual(len(said), 300)
+        self.assertEqual(said.splitlines()[:3], ["remote: Counting objects: 100%", "remote: rejected once",
+                                                 "remote: stay calm"])
+        self.assertIn("! [remote rejected] HEAD -> task/1 (pre-receive hook declined)", said)
+        self.assertNotIn("\x1b", said)
+        self.assertNotIn("\r", said)
+        short = task.git_said(subprocess.CompletedProcess([], 1, "", "remote: no\x1b[K\nerror: failed\n"))
+        self.assertEqual(short, "remote: no\nerror: failed")
+        long = task.git_said(subprocess.CompletedProcess([], 1, "", "fatal: " + "a" * 400 + "\nerror: " + "b" * 400))
+        self.assertEqual(long, "error: " + "b" * 293)  # only over-long lines: the last one, cut to size
+
+    def test_required_checks_only_merge_an_unstable_pr_once_the_required_ones_pass(self):
+        self.queue_on("checks = required\n")
+        tid, = self.in_review("first")
+        db = self.gh()
+        url = self.pr(tid)["url"]
+        db["checks"] = {url: [{"name": "test", "bucket": "pending", "link": "https://ci.example/1", "required": True},
+                              {"name": "lint", "bucket": "pending", "link": "https://ci.example/2"},
+                              {"name": "style", "bucket": "fail", "link": "https://ci.example/3"}]}
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "UNSTABLE"  # GitHub: some check is not passing
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for its checks: test", self.task())  # a required one is still running
+        self.assertNotIn("merged_order", self.gh())
+        db = self.gh()
+        db["checks"][url][0]["bucket"] = "pass"  # the optional ones are still running or failed
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [url])
+        self.assertEqual(self.status(tid), "Done")
+
+    def test_nothing_merges_that_the_human_did_not_approve_and_a_conflict_is_told_once(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.task()
+        self.push_to_main("hello.txt", "main's own greeting\n")  # its PR conflicts now
+        self.assertIn("its PR conflicts with main now", self.task())
+        self.task()
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("conflict"), 1)
+        self.wait_for(lambda: self.notifications_of(tid, "conflict"))  # in the default [notify] events
+        self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+        self.assertFalse([c for c in self.gh()["gh_calls"] if c == "pr merge"])
+        self.assertFalse([c for c in self.agent_calls() if "You resolve the merge conflicts" in c["prompt"]])
+
+    def test_prefix_fixes_a_conflicting_pr_before_approval_but_never_merges_it(self):
+        self.queue_on("prefix = on\n")
+        tid, = self.in_review("first")
+        self.push_to_main("hello.txt", "main's own greeting\n")
+        self.assertIn("started the conflict fix", self.task())
+        self.fix_ended(tid)
+        self.assertEqual(len(self.on_origin(f"task/{tid}", "rev-list", "--parents", "-n", "1").split()), 3)
+        self.task()
+        self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+        self.assertEqual(self.queue_events(tid), ["conflict", "conflict-fix", "updated"])
+        self.assertFalse([c for c in self.gh()["gh_calls"] if c == "pr merge"])
+
+    def test_merge_cancel_and_a_bad_merge_config(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.task("merge", tid)
+        self.assertIn("queued: no", self.task("merge", tid, "--cancel"))
+        self.assertIn("not queued (no-op)", self.task("merge", tid, "--cancel"))
+        self.task()
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
+        self.write_config("[merge]\nqueue = yes please\n")
+        self.assertIn("[merge] queue must be on or off", self.task(code=1))
 
     def test_design_diagram_matches_the_transitions(self):
         loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
