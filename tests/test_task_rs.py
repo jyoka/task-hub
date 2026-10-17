@@ -948,8 +948,49 @@ class HerdrPaneTest(TuiCase):
                               env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
                                    "HERDR_BIN_PATH": str(self.herdr), **env})
 
+    def tui_on_pty_without_tty(self, **env):
+        """stdout on a PTY but no terminal to read keys from: stdin not one and, in a new session, no /dev/tty, as when
+        an agent runs `task-rs tui` with its output on a pane. Returns (exit code, stdout, stderr)."""
+        master, slave = os.openpty()
+        p = subprocess.Popen([str(self.binary), "tui"], cwd=self.repo, stdin=subprocess.DEVNULL, stdout=slave,
+                             stderr=subprocess.PIPE, start_new_session=True,
+                             env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
+                                  "HERDR_BIN_PATH": str(self.herdr), **env})
+        os.close(slave)
+        chunks = []
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # the other end closed
+                break
+            if not data:
+                break
+            chunks.append(data)
+        os.close(master)
+        code = p.wait(timeout=30)
+        err = p.stderr.read().decode()
+        p.stderr.close()
+        return code, b"".join(chunks).decode().replace("\r\n", "\n"), err
+
     def calls(self):
         return self.herdr_calls.read_text().splitlines() if self.herdr_calls.exists() else []
+
+    def test_with_output_on_a_pty_but_no_terminal_to_read_it_opens_a_pane_too(self):
+        code, out, err = self.tui_on_pty_without_tty(HERDR_PANE_ID="p1")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(out.strip(), "tui: opened in herdr pane p9, to the right of p1")
+        self.assertEqual(self.calls(), [
+            f"pane split --pane p1 --direction right --cwd {os.path.realpath(self.repo)} --focus",
+            f"pane run p9 '{self.binary}' tui"])
+
+    def test_with_output_on_a_pty_but_no_terminal_to_read_and_no_herdr_it_is_an_error_not_a_panic(self):
+        for env in ({"HERDR_PANE_ID": "p1", "TASK_HERDR": "0"}, {}):
+            with self.subTest(env):
+                code, out, err = self.tui_on_pty_without_tty(**env)
+                self.assertEqual(code, 1, out + err)  # not -6 (SIGABRT) with a core
+                self.assertIn("error: the TUI needs a terminal", out)
+                self.assertNotIn("panicked", err)
+                self.assertEqual(self.calls(), [])
 
     def test_with_no_terminal_it_opens_a_pane_to_the_right_and_runs_the_same_binary_there(self):
         r = self.tui(HERDR_PANE_ID="p1")
