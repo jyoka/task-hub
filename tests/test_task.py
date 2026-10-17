@@ -2482,6 +2482,103 @@ class TaskTest(unittest.TestCase):
         self.assertLess(time.time() - began, 20)
         self.wait_for(lambda: "This pane stays open" in self.task("log", tid))  # the run went on to its end
 
+    def ntfy_server(self):
+        """A stand-in ntfy server on localhost: it keeps each POST (path, headers, JSON) in self.ntfy_posts."""
+        import http.server
+        posts = self.ntfy_posts = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                posts.append({"path": self.path, "headers": dict(self.headers), "json": json.loads(data)})
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_ntfy_gets_the_notification_too_with_priority_and_a_link(self):
+        url = self.ntfy_server()
+        self.write_config(extra=f"\n[notify]\nevents = In review, Blocked, Done\nntfy = {url}/my-topic\n"
+                                "ntfy_token = tk_secret\n")
+        ok, stuck = self.new("ok"), self.new("blocked")
+        self.task("start", ok)
+        self.task("start", stuck)
+        self.wait(ok), self.wait(stuck)
+        self.wait_for(lambda: len(self.ntfy_posts) == 2)
+        posts = {p["json"]["title"].split(":")[0]: p for p in self.ntfy_posts}
+        review, blocked = posts[f"#{ok} In review"], posts[f"#{stuck} Blocked"]
+        self.assertEqual(review["path"], "/")  # ntfy's JSON publish: the topic goes in the body
+        self.assertEqual(review["headers"]["Authorization"], "Bearer tk_secret")
+        self.assertEqual(review["json"], {"topic": "my-topic", "title": f"#{ok} In review: Add hello",
+                                          "message": f"review: hello.txt: wording\n{self.pr(ok)['url']}",
+                                          "priority": 3, "tags": ["task-hub"], "click": self.pr(ok)["url"]})
+        self.assertEqual(blocked["json"]["priority"], 4)
+        self.assertEqual(blocked["json"]["click"], self.pr(stuck)["url"])  # its draft PR
+        self.assertIn("reason:", blocked["json"]["message"])
+        # in addition to this machine's notifier, not instead of it
+        self.wait_for(lambda: self.notifications_of(ok, "In review") and self.notifications_of(stuck, "Blocked"))
+
+    def test_ntfy_config(self):
+        cfg = self.root / ".config" / "task-hub" / "config.ini"
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+
+            def post(ntfy, event="Done", **e):
+                cfg.write_text("[board]\nissues = jyoka/tasks\n" + (f"[notify]\n{ntfy}\n" if ntfy is not None else ""))
+                task.config.cache_clear()
+                return task.ntfy_post({"id": "7", "event": event, **e}, "t", "b")
+
+            self.assertIsNone(post(None))  # the default: off
+            self.assertIsNone(post("ntfy ="))
+            self.assertIsNone(post("ntfy = not a url"))
+            self.assertIsNone(post("ntfy = https://ntfy.sh/"))  # no topic
+            p = post("ntfy = https://ntfy.sh/abc_1  ; my phone")
+            self.assertEqual((p["url"], p["json"]["topic"], p["json"]["priority"], p["json"]["click"]),
+                             ("https://ntfy.sh", "abc_1", 3, "https://github.com/jyoka/tasks/issues/7"))
+            self.assertNotIn("Authorization", p["headers"])
+            self.assertLessEqual(p["timeout"], 10)
+            p = post("ntfy = https://example.com/ntfy/team/\nntfy_token = tk", event="replan", pr="https://x/pull/3")
+            self.assertEqual((p["url"], p["json"]["topic"], p["json"]["priority"], p["json"]["click"]),
+                             ("https://example.com/ntfy", "team", 4, "https://x/pull/3"))
+            self.assertEqual(p["headers"]["Authorization"], "Bearer tk")
+            p = post("ntfy = https://ntfy.sh/abc", event="update", id=None)
+            self.assertNotIn("click", p["json"])  # no task, no Issue
+
+    def test_an_unreachable_or_hanging_ntfy_server_never_slows_a_command_or_the_run(self):
+        hang = socket.socket()  # listens, never answers: the request would wait for its whole timeout
+        hang.bind(("127.0.0.1", 0))
+        hang.listen(8)
+        self.addCleanup(hang.close)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()  # nothing listens there
+        for url in (f"http://127.0.0.1:{hang.getsockname()[1]}/t", f"http://127.0.0.1:{port}/t",
+                    "http://ntfy.invalid/t"):
+            self.write_config(extra=f"\n[notify]\nntfy = {url}\n")
+            tid = self.new("blocked")
+            began = time.time()
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked")
+            # the run notifies Blocked after it moved the card, then goes on to its end
+            self.wait_for(lambda: "This pane stays open" in self.task("log", tid))
+            self.assertLess(time.time() - began, 8)  # the ntfy request alone may take 10 seconds
+            self.wait_for(lambda: self.notifications_of(tid, "Blocked"))  # this machine's still shows
+            began = time.time()
+            self.move(tid, "Done")
+            self.task()  # the sync writes Done, and notifies
+            self.assertLess(time.time() - began, 8)
+            self.wait_for(lambda: self.notifications_of(tid, "Done"))
+
     def test_digest_has_a_length_cap_and_a_research_task_gets_its_report(self):
         tid = self.new("long")
         self.task("start", tid)
