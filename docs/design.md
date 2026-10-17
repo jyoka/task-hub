@@ -237,6 +237,24 @@
     Ready に移します。同じことに 2 枚作らないよう、Issue ができた直後に `triggers.json` に記録します。Project に足す前に
     失敗すると、Issue だけが残ることがあります(2 枚目を作るよりよい)。確かめるのは `task watch` だけで、5 分に 1 回までです
     (1 つの Project を見張る 1 台のマシン、GitHub の費用は 1 時間に数十)。
+26. **承認した PR は、マージキューが 1 つずつ新しくしてマージします(`[merge] queue`、既定はオフ)。** 6 つほどの
+    タスクを並べて動かすと、1 つがマージされるたびに残りの PR が古くなり、main と競合しました。そのたびに「競合を解く」
+    タスクを手で登録し(PR のブランチから、origin/main を 2 つの親を持つ本当のマージコミットで取り込み、PR のブランチに
+    戻す)、2 回マージしていました。reviewer は PR を作る前に 1 回動くだけで、あとから見直しません。そこで、人が承認した
+    PR(`task merge <番号>`、または wait for merge の列に動かす)をキューに入れ、`task watch` がリポジトリごとに先頭の 1 つだけを
+    進めます。1 つずつなのは、マージのたびに次の PR が取り込む base が変わるからです。手順は、base を PR のブランチに
+    マージして push する → 競合したら同じ手順(本当のマージコミット、両方の機能を残す、ぶつかった設計の決定事項の番号を
+    付け直す)をエージェントに頼む(`task _fix`。エージェントはファイルを直すだけで、マージコミットと push は task-hub が
+    行う。決定事項 3)→ PR のチェックを待つ → `gh pr view` の `mergeStateStatus` が CLEAN なら、チェックが通ったコミットに
+    限って(`--match-head-commit`)`gh pr merge --merge` します。解けない競合、残った競合の印、落ちたチェック、時間内に
+    終わらないチェックは、理由(チェックならそのリンク)を付けてカードを Blocked にし、マージしません。キューに入るのは
+    人が承認したものだけで、自動で入れるのは後の段階(Merge pipeline の 2/4 以降)です。チェックは既定で PR のすべてを
+    待ちます(`[merge] checks = required` で必須のものだけ。このときは必須でないチェックが動いている、落ちている
+    `UNSTABLE` でも、必須のものが通ればマージします)。ブランチの保護がないリポジトリでは「必須」が 1 つもなく、
+    落ちた CI のままマージしてしまうからです。キューに入れていない In review の PR が競合したことは、毎分すでに読んでいる
+    マージの確認(REST)の `mergeable_state` から分かるので、呼び出しを増やさずに `conflict` で 1 回知らせます(PR の
+    コミットごとに 1 回)。`[merge] prefix = on` なら承認の前に解いておきますが、マージはしません
+    ([operations.md](operations.md#マージキュー))。
 
 ## Status の遷移
 
@@ -261,6 +279,12 @@ stateDiagram-v2
     Ready --> Blocked: launch failed
     InProgress --> Blocked: setup failed, finish, run stopped
     InProgress --> InReview: finish
+    InReview --> WaitForMerge: task merge
+    Blocked --> WaitForMerge: task merge
+    Blocked --> InReview: task merge
+    WaitForMerge --> InReview: task merge --cancel
+    InReview --> Blocked: merge queue
+    WaitForMerge --> Blocked: merge queue
     InReview --> Done: PR merged, task done
     WaitForMerge --> Done: PR merged, task done
     Backlog --> Done: task done
@@ -285,6 +309,7 @@ In progress の中には段階があります(0.6)。ステートチャートの
 | `retry` | 差し戻しを受けた実装エージェント(1 回まで) | `review_loop` |
 | `finishing` | commit、push、PR、Issue へのコメント、カードを動かす | `cmd_run` |
 | `replanning` | エージェント自身の Blocked を replanner が仕分ける(カードはもう Blocked) | `run_replan` |
+| `conflict-fix` | マージキュー(または `[merge] prefix`)の競合の解消。カードは In review か wait for merge のまま(`task _fix`) | `launch_fix` |
 
 ```mermaid
 stateDiagram-v2
@@ -329,7 +354,8 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
   なので、あとから付けた前提の変更は入りません。PR を閉じてリモートの `task/<番号>` を消しても、Base branch が
   同じなら手元の worktree が再利用されます。前提を取り込んで最初からやり直す仕事は、新しいタスクとして登録してください。
 - 前後関係のない並行のタスクが同じファイルを変えると、先にマージされた PR とあとの PR が競合することがあります。
-  task-hub はまだ検知しません(GitHub の PR の画面で分かります)。
+  `[merge] queue = on` のときは、In review の PR が競合したことを `conflict` の出来事で知らせ、承認した PR は
+  マージキューが競合を解いてからマージします(決定事項 26)。既定(オフ)では検知しません(GitHub の PR の画面で分かります)。
 - 実行中の情報はマシンごとです。あるマシンで In progress のカードを別のマシンの `task` が見ると、
   「このマシンでは動いていない」として Blocked にします。1 つの Project は 1 台のマシンで使ってください。
   トリガー([triggers.md](triggers.md))の記録もマシンごとなので、2 台の `task watch` は同じことにカードを 2 枚作ります。

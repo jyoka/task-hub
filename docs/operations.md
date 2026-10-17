@@ -130,7 +130,8 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow` です。`reason`(Blocked の 1 行、`slow` では
+`replan`、実行がいつもより長引いているときの `slow`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
+`merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
 GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
@@ -196,7 +197,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow, update   ; 既定。列の名前か replan、slow、update をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update, conflict   ; 既定。列の名前か replan、slow、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
 ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
 ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
@@ -291,6 +292,94 @@ ntfy アプリで登録のトピックを開き、次の形で送ります:
 - 1 つの文からカードを 2 枚作らないよう、id はカードを作る前に書きます。GitHub の失敗で登録できなかった文は
   もう一度は試さないので、送り直します
 
+## マージキュー
+
+いくつものタスクを並べて動かすと、1 つの PR がマージされるたびに残りの PR が古くなり、main と競合します。
+`[merge] queue = on` にすると、あなたが承認した PR を `task watch` が 1 つずつ base に追いつかせ、競合はエージェントに
+解かせ、チェックが通ったらマージします。既定はオフで、オフのときは今までと何も変わりません(wait for merge の列も、
+人がマージするまで待つだけの列のままです)。
+
+```ini
+[merge]
+queue = on          ; 既定は off。キューを動かす
+prefix = off        ; on: キューに入れていない In review の PR も、競合したら承認の前に解いておく(マージはしない)
+checks = all        ; all(既定): PR のチェックをすべて待つ。required: ブランチの保護で必須のものだけ
+ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
+```
+
+### キューに入れる
+
+キューに入るのは、あなたが承認した PR だけです。入れ方は 2 つです。
+
+- `task merge <番号>`: In review(または wait for merge、Blocked)のカードの PR をキューの最後に入れます。ボードに
+  wait for merge の列があればカードをそこに動かし、なければ In review のままです。Blocked のカードを直したあとに
+  入れ直すときも同じです
+- カードを wait for merge の列に動かす(GitHub の画面やスマートフォンで): 次の確認でキューの最後に入ります(動かした順)
+
+`task merge` は今のキューを、`task merge <番号> --cancel` はキューから外します(wait for merge のカードは In review に
+戻します)。カードを wait for merge(列がなければ In review)から別の列に動かしても外れます。
+
+### 1 つずつ進める
+
+`task watch`(と `task`)は、確認のたびにリポジトリごとにキューの先頭の PR だけを 1 段進めます。1 つがマージされると、
+次の PR が取り込む base が変わるからです。
+
+1. PR のブランチに今の base をマージします(`git merge origin/<base>`。2 つの親を持つ本当のマージコミット)。
+   きれいに入れば push します。もう追いついていれば何もしません。push が失敗したら、マージコミットを worktree に
+   残したまま(捨てません)理由を付けて Blocked にします。直してから入れ直すと、残したコミットを push します
+2. 競合したら、タスクの worktree(PR のブランチ)でエージェントに解かせます(`task _fix`、[worker/CONFLICT.md](../worker/CONFLICT.md))。
+   手で登録していた「競合を解く」タスクと同じ手順です: 両方の機能を残し、両方が足した番号付きの一覧(設計の決定事項など)は
+   base の番号を残してこちらの番号を付け直します。エージェントはファイルを直してレポートを書くだけで、マージコミットと
+   push は task-hub が行います(push が失敗したときは 1 と同じく、マージコミットを残して Blocked)。解けなかったら(エージェントが `## Blocked` を書いた、競合の印が残った、エージェントが
+   自分でコミットや中止をした)、マージを取り消してカードを Blocked にします
+3. PR のチェックを待ちます(`gh pr checks`)。落ちたら、そのチェックのリンクを付けて Blocked にします。PR の最後の
+   コミットから 2 分たつまでは、チェックがまだ 1 つも出ていなくても、出てくるのを待ちます。`checks = required` なら
+   必須のチェックだけを見ます。必須でないチェックが動いている、または落ちていても待たず、止めません
+4. `gh pr view --json mergeable,mergeStateStatus` が `CLEAN`(`checks = required` なら、必須でないチェックが通っていない
+   ときの `UNSTABLE` も)なら、チェックが通ったコミットのまま
+   (`--match-head-commit`)`gh pr merge --merge` でマージし、カードを Done にして、次の PR に進みます。
+   その間に base が進んでいれば(`BEHIND`、`DIRTY`)、1 に戻ります
+
+競合を解いている間も、カードは wait for merge(または In review)のままです。`task list` には
+`wait for merge › conflict-fix` と出て、`task log <番号>` に経過が残ります。Blocked にしたときは、理由を
+`merge queue: ...` で始まる 1 行にして、Issue に `<!-- task-hub merge -->` のコメントを書きます(タスクのレポートではないので、
+再実行のプロンプトには入りません)。直したら `task merge <番号>` でもう一度入れます。
+
+### 承認していない PR の競合
+
+キューに入れていない In review の PR が base と競合したら、`conflict` の出来事を 1 回書いて通知します(PR のコミットごとに
+1 回)。毎分すでに読んでいるマージの確認(REST)の `mergeable_state` を見るだけなので、GitHub の呼び出しは増えません。
+`[merge] prefix = on` なら、そのまま競合を解いて push しておきます(カードは In review のまま。マージはしません)。
+
+### 出来事
+
+| `event` | いつ | `reason` |
+|---|---|---|
+| `queued` | キューに入った | キューの何番目か |
+| `updated` | base をマージして push した(競合を解いたときも) | 何をどこにマージしたか、解いたファイル |
+| `conflict-fix` | 競合を解くエージェントを始めた | 競合したファイル |
+| `ci-wait` | チェックを待ち始めた(コミットごとに 1 回) | 待っているチェック |
+| `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
+| `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
+| `conflict` | キューにない In review の PR が競合した | 競合した base |
+
+どれも `task events`、`/chief`(`--only` に足したもの)、ntfy(`[notify] events` に足したもの)から見えます。通知の既定には
+`conflict` と(いつもの)`Blocked`、`Done` が入っています。
+
+### 止まったとき
+
+| 理由(`merge queue: ...`) | 対処 |
+|---|---|
+| `the conflict fixer could not resolve them: ...` | エージェントが人の判断を求めました。手で解くか、Goal に答えを書いて Ready に戻し、終わったら `task merge` |
+| `conflict markers are left in ...`、`the conflict fixer ended the merge itself ...`、`the conflict fix did not resolve the conflicts ...` | 解けませんでした(マージは取り消してあります)。`task log <番号>` を読み、手で解いて push してから `task merge` |
+| `check <名前> failed: <リンク>` | リンクのチェックを直します。PR に push すれば、`task merge` でまた入れられます |
+| `its checks did not finish in N min: ...` | チェックが止まっていないか確かめます。長いなら `[merge] ci_minutes` を延ばします |
+| `GitHub does not allow the merge (BLOCKED: ...)` | 必須のレビューやブランチのルールが足りません。満たしてから `task merge` |
+| `its PR was closed without merging`、`its PR is a draft` | PR を開き直す、または Ready for review にしてから `task merge` |
+
+チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`)のときは、キューの同じリポジトリのほかの PR も待ちます。
+別のリポジトリのキューは止まりません。
+
 ## 実行の結果を集計する
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
@@ -347,6 +436,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | タスク(ボード) | GitHub: Issue リポジトリと Project(非公開) |
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
+| マージキュー | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
 | トリガーが作ったものの記録([triggers.md](triggers.md)) | `~/.local/state/task-hub/triggers.json` |
