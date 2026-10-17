@@ -78,6 +78,12 @@ at =                      ; 08:00 のように書くと、task watch が毎日�
 topic =                   ; 登録のトピック([notify] ntfy と同じサーバー、別の名前)
 secret =                  ; 文の 1 語目に書く合言葉(16 文字以上)
 repo =                    ; 文に owner/name: がないときの作業先
+
+[triggers]
+; task watch が自分でカードを作る(Backlog に入る)。詳しくは docs/triggers.md
+ci = jyoka/app                  ; 既定のブランチの CI が失敗した
+issues = jyoka/app              ; あなたに割り当てられた Issue
+deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -86,6 +92,7 @@ repo =                    ; 文に owner/name: がないときの作業先
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
+| `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 
@@ -205,6 +212,7 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 呼びます([docs/setup.md](setup.md#task-と-chief-スキルのインストール))。
 
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
+`[triggers]` を書いていれば、`task watch` はカードを自分で作ることもします([triggers.md](triggers.md))。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
 `task watch` は、GitHub のエラー、動いている間に壊れた設定ファイル、始められないカードでは止まりません。
 `error:` の行を出し(始められないカードは理由を書いて Blocked にし)、次の回にまた確かめます。
