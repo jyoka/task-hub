@@ -4932,6 +4932,27 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
         self.assertEqual(self.status(tid), "Done")
 
+    def test_a_commit_hook_that_fails_in_the_conflict_fix_blocks_with_its_message_whole(self):
+        self.queue_on()
+        first, second = self.in_review("first", "second")
+        self.task("merge", first)
+        self.task("merge", second)
+        self.task()  # first merged: the second conflicts
+        hook = self.root / ".local/share/task-hub/repos/jyoka/app/.git/hooks/pre-commit"
+        why = "lint: " + "src/" * 40 + "app.py is not formatted"
+        hook.write_text(f"#!/bin/sh\nprintf 'x%.0s' $(seq 400) >&2\necho >&2\n"  # a long line, then the error
+                        f"printf 'checking...\\r\\033[1;31m{why}\\033[m\\033[K\\n' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.task()
+        self.fix_ended(second)
+        self.assertEqual(self.status(second), "Blocked")
+        reason = [e for e in self.events_of(second) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertIn("merge queue: the conflict fix failed: git -C", reason)
+        self.assertIn(why, reason)
+        self.assertNotIn("\x1b", reason)
+        self.assertNotIn("\r", reason)
+        self.assertNotIn("checking...", reason)
+
     def test_a_reason_from_git_drops_sideband_padding_and_keeps_the_hook_message(self):
         loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
