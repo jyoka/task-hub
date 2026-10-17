@@ -230,6 +230,13 @@
     コメントは写さず、Goal も書き換えません(Goal は人が書いたままの正本です)。読むのは REST で、再実行 1 回につき
     最大 4 回です(毎分の同期では呼びません)。読めなければ開始の失敗として Blocked にします。黙って渡さずに始めると、
     人の指示が抜けたまま進むからです([task-format.md](task-format.md#人のコメント))。
+25. **task-hub が自分で作るカードは、Backlog に入れます。** `[triggers]`([triggers.md](triggers.md))を書くと、
+    `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標に気づいてカードを作ります。カードを Ready に移すことが
+    承認(決定事項 2)なのは変わりません。Ready に入れられるのは、人が設定に目標の文まで書いた繰り返しの目標で、
+    `ready` に名前を書いたものだけです。Issue の文章はボードの外で誰かが書いたものなので、いつも人が読んでから
+    Ready に移します。同じことに 2 枚作らないよう、Issue ができた直後に `triggers.json` に記録します。Project に足す前に
+    失敗すると、Issue だけが残ることがあります(2 枚目を作るよりよい)。確かめるのは `task watch` だけで、5 分に 1 回までです
+    (1 つの Project を見張る 1 台のマシン、GitHub の費用は 1 時間に数十)。
 
 ## Status の遷移
 
@@ -246,8 +253,8 @@ stateDiagram-v2
     state "In progress" as InProgress
     state "In review" as InReview
     state "wait for merge" as WaitForMerge
-    [*] --> Backlog: task new
-    Backlog --> Ready: task start
+    [*] --> Backlog: task new, trigger
+    Backlog --> Ready: task start, ready trigger
     Blocked --> Ready: task start
     Ready --> Ready: task start --agent
     Ready --> InProgress: launch
@@ -325,6 +332,7 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
   task-hub はまだ検知しません(GitHub の PR の画面で分かります)。
 - 実行中の情報はマシンごとです。あるマシンで In progress のカードを別のマシンの `task` が見ると、
   「このマシンでは動いていない」として Blocked にします。1 つの Project は 1 台のマシンで使ってください。
+  トリガー([triggers.md](triggers.md))の記録もマシンごとなので、2 台の `task watch` は同じことにカードを 2 枚作ります。
 
 ### 未対応の指摘 (2026-09-23 のレビュー)
 
