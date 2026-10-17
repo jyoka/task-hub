@@ -3021,6 +3021,9 @@ def cmd_watch(_):
             lines += daily_digest()
         except SystemExit:  # [digest] at edited into a bad value: fail() said why; the next check reads it again
             pass
+        except Exception as e:  # a digest that cannot be built must not end the watch; today's is not retried
+            lines += [f"digest: error: unexpected {type(e).__name__}: {e} (please report it with this log)"]
+            traceback.print_exc()
         if lines:
             out(f"== {now()}", *lines)
         if os.environ.get("TASK_WATCH_ONCE"):  # tests
@@ -3325,7 +3328,8 @@ def median(values):
 DIGEST_GROUPS = [(DONE, "done"), (IN_REVIEW, "in_review"), (BLOCKED, "blocked"), (IN_PROGRESS, "running")]
 DIGEST_GROUP_MAX = 10  # lines per group; the rest is counted
 DIGEST_SECONDS = 24 * 3600  # the period of `task digest` without --since, and of the daily one
-NTFY_MESSAGE_MAX = 3500  # ntfy.sh turns a message over 4096 bytes into an attachment
+DIGEST_SINCE_MAX = 36500 * 86400  # 100 years: a longer --since would go before year 1 or overflow
+NTFY_MESSAGE_MAX = 4096  # UTF-8 bytes: ntfy.sh turns a longer message into an attachment
 
 
 def jsonl(path):
@@ -3340,9 +3344,10 @@ def jsonl(path):
 
 def since_seconds(text):
     m = re.fullmatch(r"(\d+)([mhd])", (text or "").strip().lower())
-    if not m or not int(m[1]):
+    seconds = int(m[1]) * {"m": 60, "h": 3600, "d": 86400}[m[2]] if m else 0
+    if not 0 < seconds <= DIGEST_SINCE_MAX:
         fail(f"--since takes a period like 90m, 24h or 7d, got {text!r}", "usage: task digest [--since 24h]", 2)
-    return int(m[1]) * {"m": 60, "h": 3600, "d": 86400}[m[2]]
+    return seconds
 
 
 def digest_groups(events, since):
@@ -3463,13 +3468,16 @@ def daily_digest():
 
 
 def clip_lines(lines, limit):
-    """Whole lines, as many as fit in limit chars."""
-    text = ""
+    """Whole lines, as many as fit in limit UTF-8 bytes (not chars: a Japanese title takes 3 per char), with "..."
+    in the last line when some were cut."""
+    if len((text := "\n".join(lines)).encode()) <= limit:
+        return text
+    kept = []
     for line in lines:
-        if len(text) + len(line) + 1 > limit:
-            return text + "..."
-        text += line + "\n"
-    return text.rstrip("\n")
+        if len("\n".join([*kept, line, "..."]).encode()) > limit:
+            break
+        kept.append(line)
+    return "\n".join([*kept, "..."])
 
 
 def cmd_new(a):
