@@ -222,7 +222,7 @@ const NO_END: &str = "「『（【〔〈《［｛“‘([{";
 fn hang(text: &str) -> usize {
     let item = text.trim_start_matches(' ');
     let digits = item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let mark = ["• ☐ ", "• ☑ ", "• "].iter().find(|m| item.starts_with(**m)).map(|m| cols(m))
+    let mark = ["• ☐ ", "• ☑ ", "• ", "■ ", "▸ ", "▾ "].iter().find(|m| item.starts_with(**m)).map(|m| cols(m))
         .or_else(|| (digits > 0 && item[digits..].starts_with(". ")).then_some(digits + 2));
     text.len() - item.len() + mark.unwrap_or(0)
 }
@@ -520,30 +520,33 @@ struct Comments {
     error: String,
 }
 
-/// A comment's heading in the reader's Issue: its line, the key that keeps it open or closed across reloads, and
-/// whether it is open.
+/// A heading the reader's Issue opens and closes, a comment's or a section's in one: its line, the key that keeps it
+/// open or closed across reloads, whether it is open, and whether it is a comment's (with a rule above it).
 struct Head {
     line: usize,
     key: String,
     open: bool,
+    rule: bool,
 }
 
 /// The Issue: its Goal from the local copy of the board, then its comments, oldest first, as last read from GitHub.
 /// Each comment has a rule and a heading; the newest Report is open, the others are one line until opened (`opened`
-/// says which the person opened or closed). `width` is the text's width: rules and tables fit it.
+/// says which the person opened or closed). An open comment shows its first section and the headings of the others,
+/// each opened on its own. `width` is the text's width: rules and tables fit it. Returns the lines, the headings on
+/// them, and every section of the open comments with whether it is open (some may be inside a closed one).
 fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64, width: usize,
-               opened: &HashMap<String, bool>) -> (Vec<Line<'static>>, Vec<Head>) {
+               opened: &HashMap<String, bool>) -> (Vec<Line<'static>>, Vec<Head>, Vec<(String, bool)>) {
     let mut lines = vec![
         Line::from(format!("#{} {}", t.id, t.title)).bold(),
         Line::from(format!("{} (local copy from {} ago)", t.url, ago(age))).dim(),
         Line::default(),
     ];
-    let mut heads = vec![];
+    let (mut heads, mut folds) = (vec![], vec![]);
     if t.body.trim().is_empty() {
         lines.push(Line::from("no body").dim());
     }
     markdown_lines(&t.body, width, &mut lines);
-    let Some(c) = comments else { return (lines, heads) };
+    let Some(c) = comments else { return (lines, heads, folds) };
     let list = c.saved["comments"].as_array().map_or(&[][..], Vec::as_slice);
     let total = c.saved["total"].as_u64().map_or(list.len(), |n| n as usize);
     let at = c.saved["fetched_at"].as_f64().map(|at| local_at(at, offset, false));
@@ -593,14 +596,76 @@ fn issue_lines(t: &Task, age: f64, comments: Option<&Comments>, offset: i64, wid
         }
         lines.push(Line::default());
         lines.push(Line::from("─".repeat(width)).dim());
-        heads.push(Head { line: lines.len(), key, open });
+        heads.push(Head { line: lines.len(), key: key.clone(), open, rule: true });
         lines.push(Line::from(head));
         if open {
             lines.push(Line::default());
-            markdown_lines(untitled(&body, &name), width, &mut lines);
+            section_lines(untitled(&body, &name), &key, width, opened, &mut lines, &mut heads, &mut folds);
         }
     }
-    (lines, heads)
+    (lines, heads, folds)
+}
+
+/// An open comment's text, its sections closed: the text before its first heading, or the first section when there
+/// is none, then the other sections' headings. A closed section hides the sections inside it too.
+fn section_lines(markdown: &str, key: &str, width: usize, opened: &HashMap<String, bool>, lines: &mut Vec<Line<'static>>,
+                 heads: &mut Vec<Head>, folds: &mut Vec<(String, bool)>) {
+    let parts = sections(markdown);
+    // no text before the first heading: the first section is open, with the sections inside it
+    let first = parts.get(1).and_then(|p| p.0.as_ref()).map(|(l, _)| *l).filter(|_| parts[0].1.is_empty());
+    let first_end = first.map_or(1, |l| {
+        parts.iter().skip(2).position(|p| p.0.as_ref().is_some_and(|(level, _)| *level <= l)).map_or(parts.len(), |e| e + 2)
+    });
+    let mut hidden: Option<usize> = None; // the level of the closed section the next ones may be inside
+    for (n, (head, text)) in parts.iter().enumerate() {
+        let Some((level, title)) = head else {
+            markdown_lines(text, width, lines);
+            continue;
+        };
+        let skey = format!("{key} §{n}");
+        let open = opened.get(&skey).copied().unwrap_or(n < first_end);
+        folds.push((skey.clone(), open));
+        if hidden.is_some_and(|l| *level > l) {
+            continue;
+        }
+        // a blank row above, but not between the headings of closed sections: they stay one list
+        let after_closed = heads.last().is_some_and(|h| !h.rule && !h.open && h.line + 1 == lines.len());
+        if !after_closed && lines.last().is_some_and(|l| l.width() > 0) {
+            lines.push(Line::default());
+        }
+        heads.push(Head { line: lines.len(), key: skey, open, rule: false });
+        lines.push(heading_line(*level, title, if open { "▾" } else { "▸" }));
+        hidden = (!open).then_some(*level);
+        if open {
+            markdown_lines(text, width, lines);
+        }
+    }
+}
+
+/// Markdown cut at its headings (outside code blocks): the text before the first one, then each heading's level and
+/// title with the text up to the next heading. A section runs to the next heading of its level or above, so the
+/// later parts of a deeper level are inside it. Blank lines at the end of each text are left out.
+fn sections(markdown: &str) -> Vec<(Option<(usize, String)>, String)> {
+    let mut parts: Vec<(Option<(usize, String)>, String)> = vec![(None, String::new())];
+    let mut code = false;
+    for l in markdown.lines() {
+        let trimmed = l.trim_start();
+        if trimmed.starts_with("```") {
+            code = !code;
+        }
+        match (!code).then(|| heading_of(trimmed)).flatten() {
+            Some((level, title)) => parts.push((Some((level, title.to_string())), String::new())),
+            None => {
+                let text = &mut parts.last_mut().unwrap().1;
+                text.push_str(l);
+                text.push('\n');
+            }
+        }
+    }
+    for (_, text) in &mut parts {
+        text.truncate(text.trim_end().len());
+    }
+    parts
 }
 
 /// The start of a comment as plain words, for its line while it is closed; a heading that only repeats its kind
@@ -667,6 +732,12 @@ fn clip_spans(spans: Vec<Span<'static>>, max: usize, pad: bool) -> Vec<Span<'sta
     out
 }
 
+/// `code`, paths and commands in a line of Markdown: quieter than the text around them (dimmed, never bold or
+/// colored), so that they do not compete with headings. In bold text (a heading), the bold text's own style.
+fn code_style(style: Style) -> Style {
+    if style.add_modifier.contains(Modifier::BOLD) { style } else { style.add_modifier(Modifier::DIM) }
+}
+
 /// `**bold**` and `code` in a line of Markdown, over the line's own style.
 fn inline_spans(text: &str, style: Style) -> Vec<Span<'static>> {
     let (mut spans, mut plain, mut rest) = (vec![], String::new(), text);
@@ -678,7 +749,7 @@ fn inline_spans(text: &str, style: Style) -> Vec<Span<'static>> {
     while let Some(ch) = rest.chars().next() {
         if let Some((code, after)) = rest.strip_prefix('`').and_then(|r| r.split_once('`')) {
             flush(&mut plain, &mut spans);
-            spans.push(Span::styled(code.to_string(), style.fg(Color::Yellow)));
+            spans.push(Span::styled(code.to_string(), code_style(style)));
             rest = after;
         } else if let Some((bold, after)) = rest.strip_prefix("**").and_then(|r| r.split_once("**")).filter(|(b, _)| !b.is_empty()) {
             flush(&mut plain, &mut spans);
@@ -740,10 +811,19 @@ fn table_lines(rows: &[&str], width: usize, lines: &mut Vec<Line<'static>>) {
     }
 }
 
-/// Markdown drawn for reading: headings in bold and color, lists with even indents, `**bold**` and `code`, code
+/// A heading as the reader draws it: a colored mark ("■", or "▸" and "▾" for a section that opens and closes), then
+/// its title in bold, underlined at level 1. Its `code` stays in its bold.
+fn heading_line(level: usize, title: &str, mark: &str) -> Line<'static> {
+    let style = if level == 1 { Style::new().bold().underlined() } else { Style::new().bold() };
+    let mark_style = if level <= 2 { Style::new().bold().cyan() } else { Style::new().cyan() };
+    let mut spans = vec![Span::styled(format!("{mark} "), mark_style)];
+    spans.extend(inline_spans(title, style));
+    Line::from(spans)
+}
+
+/// Markdown drawn for reading: headings in bold with a mark, lists with even indents, `**bold**` and `code`, code
 /// blocks in a frame, and tables with their columns lined up within `width`.
 fn markdown_lines(markdown: &str, width: usize, lines: &mut Vec<Line<'static>>) {
-    let code_style = Style::new().fg(Color::Yellow);
     let source: Vec<String> = markdown.lines().map(|l| l.replace('\t', "    ")).collect();
     let mut code = false;
     let mut i = 0;
@@ -756,7 +836,7 @@ fn markdown_lines(markdown: &str, width: usize, lines: &mut Vec<Line<'static>>) 
             code = !code;
             lines.push(if code { Line::from(format!("┌─ {}", lang.trim())).dim() } else { Line::from("└─").dim() });
         } else if code {
-            lines.push(Line::from(vec!["│ ".dim(), Span::styled(l.clone(), code_style)]));
+            lines.push(Line::from(vec!["│ ".dim(), Span::raw(l.clone())]));
         } else if trimmed.starts_with('|') {
             let start = i - 1;
             while i < source.len() && source[i].trim_start().starts_with('|') {
@@ -764,17 +844,11 @@ fn markdown_lines(markdown: &str, width: usize, lines: &mut Vec<Line<'static>>) 
             }
             let rows: Vec<&str> = source[start..i].iter().map(String::as_str).collect();
             table_lines(&rows, width, lines);
-        } else if let Some((level, title)) = heading(trimmed).or_else(|| bold_heading(trimmed).map(|t| (3, t))) {
-            let style = match level {
-                1 => Style::new().bold().cyan().underlined(),
-                2 => Style::new().bold().cyan(),
-                3 => Style::new().bold().light_blue(),
-                _ => Style::new().bold().light_magenta(),
-            };
+        } else if let Some((level, title)) = heading_of(trimmed) {
             if lines.last().is_some_and(|l| l.width() > 0) {
                 lines.push(Line::default()); // a blank row above, so that the heading stands apart from the text
             }
-            lines.push(Line::from(inline_spans(title, style)));
+            lines.push(heading_line(level, title, "■"));
         } else if let Some((mark, item)) = list_item(trimmed) {
             let mut spans = vec![Span::raw(format!("{}{mark} ", "  ".repeat(indent / 2 + 1)))];
             spans.extend(inline_spans(item, Style::new()));
@@ -790,6 +864,11 @@ fn heading(l: &str) -> Option<(usize, &str)> {
     let level = l.len() - l.trim_start_matches('#').len();
     let title = &l[level..];
     ((1..=6).contains(&level) && (title.is_empty() || title.starts_with(' '))).then(|| (level, title.trim()))
+}
+
+/// A heading as the reader takes it: a Markdown heading, or a line that is all bold (level 3).
+fn heading_of(l: &str) -> Option<(usize, &str)> {
+    heading(l).or_else(|| bold_heading(l).map(|t| (3, t)))
 }
 
 /// A line that is all bold, used as a heading: "**作ったもの**" -> "作ったもの".
@@ -852,9 +931,10 @@ struct Reader {
     comments: Option<Comments>, // the Issue's comments; None until the Issue is first shown
     offset: i64,
     age: f64,                       // the local board's age at the last fill
-    heads: Vec<Head>,               // the Issue's comment headings, in its lines
+    heads: Vec<Head>,               // the Issue's comment and section headings, in its lines
+    folds: Vec<(String, bool)>,     // every section of the open comments, and whether it is open: `a` acts on them
     cursor: Option<usize>,          // the heading on screen that Enter and `o` open or close, as an index in heads
-    opened: HashMap<String, bool>,  // comments opened or closed by hand, kept while the reader is open
+    opened: HashMap<String, bool>,  // comments and sections opened or closed by hand, kept while the reader is open
     issue_width: u16,               // the width the Issue's lines were made for
 }
 
@@ -863,7 +943,7 @@ impl Reader {
         let log = Pos { follow: true, ..Pos::default() }; // the log opens at its end
         Reader { task, gone: false, view, pos: [Pos::default(), Pos::default(), log], lines: vec![], rows: None, stale: true,
                  log_path: String::new(), log_from: 0, log_seen: None, page: 1, bottom: 0, right: 0, size: (0, 0),
-                 comments: None, offset, age: 0.0, heads: vec![], cursor: None, opened: HashMap::new(),
+                 comments: None, offset, age: 0.0, heads: vec![], folds: vec![], cursor: None, opened: HashMap::new(),
                  issue_width: TEXT_MAX }
     }
 
@@ -908,12 +988,13 @@ impl Reader {
         }
         self.age = age;
         self.heads.clear();
+        self.folds.clear();
         let t = &self.task;
         self.lines = match self.view {
             View::Issue => {
-                let (lines, heads) = issue_lines(t, age, self.comments.as_ref(), self.offset, self.issue_width as usize,
-                                                 &self.opened);
-                self.heads = heads;
+                let (lines, heads, folds) = issue_lines(t, age, self.comments.as_ref(), self.offset,
+                                                        self.issue_width as usize, &self.opened);
+                (self.heads, self.folds) = (heads, folds);
                 lines
             }
             View::Diff => diff_lines(t),
@@ -954,15 +1035,44 @@ impl Reader {
         self.view == View::Issue && self.cursor.is_some_and(|i| i < self.heads.len())
     }
 
-    /// Opens or closes the comment under the cursor. Nothing above it changes, so it stays where it is on screen.
+    /// Opens or closes the comment or section under the cursor. Nothing above it changes, so it stays where it is on
+    /// screen.
     fn toggle(&mut self) {
         let Some(h) = self.cursor.and_then(|i| self.heads.get(i)).filter(|_| self.view == View::Issue) else { return };
         self.opened.insert(h.key.clone(), !h.open);
         self.fill(self.age);
     }
 
-    /// Moves the cursor to the next (or previous) comment and scrolls its rule to the top. With no cursor, to the first
-    /// comment below the top row (or the last one above it).
+    /// Opens every section of the open comments, or closes them all when all are open. The heading under the cursor
+    /// stays where it is on screen; with none on screen, the reader stays as far below the last heading above it,
+    /// or goes to that heading when its section closed.
+    fn toggle_all(&mut self) {
+        if self.view != View::Issue || self.folds.is_empty() {
+            return;
+        }
+        let open = self.folds.iter().any(|(_, o)| !o);
+        let top = self.pos[View::Issue as usize].top;
+        let row = |rows: &[usize], line: usize| rows.iter().take(line).sum::<usize>() as isize;
+        let anchor = self.rows.as_ref().and_then(|(width, rows, _)| {
+            let h = self.cursor.and_then(|i| self.heads.get(i))
+                .or_else(|| self.heads.iter().rev().find(|h| row(rows, h.line) <= top as isize))?;
+            Some((*width, h.key.clone(), h.open, top as isize - row(rows, h.line)))
+        });
+        for (key, _) in &self.folds {
+            self.opened.insert(key.clone(), open);
+        }
+        self.fill(self.age);
+        let Some((width, key, was, below)) = anchor else { return };
+        let Some(i) = self.heads.iter().position(|h| h.key == key) else { return };
+        let below = if below > 0 && self.heads[i].open != was { 0 } else { below };
+        let rows = screen_rows(&self.lines, width, true);
+        self.pos[View::Issue as usize].top = (row(&rows, self.heads[i].line) + below).max(0) as usize;
+        self.cursor = Some(i);
+    }
+
+    /// Moves the cursor to the next (or previous) heading, a comment's or a section's, and scrolls it to the top: a
+    /// comment's rule, a section's heading itself. With no cursor, to the first heading below the top row (or the last
+    /// one above it).
     fn jump(&mut self, forward: bool) {
         let Some((_, rows, _)) = self.rows.as_ref().filter(|_| self.view == View::Issue) else { return };
         let row = |line: usize| rows.iter().take(line).sum::<usize>();
@@ -974,7 +1084,8 @@ impl Reader {
             None => self.heads.iter().rposition(|h| row(h.line) < top),
         };
         if let Some(i) = to {
-            self.pos[View::Issue as usize].top = row(self.heads[i].line.saturating_sub(1));
+            let h = &self.heads[i];
+            self.pos[View::Issue as usize].top = row(if h.rule { h.line.saturating_sub(1) } else { h.line });
             self.cursor = Some(i);
         }
     }
@@ -1003,6 +1114,7 @@ impl Reader {
             KeyCode::Enter => self.switch(View::Issue, age),
             KeyCode::Char('n') => self.jump(true),
             KeyCode::Char('p') => self.jump(false),
+            KeyCode::Char('a') => self.toggle_all(),
             KeyCode::Char('d') => self.switch(View::Diff, age),
             KeyCode::Char('l') => self.switch(View::Log, age),
             _ => {}
@@ -1311,7 +1423,7 @@ impl App {
             None => KEYS.to_string(),
             Some(r) => {
                 let sideways = if r.view == View::Diff { "←→ sideways  " } else { "" };
-                let issue = if r.view == View::Issue { "n p comment  ⏎ o open/close" } else { "⏎ issue" };
+                let issue = if r.view == View::Issue { "n p comment/section  ⏎ o open/close  a all sections" } else { "⏎ issue" };
                 format!("↑↓ jk scroll  {sideways}PgUp/PgDn/Space page  Home/End  {issue}  d diff  l log  g lazygit  \
                          b browser  Esc back  q quit")
             }
@@ -1678,12 +1790,39 @@ mod tests {
         let mut lines = vec![];
         markdown_lines("text\n## Big\n**作ったもの**\n- item\n**not** a heading", 80, &mut lines);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text, ["text", "", "Big", "", "作ったもの", "  • item", "not a heading"]);
+        assert_eq!(text, ["text", "", "■ Big", "", "■ 作ったもの", "  • item", "not a heading"]);
         for i in [2, 4] {
-            let style = lines[i].spans[0].style;
-            assert!(style.add_modifier.contains(Modifier::BOLD) && style.fg.is_some(), "{:?}", lines[i]);
+            let (mark, title) = (lines[i].spans[0].style, lines[i].spans[1].style);
+            assert!(mark.fg.is_some(), "{:?}", lines[i]);
+            assert!(title.add_modifier.contains(Modifier::BOLD) && title.fg.is_none(), "{:?}", lines[i]);
         }
         assert_eq!(lines[6].spans[0].style.fg, None);
+    }
+
+    #[test]
+    fn code_and_paths_are_quieter_than_headings() {
+        let mut lines = vec![];
+        markdown_lines("## Checked `cargo test`\nran `rust/src/tui.rs` and **`bold`**\n```\nmake\n```", 80, &mut lines);
+        let span = |line: usize, text: &str| lines[line].spans.iter().find(|s| s.content == text).unwrap().style;
+        let (title, code) = (span(0, "Checked "), span(1, "rust/src/tui.rs"));
+        assert!(title.add_modifier.contains(Modifier::BOLD) && !title.add_modifier.contains(Modifier::DIM));
+        assert!(code.add_modifier.contains(Modifier::DIM) && !code.add_modifier.contains(Modifier::BOLD), "{code:?}");
+        assert_eq!(code.fg, None); // no color of its own: not the orange of before
+        assert_eq!(span(0, "cargo test"), title); // in a heading, the heading's own look
+        assert_eq!(span(1, "bold").add_modifier, Modifier::BOLD);
+        assert_eq!(span(3, "make").fg, None);
+        assert_eq!(span(1, "ran ").add_modifier, Modifier::empty());
+    }
+
+    #[test]
+    fn sections_run_to_the_next_heading_of_their_level_and_skip_code() {
+        let parts = sections("intro\n\n### A\na\n```\n## not one\n```\n#### A1\n\n**B**\nb\n\n\n");
+        let heads: Vec<Option<(usize, String)>> = parts.iter().map(|p| p.0.clone()).collect();
+        assert_eq!(heads, [None, Some((3, "A".into())), Some((4, "A1".into())), Some((3, "B".into()))]);
+        assert_eq!(parts[0].1, "intro");
+        assert_eq!(parts[1].1, "a\n```\n## not one\n```");
+        assert_eq!(parts[3].1, "b");
+        assert_eq!(sections("")[0], (None, String::new()));
     }
 
     fn comments(bodies: &[&str]) -> Comments {
@@ -1695,13 +1834,22 @@ mod tests {
     #[test]
     fn a_comment_does_not_repeat_its_own_heading() {
         let c = comments(&["<!-- task-hub report -->\n\n## Report\n\n**作ったもの**\n- a file\n\n## Please review\n\n- this"]);
-        let (lines, heads) = issue_lines(&task("goal"), 0.0, Some(&c), 0, 80, &HashMap::new());
+        let (lines, heads, _) = issue_lines(&task("goal"), 0.0, Some(&c), 0, 80, &HashMap::new());
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let head = heads[0].line;
         assert!(text[head].starts_with("▾ Report · jyoka"), "{text:#?}");
-        assert_eq!(text[head + 1..head + 4], ["", "作ったもの", "  • a file"]);
-        assert!(!text.iter().any(|l| l == "Report"), "{text:#?}");
-        assert!(text.iter().any(|l| l == "Please review"));
+        // with no text before its first heading, the first section is open
+        assert_eq!(text[head + 1..head + 4], ["", "▾ 作ったもの", "  • a file"]);
+        assert!(!text.iter().any(|l| l.ends_with(" Report")), "{text:#?}");
+        assert!(text.iter().any(|l| l == "▸ Please review"));
+        assert!(!text.iter().any(|l| l.contains("this")), "{text:#?}");
+        // the sections inside the first one are open with it, the ones after it closed
+        let (mut lines, mut heads, mut folds) = (vec![], vec![], vec![]);
+        section_lines("### A\na\n#### A1\nA1-TEXT\n### B\nB-TEXT", "k", 80, &HashMap::new(), &mut lines, &mut heads,
+                      &mut folds);
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, ["▾ A", "a", "", "▾ A1", "A1-TEXT", "", "▸ B"]);
+        assert_eq!(folds.iter().map(|f| f.1).collect::<Vec<_>>(), [true, true, false]);
         // a heading with other words stays
         assert_eq!(untitled("## Blocked\n\nneed a key", "Report"), "## Blocked\n\nneed a key");
         assert_eq!(untitled("\n## report\n\n\nbody", "Report"), "body");
@@ -1738,7 +1886,7 @@ mod tests {
         let mut r = Reader::new(task(&goal), View::Issue, 0);
         r.issue_width = w;
         r.comments = Some(comments(&bodies));
-        let (lines, heads) = issue_lines(&r.task, 0.0, r.comments.as_ref(), 0, w as usize, &r.opened);
+        let (lines, heads, _) = issue_lines(&r.task, 0.0, r.comments.as_ref(), 0, w as usize, &r.opened);
         (r.lines, r.heads) = (lines, heads);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         let (header, body) = draw(&mut r, &mut term);
@@ -1770,5 +1918,87 @@ mod tests {
         r.key(KeyCode::End, 0.0);
         let (_, body) = draw(&mut r, &mut term);
         assert_eq!(body[9], "REPORT-END");
+    }
+
+    /// The rows on screen are the Issue's rows from `top`, and the header counts them all.
+    fn shows(r: &mut Reader, term: &mut Terminal<TestBackend>) -> (usize, Vec<String>) {
+        let (header, body) = draw(r, term);
+        let width = r.issue_width as usize;
+        let all: Vec<String> = r.lines.iter().flat_map(|l| wrap_line(l, width)).map(|l| l.to_string().trim_end().to_string())
+            .collect();
+        let top = r.pos[View::Issue as usize].top;
+        let end = (top + body.len()).min(all.len());
+        assert!(header.ends_with(&format!(" {}-{end} of {}", top + 1, all.len())), "{header}");
+        assert_eq!(body[..end - top], all[top..end]);
+        (top, body)
+    }
+
+    #[test]
+    fn a_reports_sections_open_and_close_one_by_one_or_all_at_once() {
+        let report = "<!-- task-hub report -->\n\n## Report\n\nSUMMARY of the work\n\n**確かめたこと**\n\n- `cargo test` passed\n\n\
+                      **やっていないこと**\n\n- NOT-DONE\n\n#### deeper\n\nDEEP-TEXT\n\n## Please review\n\n- REVIEW-ITEM";
+        let goal = (1..=30).map(|n| format!("goal line {n}")).collect::<Vec<_>>().join("\n");
+        let (w, h) = (60u16, 12u16); // a body of 11 rows
+        let mut r = Reader::new(task(&goal), View::Issue, 0);
+        r.issue_width = w;
+        r.comments = Some(comments(&[report, "LATER 1", "LATER 2", "LATER 3", "LATER 4"]));
+        r.fill(0.0);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        shows(&mut r, &mut term);
+        // n stops at the comment's heading, then at each section's, which goes to the top row
+        r.key(KeyCode::Char('n'), 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert!(body[0].starts_with("────") && body[1].starts_with("▾ Report"), "{body:#?}");
+        // the summary and the other sections' headings, one list; what is in them is not shown
+        assert_eq!(body[2..8], ["", "SUMMARY of the work", "", "▸ 確かめたこと", "▸ やっていないこと", "▸ Please review"],
+                   "{body:#?}");
+        for hidden in ["cargo test", "NOT-DONE", "deeper", "REVIEW-ITEM"] {
+            assert!(!body.iter().any(|l| l.contains(hidden)), "{hidden}: {body:#?}");
+        }
+        r.key(KeyCode::Char('n'), 0.0);
+        let (top, body) = shows(&mut r, &mut term);
+        assert_eq!(body[0], "▸ 確かめたこと");
+        // Enter opens it in place, and o (below) opens and closes too
+        r.key(KeyCode::Enter, 0.0);
+        let (top2, body) = shows(&mut r, &mut term);
+        assert_eq!((top2, &body[..4]), (top, &["▾ 確かめたこと".to_string(), "".into(), "  • cargo test passed".into(),
+                                              "".into()][..]), "{body:#?}");
+        assert_eq!(body[4], "▸ やっていないこと");
+        r.key(KeyCode::Char('n'), 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert_eq!(body[0], "▸ やっていないこと");
+        r.toggle(); // o, which App sends here on a heading
+        let (_, body) = shows(&mut r, &mut term);
+        assert!(body.contains(&"  • NOT-DONE".into()) && body.contains(&"▸ deeper".into()), "{body:#?}");
+        assert!(!body.iter().any(|l| l.contains("DEEP-TEXT")), "{body:#?}");
+        r.key(KeyCode::Char('p'), 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert_eq!(body[0], "▾ 確かめたこと");
+        r.toggle(); // o, which App sends here on a heading
+        let (_, body) = shows(&mut r, &mut term);
+        assert_eq!(body[..2], ["▸ 確かめたこと", "▾ やっていないこと"], "{body:#?}");
+        // a opens every section, the one inside a closed section too, and keeps the cursor's heading in its row
+        r.key(KeyCode::Char('a'), 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert_eq!(body[0], "▾ 確かめたこと");
+        let text: Vec<String> = r.lines.iter().map(|l| l.to_string()).collect();
+        for shown in ["  • cargo test passed", "  • NOT-DONE", "▾ deeper", "DEEP-TEXT", "▾ Please review", "  • REVIEW-ITEM"] {
+            assert!(text.contains(&shown.to_string()), "{shown}: {text:#?}");
+        }
+        // and when all are open, closes them all
+        r.key(KeyCode::Char('a'), 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert_eq!(body[0], "▸ 確かめたこと");
+        assert!(!body.iter().any(|l| l.contains("REVIEW-ITEM") || l.contains("deeper")), "{body:#?}");
+        // closing the comment hides its sections
+        for _ in 0..3 {
+            r.key(KeyCode::Char('p'), 0.0);
+        }
+        let (_, body) = shows(&mut r, &mut term);
+        assert!(body[1].starts_with("▾ Report"), "{body:#?}");
+        r.key(KeyCode::Enter, 0.0);
+        let (_, body) = shows(&mut r, &mut term);
+        assert!(body[1].starts_with("▸ Report") && !body.iter().any(|l| l.contains("確かめたこと")), "{body:#?}");
+        assert!(r.heads.len() == 5 && r.folds.is_empty());
     }
 }

@@ -63,10 +63,11 @@ The reader stays on the task you opened it on. No key in it selects another card
 | Home, End | The beginning, the end |
 | ← → | Scroll the diff sideways. Its lines are not wrapped or cut: the header shows the column |
 | Enter, d, l | Switch to the Issue, the diff, the log. Each keeps its place while the reader is open |
-| n, p | On the Issue: the next, the previous comment. Its heading goes to the top and gets the cursor |
-| Enter, o | On the Issue, with the cursor on a comment's heading: open or close that comment. With no heading on screen, Enter does nothing and `o` is `task open` as on the board |
+| n, p | On the Issue: the next, the previous heading: a comment's, or a section's in an open comment. A comment's rule or a section's heading goes to the top, and the heading gets the cursor |
+| Enter, o | On the Issue, with the cursor on a comment's or a section's heading: open or close that comment or section. With no heading on screen, Enter does nothing and `o` is `task open` as on the board |
+| a | On the Issue: open all the sections of the open comments, or close them all when all are open. The heading under the cursor stays where it is on screen |
 | g | Lazygit in this task's worktree, as on the board. Quitting it brings back the same view at the same place |
-| b, o, f | As on the board, for this task (`o` on a comment's heading opens or closes it instead). On the Issue, `f` also reads its comments again |
+| b, o, f | As on the board, for this task (`o` on a heading opens or closes it instead). On the Issue, `f` also reads its comments again |
 | Esc | Back to the board, on the same card |
 | q | Quit task-rs, as on the board |
 
@@ -76,10 +77,12 @@ terminal. task-rs wraps them itself: Japanese text fills each row and wraps betw
 of letters and digits wrap at spaces (only a word wider than a row, a long path say, is cut), and no row starts with
 `、`, `。` or a closing bracket. The rows after the first of a list item start under its text, not under its mark.
 
-The Issue's Markdown is drawn for reading: headings (`#` to `####`, and a line that is all `**bold**`) in bold and
-color without their `#`, with a blank row above, lists with even indents (`•`, `1.`, `☐` and `☑` for `- [ ]` and `- [x]`), `**bold**` in bold, `` `code` `` in yellow, code blocks
-in a frame (`┌─`, `│`, `└─`), and tables with their columns lined up. A table wider than the Issue has its widest
-columns cut (`…`); a table with too many columns wraps.
+The Issue's Markdown is drawn for reading: headings (`#` to `####`, and a line that is all `**bold**`) in bold after
+a colored `■` instead of their `#` (`▸` or `▾` for a comment's sections, below; a `#` heading is also underlined),
+with a blank row above, lists with even indents (`•`, `1.`, `☐` and `☑` for `- [ ]` and `- [x]`), `**bold**` in
+bold, code blocks in a frame (`┌─`, `│`, `└─`), and tables with their columns lined up. `` `code` `` (paths,
+commands) is dimmed, not colored: quieter than the text around it, so that the headings are what stands out. A table
+wider than the Issue has its widest columns cut (`…`); a table with too many columns wraps.
 
 The reader turns on the terminal's mouse reports so that the wheel scrolls. To select text with the mouse there, hold
 Option (Terminal, iTerm2) or Shift (most other terminals). The board leaves the mouse to the terminal.
@@ -123,8 +126,15 @@ An open comment does not repeat its own heading: a `## Report` it starts with is
 `▾ Report · …`. Only the newest Report is open (`▾`). The other comments, older Reports included, are closed (`▸`): one line with
 their heading and the start of their text. The cursor (the heading drawn reversed) is on the first heading on screen,
 or on the comment `n` or `p` went to. Enter or `o` opens or closes it, and the comments you opened or closed stay so
-while the reader is open, across reloads and `f`. An open comment's long lines wrap and scroll as the Goal does, and
-the header counts their rows too.
+while the reader is open, across reloads and `f`.
+
+An open comment's sections (from a heading to the next heading of the same level or above) are closed too: it shows
+its first section, the text before its first heading (a Report's summary) or, with none, its first heading's section
+with the sections inside it, and then only the headings of the others, one under the other, with `▸`. `n` and `p`
+stop at those headings as well, and Enter or `o` opens (`▾`) or closes one where it is. A closed section hides the
+sections inside it. `a` opens all the sections of the open comments at once, and when all are open, closes them all.
+Sections you opened or closed stay so, as comments do. An open comment's long lines wrap and scroll as the Goal does,
+and the header counts their rows too.
 
 task-rs keeps the comments it read in its own file, `~/.local/state/task-hub/task-rs/comments-<owner>_<repo>-<number>.json`.
 When GitHub cannot be reached (offline, `gh` not logged in, an error), the reader shows that copy with the reason and

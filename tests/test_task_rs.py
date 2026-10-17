@@ -985,7 +985,7 @@ class IssueCommentsTest(TuiCase):
         human = f"▸ Comment · alice · {local(self.HUMAN['createdAt'])}"  # closed: one line, the start of its body
         report = f"▾ Report · jyoka · {local(self.REPORT['createdAt'])}"  # the newest Report is open
         order = [shown.find(s) for s in ("GOAL-LINE", "Comments (2)", "read from GitHub at", human,
-                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "• a file")]
+                                         "HUMAN-COMMENT please check", report, "REPORT-TEXT done", "▸ Please review")]
         self.assertNotIn(-1, order, shown)
         self.assertEqual(order, sorted(order), shown)  # the Goal, then the comments, oldest first
         self.assertNotIn("<!-- task-hub", shown)
@@ -1028,7 +1028,8 @@ class IssueCommentsTest(TuiCase):
         self.assertNotIn("OLD-END", self.body())
         self.assertNotIn("HUMAN-END", self.body())
         self.assertIn("▾ Report · jyoka", self.body())
-        self.assertIn("• a file", self.body())
+        self.assertIn("▸ Please review", self.body())  # its sections after the first: their headings only
+        self.assertNotIn("• a file", self.body())
         self.assertIn("n p comment", self.status())
         # the cursor is on the first heading on screen: Enter opens it, o closes it
         self.press("\r")
@@ -1065,6 +1066,29 @@ class IssueCommentsTest(TuiCase):
         self.assertIn("OLD-END", self.body())
         self.assertIn("HUMAN-END", self.body())
         self.assertNotIn("• a file", self.body())  # only the one line
+        self.assertEqual(self.quit(), 0)
+
+    def test_a_reports_sections_open_with_enter_or_o_and_all_at_once_with_a(self):
+        self.answer(self.REPORT)
+        self.start()
+        self.press("\r")
+        self.wait_screen("▸ Please review")
+        self.assertNotIn("• a file", self.body())
+        self.assertIn("a all sections", self.status())
+        self.press("n")  # the cursor, from the comment's heading to its section's
+        self.settle(0.3)
+        self.press("o")
+        self.wait_screen("• a file")
+        self.assertNotIn("task open", self.status())
+        self.press("\r")
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())
+        self.press("a")  # all of them
+        self.wait_screen("• a file")
+        self.press("a")  # all were open: all closed
+        self.settle(0.5)
+        self.assertNotIn("• a file", self.body())
+        self.assertIn("REPORT-TEXT done", self.body())  # the text before the first heading stays
         self.assertEqual(self.quit(), 0)
 
     def test_n_and_p_jump_between_comments_and_bring_each_to_the_top(self):
@@ -1120,7 +1144,7 @@ class IssueCommentsTest(TuiCase):
         rows = [r.rstrip() for r in shown.split("\n")]
         self.assertIn("Big heading", shown)
         self.assertNotIn("# ", shown)  # headings without their marks
-        self.assertIn("Small heading", rows)
+        self.assertIn("■ Small heading", rows)
         self.assertIn("plain with strong words and some_code() inside", shown)  # no ** or `
         self.assertIn("  • first item", rows)
         self.assertIn("    • nested item", rows)
