@@ -10,7 +10,7 @@ task-hub が何でできていて、データがどこを流れるかの全体�
 ## 1. 目的と範囲
 
 GitHub Project をかんばんにして、そのカードをコーディングエージェントに実行させます。人が決めるのは
-「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする)」の 2 つだけです。その間の準備、実行、レビュー、
+「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする。`[merge] queue` なら PR をマージキューに入れる)」の 2 つだけです。その間の準備、実行、レビュー、
 PR、止まったときの仕分け、後片付けを task-hub が行います。人が選んだタスクは、チームの GitHub(組織のリポジトリの Issue と
 Project)にも写せます(`task share`。写す向きは個人 → チームだけ)。
 
@@ -70,6 +70,7 @@ flowchart TB
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
         links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
+        mergeq["マージキュー(任意)<br/>task merge、merge_queue"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -103,6 +104,10 @@ flowchart TB
     cli --> sync
     sync --> board
     sync -- "起動" --> runner
+    sync --> mergeq
+    cli --> mergeq
+    mergeq -- "gh pr view、checks、merge、git push" --> gh
+    mergeq -- "起動(task _fix)" --> runner
     board -- "gh" --> gh
     cli --> links
     links --> board
@@ -133,6 +138,8 @@ flowchart TB
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
 | `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする | Backlog のカードの登録と、ntfy への返事だけ(Ready には動かさない) |
+| マージキュー(`[merge] queue`、既定はオフ) | 人が承認した PR(`task merge`、wait for merge の列)を、リポジトリごとに 1 つずつ base に追いつかせ、チェックを待ってマージする。競合は `task _fix` がエージェントに解かせる。キューにない In review の PR の競合は知らせるだけ | `merge-queue.json`、PR のブランチへのマージコミットの push、承認した PR のマージ、止めたときの Blocked とコメント |
+| `task _fix <番号> <base>` | 1 回の競合の解消(base のマージを始め、エージェントがファイルを直し、task-hub がマージコミットを作って push) | そのタスクの worktree、PR のブランチ、Issue のコメント、カード(Blocked のときだけ) |
 
 ## 4. データの流れ
 
@@ -169,6 +176,9 @@ sequenceDiagram
     Task->>Task: worktree、ブランチ、タブを片付ける
 ```
 
+`[merge] queue = on` のときは、最後の「あなたが PR をマージする」が「`task merge` でキューに入れる」になります。
+その先は 4.4 のとおり task-hub がマージします。
+
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
 PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
@@ -202,6 +212,36 @@ flowchart LR
     stale -. "これより前に読んだボードは使わない" .-> cache
 ```
 
+### 4.4 マージキュー
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You as あなた
+    participant Task as task watch(sync)
+    participant Q as merge-queue.json
+    participant Fix as task _fix
+    participant GH as GitHub
+    You->>Task: task merge 12(または wait for merge の列へ)
+    Task->>Q: 最後に足す(queued)
+    loop 1 分ごと、リポジトリごとに先頭の 1 つだけ
+        Task->>GH: gh pr view(状態、ブランチ、mergeStateStatus)
+        alt base を取り込む段
+            Task->>Task: git merge origin/base(worktree で)
+            alt きれいに入った
+                Task->>GH: push(updated)
+            else 競合
+                Task->>Fix: 起動(conflict-fix)
+                Fix->>Fix: エージェントが直す、マージコミット
+                Fix->>GH: push(updated)、解けなければ Blocked
+            end
+        else チェックの段
+            Task->>GH: gh pr checks(ci-wait、落ちたら Blocked)
+            Task->>GH: CLEAN なら gh pr merge --merge(merged、Done)
+        end
+    end
+```
+
 ## 5. 責任の分担
 
 | 判断が要る(LLM) | 決まっている(コード) |
@@ -210,6 +250,7 @@ flowchart LR
 | 評価する(reviewer) | git、push、PR、Issue へのコメント |
 | 止まった理由を仕分ける(replanner) | 判定の読み取り、reviewer の書き換えの取り消し |
 | 会話を分けて提案する(/chief) | replanner の根拠と実物の照合、通知、並び順、アーカイブ |
+| マージの競合を解く(`task _fix`) | マージキューの順番、base の取り込み、マージコミットと push、競合の印の確認、チェック待ち、マージ |
 
 ## 6. 信頼の境界
 
@@ -218,6 +259,8 @@ flowchart LR
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
+- マージキューに入るのは、あなたが承認した PR(`task merge`、wait for merge の列)だけです。競合を解くエージェントも
+  ファイルを直すだけで、マージコミット、push、マージは task-hub が行います
 - 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
 - `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
   記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです
@@ -249,7 +292,7 @@ flowchart TB
 
 | 項目 | 目標と、守っている仕組み |
 |---|---|
-| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST |
+| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST。マージキューは、キューのあるリポジトリごとに 1 分に `gh pr view` と `gh pr checks` を 1 回ずつ足す(キューが空なら 0)。承認していない PR の競合はマージの確認の REST から読むので増えない |
 | 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない |
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |

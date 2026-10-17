@@ -28,7 +28,7 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      prints as the cursor `<n>`. Then start this with the Monitor, with the longest timeout it allows:
 
      ```sh
-     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done,slow" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
+     n=<n>; while :; do o=$(task events --next --after $n --only "In review,Blocked,replan,Done,slow,conflict" --digest 2>&1) || { printf 'watch stopped: %s\n' "$o"; exit 1; }; printf '%s\n' "$o"; n=$(printf '%s\n' "$o" | sed -n 's/^next: .*--after \([0-9]*\).*/\1/p'); done
      ```
 
      Each batch of events arrives as one notification: the events with their digest, then a
@@ -46,7 +46,7 @@ If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
      or the run stops, tell the user in one line and check at each reply instead (below). But if its last message
      says watching moved to a newer /chief chat, say so in one line and do not watch in this chat any more.
    - A background command that wakes you when it exits: run
-     `task events --next --digest --only "In review,Blocked,replan,Done,slow"` in the background. It waits for
+     `task events --next --digest --only "In review,Blocked,replan,Done,slow,conflict"` in the background. It waits for
      the next event, prints it with its digest, and exits.
 
 ## Keep watching
@@ -94,6 +94,9 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
 - **slow**: a run is taking much longer than usual for its agent (its `reason` says how long it has run and how
   long it usually takes). One line: the task, both times, and that if they want to stop it, Ctrl-C in that task's
   herdr tab (its work so far is pushed and the card goes Blocked). Do not stop it yourself.
+- **conflict**: an In review PR now conflicts with its base (only with `[merge] queue = on`). One line: the task
+  and its PR, and that `task merge <id>` queues it, after which task-hub resolves the conflict and merges it once
+  its checks pass. Do not queue it yourself: queuing approves the merge, and only the user decides that.
 - Anything else (Backlog, Ready, In progress, if they reach you): end your turn without writing
   anything. Do not explain that you are staying quiet, or mention these rules.
 
