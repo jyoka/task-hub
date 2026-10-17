@@ -20,11 +20,14 @@ flowchart TB
     config["config<br/>config、board_config、parallel、agent_command、check_ready"]
     output["output(TOON)<br/>out、table、fail、q"]
     updates["updates<br/>UpdateCheck、cmd_update"]
+    triggers["triggers<br/>check_triggers、trigger_config、parse_schedule、due_period、*_occurrences"]
 
     commands --> sync
     commands --> runone
     commands --> boardl
     commands --> updates
+    commands --> triggers
+    triggers --> boardl
     sync --> start
     sync --> boardl
     sync --> runstate
@@ -131,10 +134,10 @@ flowchart LR
 | コマンド | 主な関数 | GitHub | 手元に書くもの |
 |---|---|---|---|
 | `task` | `sync(started_here=True)`、`cmd_home` | ボードを読む、開始、片付け | runs、events、asked |
-| `task watch` | `archive_overflow`、ループで `sync` | 同上 + 開始時のアーカイブの確認 | 同上 |
+| `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.5 節) | 同上 + triggers |
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
-| `task new` | `cmd_new` | Issue、カード、欄、Blocked by | events、asked |
+| `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
 | `task done <id>` | `cleanup`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ | runs を消す、events |
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
@@ -258,11 +261,29 @@ sequenceDiagram
     P->>P: 手元の情報(stage、waits_for、running)を毎回計算
 ```
 
+### 4.5 トリガー(`check_triggers`)
+
+`task watch` の 1 回の確認で、`sync` が返した開いているカードを渡して呼びます。`trigger_config` が `None`
+(`[triggers]` がない、または何も書いていない)なら、GitHub にもファイルにも触りません。
+`trigger_config` は `ci` と `issues` のリポジトリを、大文字と小文字を区別せずに 1 つにまとめます(最初の書き方を使う)。
+
+1. `triggers.json` の `checked_at` から `TRIGGER_SECONDS`(既定 300、テストは `TASK_TRIGGER_SECONDS`)たっていなければ何もしない
+2. `checked_at` を先に書く(失敗するリポジトリにも 5 分に 1 回しか聞かない)
+3. 1 回のこと(occurrence)を集める。どれも `seen` にあるキーは除く
+   - `ci_occurrences`: 同じタイトルの開いたカードがあれば何もしない。`default_branch`(1 日取っておく)の
+     `gh run list` から、ワークフローごとに最後に終わった実行を取り、`CI_FAILED` のものを 1 枚にまとめる。キーは `ci:<repo>:<run id>`
+   - `issue_occurrences`: `gh issue list --assignee @me`、`issue_label` があれば `--label` も。キーは `issue:<repo>#<番号>`
+   - `recurring_occurrences`: `due_period` が今の周期を返したもの。キーは `every:<名前>:<周期>`
+4. occurrence ごとに `create_task`。キーがもう `seen` にあれば(同じ確認の前の occurrence が書いた)作らない。`created` で Issue の URL が分かった直後に `seen` に書く。`ready` なら Backlog のあと `set_status(Ready)`
+
+GitHub の失敗はリポジトリごと、カードごとに `trigger_errors` に出し、ほかは続けます。`triggers.json` が書けなければ
+何も作らずに `error:` を返します。
+
 ## 5. 手元のファイル
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`、`[triggers]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
@@ -274,6 +295,7 @@ sequenceDiagram
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/triggers.json` | `check_triggers`(`task watch` だけ) | `check_triggers` | `{checked_at, seen: {キー: {at, issue}}, default_branch: {repo: [名前, UNIX 時刻]}}` |
 | `share/repos/<owner>/<name>` | `ensure_clone` | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
@@ -340,6 +362,9 @@ sequenceDiagram
 | `MOVE_TO_TOP` | GraphQL | 1 | Status を変えるとき |
 | `ARCHIVE_ITEM` | GraphQL | 1 枚ごとに 1 | 100 枚を超えたとき |
 | `ADD_BLOCKED_BY` | GraphQL | 1 | `task new --blocked-by` |
+| `gh run list`(既定のブランチの 20 件) | REST | 1 回 | `[triggers] ci` のリポジトリごと、5 分に 1 回まで |
+| `gh repo view`(既定のブランチ) | GraphQL(gh) | 1 前後 | `[triggers] ci` のリポジトリごと、1 日 1 回 |
+| `gh issue list`(割り当て、ラベル) | GraphQL(gh) | 1 前後 | `[triggers] issues` のリポジトリごとに 1〜2、5 分に 1 回まで |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
@@ -398,6 +423,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」 |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
+| トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 
 ## 9. 守る約束(テストで確かめているもの)
@@ -412,6 +438,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 8. 手元の JSON は、書き込みの途中で読んでも壊れていない
 9. アンインストールは、インストーラが記録したものだけを消す。ジャンクションは先を消さずに外す。作業中のタスクがある
    あいだ、Windows のアンインストールは見張りだけを止める
+10. トリガーは同じ CI の実行、Issue、周期にカードを 2 枚作らない。`ci` と `issues` のカードは Backlog に入る。`[triggers]` がなければ何も変わらない
 
 ## 10. テストの仕組み
 
