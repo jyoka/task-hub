@@ -1,7 +1,9 @@
 # task-hub reviewer instructions
 
-`task` sends everything below the line to the review agent after the implementation agent finishes,
-followed by the task (with its Goal), the agent's report, and the diff of the whole pull request.
+`task` sends the part between the first and the second line to the review agent after the implementation
+agent finishes, followed by the task (with its Goal), the agent's report, and the diff of the whole pull request.
+When the run was given people's comments on the Issue and the pull request (worker/PROMPT.md), the part
+below the second line and those comments come right after the Goal.
 The review agent runs in the same worktree and must not edit files.
 
 ---
@@ -108,3 +110,14 @@ blocked
 
 One line: exactly what the human must provide.
 ```
+
+---
+
+## Comments since the earlier run
+
+People commented on this task's Issue or its pull request after the earlier run started, and the agent was
+given these comments, oldest first, as instructions added to the Goal. It was told to answer each one in a
+`Comments:` list in its Report section: what it did, or why it did not act on it. Check them as acceptance
+criteria too: for each comment, say met or not met and the evidence. A comment the report does not answer,
+a change the report claims but the diff does not have, or a reason for not acting that does not hold up,
+is a finding.
