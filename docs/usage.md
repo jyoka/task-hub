@@ -44,6 +44,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | 調べもの(コードを変えない)を頼む | `task new --research ...`、または `/task` や `/chief` に「調べて」と頼む。レポートが成果物になり、PR なしで In review になる。読み終えたら `task done` |
 | main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出る |
 | このタスクだけ別のエージェントを使う | カードの Agent 欄に書く、または `task start --agent kiro` |
+| 外出先のスマートフォンから登録する | `task intake` を常駐させ、ntfy アプリで `<合言葉> owner/name: やること` を送る。Backlog にでき、番号とリンクが返ってくる([operations.md](operations.md#スマートフォンからカードを作るtask-intake)) |
 | エージェントを使わない雑務を管理する | Project の「+ Add item」で下書きのカードを作る。Issue ではないカードを task-hub は無視する |
 
 ## 設定
@@ -68,6 +69,12 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 [notify]
 events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
+
+[intake]
+; task intake: スマートフォンから ntfy で送った文を Backlog のカードにする(docs/operations.md)
+topic =                   ; 登録のトピック([notify] ntfy と同じサーバー、別の名前)
+secret =                  ; 文の 1 語目に書く合言葉(16 文字以上)
+repo =                    ; 文に owner/name: がないときの作業先
 ```
 
 | 設定 | 有効にすると | 人が決めること |
