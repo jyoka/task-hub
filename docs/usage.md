@@ -70,6 +70,9 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
 
+[digest]
+at =                      ; 08:00 のように書くと、task watch が毎日その時刻に ntfy でまとめを送る(既定は空)
+
 [intake]
 ; task intake: スマートフォンから ntfy で送った文を Backlog のカードにする(docs/operations.md)
 topic =                   ; 登録のトピック([notify] ntfy と同じサーバー、別の名前)

@@ -90,6 +90,7 @@ METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, 
 EVENTS = STATE / "events.jsonl"
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
 LIB = BIN.parent.parent  # the clone `task` runs from (~/.local/lib/task-hub, docs/setup.md)
+DIGEST_SENT = STATE / "digest.json"  # the local day `task watch` last sent the daily digest: once a day, restarts too
 UPDATE = STATE / "update.json"  # the newest v* tag seen on origin, when origin was asked, and which one was notified
 # origin is asked at most once a day (again after an hour when it could not be reached), for at most UPDATE_TIMEOUT
 UPDATE_EVERY, UPDATE_RETRY, UPDATE_TIMEOUT = 24 * 3600, 3600, 5
@@ -354,7 +355,7 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
-                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""}})
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""}, "digest": {"at": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
     except UnicodeDecodeError:
@@ -868,11 +869,10 @@ def notify(e):
                else "normal", title, body]
     else:
         cmd = None
-    launch = [(cmd, {"TASK_HUB_TITLE": title, "TASK_HUB_BODY": body})] if cmd else []
+    if cmd:
+        detach(cmd, {"TASK_HUB_TITLE": title, "TASK_HUB_BODY": body})
     if post := ntfy_post(e, title, body):  # in addition to this machine's: the phone is for when nobody is here
-        launch.append(([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)}))
-    for argv, env in launch:
-        detach(argv, env)
+        ntfy_send(post)
 
 
 def detach(argv, env):
@@ -882,6 +882,10 @@ def detach(argv, env):
                          env={**os.environ, **env}, **DETACHED)
     except OSError:
         pass
+
+
+def ntfy_send(post):
+    detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
 
 
 # a detached `python -I -c`, so a down or hanging server costs only this process, never the command that wrote the event
@@ -3306,7 +3310,7 @@ def events_next(a, wanted):
 
 
 def cmd_watch(_):
-    board(), parallel()  # fail fast on a bad config
+    board(), parallel(), digest_at()  # fail fast on a bad config
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     try:  # afterwards, each card that gets Done checks again
         out(*archive_lines(archive_overflow()))
@@ -3325,6 +3329,13 @@ def cmd_watch(_):
             lines = [f"error: unexpected {type(e).__name__}: {e} (please report it with this log)"]
             traceback.print_exc()
         lines += update_notice(check)
+        try:
+            lines += daily_digest()
+        except SystemExit:  # [digest] at edited into a bad value: fail() said why; the next check reads it again
+            pass
+        except Exception as e:  # a digest that cannot be built must not end the watch; today's is not retried
+            lines += [f"digest: error: unexpected {type(e).__name__}: {e} (please report it with this log)"]
+            traceback.print_exc()
         if lines:
             out(f"== {now()}", *lines)
         if os.environ.get("TASK_WATCH_ONCE"):  # tests
@@ -3748,6 +3759,161 @@ def median(values):
     return values[len(values) // 2] if values else ""
 
 
+DIGEST_GROUPS = [(DONE, "done"), (IN_REVIEW, "in_review"), (BLOCKED, "blocked"), (IN_PROGRESS, "running")]
+DIGEST_GROUP_MAX = 10  # lines per group; the rest is counted
+DIGEST_SECONDS = 24 * 3600  # the period of `task digest` without --since, and of the daily one
+DIGEST_SINCE_MAX = 36500 * 86400  # 100 years: a longer --since would go before year 1 or overflow
+NTFY_MESSAGE_MAX = 4096  # UTF-8 bytes: ntfy.sh turns a longer message into an attachment
+
+
+def jsonl(path):
+    """The records of a JSON Lines file this machine writes; a line a crash cut short is left out."""
+    records = []
+    for line in event_lines_of(path.read_text(errors="replace")) if path.exists() else []:
+        with contextlib.suppress(ValueError):
+            if isinstance(r := json.loads(line), dict):
+                records.append(r)
+    return records
+
+
+def since_seconds(text):
+    m = re.fullmatch(r"(\d+)([mhd])", (text or "").strip().lower())
+    seconds = int(m[1]) * {"m": 60, "h": 3600, "d": 86400}[m[2]] if m else 0
+    if not 0 < seconds <= DIGEST_SINCE_MAX:
+        fail(f"--since takes a period like 90m, 24h or 7d, got {text!r}", "usage: task digest [--since 24h]", 2)
+    return seconds
+
+
+def digest_groups(events, since):
+    """Each task's latest Status event, grouped: Done only when it came after since, the others (what awaits the
+    human, and what still runs) whenever it came, since they still stand. Built from EVENTS alone, newest first."""
+    last, replans = {}, {}
+    for e in events:
+        tid = e.get("id")
+        if not tid:
+            continue
+        if e.get("event") in STATUSES:
+            last[tid] = e
+            replans.pop(tid, None)  # a replan is about the Blocked it came after
+        elif e.get("event") == "replan":
+            replans[tid] = e
+    groups = {status: [] for status, _ in DIGEST_GROUPS}
+    for tid, e in last.items():
+        if e["event"] in groups and (e["event"] != DONE or e.get("time", "") >= since):
+            groups[e["event"]].append({**e, "replan": replans.get(tid) or {}})
+    return {status: sorted(g, key=lambda e: e.get("time", ""), reverse=True) for status, g in groups.items()}
+
+
+def digest_item(e):
+    """One task's line: its PR, or for Blocked the question to answer (the replanner's, else the reason)."""
+    d, r = e.get("digest") or {}, e["replan"].get("digest") or {}
+    if e["event"] == BLOCKED:
+        reason = e.get("reason") or d.get("reason")
+        what = [f"question: {r['question']}" if r.get("question") else f"reason: {reason}" if reason else "",
+                e.get("pr") or d.get("pr") or ""]
+    elif e["event"] == IN_PROGRESS:
+        what = [f"since {e.get('time', '')}"]
+    else:
+        what = [e.get("pr") or d.get("pr") or (f"report: {d['report']}" if d.get("report") else "")]
+    return " | ".join([f"#{e['id']} {e.get('title', '')}", *(w for w in what if w)])
+
+
+def run_totals(runs):
+    """The runs that finished in the period, summed as `task stats` counts them (tokens, credits, seconds)."""
+    if not runs:
+        return "runs: none finished"
+    outcomes = {}
+    for r in runs:
+        outcomes[r.get("status") or "?"] = outcomes.get(r.get("status") or "?", 0) + 1
+    usage = [u for r in runs for u in r.get("usage") or []]
+    measured = [u for u in usage if "output" in u]
+    credits_ = [u["credits"] for u in usage if "credits" in u]
+    seconds = sum(r.get("seconds") or 0 for r in runs)
+    return (f"runs: {len(runs)} finished ({', '.join(f'{n} {s}' for s, n in outcomes.items())}), "
+            + (f"{short(sum(tokens(u) for u in measured))} tokens, " if measured else "")
+            + (f"{sum(credits_):.2f} credits, " if credits_ else "")
+            + f"{seconds // 3600}h{seconds % 3600 // 60:02d}m")
+
+
+def digest_report(seconds):
+    """(headline, lines) of what task-hub did in the last `seconds`, from EVENTS and METRICS: no LLM, no GitHub."""
+    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=seconds)
+             ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    groups = digest_groups(jsonl(EVENTS), since)
+    lines = []
+    for status, name in DIGEST_GROUPS:
+        g = groups[status]
+        lines.append(f"{name}[{len(g)}]:" if g else f"{name}: none")
+        lines += [f"  {digest_item(e)}" for e in g[:DIGEST_GROUP_MAX]]
+        if len(g) > DIGEST_GROUP_MAX:
+            lines.append(f"  (+{len(g) - DIGEST_GROUP_MAX} more)")
+    lines.append(run_totals([r for r in jsonl(METRICS) if (r.get("finished") or r.get("started") or "") >= since]))
+    headline = ", ".join(f"{len(groups[status])} {name.replace('_', ' ')}" for status, name in DIGEST_GROUPS)
+    return since, headline, lines
+
+
+def board_url():
+    """The Project's URL from the board this command already read, else from the last read saved: no GitHub."""
+    return _board.get("url") or (read_json(BOARD_META).get("board") or {}).get("url", "")
+
+
+def cmd_digest(a):
+    """What task-hub did lately, grouped as a human reviews it: Done, In review, Blocked, Running, and the totals."""
+    since, headline, lines = digest_report(since_seconds(a["since"] or "24h"))
+    url = board_url()
+    out(f"digest: since {since} ({headline})", *lines, *([f"board: {url}"] if url else []))
+
+
+def digest_at():
+    """[digest] at as (hour, minute) on this machine's clock, or None when it is not set."""
+    at = config()["digest"].get("at", "").strip()
+    if not at:
+        return None
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", at)
+    if not m:
+        fail(f"[digest] at must be a time like 08:00, got {at!r}", f"fix it in {home(CONFIG)}")
+    return int(m[1]), int(m[2])
+
+
+def digest_due(at, local, sent):
+    """Whether the daily digest is due at the local time: at is past today, and it was not sent today yet."""
+    return at is not None and (local.hour, local.minute) >= at and sent != local.date().isoformat()
+
+
+def daily_digest():
+    """`task watch`'s daily digest through ntfy, at [digest] at. The day is noted before it is sent, so a watch that
+    restarts, or a send that fails, never sends a second one that day; a day the note cannot be written sends none."""
+    local = datetime.datetime.now().astimezone()
+    if not digest_due(digest_at(), local, read_json(DIGEST_SENT).get("sent")):
+        return []
+    try:
+        write_atomic(DIGEST_SENT, json.dumps({"sent": local.date().isoformat(), "time": now()}))
+    except OSError as e:
+        return [f"digest: not sent, could not write {home(DIGEST_SENT)}: {e}"]
+    _, headline, lines = digest_report(DIGEST_SECONDS)
+    title = f"task-hub digest: {headline}"
+    post = ntfy_post({"event": "digest"}, title, clip_lines(lines, NTFY_MESSAGE_MAX))
+    if not post:
+        return [f"digest: {headline} (not sent: [notify] ntfy is not set)"]
+    if url := board_url():
+        post["json"]["click"] = url
+    ntfy_send(post)
+    return [f"digest: sent to ntfy ({headline})"]
+
+
+def clip_lines(lines, limit):
+    """Whole lines, as many as fit in limit UTF-8 bytes (not chars: a Japanese title takes 3 per char), with "..."
+    in the last line when some were cut."""
+    if len((text := "\n".join(lines)).encode()) <= limit:
+        return text
+    kept = []
+    for line in lines:
+        if len("\n".join([*kept, line, "..."]).encode()) > limit:
+            break
+        kept.append(line)
+    return "\n".join([*kept, "..."])
+
+
 def cmd_new(a):
     if not a["title"] or not a["repo"]:
         fail("--title and --repo are required",
@@ -3960,6 +4126,9 @@ COMMANDS = {
                "--digest adds each event's digest below it"),
     "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
               "tokens"),
+    "digest": (cmd_digest, [], {"since": True},
+               "task digest [--since 24h]  # what task-hub did lately: Done, In review (PRs), Blocked (questions), "
+               "Running, and the runs' totals; [digest] at sends it to ntfy once a day from `task watch`"),
     "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release (an installer's clone: by "
                "that release's installer), restart the launchd "
                "`task watch`, copy Kiro's hook and workflow again"),

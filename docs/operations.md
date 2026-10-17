@@ -221,6 +221,47 @@ ntfy_token = tk_...                ; 任意。アクセス制御のあるトピ�
 待たずにそのまま続きます(その通知が届かないだけで、エラーも出しません)。トピックの名前は知っている人なら
 誰でも購読できるので、ntfy.sh を使うときは推測されにくい名前にするか、トークンで守ります。
 
+## 毎日のまとめ(LLM なし)
+
+`task digest` は、このマシンの `events.jsonl` と `metrics.jsonl` から、朝に見るまとめを出します。ボードを
+見張らなくても、何が終わり、何がレビューを待ち、何が止まっているかがわかります。LLM も GitHub も使いません。
+
+```sh
+task digest              # 直近 24 時間
+task digest --since 7d   # 期間は 90m、24h、7d のように
+```
+
+- `done`: 期間のうちに Done になったタスク(PR があれば PR)
+- `in_review`: 今 In review のタスクと PR。期間より前に In review になったものも、まだ待っているので出します
+- `blocked`: 今 Blocked のタスク。replanner が人への問い(`question:`)を書いていればそれ、なければ止まった理由(`reason:`)
+- `running`: 今 In progress のタスクと、始まった時刻
+- `runs:` の行: 期間のうちに終わった実行の数、結果ごとの数、トークン数、クレジット、かかった時間の合計(`task stats` と同じ記録)
+- `board:` の行: ボードの URL(このマシンが前に読んだもの)
+
+「今」は、このマシンが書いた出来事でいちばん新しい Status です。GitHub でカードを手で動かしたことは出来事に
+ならないので、そのぶんは古いまま出ます。各グループは新しい順に 10 件まで出し、残りは件数だけ出します。`--since` は
+100 年(`36500d`)までで、それより長い期間は使い方のエラーになります。
+
+### 毎朝スマートフォンに送る
+
+`[digest] at` に時刻(このマシンの時計で `HH:MM`)を書くと、`task watch` が毎日その時刻を過ぎた最初の確認
+(1 分ごと)で、直近 24 時間のまとめを `[notify] ntfy` のトピックに送ります。見出しは件数
+(`task-hub digest: 1 done, 2 in review, 1 blocked, 0 running`)、本文は `task digest` と同じグループ、
+タップするとボードが開きます。送り方は通知の ntfy と同じです(切り離したプロセス、待つのは 10 秒まで)。
+
+```ini
+[digest]
+at = 08:00   ; 既定は空(送らない)
+```
+
+- 1 日に 1 回だけ: 送る前に、送った日を `~/.local/state/task-hub/digest.json` に書きます。`task watch` を
+  再起動しても、その日はもう送りません。送るのに失敗しても送り直しません(その日のまとめが届かないだけ)
+- `task watch` が `at` の時刻に止まっていたときは、その日のうちに次に動いた最初の確認で送ります
+- `at` が空なら何も送りません。`[notify] ntfy` が空なら送らず、`task watch` のログに 1 行書くだけです
+- `08:00` の形でない値は、`task watch` の開始時にエラーで止まります(動いている間に書き換えたときは、その確認では送らず、直すまで待ちます)
+- 本文は UTF-8 で 4096 バイトまでです(ntfy.sh はそれより長い本文を添付ファイルにします)。日本語の題は 1 文字 3 バイトなので、入りきらない行は切って `...` で終えます
+- まとめを作るときに思わぬエラーが起きても、`task watch` は止まりません。ログにエラーを 1 行書き、その日は送り直しません
+
 ## スマートフォンからカードを作る(`task intake`)
 
 `task intake` は ntfy のトピックを購読し続け、スマートフォンから送った文を Backlog のカードにします。カードを
@@ -349,6 +390,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
+| 毎日のまとめを送った日 | `~/.local/state/task-hub/digest.json` |
 | 直近に読んだボード(`task list` が共有) | `~/.local/state/task-hub/board-cache.json`、`board-meta.json` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | worktree | `~/.local/share/task-hub/worktrees/<番号>` |
