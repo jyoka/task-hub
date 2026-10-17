@@ -4,6 +4,13 @@
 あなたの HOME(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、デスクトップ)は見えません。
 既定は `off` で、Mac と Windows の動きは変わりません。なぜこの作りかは [design.md](design.md) の決定事項 22 にあります。
 
+> **これから:専用ユーザーの mode(未実装)。** bwrap では、task-hub 自身の git を worktree の外で動かすところに、
+> エージェントの仕込んだ git 設定を動かす抜け道が繰り返し見つかりました(入れ子リポジトリの `filter.*.clean` など。
+> 決定事項 22)。これを閉じるため、エージェントとその worktree への git を権限の低い専用 Linux ユーザー `S` で動かす
+> mode に移ります。実装と検証には root/sudo でのマシンの用意(`S` の作成、NOPASSWD の sudo、worktree の共有)が要るため、
+> まだ入っていません。用意のしかたと手動の隔離確認は、実装と同じタスクで足します。それまでは下の bwrap が、特権なしで
+> 使える当座の mode です。
+
 ## 使う
 
 [bubblewrap](https://github.com/containers/bubblewrap)(`bwrap`)を入れて、`~/.config/task-hub/config.ini` に書きます。
