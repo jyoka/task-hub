@@ -68,6 +68,27 @@ DEFAULT_AGENTS = {
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}",
 }
 LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/operations.md)
+# [sandbox] (docs/sandbox.md): what the agent CLIs keep of their own (sign-in, settings, and the transcripts task-hub
+# reads for usage), bound read-write at the same path when it exists. Data, like DEFAULT_AGENTS: no code path per agent
+SANDBOX_AGENT_FILES = "~/.claude, ~/.claude.json, $CLAUDE_CONFIG_DIR, ~/.codex, ~/.pi, ~/.kiro, ~/.local/share/kiro-cli"
+# what of those starts code or steers the CLI the next time it runs, sandboxed or not (hooks, MCP servers, plugins,
+# instructions): read-only over the read-write folder, made first (empty) when missing. A trailing / is a folder
+SANDBOX_AGENT_CODE = ["~/.claude.json", "~/.claude/settings.json", "~/.claude/CLAUDE.md", "~/.claude/hooks/",
+                      "~/.claude/commands/", "~/.claude/agents/", "~/.claude/skills/", "~/.claude/plugins/",
+                      "~/.claude/output-styles/", "$CLAUDE_CONFIG_DIR/.claude.json", "$CLAUDE_CONFIG_DIR/settings.json",
+                      "$CLAUDE_CONFIG_DIR/CLAUDE.md", "$CLAUDE_CONFIG_DIR/hooks/", "$CLAUDE_CONFIG_DIR/commands/",
+                      "$CLAUDE_CONFIG_DIR/agents/", "$CLAUDE_CONFIG_DIR/skills/", "$CLAUDE_CONFIG_DIR/plugins/",
+                      "$CLAUDE_CONFIG_DIR/output-styles/", "~/.codex/config.toml", "~/.codex/AGENTS.md",
+                      "~/.codex/prompts/", "~/.codex/skills/", "~/.pi/agent/settings.json", "~/.pi/agent/AGENTS.md",
+                      "~/.pi/agent/extensions/", "~/.pi/agent/prompts/", "~/.pi/agent/skills/", "~/.kiro/settings/",
+                      "~/.kiro/agents/", "~/.kiro/hooks/", "~/.kiro/steering/", "~/.kiro/prompts/"]
+SANDBOX_SYSTEM = ["/usr", "/etc", "/opt", "/nix", "/sys", "/run/systemd/resolve"]  # read-only, when there
+# what reaches the user's GitHub account, keys and desktop from the environment; task-hub pushes outside the sandbox
+SANDBOX_UNSET = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
+                 "GPG_AGENT_INFO", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY",
+                 "TMPDIR"]
+RULES_FILE = ".claude/settings.local.json"  # the Goal's Rules, as Claude Code permissions (docs/task-format.md)
+RULE_LEVELS = {"can": "allow", "ask": "ask", "never": "deny"}
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
@@ -338,7 +359,8 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {},
-                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS}})
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS},
+                 "sandbox": {"mode": "off", "agent_files": SANDBOX_AGENT_FILES, "read": "", "write": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
     except UnicodeDecodeError:
@@ -446,6 +468,107 @@ def check_ready(name):
             output = output.replace(os.environ[k], "***")
     tail = " | ".join(line.strip() for line in output.strip().splitlines()[-3:])
     raise RuntimeError(f'agent "{name}" is not ready: `{cmd}` {result}: {tail[-200:]}')
+
+
+def sandbox_mode():
+    """[sandbox] mode: "off" (the default) or "bwrap" (Linux: the agent sees only its worktree, docs/sandbox.md)."""
+    mode = config()["sandbox"].get("mode", "").strip().lower() or "off"
+    if mode not in ("off", "bwrap"):
+        raise RuntimeError(f"[sandbox] mode must be off or bwrap; got {mode!r} in {home(CONFIG)}")
+    return mode
+
+
+def check_sandbox():
+    """Raise when [sandbox] asks for a sandbox this machine cannot give: at launch, before any credit is spent."""
+    if sandbox_mode() == "off":
+        return
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError(f"[sandbox] mode = bwrap works on Linux only; set mode = off in {home(CONFIG)}")
+    if not shutil.which("bwrap"):
+        raise RuntimeError("[sandbox] mode = bwrap, but bwrap is not installed (the bubblewrap package)")
+    r = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-all", "--share-net", "--", "true"],
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if r.returncode != 0:  # user namespaces turned off, or bwrap itself refused inside another sandbox
+        raise RuntimeError(f"[sandbox] bwrap cannot start here: {r.stderr.strip()[-200:]}")
+    sandbox_guarded()
+
+
+def sandbox_guarded():
+    """The paths of SANDBOX_AGENT_CODE the agent could write through a read-write [sandbox] folder, each made
+    (an empty folder, file, or {} for JSON) when missing so that it can be bound read-only. Raises on a link:
+    bwrap cannot bind over one, and the agent could swap it for a file of its own."""
+    shared = [p.resolve() for p in sandbox_paths("agent_files") + sandbox_paths("write")]
+    guarded = []
+    for entry in SANDBOX_AGENT_CODE:
+        p = Path(os.path.expandvars(entry)).expanduser()
+        p = p.parent.resolve() / p.name  # as bwrap binds it, without following p itself
+        if "$" in str(p) or not any(p == d or d in p.parents for d in shared):
+            continue
+        if p.is_symlink():
+            raise RuntimeError(f"[sandbox] {p} is a link, which the agent could replace; "
+                               "make it a plain file or folder (docs/sandbox.md)")
+        if entry.endswith("/"):
+            p.mkdir(parents=True, exist_ok=True)
+        elif not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}\n" if p.suffix == ".json" else "")
+        guarded.append(p)
+    return guarded
+
+
+def sandbox_paths(key):
+    """The existing absolute paths of a [sandbox] list (~ and $VARIABLES expanded; an unset variable drops it)."""
+    paths = []
+    for entry in (e.strip() for e in config()["sandbox"].get(key, "").split(",")):
+        p = Path(os.path.expandvars(entry)).expanduser() if entry else None
+        if p and "$" not in str(p) and p.is_absolute() and p.exists():
+            paths.append(p)
+    return paths
+
+
+def sandboxed(argv, wt):
+    """argv as [sandbox] runs it: unchanged when off; with bwrap, in its own namespaces where the filesystem is
+    the system's programs and settings (read-only), an empty HOME and /tmp, the agent's own files, the
+    [sandbox] read and write lists, the programs on PATH, and the worktree with its git directory. The network
+    stays. Nothing else of HOME (other repos, ~/.ssh, gh's sign-in, other worktrees) is there to read."""
+    if sandbox_mode() == "off":
+        return argv
+    wt = Path(wt).resolve()
+    user = Path.home().resolve()
+    args = ["bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]
+    for d in SANDBOX_SYSTEM:
+        args += ["--ro-bind-try", d, d]
+    for d in ("/bin", "/sbin", "/lib", "/lib64", "/lib32"):  # usually links into /usr
+        args += ["--symlink", os.readlink(d), d] if os.path.islink(d) else ["--ro-bind-try", d, d]
+    args += ["--tmpfs", str(user)]
+
+    def outside_system(p):  # HOME itself or a folder holding it would undo the sandbox
+        return not any(p == Path(d) or Path(d) in p.parents for d in SANDBOX_SYSTEM) and p != user \
+            and p not in user.parents and p != Path("/")
+
+    program = next((w for w in argv if w != "env" and not re.fullmatch(r"\w+=.*", w, re.S)), "")
+    found = shutil.which(program) if program else None
+    read = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(d) and os.path.isdir(d)]
+    read += [Path(found).resolve().parent] * bool(found) + sandbox_paths("read")
+    # both spellings: a PATH entry like mise's installs/claude/latest is a link, and programs find themselves by either
+    for p in dict.fromkeys(q for p in read for q in (Path(os.path.normpath(p)), p.resolve())):
+        if outside_system(p) and outside_system(p.resolve()):
+            args += ["--ro-bind", str(p), str(p)]
+    git_common = Path(run("git", "-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
+    git_dir = Path(run("git", "-C", wt, "rev-parse", "--absolute-git-dir").stdout.strip())
+    args += ["--ro-bind", str(git_common), str(git_common)]  # the repository's objects and refs: read only
+    for p in dict.fromkeys(p.resolve() for p in sandbox_paths("agent_files") + sandbox_paths("write")):
+        if outside_system(p):
+            args += ["--bind", str(p), str(p)]
+    for p in sandbox_guarded():  # over the read-write folders: no hook or MCP server left for a later run
+        args += ["--ro-bind", str(p), str(p)]
+    args += ["--bind", str(git_dir), str(git_dir), "--bind", str(wt), str(wt)]  # its index, HEAD; the work
+    if (wt / RULES_FILE).is_file():  # the Goal's Rules hold for every launch of the run, whatever the agent edits
+        args += ["--ro-bind", str(wt / RULES_FILE), str(wt / RULES_FILE)]
+    for name in SANDBOX_UNSET:
+        args += ["--unsetenv", name]
+    return [*args, "--chdir", str(wt), "--", *argv]
 
 
 def check_agent(name):
@@ -1188,9 +1311,13 @@ def base_ref(t, git_dir):
         or "origin/main"
 
 
-def ensure_internal_excludes(wt, extra=()):
+def exclude_file(wt):
     exclude = Path(run("git", "-C", wt, "rev-parse", "--git-common-dir").stdout.strip())
-    exclude = (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
+    return (exclude if exclude.is_absolute() else wt / exclude) / "info" / "exclude"
+
+
+def ensure_internal_excludes(wt, extra=()):
+    exclude = exclude_file(wt)
     existing_exclude = exclude.read_text() if exclude.exists() else ""
     missing_excludes = [name for name in [*NEVER_COMMIT, *extra] if name not in existing_exclude.splitlines()]
     if missing_excludes:
@@ -1237,6 +1364,57 @@ def copy_env_files(t, wt):
         shutil.copy2(src, wt / rel)
     # anchored: this path only; a wildcard character in a file name is matched as itself
     ensure_internal_excludes(wt, ["/" + re.sub(r"([*?\[\\])", r"\\\1", rel) for rel in copies])
+
+
+def split_rules(text):
+    """`Bash(npm test *), WebFetch` -> the two rules: commas inside parentheses stay in their rule."""
+    rules, depth, current = [], 0, ""
+    for ch in text:
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth <= 0:
+            rules.append(current)
+            current = ""
+        else:
+            current += ch
+    return [r.strip().strip("`").strip() for r in [*rules, current] if r.strip().strip("`").strip()]
+
+
+def goal_rules(body):
+    """The Goal's "Rules" heading as Claude Code permissions: lines `can: ...`, `ask: ...` and `never: ...`
+    become allow, ask and deny. Lines without such a word (prose) are left to the agent, which reads the Goal."""
+    rules, inside = {}, False
+    for line in body.splitlines():
+        if line.lstrip().startswith("#") and not re.match(r"\s*#\d", line):
+            inside = bool(re.match(r"\s*#+\s*rules\s*$", line, re.I))
+        elif inside:
+            m = re.match(r"\s*(?:[-*]\s+)?(\w+)\s*:\s*(.*)", line)
+            if not m:
+                continue
+            if m[1].lower() not in RULE_LEVELS:
+                raise RuntimeError(f'the Goal\'s Rules has a line starting "{m[1]}:"; '
+                                   "each rule line starts with can:, ask: or never: (docs/task-format.md)")
+            rules.setdefault(RULE_LEVELS[m[1].lower()], []).extend(split_rules(m[2]))
+    return {k: rules[k] for k in ("allow", "ask", "deny") if rules.get(k)}
+
+
+def write_rules(t, wt, body):
+    """The Goal's Rules into the worktree's Claude Code local settings (merged with the repository's own
+    .claude/settings.json; a deny holds even with --dangerously-skip-permissions). Never committed. Other agents
+    get the Rules as part of the Goal in their prompt."""
+    rules = goal_rules(body)
+    if run("git", "-C", wt, "ls-files", "--error-unmatch", RULES_FILE).returncode == 0:
+        if rules:
+            raise RuntimeError(f"{RULES_FILE} is tracked in {t['repo']}; the Goal's Rules cannot be written to it")
+        return
+    target = wt / RULES_FILE
+    if not rules:  # Rules taken out of the Goal since the last run: remove our copy, never a file of anyone else
+        if "/" + RULES_FILE in (exclude_file(wt).read_text().splitlines() if exclude_file(wt).exists() else []):
+            target.unlink(missing_ok=True)
+        return
+    ensure_internal_excludes(wt, ["/" + RULES_FILE])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    target.write_text(json.dumps({"permissions": rules}, indent=2) + "\n")
 
 
 def setup_command(repo):
@@ -1355,6 +1533,7 @@ def launch(t):
     for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
         if name:  # before the worktree and before any credit is spent
             check_ready(name)
+    check_sandbox()
     wt = ensure_worktree(t)
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -1363,6 +1542,7 @@ def launch(t):
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     i = issue(t)
     t["research"] = "yes" if i["research"] else ""
+    write_rules(t, wt, i["body"])
     prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     t["workspace"], t["tab"] = "", ""
@@ -1703,6 +1883,7 @@ def agent_process(agent, prompt, wt, say):
     proc = None
     try:
         argv, env = windows_command(agent_command(agent, prompt))
+        argv = sandboxed(argv, wt)
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
         steps = STEPS.get(step_format(agent), Steps)(wt)
@@ -2226,6 +2407,8 @@ def cmd_run(a):
     (wt / REVIEW_FILE).unlink(missing_ok=True)
     (wt / REPLAN_FILE).unlink(missing_ok=True)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
+    if sandbox_mode() != "off":
+        say(f"== sandbox: {sandbox_mode()} (the agent sees only this worktree, see docs/sandbox.md)")
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,

@@ -163,3 +163,5 @@ Codex を除き、組み込みコマンドは**承認の確認なしで**実行�
 
 マシンによって(たとえば仕事用 Mac で)これでは信頼しすぎだと感じる場合は、config でコマンドを厳しくしてください。
 Claude ならツールの許可リスト、Kiro なら `--trust-tools=...`、Codex ならより厳しいサンドボックスを使います。
+Linux では、`[sandbox] mode = bwrap` でエージェントに worktree だけを見せられます([sandbox.md](sandbox.md))。
+タスクごとにしてはいけないことは、Goal の `Rules` に書きます([task-format.md](task-format.md#rules-タスクごとの決まり))。

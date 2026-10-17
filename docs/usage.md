@@ -67,6 +67,9 @@ jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .
 
 [notify]
 events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
+
+[sandbox]
+mode = bwrap            ; Linux だけ。エージェントに worktree だけを見せる(既定 off)
 ```
 
 | 設定 | 有効にすると | 人が決めること |
@@ -75,6 +78,7 @@ events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出�
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
+| `[sandbox]` | エージェントを bubblewrap の中で動かし、HOME の残り(ほかのリポジトリ、鍵、`gh` のログイン)を見せない([sandbox.md](sandbox.md)) | 中に何を足すか(`read`、`write`) |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 

@@ -153,6 +153,7 @@ The docs are in Japanese.
 | [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
 | [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
+| | [sandbox.md](docs/sandbox.md) Sandboxed runs (Linux) | | |
 
 ## Bug reports and feature requests
 

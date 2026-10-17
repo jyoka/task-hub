@@ -145,6 +145,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+| | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
 
 ## バグ報告と要望
 

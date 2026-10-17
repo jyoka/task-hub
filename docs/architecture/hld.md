@@ -195,6 +195,8 @@ flowchart LR
 ## 6. 信頼の境界
 
 - エージェントは worktree の中だけを編集します。git と GitHub の操作はすべて task-hub が行います
+- Linux で `[sandbox] mode = bwrap` のときは、エージェントから見えるのも worktree とエージェント CLI 自身のファイルだけです(HOME の残り、`gh` のログイン、鍵は見えない。[sandbox.md](../sandbox.md))。既定は off です
+- Goal の Rules は、Claude Code には権限の設定(`.claude/settings.local.json`)として渡ります
 - reviewer と replanner の書き換えは、実行の前の状態に戻してから結果を読みます
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
