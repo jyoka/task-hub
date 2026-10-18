@@ -243,6 +243,21 @@ elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?he
     out = [{"merged_at": p.get("merged_at") or ("2026-09-23T00:00:00Z" if p.get("merged") else None),
             "body": p.get("body", "")}
            for p in prs if state == "all" or p["state"] != "OPEN"][:1]
+elif cmd in (["repo", "view"], ["run", "list"], ["issue", "list"]):  # the triggers ask the work repos
+    db["trigger_calls"] = db.get("trigger_calls", 0) + 1
+    repo = a[2] if cmd == ["repo", "view"] else opt("--repo")
+    if repo in db.get("broken_repos", []):
+        fail("HTTP 404: Could not resolve to a Repository")
+    if cmd == ["repo", "view"]:
+        out = {"defaultBranchRef": {"name": db.get("default_branches", {}).get(repo, "main")}}
+    elif cmd == ["run", "list"]:  # db["runs"][repo]: newest first, as GitHub lists them
+        out = [r for r in db.get("runs", {}).get(repo, []) if r["headBranch"] == opt("--branch")][:int(opt("--limit"))]
+        out = [{k: r[k] for k in opt("--json").split(",")} for r in out]
+    else:  # db["repo_issues"][repo]: {number, title, assignees, labels}; gh's @me is "me"
+        out = [{"number": i["number"], "title": i["title"], "url": f"https://github.com/{repo}/issues/{i['number']}"}
+               for i in db.get("repo_issues", {}).get(repo, []) if i.get("state", "OPEN") == "OPEN"
+               and (opt("--assignee") != "@me" or "me" in i.get("assignees", []))
+               and (not opt("--label") or opt("--label") in i.get("labels", []))]
 elif cmd == ["pr", "ready"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["isDraft"] = "--undo" in a
 else:
@@ -5541,6 +5556,144 @@ class TaskTest(unittest.TestCase):
         self.assertIn("task feedback [--feature]", self.task("help"))
 
 
+    # --- triggers (docs/triggers.md) ---
+
+    def trigger_watch(self, triggers, every="0"):
+        """One check of `task watch` with [triggers]; every: TASK_TRIGGER_SECONDS ("" = the default)."""
+        self.write_config(extra=f"[triggers]\n{triggers}\n")
+        env = {**self.env, "TASK_WATCH_ONCE": "1"}
+        if every:
+            env["TASK_TRIGGER_SECONDS"] = every
+        r = subprocess.run([str(BIN), "watch"], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.stderr.append(r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def cards(self):
+        db = self.gh()
+        return [{"id": str(it["number"]), "title": db["issues"][str(it["number"])]["title"],
+                 "body": db["issues"][str(it["number"])]["body"], **it["values"]} for it in db["items"].values()]
+
+    def ci_run(self, run_id, conclusion="failure", workflow="test", branch="main", status="completed"):
+        return {"databaseId": run_id, "workflowName": workflow, "status": status, "conclusion": conclusion,
+                "headBranch": branch, "displayTitle": f"commit {run_id}",
+                "url": f"https://github.com/jyoka/app/actions/runs/{run_id}"}
+
+    def set_runs(self, *runs):
+        db = self.gh()
+        db["runs"] = {"jyoka/app": list(runs)}
+        self.save_db(db)
+
+    def test_no_triggers_changes_nothing(self):
+        self.env["TASK_WATCH_ONCE"] = "1"
+        out = self.task("watch")
+        self.assertNotIn("trigger", out)
+        self.assertEqual(self.cards(), [])
+        self.assertNotIn("trigger_calls", self.gh())
+        self.assertFalse((self.root / ".local/state/task-hub/triggers.json").exists())
+
+    def test_ci_failure_makes_one_backlog_card_per_failed_run(self):
+        # newest first: the latest completed run of "test" failed; a newer one still running and an older
+        # failure do not count, nor does a failure on another branch
+        self.set_runs(self.ci_run(9, status="in_progress", conclusion=""), self.ci_run(8),
+                      self.ci_run(7, branch="feature"), self.ci_run(6, workflow="lint", conclusion="success"),
+                      self.ci_run(5))
+        out = self.trigger_watch("ci = jyoka/app")
+        self.assertIn("triggered[1]", out)
+        [card] = self.cards()
+        self.assertEqual((card["title"], card["status"], card["target repo"]),
+                         ("Fix failing CI on jyoka/app", "Backlog", "jyoka/app"))
+        self.assertIn("https://github.com/jyoka/app/actions/runs/8", card["body"])
+        self.assertNotIn("runs/5", card["body"])
+        self.assertNotIn("runs/7", card["body"])
+        self.assertNotIn("triggered", self.trigger_watch("ci = jyoka/app"))  # the same run: no second card
+        # a later failure while the card is still open waits for it
+        self.set_runs(self.ci_run(10), self.ci_run(8))
+        self.trigger_watch("ci = jyoka/app")
+        self.assertEqual(len(self.cards()), 1)
+        self.move(card["id"], "Done")
+        self.assertIn("triggered[1]", self.trigger_watch("ci = jyoka/app"))
+        self.assertIn("runs/10", self.cards()[-1]["body"])
+        self.set_runs(self.ci_run(11, conclusion="success"), self.ci_run(10))  # fixed: nothing more
+        self.move(self.cards()[-1]["id"], "Done")
+        self.assertNotIn("triggered", self.trigger_watch("ci = jyoka/app"))
+        self.assertEqual(len(self.cards()), 2)
+
+    def test_issue_trigger_makes_one_card_per_assigned_or_labeled_issue(self):
+        db = self.gh()
+        db["repo_issues"] = {"jyoka/app": [
+            {"number": 5, "title": "Crash on start", "assignees": ["me"]},
+            {"number": 6, "title": "Typo", "labels": ["agent"]},
+            {"number": 7, "title": "Someone else's", "assignees": ["other"], "labels": ["bug"]},
+            {"number": 8, "title": "Closed", "assignees": ["me"], "state": "CLOSED"}]}
+        self.save_db(db)
+        out = self.trigger_watch("issues = jyoka/app\nissue_label = agent")
+        self.assertIn("triggered[2]", out)
+        cards = sorted(self.cards(), key=lambda c: c["title"])
+        self.assertEqual([(c["title"], c["status"]) for c in cards],
+                         [("jyoka/app#5: Crash on start", "Backlog"), ("jyoka/app#6: Typo", "Backlog")])
+        self.assertIn("https://github.com/jyoka/app/issues/5", cards[0]["body"])
+        self.move(cards[0]["id"], "Done")  # done or not, an Issue gets one card
+        self.assertNotIn("triggered", self.trigger_watch("issues = jyoka/app\nissue_label = agent"))
+        self.assertEqual(len(self.cards()), 2)
+        self.assertEqual(len(self.gh()["issues"]), 2)
+
+    def test_repo_named_twice_in_a_trigger_makes_one_card(self):
+        self.set_runs(self.ci_run(8))
+        db = self.gh()
+        db["repo_issues"] = {"jyoka/app": [{"number": 5, "title": "Crash", "assignees": ["me"]}]}
+        self.save_db(db)
+        out = self.trigger_watch("ci = jyoka/app, jyoka/app Jyoka/App\nissues = jyoka/app JYOKA/app")
+        self.assertIn("triggered[2]", out)
+        self.assertEqual(sorted(c["title"] for c in self.cards()), ["Fix failing CI on jyoka/app", "jyoka/app#5: Crash"])
+        self.assertEqual(len(self.gh()["issues"]), 2)
+
+    def test_recurring_goal_makes_one_card_per_period_and_ready_is_opt_in(self):
+        triggers = "deps = daily jyoka/app Bump the dependencies"
+        self.assertIn("triggered[1]", self.trigger_watch(triggers))
+        [card] = self.cards()
+        self.assertRegex(card["title"], r"^Bump the dependencies \(\d{4}-\d{2}-\d{2}\)$")
+        self.assertEqual((card["status"], card["target repo"]), ("Backlog", "jyoka/app"))
+        self.assertNotIn("triggered", self.trigger_watch(triggers))
+        self.assertEqual(len(self.cards()), 1)
+        # opted in: straight to Ready, through Backlog as a human's approval would
+        out = self.trigger_watch("chore = daily jyoka/app Update the lock file MODE:ok\nready = chore")
+        [chore] = [c for c in self.cards() if c["title"].startswith("Update")]
+        self.assertEqual(chore["status"], "Ready")
+        self.assertEqual([e["event"] for e in self.events_of(chore["id"])], ["Backlog", "Ready"])
+        self.assertIn("Ready", out)
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.assertIn("started[1]", self.task("watch"))  # the next check starts it, as any Ready card
+        self.assertEqual(self.wait(chore["id"]), "In review")
+
+    def test_triggers_are_checked_at_most_every_few_minutes(self):
+        self.set_runs(self.ci_run(8, conclusion="success"))
+        self.trigger_watch("ci = jyoka/app", every="")
+        calls = self.gh()["trigger_calls"]
+        self.trigger_watch("ci = jyoka/app", every="")
+        self.assertEqual(self.gh()["trigger_calls"], calls)
+
+    def test_trigger_errors_do_not_stop_the_watch_or_the_other_triggers(self):
+        db = self.gh()
+        db["broken_repos"] = ["jyoka/gone"]
+        db["repo_issues"] = {"jyoka/app": [{"number": 5, "title": "Crash", "assignees": ["me"]}]}
+        self.save_db(db)
+        out = self.trigger_watch("ci = jyoka/gone\nissues = jyoka/app")
+        self.assertIn("trigger_errors[1]", out)
+        self.assertIn("jyoka/gone", out)
+        self.assertEqual([c["title"] for c in self.cards()], ["jyoka/app#5: Crash"])
+
+    def test_bad_triggers_config_fails_the_watch_at_start(self):
+        for triggers, why in [("deps = hourly jyoka/app Bump", "unknown schedule"),
+                              ("deps = daily Bump the dependencies", "<schedule> <owner/repo> <goal>"),
+                              ("ci = app", "owner/name"), ("issues = jyoka/tasks", "the board's own Issue repo"),
+                              ("ci = jyoka/app\nready = ci", "only those can go to Ready")]:
+            self.write_config(extra=f"[triggers]\n{triggers}\n")
+            self.env["TASK_WATCH_ONCE"] = "1"
+            out = self.task("watch", code=1)
+            self.assertIn(why, out)
+        self.assertEqual(self.cards(), [])
+
 class SlowThresholdTableTest(unittest.TestCase):
     """The task-board mod works out the usual time in TypeScript (claude/task-board/hooks/panel.ts slowThreshold);
     both sides are held to the same table, so they cannot drift apart."""
@@ -5558,6 +5711,52 @@ class SlowThresholdTableTest(unittest.TestCase):
             with unittest.mock.patch.object(task, "METRICS", metrics), unittest.mock.patch.dict(os.environ, env, clear=True):
                 for agent, (limit, usual) in table["cases"].items():
                     self.assertEqual(task.slow_threshold(agent), (limit, usual), agent)
+
+
+
+class ScheduleTest(unittest.TestCase):
+    """[triggers] recurring goals: when a period's card is due (bin/task parse_schedule, due_period)."""
+
+    @classmethod
+    def setUpClass(cls):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        cls.task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(cls.task)
+
+    def due(self, schedule, when):
+        import datetime
+        return self.task.due_period(self.task.parse_schedule(schedule), datetime.datetime.fromisoformat(when))
+
+    def test_parse(self):
+        parse = self.task.parse_schedule
+        self.assertEqual(parse("daily"), ("daily", None, (0, 0)))
+        self.assertEqual(parse("Daily 9:30"), ("daily", None, (9, 30)))
+        self.assertEqual(parse("weekly"), ("weekly", 0, (0, 0)))
+        self.assertEqual(parse("weekly fri 17:00"), ("weekly", 4, (17, 0)))
+        self.assertEqual(parse("weekly Sunday"), ("weekly", 6, (0, 0)))
+        self.assertEqual(parse("monthly"), ("monthly", 1, (0, 0)))
+        self.assertEqual(parse("monthly 15 08:00"), ("monthly", 15, (8, 0)))
+        for bad in ["", "hourly", "weekly someday", "weekly mon tue", "monthly 0", "monthly 32", "daily 24:00",
+                    "daily 9:60", "monthly first", "*/5 * * * *"]:
+            with self.assertRaises(ValueError, msg=bad):
+                parse(bad)
+
+    def test_due_period(self):
+        # 2026-10-17 is a Saturday in ISO week 42
+        self.assertEqual(self.due("daily", "2026-10-17T00:00"), "2026-10-17")
+        self.assertIsNone(self.due("daily 09:00", "2026-10-17T08:59"))
+        self.assertEqual(self.due("daily 09:00", "2026-10-17T09:00"), "2026-10-17")
+        self.assertEqual(self.due("weekly", "2026-10-17T12:00"), "2026-W42")  # Monday has passed
+        self.assertEqual(self.due("weekly sat", "2026-10-17T00:00"), "2026-W42")
+        self.assertIsNone(self.due("weekly sun", "2026-10-17T23:00"))
+        self.assertEqual(self.due("weekly sun", "2026-10-18T00:00"), "2026-W42")
+        self.assertEqual(self.due("weekly mon", "2026-10-19T00:00"), "2026-W43")
+        self.assertEqual(self.due("weekly", "2027-01-01T00:00"), "2026-W53")  # the ISO year of the week
+        self.assertIsNone(self.due("monthly 18", "2026-10-17T23:59"))
+        self.assertEqual(self.due("monthly 17", "2026-10-17T00:00"), "2026-10")
+        self.assertEqual(self.due("monthly", "2026-10-31T00:00"), "2026-10")
+        self.assertIsNone(self.due("monthly 31", "2026-02-27T12:00"))
+        self.assertEqual(self.due("monthly 31", "2026-02-28T00:00"), "2026-02")  # the month's last day
 
 
 if __name__ == "__main__":
