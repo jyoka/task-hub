@@ -126,7 +126,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task new --title ... --repo owner/name --goal ...` | タスクを登録する(`--base`、`--agent`、`--research`、`--blocked-by 12,14`) |
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
-| `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
+| `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
