@@ -22,10 +22,12 @@ import contextlib
 import datetime
 from functools import cache
 import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -805,8 +807,9 @@ def get(tid):
     fail(f"task {tid} not found on the board", "run `task` to see the board")
 
 
-def set_status(t, status, reason="", digest_=None):
-    """digest_: the event's digest; a Blocked without one gets its reason as the digest."""
+def set_status(t, status, reason="", digest_=None, sha=""):
+    """digest_: the event's digest; a Blocked without one gets its reason as the digest.
+    sha: the PR's head commit the run just pushed, for the phone's buttons on the In review notification."""
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
     # a t without "status" came from somewhere that does not know it: unchecked, rather than another GitHub call
@@ -824,7 +827,7 @@ def set_status(t, status, reason="", digest_=None):
     t["status"] = status
     if digest_ is None and status == BLOCKED and reason:
         digest_ = {"reason": clip(reason, DIGEST_TEXT)}
-    emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_)
+    emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_, sha=sha)
     move_to_top(t)  # after the event: whoever sees the new Status finds its event already written
     # the team's copy (`task share`) last: a slow or failing team's GitHub never holds back the event
     to_team(t, f"the Status {status}", lambda team, n: team.move(n, status, share_config(team.repo)))
@@ -918,7 +921,15 @@ def ntfy_post(e, title, body):
     pr = e.get("pr") or (e.get("digest") or {}).get("pr")
     click = pr or (f"https://github.com/{issues}/issues/{e['id']}"
                    if e.get("id") and re.fullmatch(r"[\w.-]+/[\w.-]+", issues) else "")
-    return ntfy_message(title, body, 4 if e["event"] in (BLOCKED, "replan") else 3, click)
+    post = ntfy_message(title, body, 4 if e["event"] in (BLOCKED, "replan") else 3, click)
+    if post and e["event"] == IN_REVIEW and pr and e.get("sha") and e.get("id"):
+        try:
+            actions = review_actions(e["id"], pr, e["sha"])
+        except OSError:  # no key file to sign with: the notification still goes, without buttons
+            actions = []
+        if actions:
+            post["json"]["actions"] = actions
+    return post
 
 
 def ntfy_target():
@@ -2496,14 +2507,16 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         parsed.blocked = blocked_override
     elif not parsed.blocked and not ahead and not t.get("research"):  # a research task's report is its result
         parsed.blocked = "agent wrote a report but changed no files"
+    head = ""
     if ahead:
         run("git", "-C", wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
+        head = git_out(wt, "rev-parse", "HEAD")
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
     body = parsed.issue_comment(t.get("pr", "") if ahead else "")
     comment(t, body)
     status = BLOCKED if parsed.blocked else IN_REVIEW
-    set_status(t, status, reason=parsed.blocked, digest_=digest(report=body))
+    set_status(t, status, reason=parsed.blocked, digest_=digest(report=body), sha=head if status == IN_REVIEW else "")
     return status
 
 
@@ -4092,6 +4105,8 @@ def parse_intake(m, secret, default_repo):
 
 def intake_message(m, secret, default_repo):
     """Handle one ntfy message: a Backlog card and a reply with its link, or a log line saying why not."""
+    if (m.get("message") or "").lstrip().startswith(ACTION_WORD):  # a button of an In review notification
+        return action_message(m)
     card, reason = parse_intake(m, secret, default_repo)
     mid = m.get("id", "?")
     if reason.startswith("ignored"):  # anyone who knows the topic can write to it: say nothing back
@@ -4114,6 +4129,142 @@ def intake_message(m, secret, default_repo):
     if post:
         detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
     return [line]
+
+
+# ---------- the phone's buttons: Merge and Reject on an In review notification (docs/operations.md) ----------
+
+ACTION_KEY = STATE / "action.key"  # the local secret the buttons' tokens are signed with; never leaves this machine
+ACTIONS_USED = STATE / "intake-actions.json"  # {"used": {token: time}}: the tokens already acted on, newest last
+ACTIONS_USED_MAX = 2000
+ACTION_WORD = "task-hub "  # a button's message starts with it; no [intake] secret can (16 characters at least)
+ACTION_MESSAGE = re.compile(r"task-hub (merge|reject) (\d+) ([\w.-]+/[\w.-]+)#(\d+) ([0-9a-f]{40}) ([0-9a-f]{32})")
+PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
+def action_target():
+    """Where the buttons post: [intake] topic on [notify] ntfy's server, as (server, topic, token), or None when
+    `task intake` is not set up (the notification then has no buttons)."""
+    target = ntfy_target()
+    try:
+        i = config()["intake"] if config().has_section("intake") else {}
+        topic, secret = (i.get(k, "").strip() for k in ("topic", "secret"))
+    except configparser.Error:
+        return None
+    if not target or not re.fullmatch(r"[\w-]{1,64}", topic) or topic == target[1] or len(secret) < INTAKE_SECRET_MIN:
+        return None
+    return target[0], topic, target[2]
+
+
+def action_key():
+    """The key the tokens are signed with: made once, readable only by this user. Linked into place, so two
+    processes making it at once both end up with the one that won."""
+    with contextlib.suppress(FileNotFoundError):
+        if key := ACTION_KEY.read_text().strip():
+            return key.encode()
+    ACTION_KEY.parent.mkdir(parents=True, exist_ok=True)
+    temp = ACTION_KEY.parent / f".{ACTION_KEY.name}.{os.getpid()}.tmp"
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32))
+        with contextlib.suppress(FileExistsError):
+            os.link(temp, ACTION_KEY)
+    finally:
+        temp.unlink(missing_ok=True)
+    return ACTION_KEY.read_text().strip().encode()
+
+
+def action_token(action, tid, repo, number, sha):
+    """One button's token: an HMAC of what it does, to which card, PR and head commit. A new push changes the head,
+    so a button from before it no longer matches."""
+    signed = "\n".join(["task-hub action 1", action, str(tid), repo.lower(), str(number), sha.lower()])
+    return hmac.new(action_key(), signed.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def review_actions(tid, pr, sha):
+    """The In review notification's ntfy buttons: Merge (when [merge] queue = on), Reject and View PR; none without
+    `task intake`. Merge and Reject post `task-hub <action> <id> <owner/name>#<n> <sha> <token>` to [intake] topic."""
+    m = PR_URL.fullmatch(pr)
+    if not m or not re.fullmatch(r"[0-9a-f]{40}", sha) or not (target := action_target()):
+        return []
+    server, topic, token = target
+
+    def button(action, label):
+        return {"action": "http", "label": label, "url": f"{server}/{topic}", "method": "POST",
+                "headers": {"Authorization": f"Bearer {token}"} if token else {}, "clear": True,
+                "body": f"task-hub {action} {tid} {m[1]}#{m[2]} {sha} {action_token(action, tid, m[1], m[2], sha)}"}
+    merge = config()["merge"].get("queue", "").strip().lower() == "on"
+    return [*([button("merge", "Merge")] if merge else []), button("reject", "Reject"),
+            {"action": "view", "label": "View PR", "url": pr, "clear": False}]
+
+
+def action_message(m):
+    """Handle one button: check its token, then queue or reject the PR and say so on [notify] ntfy; a log line."""
+    mid = m.get("id", "?")
+    a = ACTION_MESSAGE.fullmatch((m.get("message") or "").strip())
+    if not a:  # anyone who knows the topic can write to it: say nothing back
+        return [f"intake: refused: not a button's message (message {mid}, {len(m.get('message') or '')} chars)"]
+    action, tid, repo, number, sha, token = a.groups()
+    what = f"{action} #{tid} ({repo}#{number} at {sha[:7]}, message {mid})"
+    if not hmac.compare_digest(token, action_token(action, tid, repo, number, sha)):
+        return [f"intake: refused: forged token: {what}"]  # nothing said back, as to a wrong secret
+    url = f"https://github.com/{repo}/pull/{number}"
+
+    def reply(title, body, priority=3):
+        if post := ntfy_message(f"#{tid} {title}", body, priority, url):
+            detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
+
+    def refuse(why, kind="refused"):
+        reply(f"{action} refused", f"{why}\n{url}", 4)
+        return [f"intake: {kind}: {why}: {what}"]
+    used = read_json(ACTIONS_USED).get("used")
+    used = used if isinstance(used, dict) else {}
+    if token in used:
+        return refuse(f"this button was already used ({used[token]})")
+    try:
+        if action == "merge" and not merge_config()["queue"]:
+            return refuse("the merge queue is off ([merge] queue = on)")
+        t = next((x for x in tasks() if x["id"] == tid), None)
+        if not t:
+            return refuse("the card is not on the board, or is Done")
+        pr = pr_view(url)
+        if pr.get("state") != "OPEN":
+            return refuse(f"the PR is {(pr.get('state') or 'gone').lower()}")
+        if pr.get("headRefOid") != sha:
+            return refuse("stale: the PR has new commits since this notification; use the newest one")
+        e = queue_entry(t)
+        if not e or e["pr"].lower() != url.lower():
+            return refuse(f"the card's PR is {e['pr'] if e else 'none'}, not this one")
+        queued = next((x for x in read_queue() if x["id"] == tid), None)
+        if action == "merge":
+            if queued:
+                done = None
+                reply(f"already queued: {t['title']}", f"step {queued.get('step') or 'update'}\n{url}")
+            else:
+                e, n = enqueue(t)
+                done = f"queued {e['pr']} at position {n}"
+                reply(f"PR queued: {t['title']}", f"position {n} in the merge queue of {e['repo']}\n{url}")
+        else:
+            if t["status"] not in (IN_REVIEW, WAIT_FOR_MERGE, BLOCKED) or t["running"]:
+                return refuse(f"the card is {t['status']}{' and running' if t['running'] else ''}")
+            gh("pr", "close", url, "--comment", f"Rejected from the phone (task-hub, task {board()['issues']}#{tid}).")
+            if queued:
+                queue_drop(tid)
+            comment(t, f"{MERGE_MARK}\n\n## Rejected\n\nThe PR {url} was rejected from the phone (`task intake`) "
+                       f"and closed.\n\nRun the task again with what to change (it opens a new PR), or "
+                       f"`task done {tid}` to drop it.")
+            set_status(t, BLOCKED, reason="rejected from the phone: the PR was closed")
+            done = f"closed {url}, the card is {BLOCKED}"
+            reply(f"rejected: {t['title']}", f"the PR was closed and the card is {BLOCKED}\n{url}")
+    except ValueError as x:  # enqueue: it cannot be queued
+        return refuse(x.args[0])
+    except (RuntimeError, SystemExit) as x:  # GitHub failed, or fail() wrote why to the log
+        return refuse(f"GitHub: {x}" if isinstance(x, RuntimeError) else "see the intake log on the machine", "error")
+    if done:  # acted on: the same button never acts again
+        used[token] = now()
+        write_atomic(ACTIONS_USED, json.dumps({"used": dict(list(used.items())[-ACTIONS_USED_MAX:])}))
+        return [f"intake: {done}: {what}"]
+    return [f"intake: already queued: {what}"]
 
 
 def intake_stream(server, topic, token, since):
@@ -4594,6 +4745,27 @@ def cmd_done(a):
         *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []), *archived)
 
 
+def enqueue(t):
+    """`task merge <id>` and the phone's Merge button: the card's PR joins the merge queue, as (entry, position).
+    Raises ValueError(why, what to do) when it cannot; the caller has made sure it is not queued yet."""
+    if t["status"] not in (IN_REVIEW, WAIT_FOR_MERGE, BLOCKED):
+        raise ValueError(f"task {t['id']} is {t['status']}; only In review, {WAIT_FOR_MERGE} or Blocked tasks with a PR "
+                         "can be queued")
+    if t["running"]:
+        raise ValueError(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
+                         "queue it once it has finished")
+    e = queue_entry(t)
+    if not e:
+        raise ValueError(f"task {t['id']} has no open PR to merge",
+                         "a research task's report has nothing to merge: `task done` it")
+    n = change_queue(lambda q: q.append(e) or position(q, e))
+    column = queue_column()
+    if t["status"] != column:
+        set_status(t, column)
+    emit(t, "queued", pr=e["pr"], reason=f"position {n} in the merge queue of {e['repo']}")
+    return e, n
+
+
 def cmd_merge(a):
     """Approve a PR for the merge queue (or, with --cancel, take it out); no id: the queue as it is."""
     if not merge_config()["queue"]:
@@ -4617,19 +4789,10 @@ def cmd_merge(a):
     if queued:
         out(f"merge: #{t['id']} already queued, step {queued.get('step') or 'update'} (no-op)")
         return
-    if t["status"] not in (IN_REVIEW, WAIT_FOR_MERGE, BLOCKED):
-        fail(f"task {t['id']} is {t['status']}; only In review, {WAIT_FOR_MERGE} or Blocked tasks with a PR can be "
-             "queued")
-    if t["running"]:
-        fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})", "queue it once it has finished")
-    e = queue_entry(t)
-    if not e:
-        fail(f"task {t['id']} has no open PR to merge", "a research task's report has nothing to merge: `task done` it")
-    n = change_queue(lambda q: q.append(e) or position(q, e))
-    column = queue_column()
-    if t["status"] != column:
-        set_status(t, column)
-    emit(t, "queued", pr=e["pr"], reason=f"position {n} in the merge queue of {e['repo']}")
+    try:
+        e, n = enqueue(t)
+    except ValueError as x:
+        fail(*x.args)
     out("merge:", f"  id: {t['id']}", f"  pr: {e['pr']}", f"  status: {t['status']}", f"  position: {n}",
         "help[1]:", f"  `task watch` keeps it up to date with its base and merges it once its checks pass; "
                     f"`task merge {t['id']} --cancel` takes it out")
