@@ -44,6 +44,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 | 調べもの(コードを変えない)を頼む | `task new --research ...`、または `/task` や `/chief` に「調べて」と頼む。レポートが成果物になり、PR なしで In review になる。読み終えたら `task done` |
 | main ではなく作業中のブランチから始める | カードの Base branch 欄にブランチ名を書く(push 済みのもの)。PR もそのブランチに向けて出る |
 | このタスクだけ別のエージェントを使う | カードの Agent 欄に書く、または `task start --agent kiro` |
+| 外出先のスマートフォンから登録する | `task intake` を常駐させ、ntfy アプリで `<合言葉> owner/name: やること` を送る。Backlog にでき、番号とリンクが返ってくる([operations.md](operations.md#スマートフォンからカードを作るtask-intake)) |
 | エージェントを使わない雑務を管理する | Project の「+ Add item」で下書きのカードを作る。Issue ではないカードを task-hub は無視する |
 
 ## 設定
@@ -66,7 +67,24 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow, update   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update, conflict   ; 通知を出す出来事(これが既定)。空にすると出さない
+ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
+
+[intake]
+; task intake: スマートフォンから ntfy で送った文を Backlog のカードにする(docs/operations.md)
+topic =                   ; 登録のトピック([notify] ntfy と同じサーバー、別の名前)
+secret =                  ; 文の 1 語目に書く合言葉(16 文字以上)
+repo =                    ; 文に owner/name: がないときの作業先
+
+[triggers]
+; task watch が自分でカードを作る(Backlog に入る)。詳しくは docs/triggers.md
+ci = jyoka/app                  ; 既定のブランチの CI が失敗した
+issues = jyoka/app              ; あなたに割り当てられた Issue
+deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
+
+[merge]
+queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
+prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
 
 [sandbox]
 mode = user             ; Linux だけ。エージェントを専用のユーザーで動かす(既定 off)
@@ -80,8 +98,64 @@ user = task-agent       ; そのユーザー(これが既定)
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
 | `[sandbox]` | エージェントと、worktree への git を専用の Linux ユーザーで動かし、あなたの HOME(ほかのリポジトリ、鍵、`gh` のログイン)に届かせない([sandbox.md](sandbox.md)) | そのユーザーを用意し、GitHub のトークンをどこまで許すか |
+| `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
+| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
+
+## チームのボードに出す(task share)
+
+個人のボードのタスクのうち、選んだものだけをチームの GitHub(組織のリポジトリの Issue と、組織の Project のカード)に
+出します。正本は個人のボードのままで、写す向きは個人 → チームだけです(設計は
+[architecture/designs/team-sync.md](architecture/designs/team-sync.md))。
+
+```
+task share 12 --to org/app [--project org/7]
+```
+
+- チームのリポジトリに Issue を 1 つ作ります。タイトルは `[share]` の接頭辞 + 個人の Issue のタイトル、本文は
+  「task-hub が上書きするので意見はコメントへ」という注意のあとに Goal をそのまま、担当はあなた(`--assignee @me`)です
+- 個人の Issue にある task-hub のコメント(Report、Blocked の仕分け)も写します。人のコメントは写しません
+- チームの Project(`--project`、なければ `[share]`。どちらもなければ Issue だけ)にカードを足し、Status と既定の欄を入れます
+- 個人の Issue に、つなぎ先のコメント(`<!-- task-hub link -->` で始まる)を書きます。選んだ Project も残すので、あとから設定を変えてもその Project に写します。2 回目からは同じ Issue を出すだけです
+- つなぎ先は、今 `gh` でログインしているアカウントが書いたコメントだけを読みます。ほかの人のコメントでは、別の Issue を書き換えたり閉じたりしません
+- そのあとの実行の PR は、本文に `Closes` を 2 つ(個人の Issue とチームの Issue)持ちます。マージで両方が閉じます。
+  開いている PR がすでにあれば、`task share` がその場で足します(実行中なら、終わってからもう一度 `task share`)
+- 出したくない部分があるタスクは共有しません(本文を変えて出す方法はありません)。本文に同じリポジトリの Issue の
+  URL や `#番号` があると、チームのリポジトリではその Issue への参照になります。個人の Issue へのリンクは、チームの人には開けません
+
+つないだあとも、task-hub が変えたものはチームに写ります(向きは個人 → チームだけ)。
+
+- Status が変わると、チームのカードを下の対応表の列に動かします。チームのカードがもうその列にあれば何もしません。
+  スマホで Ready に移したときは写さず、実行が始まって In progress にするときに写します
+- 実行を始めるたびに、チームの Issue のタイトルと本文を個人の Issue から写し直します。Goal に答えを書き足して Ready に
+  戻したときも、次の実行で新しい Goal になります。チームの人が本文を直していても上書きします
+- task-hub がコメント(Report、Blocked の仕分け)を書くと、同じ本文をチームの Issue にもコメントします。人のコメントは写しません
+- `task done` でチームの Issue も閉じます。デフォルトブランチ以外へのマージで GitHub が閉じなかったときは、マージを見つけた
+  同期がチームの Issue も閉じます
+- 写すのに失敗しても、個人のカードと実行は止まりません。stderr(実行の中ならログ)に `warning: task <番号>: could not copy ...`
+  を 1 行出します
+- 実行中に共有したタスクは、その実行が終わるまで写しません(次の実行から写します)
+
+```ini
+[share]
+org/app = org/7                      ; org/app に出した Issue を足すチームの Project
+org/app.title = 【Sprint 3】          ; タイトルの接頭辞。末尾に空白を残すなら "[Sprint 3] " と引用符で囲む
+org/app.field.Sprint = Sprint 3      ; カードに入れる単一選択の欄と値(いくつでも)
+status.Blocked = Todo                ; 個人の列 = チームの列(すべての共有先)
+org/app.status.In review = Review    ; この共有先だけの対応
+```
+
+チームの列は、`[share]` の対応、チームの同じ名前の列、次の既定の順で決めます。
+
+| 個人の列 | チームの列(既定) |
+|---|---|
+| Backlog | Todo |
+| Ready、In progress、In review、wait for merge、Blocked | In progress |
+| Done | Done |
+
+`[share]` に書いた列、欄、値がチームの Project になければ、何も作らずに `error:` で止まります。チームのリポジトリに
+書けないとき(権限、別のアカウント)も、`error:` と `help:` を出して終わり、個人のカードと PR は変えません。
 
 ## 役割と分担
 
@@ -136,7 +210,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 ```
 worker      「Stripe のテスト用キーが要る」と書いて止まる                          Blocked
 replanner   answered(リポジトリにある答えを根拠付きで)/ human(あなたへの質問を 1 行に)/ goal-conflict
-あなた      Goal に答えを書き足して Ready に戻す     → 同じブランチと PR で続きから
+あなた      Goal に答えを書き足すか Issue や PR にコメントして Ready に戻す → 同じブランチと PR で続きから(コメントも渡る)
 ```
 
 ### スキルの呼び方、自動で始める、通知
@@ -145,6 +219,7 @@ replanner   answered(リポジトリにある答えを根拠付きで)/ human(�
 呼びます([docs/setup.md](setup.md#task-と-chief-スキルのインストール))。
 
 Ready のカードを自動で始めるには、herdr のペインで `task watch` を動かしておきます(1 分ごとに確認)。
+`[triggers]` を書いていれば、`task watch` はカードを自分で作ることもします([triggers.md](triggers.md))。
 `task` を引数なしで実行しても、その場で 1 回確認して始めます。
 `task watch` は、GitHub のエラー、動いている間に壊れた設定ファイル、始められないカードでは止まりません。
 `error:` の行を出し(始められないカードは理由を書いて Blocked にし)、次の回にまた確かめます。
@@ -172,6 +247,10 @@ worker のレポートの Please review には、確認すべき場所に加え�
 
 In review と Done の間に `wait for merge` の列を足せます。レビュー済みでマージ待ちのカードを置く列で、
 マージされた PR はいつもどおり Done に移します。列のないボードでは使いません。
+
+`[merge] queue = on` にすると、この列はマージキューの入口になります。カードをここに動かす(または `task merge <番号>`)と
+承認したことになり、`task watch` が base に追いつかせて、チェックが通ったらマージします
+([operations.md](operations.md#マージキュー))。
 
 ### 更新
 

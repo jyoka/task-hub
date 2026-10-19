@@ -13,16 +13,21 @@ moves the card. At most [runner] parallel tasks (5 by default) are In progress a
 Board: Backlog -> Ready -> In progress -> In review -> Done   (or Blocked)
 An optional "wait for merge" column between In review and Done holds reviewed cards
 whose PR is approved but not merged yet; the merged PR moves them to Done as usual.
+With [merge] queue = on, an approved PR (`task merge`, or that column) is kept up to date with its base, its
+conflicts fixed by an agent, and merged once its checks pass: one PR at a time per repo.
 """
+import calendar
 import configparser
 import contextlib
 import datetime
 from functools import cache
 import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -35,7 +40,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
@@ -50,11 +55,19 @@ REPLAN_FILE = ".task-replan.md"
 NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
 REPLAN_MARK = "<!-- task-hub replan -->"
+MERGE_MARK = "<!-- task-hub merge -->"  # the merge queue's notes on the Issue: never the task's report
+LINK_MARK = "<!-- task-hub link -->"  # a comment on the personal Issue: where `task share` put the task's copy
+SHARED_MARK = "<!-- task-hub shared -->"  # the first line of the copy's body
+SHARE_NOTICE = "> task-hub overwrites this body from a personal task board. Please write in the comments instead."
+# the team's column for a personal Status, when [share] names none and the team has no column of the same name
+SHARE_STATUS = {BACKLOG: "Todo", READY: IN_PROGRESS, IN_PROGRESS: IN_PROGRESS, IN_REVIEW: IN_PROGRESS,
+                WAIT_FOR_MERGE: IN_PROGRESS, BLOCKED: IN_PROGRESS, DONE: DONE}
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
-# [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`)
-NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update"
+# [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`);
+# "conflict": an In review PR that conflicts with its base now ([merge] queue = on)
+NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict"
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
@@ -69,16 +82,18 @@ DEFAULT_AGENTS = {
 }
 LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/operations.md)
 # [sandbox] mode = user (docs/sandbox.md): the agent, and every git command and file task-hub touches in the shared
-# clones and worktrees, run as this Linux user, which cannot read your HOME (decision 22)
+# clones and worktrees, run as this Linux user, which cannot read your HOME (decision 28)
 SANDBOX_USER = "task-agent"
 SANDBOX_GROUP = "task-agents"  # what workenv_setting's setup_agent_user.sh gives the shared folders' ACLs to
 RULES_FILE = ".claude/settings.local.json"  # the Goal's Rules, as Claude Code permissions (docs/task-format.md)
 RULE_LEVELS = {"can": "allow", "ask": "ask", "never": "deny"}
+CI_MINUTES = 60  # [merge] ci_minutes by default: how long the merge queue waits for a PR's checks before it blocks the card
 
 BIN = Path(__file__).resolve()
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
 WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
+WORKER_CONFLICT = BIN.parent.parent / "worker" / "CONFLICT.md"
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
 # mode = user has run here: until repos/ and worktrees/ are gone, mode = off must not trust what the agent left there
@@ -101,9 +116,13 @@ WATCH_LABEL = "com.task-hub.watch"  # the launchd job of docs/setup.md
 KIRO_COPIES = {"kiro-hook": ("kiro/hooks/task-hub-events.json", ".kiro/hooks/task-hub-events.json"),
                "kiro-workflow": ("kiro/workflows/task-hub-events.workflow.json",
                                  ".kiro/workflows/task-hub-events.workflow.json")}
+# [triggers] (docs/triggers.md): what they made a card for, so each CI run, Issue, and period gets one card
+TRIGGERS = STATE / "triggers.json"
+TRIGGER_SECONDS = float(os.environ.get("TASK_TRIGGER_SECONDS") or 300)  # `task watch` checks them at most this often
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
-            "research", "stage"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+            "research", "stage", "link", "link_project"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+# link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again
 GH = os.environ.get("TASK_GH", "gh")
 # the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
 # A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
@@ -155,9 +174,11 @@ def home(p):
 
 
 def run(*cmd, cwd=None, check=False):
-    r = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True)
+    # not text=True: its universal newlines split a line git redraws with \r, which git_said keeps whole
+    r.stdout, r.stderr = (b.decode(errors="replace").replace("\r\n", "\n") for b in (r.stdout, r.stderr))
     if check and r.returncode != 0:
-        raise RuntimeError(f"{' '.join(map(str, cmd[:3]))} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        raise RuntimeError(f"{' '.join(map(str, cmd[:3]))} failed: {git_said(r)}")
     return r
 
 
@@ -192,6 +213,9 @@ class StatusLifecycle:
         (READY, IN_PROGRESS),  # launch
         (READY, BLOCKED), (IN_PROGRESS, BLOCKED),  # sync: launch failed; cmd_run: setup failed, finish raised; pid gone
         (IN_PROGRESS, IN_REVIEW),  # finish
+        (IN_REVIEW, WAIT_FOR_MERGE), (BLOCKED, WAIT_FOR_MERGE), (BLOCKED, IN_REVIEW),  # cmd_merge: approved
+        (WAIT_FOR_MERGE, IN_REVIEW),  # cmd_merge --cancel
+        (IN_REVIEW, BLOCKED), (WAIT_FOR_MERGE, BLOCKED),  # the merge queue: a conflict or a check it cannot get past
         *{(s, DONE) for s in watched_for_merge},  # sync: the PR was merged
         *{(s, DONE) for s in all if s != DONE},  # cmd_done
     }
@@ -286,11 +310,12 @@ class AgentReport:
         return "\n\n".join([f"## Blocked\n\n{self.blocked}"] * bool(self.blocked) +
                            [f"## Report\n\n{self.report}", f"## Please review\n\n{self.review}"] +
                            ([self.auto_review] if self.auto_review else []) +
-                           [f"Closes {board()['issues']}#{t['id']}",
-                            f"<sub>task-hub | agent: {t['agent']}</sub>"])
+                           [f"Closes {board()['issues']}#{t['id']}"] +
+                           ([f"Closes {t['link']}"] if t.get("link") else []) +
+                           [f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
-DIGEST_KEYS = ["verdict", "reason", "review", "report", "decision", "question", "answer", "goal_change", "pr"]
+DIGEST_KEYS = ["verdict", "reason", "report", "review", "decision", "question", "answer", "goal_change", "pr"]
 DIGEST_ITEM, DIGEST_TEXT, DIGEST_REVIEW_ITEMS = 120, 240, 3  # the caps keep one digest under ~1000 chars
 
 
@@ -304,6 +329,14 @@ def subsection(body, name):
     """The first paragraph under '### name', or '' (what follows it in a replan comment is task-hub's own advice)."""
     m = re.search(rf"(?m)^### {re.escape(name)}[ \t]*\n(.*?)(?=^##|\Z)", body, re.S)
     return m.group(1).strip().split("\n\n")[0] if m else ""
+
+
+def summary(report):
+    """The head of a Report: the bullets under its first '### ' heading (worker/PROMPT.md asks for '### Summary'),
+    or, in a report without one, everything before its first '### ' heading. Bullet marks dropped, one line."""
+    m = re.match(r"\s*### [^\n]*\n(.*?)(?=^### |\Z)", report, re.S | re.M)
+    head = m.group(1) if m else re.split(r"(?m)^### ", report)[0]
+    return " ".join(re.sub(r"^\s*([-*+]|\d+[.)])\s+", "", l).strip() for l in head.splitlines() if l.strip())
 
 
 def digest(report="", replan=""):
@@ -323,7 +356,7 @@ def digest(report="", replan=""):
             d["review"].append(f"(+{len(items) - DIGEST_REVIEW_ITEMS} more)")
         d["pr"] = pr
         if not pr and not d["reason"]:  # In review without a PR is a research task: its report is the result
-            d["report"] = clip(section(report, "Report"), DIGEST_TEXT)
+            d["report"] = clip(summary(section(report, "Report")), DIGEST_TEXT)
     if replan:
         d["decision"] = clip((re.findall(r"(?m)^Decision: (.+)$", replan) or [""])[0], 40)
         d["question"] = clip(subsection(replan, "Question for you"), DIGEST_TEXT)
@@ -345,8 +378,9 @@ def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL)},
-                 "agents": DEFAULT_AGENTS, "check": {}, "board": {},
-                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS},
+                 "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
+                 "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
+                 "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
                  "sandbox": {"mode": "off", "user": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
@@ -645,6 +679,13 @@ MOVE_TO_TOP = """mutation($project: ID!, $item: ID!) {
 PROJECT_QUERY = """query($owner: String!, $number: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner {
   projectV2(number: $number) { id url fields(first: 50) { nodes {
     ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } } } } } }"""
+# the card of a team's Issue (`task share`) on each Project, with the Project's single-select fields and the card's
+# values: which column it is in now, so an unchanged column costs no mutation (1 point)
+TEAM_CARD_QUERY = """query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) {
+  issue(number: $number) { projectItems(first: 20) { nodes { id
+    project { id url fields(first: 50) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } }
+    fieldValues(first: 50) { nodes { ... on ProjectV2ItemFieldSingleSelectValue {
+      name field { ... on ProjectV2FieldCommon { id } } } } } } } } } }"""
 # "@<field>" is replaced by the field's name as spelled on the board (we match names without regard to case)
 ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { ... on ProjectV2 {
   items(first: 100, after: $after, query: $q) { pageInfo { hasNextPage endCursor } nodes { id updatedAt
@@ -921,8 +962,9 @@ def get(tid):
     fail(f"task {tid} not found on the board", "run `task` to see the board")
 
 
-def set_status(t, status, reason="", digest_=None):
-    """digest_: the event's digest; a Blocked without one gets its reason as the digest."""
+def set_status(t, status, reason="", digest_=None, sha=""):
+    """digest_: the event's digest; a Blocked without one gets its reason as the digest.
+    sha: the PR's head commit the run just pushed, for the phone's buttons on the In review notification."""
     if not t.get("item"):  # the card was removed from the Project; nothing to move
         return
     # a t without "status" came from somewhere that does not know it: unchecked, rather than another GitHub call
@@ -940,8 +982,10 @@ def set_status(t, status, reason="", digest_=None):
     t["status"] = status
     if digest_ is None and status == BLOCKED and reason:
         digest_ = {"reason": clip(reason, DIGEST_TEXT)}
-    emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_)
+    emit(t, status, reason=reason, pr=t.get("pr", ""), digest=digest_, sha=sha)
     move_to_top(t)  # after the event: whoever sees the new Status finds its event already written
+    # the team's copy (`task share`) last: a slow or failing team's GitHub never holds back the event
+    to_team(t, f"the Status {status}", lambda team, n: team.move(n, status, share_config(team.repo)))
 
 
 def emit(t, event, **extra):
@@ -975,7 +1019,8 @@ $m::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShe
 
 
 def notify(e):
-    """Show the event on this machine if [notify] events lists it: herdr's notification if herdr runs, else macOS's.
+    """Show the event if [notify] events lists it: on this machine (herdr, else macOS, Windows or notify-send),
+    and on the phone too when [notify] ntfy is set.
     Fire and forget: a missing or hanging notifier must never cost the run or the command that wrote the event."""
     try:
         wanted = {x.strip().lower() for x in config()["notify"].get("events", "").split(",") if x.strip()}
@@ -985,20 +1030,83 @@ def notify(e):
         return
     title, body = notification(e)
     if herdr_available():
-        sound = "request" if e["event"] in (BLOCKED, "replan", "slow") else "done"
+        sound = "request" if e["event"] in (BLOCKED, "replan", "slow", "conflict") else "done"
         cmd = ["herdr", "notification", "show", title, "--body", body, "--sound", sound]
     elif shutil.which("osascript"):  # arguments, not a script built from the text: no quoting to get wrong
         cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
                "-e", "end run", title, body]
     elif WINDOWS:  # a toast from Windows PowerShell (5.1, which loads WinRT types); the text goes in as variables
         cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]
+    elif shutil.which("notify-send"):  # Linux without herdr
+        cmd = ["notify-send", "--app-name=task-hub", "--urgency", "critical" if e["event"] in (BLOCKED, "replan")
+               else "normal", title, body]
     else:
-        return
+        cmd = None
+    launch = [(cmd, {"TASK_HUB_TITLE": title, "TASK_HUB_BODY": body})] if cmd else []
+    if post := ntfy_post(e, title, body):  # in addition to this machine's: the phone is for when nobody is here
+        launch.append(([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)}))
+    for argv, env in launch:
+        detach(argv, env)
+
+
+def detach(argv, env):
+    """Start argv in its own session and never wait for it; a program that is not there is no error."""
     try:
-        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env={**os.environ, "TASK_HUB_TITLE": title, "TASK_HUB_BODY": body}, **DETACHED)
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={**os.environ, **env}, **DETACHED)
     except OSError:
         pass
+
+
+# a detached `python -I -c`, so a down or hanging server costs only this process, never the command that wrote the event
+NTFY_POST = """import json, os, urllib.request
+p = json.loads(os.environ["TASK_HUB_NTFY"])
+urllib.request.urlopen(urllib.request.Request(p["url"], data=json.dumps(p["json"]).encode(), headers=p["headers"],
+                                              method="POST"), timeout=p["timeout"]).close()"""
+NTFY_TIMEOUT = 10  # seconds, for the whole request in its own process
+
+
+def ntfy_post(e, title, body):
+    """[notify] ntfy: the phone's copy of the notification, as ntfy's JSON publish (url, json, headers), or None
+    when it is off. JSON, not the Title/Click headers: a title in Japanese is not a valid HTTP header."""
+    try:
+        issues = config()["board"].get("issues", "")
+    except configparser.Error:
+        return None
+    pr = e.get("pr") or (e.get("digest") or {}).get("pr")
+    click = pr or (f"https://github.com/{issues}/issues/{e['id']}"
+                   if e.get("id") and re.fullmatch(r"[\w.-]+/[\w.-]+", issues) else "")
+    post = ntfy_message(title, body, 4 if e["event"] in (BLOCKED, "replan") else 3, click)
+    if post and e["event"] == IN_REVIEW and pr and e.get("sha") and e.get("id"):
+        try:
+            actions = review_actions(e["id"], pr, e["sha"])
+        except OSError:  # no key file to sign with: the notification still goes, without buttons
+            actions = []
+        if actions:
+            post["json"]["actions"] = actions
+    return post
+
+
+def ntfy_target():
+    """[notify] ntfy and ntfy_token as (server URL, topic, token), or None when it is off."""
+    try:
+        n = config()["notify"]
+        url, token = n.get("ntfy", "").strip(), n.get("ntfy_token", "").strip()
+    except configparser.Error:
+        return None
+    m = re.fullmatch(r"(https?://[^/?#\s]+(?:/[^?#\s]*)?)/([\w-]{1,64})", url.rstrip("/"))
+    return (m[1], m[2], token) if m else None  # empty: off. Not `<server>/<topic>`: nothing to send to
+
+
+def ntfy_message(title, body, priority=3, click=""):
+    """A publish to [notify] ntfy's topic for NTFY_POST, or None when it is off."""
+    if not (target := ntfy_target()):
+        return None
+    server, topic, token = target
+    msg = {"topic": topic, "title": title, "message": body or title, "priority": priority, "tags": ["task-hub"],
+           **({"click": click} if click else {})}
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+    return {"url": server, "json": msg, "headers": headers, "timeout": NTFY_TIMEOUT}
 
 
 def set_text(t, field, value):
@@ -1018,6 +1126,8 @@ def comment(t, body):
     f.write_text(body)
     gh("issue", "comment", t["id"], "--repo", board()["issues"], "--body-file", f)
     f.unlink(missing_ok=True)
+    if body.startswith((REPORT_MARK, REPLAN_MARK)):  # task-hub's report and triage go to the team; nothing else
+        to_team(t, "task-hub's comment", lambda team, n: team.comment(n, body))
 
 
 def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
@@ -1030,9 +1140,56 @@ def issue(t):
     data = gh_json("issue", "view", t["id"], "--repo", board()["issues"], "--json", "body,state,comments,labels")
     reports = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     replans = [c["body"] for c in data.get("comments", []) if c["body"].startswith(REPLAN_MARK)]
+    # A public comment is not permission to edit or close another Issue with this account's credentials.
+    links = [(m[1], c["body"]) for c in data.get("comments", [])
+             if c["body"].startswith(LINK_MARK) and c.get("viewerDidAuthor") is True
+             for m in [re.search(r"([\w.-]+/[\w.-]+#\d+)", c["body"])] if m]
+    project = re.search(r"(?m)^Project: ([\w.-]+/\d+)\s*$", links[-1][1]) if links else None
+    reported = [c.get("createdAt") or "" for c in data.get("comments", []) if c["body"].startswith(REPORT_MARK)]
     return {"body": data.get("body") or "", "state": data.get("state", ""), "report": reports[-1] if reports else "",
-            "replans": replans,
+            "reported": reported[-1] if reported else "", "replans": replans, "link": links[-1][0] if links else "",
+            "link_project": project[1] if project else "",
+            "own_comments": [c["body"] for c in data.get("comments", []) if c["body"].startswith((REPORT_MARK, REPLAN_MARK))],
             "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
+
+
+def human_comments(t, since):
+    """What people wrote on the task's Issue and on its PR from `since` (the earlier run's start) on, oldest first:
+    Issue comments, and the PR's conversation comments, review bodies, and line comments (with their place).
+    task-hub's own comments (they start with "<!-- task-hub") and bots' are left out. REST, like pr_merged:
+    the first 100 of each kind changed since then is plenty for one re-run."""
+    def human(c, at):
+        user, body = c.get("user") or {}, (c.get("body") or "").strip()
+        return bool(at) and at >= since and body and not body.startswith("<!-- task-hub") \
+            and user.get("type") != "Bot" and not (user.get("login") or "").endswith("[bot]")
+
+    def place(c):
+        line, first, old = c.get("line"), c.get("start_line"), ""
+        if line is None and c.get("original_line") is not None:  # the line changed since: where it was
+            line, first, old = c["original_line"], c.get("original_start_line"), " (outdated: an earlier version)"
+        span = f"lines {first}-{line}" if first and first != line else f"line {line}" if line else "the whole file"
+        return f" on `{c.get('path')}` {span}{old}"
+
+    found = [("Issue comment", c, c.get("created_at"))
+             for c in gh_json("api", f"repos/{board()['issues']}/issues/{t['id']}/comments?since={since}&per_page=100")]
+    m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
+    if m:
+        pulls = f"repos/{m[1]}/pulls/{m[2]}"
+        found += [("PR comment", c, c.get("created_at"))
+                  for c in gh_json("api", f"repos/{m[1]}/issues/{m[2]}/comments?since={since}&per_page=100")]
+        found += [(f"PR review ({r.get('state', '').lower().replace('_', ' ')})", r, r.get("submitted_at"))
+                  for r in gh_json("api", f"{pulls}/reviews?per_page=100") if r.get("state") != "PENDING"]
+        found += [("PR line comment" + place(c), c, c.get("created_at"))
+                  for c in gh_json("api", f"{pulls}/comments?since={since}&per_page=100")]
+    return sorted(([kind, (c.get("user") or {}).get("login") or "someone", at, c["body"].strip()]
+                   for kind, c, at in found if human(c, at)), key=lambda x: x[2])
+
+
+def comments_text(comments):
+    """The comments as the agent and the reviewer read them, numbered so a report can answer each."""
+    return "\n\n".join(f"## Comment {n}: {kind}, by @{who} at {at}\n\n" + "\n".join(f"> {line}".rstrip()
+                                                                                 for line in body.splitlines())
+                       for n, (kind, who, at, body) in enumerate(comments, 1))
 
 
 # ---------- run state on this machine ----------
@@ -1087,19 +1244,25 @@ def write_atomic(path, text):
         temp.unlink(missing_ok=True)
 
 
-@contextlib.contextmanager
 def launch_lock(tid):
     """Held by the one process starting this task's run: `task start` and the watch can both see the card Ready.
     Yields False while another process holds it. The system lets go of it when its holder exits or is killed."""
-    RUNS.mkdir(parents=True, exist_ok=True)
-    with open(RUNS / f"{tid}.lock", "a") as f:
+    return file_lock(RUNS / f"{tid}.lock")
+
+
+@contextlib.contextmanager
+def file_lock(path, wait=False):
+    """An OS file lock on path (POSIX flock, Windows msvcrt.locking); yields False when another process holds it.
+    wait: wait for it (on Windows at most about 10 seconds) instead of giving up at once."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
         try:
             if WINDOWS:
                 import msvcrt
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError:
             yield False
             return
@@ -1138,9 +1301,9 @@ def alive(t):
             return False  # no run of this task on this machine
         # launched but `_run` has not recorded itself yet; give it two minutes
         return seconds_since(t["started"]) < 120
-    # this task's own run: pids are handed out again (soon on Windows; and the run files outlive a restart), to
-    # another task's run too, and an agent's prompt can say _run
-    own = rf"\s_run\s+{t['id']}\s*$"
+    # this task's own run (or its conflict fix, `_fix <id> <base>`): pids are handed out again (soon on Windows; and
+    # the run files outlive a restart), to another task's run too, and an agent's prompt can say _run
+    own = rf"\s_(run\s+{t['id']}|fix\s+{t['id']}\s+\S+)\s*$"
     if WINDOWS:
         return bool(re.search(own, windows_command_line(int(t["pid"]))))
     r = run("ps", "-p", t["pid"], "-o", "command=")
@@ -1585,13 +1748,26 @@ def launch(t):
     wt = ensure_worktree(t)
     copy_env_files(t, wt)
     LOGS.mkdir(parents=True, exist_ok=True)
+    earlier = load_run(t["id"])  # what this machine last ran of the task: the comments since then are new
     t["worktree"], t["log"], t["started"], t["pid"] = str(wt), str(LOGS / f"{t['id']}.log"), now(), ""
     t["stage"] = "preparing"
     prompt_file(t).parent.mkdir(parents=True, exist_ok=True)
     i = issue(t)
+    # a re-run: since this machine's last start, or the last report (the run was on another machine); a first run, none
+    since = earlier.get("started") or i["reported"]
+    comments = comments_text(human_comments({**t, "pr": earlier.get("pr", "")}, since)) if since else ""
     t["research"] = "yes" if i["research"] else ""
     write_rules(t, wt, i["body"])
-    prompt_file(t).write_text(build_prompt(t, i))  # kept, so you can always see what the agent was told
+    t["link"] = i["link"]
+    t["link_project"] = i["link_project"]
+    # the Goal as it is now (an answer added before Ready again too), whatever the team changed in the copy
+    to_team(t, "the title and Goal", lambda team, n: team.edit(n, share_config(team.repo)["title"] + t["title"],
+                                                               share_body(i["body"])))
+    prompt_file(t).write_text(build_prompt(t, i, comments))  # kept, so you can always see what the agent was told
+    if comments:
+        comments_file(t).write_text(comments + "\n")
+    else:
+        comments_file(t).unlink(missing_ok=True)
     cmd = [sys.executable, str(BIN), "_run", t["id"]]
     # with [sandbox] on, your shell, its prompt, and the run itself stay out of the worktree: a git-aware prompt (or
     # gh) there would run git as you on the config the agent can write
@@ -1646,30 +1822,45 @@ def launch(t):
                 raise RuntimeError("the run did not start in herdr "
                                    f"{'tab ' + t['tab'] if t['tab'] else 'workspace ' + t['workspace']}")
     else:
-        with open(t["log"], "ab") as log:
-            start = lambda flags: subprocess.Popen(cmd, cwd=here, stdin=subprocess.DEVNULL, stdout=log,
-                                                   stderr=subprocess.STDOUT, env={**os.environ, "TASK_RUN_LOGGED": "1"},
-                                                   **flags)
-            try:  # Windows: out of the watch's Task Scheduler job, so stopping the watch leaves the run going
-                start({"creationflags": DETACHED["creationflags"] | subprocess.CREATE_BREAKAWAY_FROM_JOB}
-                      if WINDOWS else DETACHED)
-            except PermissionError:  # the job does not allow it
-                start(DETACHED)
+        start_logged(cmd, here, t["log"])
+
+
+def start_logged(cmd, cwd, log_path):
+    """Start a run in the background, its output appended to its log, outliving the command that starts it."""
+    with open(log_path, "ab") as log:
+        start = lambda flags: subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log,
+                                               stderr=subprocess.STDOUT, env={**os.environ, "TASK_RUN_LOGGED": "1"},
+                                               **flags)
+        try:  # Windows: out of the watch's Task Scheduler job, so stopping the watch leaves the run going
+            return start({"creationflags": DETACHED["creationflags"] | subprocess.CREATE_BREAKAWAY_FROM_JOB}
+                         if WINDOWS else DETACHED)
+        except PermissionError:  # the job does not allow it
+            return start(DETACHED)
 
 
 def prompt_file(t):
     return DATA / "prompts" / f"{t['id']}.md"
 
 
-def build_prompt(t, i):
-    instructions = WORKER_PROMPT.read_text().split("\n---\n", 1)[-1].strip()
+def comments_file(t):
+    """The comments the run's prompt gave the agent (human_comments), for its reviewer; none, no file."""
+    return DATA / "prompts" / f"{t['id']}-comments.md"
+
+
+def instruction_parts(path):
+    """A worker/*.md file without its header: the instructions, then the part sent only with comments (or "")."""
+    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), ""][:2]
+
+
+def build_prompt(t, i, comments=""):
+    instructions, about_comments = instruction_parts(WORKER_PROMPT)
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
              *([f"Came after: {', '.join(x['ref'] + ' ' + x['title'] for x in t['blockers'])} "
                 "(finished before this run started)"] if t.get("blockers") else []),
-             *(["Kind: research. Your report is the deliverable: put your findings in its Report section. Change "
-                "files only if the Goal asks for a file."] if t.get("research") else []),
+             *(["Kind: research. Your report is the deliverable: put the answer in its Report's Summary and the findings "
+                "under its Details. Change files only if the Goal asks for a file."] if t.get("research") else []),
              "", i["body"].strip()]
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",
@@ -1679,6 +1870,8 @@ def build_prompt(t, i):
         lines += ["", "# Replanner notes", "",
                   "Another agent answered what the earlier run was blocked on, from the repository. "
                   "Check its evidence before you rely on it:", "", answered[-1].replace(REPLAN_MARK, "").strip()]
+    if comments:
+        lines += ["", about_comments, "", comments]
     return "\n".join(lines) + "\n"
 
 
@@ -2305,13 +2498,15 @@ def shown_path(path, wt):
 
 
 def build_review_prompt(t, report, diff):
-    instructions = WORKER_REVIEW.read_text().split("\n---\n", 1)[-1].strip()
+    instructions, about_comments = instruction_parts(WORKER_REVIEW)
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
+    comments = comments_file(t).read_text().strip() if comments_file(t).exists() else ""
     return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
                       f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
-                      issue(t)["body"].strip(), "", "# Agent report", "",
+                      issue(t)["body"].strip(), *(["", about_comments, "", comments] if comments else []),
+                      "", "# Agent report", "",
                       report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
 
 
@@ -2559,7 +2754,7 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
     ahead = git_shared(wt, "rev-list", "--count", f"{base}..HEAD").stdout.strip() not in ("", "0")
     if ahead and sandbox_mode() != "off":
         # the agent's user pushes with its own GitHub sign-in; what reached GitHub is then read from GitHub, never
-        # from the git the agent could have set up (decision 22)
+        # from the git the agent could have set up (decision 28)
         git_shared(wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
         ahead = (branch_compare(t, base) or {}).get("ahead_by", 0) > 0
 
@@ -2569,15 +2764,17 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         parsed.blocked = blocked_override
     elif not parsed.blocked and not ahead and not t.get("research"):  # a research task's report is its result
         parsed.blocked = "agent wrote a report but changed no files"
+    head = ""
     if ahead:
         if sandbox_mode() == "off":
             git_shared(wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
+        head = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
     body = parsed.issue_comment(t.get("pr", "") if ahead else "")
     comment(t, body)
     status = BLOCKED if parsed.blocked else IN_REVIEW
-    set_status(t, status, reason=parsed.blocked, digest_=digest(report=body))
+    set_status(t, status, reason=parsed.blocked, digest_=digest(report=body), sha=head if status == IN_REVIEW else "")
     return status
 
 
@@ -2599,20 +2796,22 @@ def upsert_pr(t, body, draft, base):
 
 
 def pr_merged(t):
-    """Whether the task's PR was merged. REST, not GraphQL: the watch asks every minute, and GraphQL
+    """Whether the task's PR was merged, and the PR as REST gives it (None when it was found by its branch): the merge
+    queue reads whether it conflicts from the same call. REST, not GraphQL: the watch asks every minute, and GraphQL
     has the tighter hourly limit. Without this machine's run file (the task ran elsewhere), the PR is
     found by its branch, as is a PR this machine's run did not open (made by hand after a run without changes).
     Only the newest PR of that branch counts, only if it closes this task's Issue, and not if it was merged before
     this machine's last run started: an older merged PR of a reused branch name never closes a card worked on again."""
     m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
     if m:
-        return gh_json("api", f"repos/{m[1]}/pulls/{m[2]}").get("merged") is True
+        pull = gh_json("api", f"repos/{m[1]}/pulls/{m[2]}")
+        return pull.get("merged") is True, pull
     owner = t["repo"].split("/")[0]
     prs = gh_json("api", f"repos/{t['repo']}/pulls?head={owner}:task/{t['id']}&state=all&sort=created"
                          "&direction=desc&per_page=1")
     if not prs or not prs[0].get("merged_at") or prs[0]["merged_at"] < (load_run(t["id"]).get("started") or ""):
-        return False
-    return bool(re.search(rf"(?i)\bcloses {re.escape(board()['issues'])}#{t['id']}\b", prs[0].get("body") or ""))
+        return False, None
+    return bool(re.search(rf"(?i)\bcloses {re.escape(board()['issues'])}#{t['id']}\b", prs[0].get("body") or "")), None
 
 
 def find_pr(t):
@@ -2657,14 +2856,668 @@ def cleanup(t):
     return ""
 
 
+# ---------- sharing: a task's copy on a team's board ----------
+
+def share_config(repo):
+    """[share] for one place to share to: its team Project, the title prefix, the single-select fields to set, and
+    the Status table (`status.<column>`, for every place; `<repo>.status.<column>`, for this one). Names are matched
+    without regard to case, as configparser lowers them."""
+    s, key = config()["share"], repo.lower()
+    project = s.get(key, "").strip()
+    if project and not re.fullmatch(r"[\w.-]+/\d+", project):
+        raise RuntimeError(f"[share] {repo} must be a Project as <owner>/<number>, got {project!r}")
+    prefix = s.get(f"{key}.title", "")
+    if len(prefix) >= 2 and prefix[0] == prefix[-1] == '"':  # quoted: a space at its end stays
+        prefix = prefix[1:-1]
+    named = lambda start: {k[len(start):]: v.strip() for k, v in s.items() if k.startswith(start) and k != start}
+    return {"project": project, "title": prefix, "fields": named(f"{key}.field."),
+            "status": {**named("status."), **named(f"{key}.status.")}}
+
+
+def share_body(goal):
+    """The team's Issue body: the notice that task-hub overwrites it, then the Goal as it is."""
+    return f"{SHARED_MARK}\n{SHARE_NOTICE}\n\n{goal.strip()}\n"
+
+
+def share_column(status, settings, columns, project):
+    """The team's column (an option of columns, by lowered name) for a personal Status: [share], then a column of the
+    same name, then SHARE_STATUS; None when the team has none of them. One that [share] names but the team lacks raises."""
+    wanted = settings["status"].get(status.lower())
+    if wanted and wanted.lower() not in columns:
+        raise RuntimeError(f'the team\'s Project {project} has no column "{wanted}" (status.{status})')
+    return columns.get((wanted or status).lower()) or columns.get(SHARE_STATUS.get(status, "").lower())
+
+
+class TeamGitHub:
+    """The connector for a team's GitHub: an Issue in its repo, and a card on its Project. Another kind of place to
+    share to (Jira, ...) is another connector with the same methods; `task share` and `set_status` stay as they are.
+    (docs/architecture/designs/team-sync.md)"""
+
+    def __init__(self, repo, project=""):
+        self.repo, self.project, self.card = repo, project, None
+
+    def ref(self, number):
+        return f"{self.repo}#{number}"
+
+    def prepare(self, status, settings):
+        """Read the team's Project and work out the card's values before anything is written: a column, a field or a
+        value it does not have stops the share with nothing made. Returns the team's column for status, or ""."""
+        if not self.project:
+            return ""
+        owner, number = self.project.split("/")
+        where = f"[share] in {home(CONFIG)}"
+        try:
+            project = (graphql(PROJECT_QUERY, owner=owner, number=int(number))["repositoryOwner"] or {}).get("projectV2")
+            if not project:
+                raise RuntimeError(f"no user or organization {owner}")
+        except RuntimeError as e:
+            fail(f"cannot read the team's Project {self.project}: {e}",
+                 f"run `gh auth refresh -s project`, and check --project or {where}")
+        by_name = {f["name"].lower(): f for f in project["fields"]["nodes"] if f}
+        options = lambda f: {o["name"].lower(): o for o in f.get("options") or []}
+        values, column = [], ""
+        if "status" in by_name:
+            columns = options(by_name["status"])
+            try:
+                found = share_column(status, settings, columns, self.project)
+            except RuntimeError as e:
+                fail(str(e), f"columns: {', '.join(o['name'] for o in columns.values())}; fix {where}")
+            if found:
+                values.append((by_name["status"]["id"], found["id"]))
+                column = found["name"]
+        for name, value in settings["fields"].items():
+            field = by_name.get(name)
+            if not field or field.get("dataType") != "SINGLE_SELECT":
+                fail(f'the team\'s Project {self.project} has no single-select field "{name}"', f"fix {where}")
+            if value.lower() not in options(field):
+                fail(f'the field "{field["name"]}" of the team\'s Project {self.project} has no option "{value}"',
+                     f"options: {', '.join(o['name'] for o in options(field).values())}; fix {where}")
+            values.append((field["id"], options(field)[value.lower()]["id"]))
+        self.card = {"id": project["id"], "owner": owner, "number": number, "values": values}
+        return column
+
+    def create_issue(self, title, body):
+        """The team's Issue, assigned to you. Returns its number and url."""
+        f = DATA / "share-issue.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+        try:
+            url = gh("issue", "create", "--repo", self.repo, "--title", title, "--body-file", f,
+                     "--assignee", "@me").strip().splitlines()[-1]
+        finally:
+            f.unlink(missing_ok=True)
+        return url.rstrip("/").rsplit("/", 1)[-1], url
+
+    def body_file(self, kind, number, text):
+        f = DATA / f"share-{kind}-{self.repo.replace('/', '-')}-{number}.md"  # two runs may write at once
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
+    def comment(self, number, body):
+        f = self.body_file("comment", number, body)
+        try:
+            gh("issue", "comment", number, "--repo", self.repo, "--body-file", f)
+        finally:
+            f.unlink(missing_ok=True)
+
+    def edit(self, number, title, body):
+        """Write the title and body again: task-hub's copy, whatever the team changed in it (its notice says so)."""
+        f = self.body_file("body", number, body)
+        try:
+            gh("issue", "edit", number, "--repo", self.repo, "--title", title, "--body-file", f)
+        finally:
+            f.unlink(missing_ok=True)
+
+    def close(self, number):
+        gh("issue", "close", number, "--repo", self.repo)
+
+    def move(self, number, status, settings):
+        """Put the Issue's card on the team's Project in the column for status. One read finds the card, the Project's
+        columns, and the card's column now: the mutation only when the column changes. Returns the column, or "" when
+        the Issue has no card or the Project no column for it."""
+        owner, name = self.repo.split("/")
+        items = ((graphql(TEAM_CARD_QUERY, owner=owner, name=name, number=int(number))["repository"] or {})
+                 .get("issue") or {}).get("projectItems", {}).get("nodes") or []
+        items = [x for x in items if x and x.get("project")]
+        project = self.project or settings["project"]  # the saved choice, then [share]; legacy links may name none
+        at = f"/{project.split('/')[0]}/projects/{project.split('/')[-1]}".lower() if project else ""
+        item = next((x for x in items if x["project"].get("url", "").lower().endswith(at)), None) if at else \
+            (items[0] if items else None)
+        if not item:
+            return ""
+        field = next((f for f in item["project"]["fields"]["nodes"] if f and f.get("name", "").lower() == "status"),
+                     None)
+        if not field:
+            return ""
+        found = share_column(status, settings, {o["name"].lower(): o for o in field.get("options") or []},
+                             item["project"].get("url", project))
+        if not found:
+            return ""
+        now_ = next((v.get("name") for v in item["fieldValues"]["nodes"]
+                     if v and (v.get("field") or {}).get("id") == field["id"]), None)
+        if now_ != found["name"]:
+            gh("project", "item-edit", "--id", item["id"], "--project-id", item["project"]["id"],
+               "--field-id", field["id"], "--single-select-option-id", found["id"])
+        return found["name"]
+
+    def add_card(self, url):
+        """Put the Issue on the team's Project with the values prepare() worked out (no Project: nothing)."""
+        if not self.card:
+            return
+        c = self.card
+        item = gh_json("project", "item-add", c["number"], "--owner", c["owner"], "--url", url, "--format", "json")["id"]
+        for field, option in c["values"]:
+            gh("project", "item-edit", "--id", item, "--project-id", c["id"], "--field-id", field,
+               "--single-select-option-id", option)
+
+
+def to_team(t, what, change):
+    """Copy a change to the task's team Issue (`task share`): change(connector, number). Only for a task with a link
+    (t["link"]: launch's issue() read, kept in the run file, or the command's own issue() read): no GitHub call is added
+    to find it. A failure stops nothing: one line on stderr, as a failed notification or cache (lld.md 8)."""
+    m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", t.get("link") or "")
+    if not m:
+        return
+    try:
+        change(TeamGitHub(m[1], t.get("link_project") or ""), m[2])
+    except (RuntimeError, OSError, ValueError, LookupError, TypeError, AttributeError) as e:
+        print(f"warning: task {t['id']}: could not copy {what} to {m[0]}: {e}", file=sys.stderr, flush=True)
+
+
+def add_closes(url, ref):
+    """`Closes <ref>` in an open PR's body, after its other Closes lines. False when it is closed or has it already."""
+    pr = gh_json("pr", "view", url, "--json", "body,state")
+    body = pr.get("body") or ""
+    if pr.get("state") != "OPEN" or re.search(rf"(?im)^closes {re.escape(ref)}\s*$", body):
+        return False
+    closes = list(re.finditer(r"(?im)^closes \S+[ \t]*$", body))
+    at = closes[-1].end() if closes else len(body.rstrip())
+    f = DATA / f"pr-body-{ref.replace('/', '-').replace('#', '-')}.md"
+    f.write_text(body[:at] + f"\n\nCloses {ref}" + body[at:])
+    try:
+        gh("pr", "edit", url, "--body-file", f)
+    finally:
+        f.unlink(missing_ok=True)
+    return True
+
+
+def share_pr(t, ref):
+    """The lines about the task's PR once it is shared: its PR closes the team's Issue too. A run still going
+    rewrites its PR's body when it finishes, from what it read when it began."""
+    if t.get("running"):
+        return [f"help: its run began before it was shared, so that run's PR closes only #{t['id']}: run this again "
+                "once the run ends (later runs add it themselves)"]
+    if t.get("pr") and add_closes(t["pr"], ref):
+        return [f"  pr: {t['pr']} (closes {ref} too now)"]
+    return []
+
+
+# ---------- merge queue: approved PRs kept up to date and merged one at a time (docs/operations.md) ----------
+
+MERGE_QUEUE = STATE / "merge-queue.json"  # {"queue": [...]}: the approved PRs, oldest approval first
+MERGE_QUEUE_LOCK = STATE / "merge-queue.lock"  # held for each read-change-write of MERGE_QUEUE (`task merge`, sync)
+MERGE_WORK_LOCK = STATE / "merge-queue.work.lock"  # held by the one task-hub working the queue (`task watch`, `task`)
+# after a push, how long "no checks" may only mean GitHub has not started them yet (tests: 0)
+CHECKS_GRACE = float(os.environ.get("TASK_CHECKS_GRACE_SECONDS") or 120)
+MERGE_READY = {"CLEAN", "HAS_HOOKS"}  # mergeStateStatus values GitHub merges at once
+MERGE_WAIT = {"BLOCKED", "UNKNOWN", ""}  # may still change by itself (GitHub recomputing): waited for up to ci_minutes
+MERGE_STATES = {"BLOCKED": "a required review or a rule of the branch is missing",
+                "UNSTABLE": "a check that is not required failed or has not finished",
+                "DRAFT": "the PR is a draft"}
+CONFLICT_MARKER = re.compile(r"(?m)^(<{7}|>{7})( |$)")
+
+
+def merge_config():
+    """[merge]: queue (off by default), prefix (fix In review PRs that conflict before anyone approves them), checks
+    (all, or only the required ones), ci_minutes (how long to wait for them). A bad value stops before anything changes."""
+    m = config()["merge"]
+
+    def switch(key):
+        value = m.get(key, "").strip().lower() or "off"
+        if value not in ("on", "off"):
+            fail(f"[merge] {key} must be on or off; got {value!r}", f"set  [merge]  {key} = on  in {home(CONFIG)} "
+                                                                    "(off by default)")
+        return value == "on"
+    checks = m.get("checks", "").strip().lower() or "all"
+    if checks not in ("all", "required"):
+        fail(f"[merge] checks must be all or required; got {checks!r}", f"fix it in {home(CONFIG)} (default all)")
+    minutes = m.get("ci_minutes", "").strip() or str(CI_MINUTES)
+    if not re.fullmatch(r"\d+", minutes) or int(minutes) < 1:
+        fail(f"[merge] ci_minutes must be a whole number, 1 or more; got {minutes!r}",
+             f"fix it in {home(CONFIG)} (default {CI_MINUTES})")
+    return {"queue": switch("queue"), "prefix": switch("prefix"), "required": checks == "required",
+            "ci_seconds": int(minutes) * 60}
+
+
+def read_queue():
+    """The queue's entries: {id, repo, pr, queued, step, since, fixed, ci_wait}; none when the file is missing."""
+    q = read_json(MERGE_QUEUE).get("queue")
+    return [e for e in q if isinstance(e, dict) and e.get("id") and e.get("pr")] if isinstance(q, list) else []
+
+
+def change_queue(change):
+    """Run change(entries) on the queue and write it back, under its lock: `task merge` and the sync both change it."""
+    with file_lock(MERGE_QUEUE_LOCK, wait=True) as mine:
+        if not mine:
+            raise RuntimeError(f"another task-hub holds {home(MERGE_QUEUE_LOCK)}; try again")
+        q = read_queue()
+        result = change(q)
+        write_atomic(MERGE_QUEUE, json.dumps({"queue": q}, indent=1))
+        return result
+
+
+def queue_drop(tid):
+    change_queue(lambda q: q.__setitem__(slice(None), [e for e in q if e["id"] != tid]))
+
+
+def queue_set(e, **changes):
+    e.update(changes)
+    change_queue(lambda q: [x.update(changes) for x in q if x["id"] == e["id"]])
+
+
+def queue_column():
+    """Where an approved card waits: the optional wait for merge column when the board has it, else In review."""
+    return WAIT_FOR_MERGE if WAIT_FOR_MERGE.lower() in board()["status_options"] else IN_REVIEW
+
+
+def queue_entry(t):
+    """The card's queue entry, with its open PR (this machine's run, else found by the task's branch); None without."""
+    pr = t.get("pr") or ""
+    if not pr and re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or ""):
+        found = find_pr({**t, "branch": t.get("branch") or f"task/{t['id']}"})
+        pr = found["url"] if found and found["state"] == "OPEN" else ""
+    m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+", pr)
+    return {"id": t["id"], "repo": m[1], "pr": pr, "queued": now(), "step": "update"} if m else None
+
+
+def position(q, e):
+    return [x["repo"].lower() for x in q].count(e["repo"].lower())
+
+
+def pr_view(url):
+    return gh_json("pr", "view", url, "--json",
+                   "url,state,isDraft,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus")
+
+
+def pr_checks(url, required):
+    """The PR's checks as [{name, bucket, link}] (bucket: pass, fail, pending, skipping or cancel); [] when it has none."""
+    try:
+        r = run(GH, "pr", "checks", url, *(["--required"] if required else []), "--json", "name,bucket,link")
+    except FileNotFoundError:
+        raise RuntimeError(f"gh not found ({GH})") from None
+    if r.stdout.strip():  # it exits 8 while one is pending and 1 when one failed: the JSON says which
+        with contextlib.suppress(ValueError):
+            checks = json.loads(r.stdout)
+            if isinstance(checks, list):
+                return checks
+    if re.search(r"no (required )?checks reported", r.stderr + r.stdout):
+        return []
+    raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or ["gh pr checks failed"])[-1])
+
+
+def git_out(wt, *args):
+    return git_shared(wt, *args).stdout.strip()
+
+
+def unmerged(wt):
+    return git_out(wt, "diff", "--name-only", "--diff-filter=U").splitlines()
+
+
+def merge_worktree(t, head):
+    """The task's worktree on the PR's branch, as the branch is on GitHub: where its base is merged into it."""
+    repo_dir = ensure_clone(t["repo"])  # fetches: the base as it is now
+    wt = Path(t.get("worktree") or DATA / "worktrees" / t["id"])
+    if not (wt / ".git").exists():  # the task ran on another machine, or its worktree was removed
+        git_shared(repo_dir, "worktree", "prune")
+        git_shared(repo_dir, "worktree", "add", "-q", "-B", head, wt, f"origin/{head}", check=True)
+        t.update(worktree=str(wt), branch=head)
+        save_run(t)  # cleanup removes it with the card
+        ensure_internal_excludes(wt)
+        return wt
+    if git_out(wt, "rev-parse", "--abbrev-ref", "HEAD") != head:
+        raise RuntimeError(f"the worktree {home(wt)} is not on the PR's branch {head}")
+    if git_out(wt, "status", "--porcelain", "--untracked-files=no"):
+        raise RuntimeError(f"the worktree {home(wt)} has changes nobody committed; commit or undo them")
+    if git_shared(wt, "merge", "--ff-only", "-q", f"origin/{head}").returncode != 0:
+        raise RuntimeError(f"branch {head} on GitHub and the worktree {home(wt)} have both changed; "
+                           f"merge origin/{head} in that worktree (or delete it to start from GitHub's)")
+    return wt
+
+
+def merge_block(t, e, reason):
+    """The queue stops for this card: why, on the Issue and the card. The next PR of its repo goes on."""
+    comment(t, f"{MERGE_MARK}\n\n## Merge queue\n\nBlocked: {reason}\n\nPR: {e['pr']}\n\n"
+               f"Fix it, then run `task merge {t['id']}` to queue it again.")
+    set_status(t, BLOCKED, reason=f"merge queue: {reason}")
+    queue_drop(t["id"])  # last: a GitHub failure above leaves it queued, to try again at the next check
+    return f"blocked: {reason}"
+
+
+def close_merged(t):
+    """Its PR was merged: close the Issue (GitHub's "Closes ..." works only for PRs into the default branch, and can
+    miss even those), move the card to Done, clean up."""
+    gh("issue", "close", t["id"], "--repo", board()["issues"])
+    to_team(t, "the close", lambda team, n: team.close(n))  # GitHub did not close it either
+    set_status(t, DONE)
+    cleanup(t)
+
+
+def merge_queue(open_, settings, lines, changed, errors):
+    """[merge] queue: cards a human moved to wait for merge join the queue, and the first PR of each repo takes its next
+    step. Only one PR per repo moves at a time: each merge changes the base the next one is merged with."""
+    cards = {t["id"]: t for t in open_}
+    try:
+        column = queue_column()
+        queued = {e["id"] for e in read_queue()}
+        # dragged to wait for merge on GitHub: approved like `task merge`, in the order the cards were moved
+        for t in sorted((t for t in open_ if t["status"] == WAIT_FOR_MERGE and t["id"] not in queued),
+                        key=lambda t: t["updated"]):
+            e = queue_entry(t)
+            if not e:
+                lines.append(f"merge: task {t['id']} is in {WAIT_FOR_MERGE} but has no open PR")
+                continue
+            n = change_queue(lambda q: q.append(e) or position(q, e))
+            emit(t, "queued", pr=e["pr"], reason=f"position {n} in the merge queue of {e['repo']}")
+            lines.append(f"merge: task {t['id']} joined the queue of {e['repo']} (position {n})")
+    except RuntimeError as err:
+        errors.append({"id": "", "error": f"merge queue: {err}"})
+        return
+    with file_lock(MERGE_WORK_LOCK) as mine:
+        if not mine:
+            lines.append("merge: another task-hub is working the queue")
+            return
+        heads = {}
+        for e in read_queue():
+            heads.setdefault(e["repo"].lower(), e)
+        for e in heads.values():
+            t = cards.get(e["id"])
+            before = t["status"] if t else ""
+            try:
+                line = merge_step(t, e, column, settings)
+            except (RuntimeError, OSError) as err:  # GitHub or git: the same step again at the next check
+                errors.append({"id": e["id"], "error": f"merge queue: {err}"})
+                continue
+            if line:
+                lines.append(f"merge: task {e['id']}: {line}")
+            if t and t["status"] != before:
+                changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
+
+
+def merge_step(t, e, column, settings):
+    """One step of the first PR of a repo's queue; returns what it did, as one line."""
+    if not t or t["status"] != column:  # a human moved it (or `task done`): no longer approved
+        queue_drop(e["id"])
+        return f"left the queue ({t['status'] if t else 'no longer open'})"
+    if t["running"]:
+        return f"waiting for its run ({t.get('stage') or 'starting'})"
+    pr = pr_view(e["pr"])
+    if pr["state"] == "MERGED":  # merged by hand: the merge watch moves the card to Done
+        queue_drop(e["id"])
+        return "its PR was merged elsewhere"
+    if pr["state"] != "OPEN":
+        return merge_block(t, e, f"its PR was closed without merging: {e['pr']}")
+    if pr.get("isDraft"):
+        return merge_block(t, e, f"its PR is a draft: {e['pr']}")
+    t["pr"] = e["pr"]
+    if e.get("step") == "ci":
+        return merge_ci(t, e, pr, settings)
+    return merge_update(t, e, pr, settings)
+
+
+def merge_update(t, e, pr, settings):
+    """Merge the PR's base into its branch, a real merge commit; push it, or start the conflict fix."""
+    head, base = pr["headRefName"], pr["baseRefName"]
+    wt = merge_worktree(t, head)
+    base_sha = git_out(wt, "rev-parse", f"origin/{base}")
+    r = git_shared(wt, "merge", "--no-edit", "-q", f"origin/{base}")
+    if r.returncode == 0:
+        # against GitHub's branch, not the worktree's: a merge an earlier push failed to send is still to push
+        if git_out(wt, "rev-parse", "HEAD") == git_out(wt, "rev-parse", f"origin/{head}"):
+            queue_set(e, step="ci", since=now())  # up to date already: its checks are the ones to wait for
+            return merge_ci(t, e, pr, settings)
+        failed = push_failed(wt, head)
+        if failed:  # the merge commit stays in the worktree, never reset away: queued again, it is pushed then
+            return merge_block(t, e, failed)
+        queue_set(e, step="ci", since=now())
+        emit(t, "updated", pr=e["pr"], reason=f"merged {base} into {head}")
+        return f"merged {base} into {head} and pushed; its checks come next"
+    conflicted = unmerged(wt)
+    git_shared(wt, "merge", "--abort")
+    if not conflicted:
+        raise RuntimeError(f"git merge origin/{base} failed: {git_said(r)}")
+    files = ", ".join(conflicted)
+    if e.get("fixed") == base_sha:  # the fix ran for this very base and the conflict is still there
+        return merge_block(t, e, f"the conflict fix did not resolve the conflicts with {base} ({files})")
+    with launch_lock(t["id"]) as mine:
+        if not mine or alive(load_run(t["id"])):
+            return "its run is starting in another task-hub"
+        launch_fix(t, base, head)
+    queue_set(e, step="update", fixed=base_sha)
+    emit(t, "conflict-fix", pr=e["pr"], reason=f"{files} conflict with {base}; {t['agent']} is resolving them")
+    return f"{files} conflict with {base}; started the conflict fix (`task log {t['id']}`)"
+
+
+def push_failed(wt, head):
+    """Push the worktree's HEAD to the PR's branch: "" when it got there, else why not (the commit stays local)."""
+    r = git_shared(wt, "push", "-q", "origin", f"HEAD:{head}")
+    if r.returncode == 0:
+        return ""
+    return f"pushing {head} failed, the merge commit is kept in {home(wt)}: {git_said(r)}"
+
+
+TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]")
+
+
+def git_said(r, limit=300):
+    """What a failed git command said, for a reason: one clean line per message, at most about `limit` characters.
+    Sideband output (`remote: `, a hook's message) comes padded with spaces or ANSI clear-line codes and
+    redrawn with \\r, more so on macOS; only the last drawing of each line is kept. Cut to size by whole lines,
+    the `remote:` ones first, then a ref's `! [rejected]`: they say why, where `To <url>` and `error: failed to
+    push` only say where."""
+    lines = []
+    for line in (r.stderr or r.stdout or "").split("\n"):  # not splitlines(): that splits at \r too
+        drawn = [d.strip() for d in TERMINAL_ESCAPE.sub("", line).split("\r")]
+        if last := next((d for d in reversed(drawn) if d not in ("", "remote:")), ""):
+            lines.append(last[:limit])
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    order = sorted(reversed(range(len(lines))), key=lambda i: 0 if lines[i].startswith("remote:") else
+                   1 if lines[i].startswith("! ") else 2)
+    kept, size = set(), 0
+    for i in order:  # the first one always fits: every line is at most `limit`, and \n only goes between lines
+        need = len(lines[i]) + (1 if kept else 0)
+        if size + need > limit:
+            continue
+        kept.add(i)
+        size += need
+    return "\n".join(lines[i] for i in sorted(kept))
+
+
+def merge_ci(t, e, pr, settings):
+    """Wait for the PR's checks, then merge it when GitHub says it can."""
+    checks = pr_checks(e["pr"], settings["required"])
+    failed = [c for c in checks if c.get("bucket") in ("fail", "cancel")]
+    if failed:
+        return merge_block(t, e, "; ".join(f"check {c.get('name') or '?'} failed: {c.get('link') or e['pr']}"
+                                           for c in failed[:3]))
+    waited, limit = seconds_since(e.get("since") or now()), settings["ci_seconds"]
+    pending = [c.get("name") or "?" for c in checks if c.get("bucket") == "pending"]
+    pushed = git_shared(clone_dir(t["repo"]), "log", "-1", "--format=%ct", pr["headRefOid"]).stdout.strip()
+    if not checks and pushed.isdigit() and time.time() - int(pushed) < CHECKS_GRACE:
+        pending = ["(none reported yet)"]  # just pushed: GitHub may not have started them
+    if pending:
+        if waited >= limit:
+            return merge_block(t, e, f"its checks did not finish in {limit // 60} min: {', '.join(pending)}")
+        if e.get("ci_wait") != pr["headRefOid"]:  # once per commit
+            queue_set(e, ci_wait=pr["headRefOid"])
+            emit(t, "ci-wait", pr=e["pr"], reason=f"waiting for {', '.join(pending)}")
+        return f"waiting for its checks: {', '.join(pending)}"
+    state = pr.get("mergeStateStatus") or ""
+    if pr.get("mergeable") == "CONFLICTING" or state in ("DIRTY", "BEHIND"):  # the base moved on meanwhile
+        queue_set(e, step="update")
+        return f"{pr['baseRefName']} moved on; merging it in at the next check"
+    # [merge] checks = required: the required ones all passed above, so the ones still running or failed are not
+    # required, and GitHub merges an UNSTABLE PR
+    if state in MERGE_READY or (state == "UNSTABLE" and settings["required"]):
+        # only the commit whose checks passed: a push since then waits for its own
+        gh("pr", "merge", e["pr"], "--merge", "--match-head-commit", pr["headRefOid"])
+        queue_drop(t["id"])
+        emit(t, "merged", pr=e["pr"], reason=f"merged into {pr['baseRefName']} by the merge queue")
+        close_merged(t)
+        return f"merged {e['pr']}"
+    if state in MERGE_WAIT and waited < limit:
+        return f"waiting for GitHub to allow the merge ({state or 'UNKNOWN'})"
+    return merge_block(t, e, f"GitHub does not allow the merge ({state or 'UNKNOWN'}: "
+                             f"{MERGE_STATES.get(state, 'see the PR')}): {e['pr']}")
+
+
+def watch_conflict(t, pull, settings):
+    """An In review PR nobody approved yet that conflicts with its base now: told once per commit of the PR, and with
+    [merge] prefix = on fixed (never merged) before the human looks at it. pull: the merge watch's own REST read."""
+    sha = (pull.get("head") or {}).get("sha") or ""
+    if t["status"] != IN_REVIEW or pull.get("mergeable_state") != "dirty" or t["running"] or not sha:
+        return []
+    base, head = (pull.get("base") or {}).get("ref") or "", (pull.get("head") or {}).get("ref") or ""
+    told = lambda name: any(x.get("id") == t["id"] and x.get("sha") == sha for x in events_named(name))
+    lines = []
+    if not told("conflict"):
+        emit(t, "conflict", pr=t["pr"], sha=sha, reason=f"its PR conflicts with {base} now"
+             + ("" if settings["prefix"] else f"; `task merge {t['id']}` queues it, and the queue resolves it"))
+        lines.append(f"merge: task {t['id']}: its PR conflicts with {base} now")
+    if settings["prefix"] and base and head and not told("conflict-fix"):
+        with launch_lock(t["id"]) as mine:
+            if not mine or alive(load_run(t["id"])):
+                return lines
+            launch_fix(t, base, head)
+        emit(t, "conflict-fix", pr=t["pr"], sha=sha, reason=f"{t['agent']} is resolving the conflicts with {base}")
+        lines.append(f"merge: task {t['id']}: started the conflict fix (`task log {t['id']}`)")
+    return lines
+
+
+def launch_fix(t, base, head):
+    """Start `task _fix <number> <base>` in the background: the agent resolves the conflicts of base with the PR's
+    branch in the task's worktree. The card stays where it is; `task list` shows the run's stage."""
+    t["agent"] = t.get("agent") or config()["runner"]["agent"]
+    if not config().has_option("agents", t["agent"]):
+        raise RuntimeError(f'unknown agent "{t["agent"]}" on the card')
+    check_ready(t["agent"])
+    wt = merge_worktree(t, head)
+    LOGS.mkdir(parents=True, exist_ok=True)
+    # `started` stays the last run's: a re-run's prompt gets the comments since then, the review of the PR included
+    t.update(worktree=str(wt), branch=head, log=str(LOGS / f"{t['id']}.log"), pid="", stage="conflict-fix")
+    save_run(t)  # before it starts: the run reads it
+    t["pid"] = str(start_logged([sys.executable, str(BIN), "_fix", t["id"], base],
+                                   wt if sandbox_mode() == "off" else DATA, t["log"]).pid)
+    save_run(t)  # alive() at once (the fix writes the same pid when it begins)
+
+
+def build_fix_prompt(t, base, conflicted):
+    instructions = WORKER_CONFLICT.read_text().split("\n---\n", 1)[-1].strip()
+    return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
+                      f"Branch: {t['branch']} (the PR's branch, already checked out, in the middle of merging {base})",
+                      f"Base branch: {base}", "", "## Goal", "", issue(t)["body"].strip(), "", "# Conflicted files", "",
+                      *(f"- {f}" for f in conflicted), ""])
+
+
+def cmd_fix(a):
+    """One conflict fix (launch_fix): merge the base into the PR's own branch, let the agent resolve the conflicts,
+    make the merge commit (two parents) and push it. One that cannot be finished is undone, and the card is Blocked."""
+    t = {"id": a["id"], **load_run(a["id"])}
+    t["pid"] = str(os.getpid())
+    save_run(t)
+    log = None if os.environ.get("TASK_RUN_LOGGED") else open(t["log"], "a")
+
+    def say(line):
+        print(line, flush=True)
+        if log:
+            log.write(line + "\n")
+            log.flush()
+
+    wt, base = Path(t["worktree"]), f"origin/{a['base']}"
+    shared_unlink(wt / REPORT_FILE)
+    say(f"== task {t['id']}: conflict fix of {t['branch']} with {base} | agent {t['agent']} | {now()}")
+    start = git_out(wt, "rev-parse", "HEAD")
+    try:
+        reason, report, conflicted, keep = fix_conflicts(t, wt, base, say)
+    except RuntimeError as e:
+        reason, report, conflicted, keep = f"the conflict fix failed: {e}", "", [], False
+    if reason and not keep:  # nothing of it reaches the PR
+        say(f"== {reason}")
+        git_shared(wt, "merge", "--abort")
+        git_shared(wt, "reset", "-q", "--hard", start)
+        git_shared(wt, "clean", "-fdq")
+    parsed = AgentReport(report)
+    body = "\n\n".join([f"{MERGE_MARK}\n\n## Merge queue",
+                        f"Blocked: {reason}" if reason else
+                        f"Resolved the conflicts of {t['branch']} with {base}"
+                        + (f" ({', '.join(conflicted)})" if conflicted else "") + " and pushed the merge commit.",
+                        *([f"### Report\n\n{parsed.report}"] if parsed.report else []),
+                        *([f"### Please review\n\n{parsed.review}"] if parsed.review else []),
+                        *([f"PR: {t['pr']}"] if t.get("pr") else [])])
+    try:
+        take_card(t)
+        comment(t, body)
+        if reason:
+            set_status(t, BLOCKED, reason=f"merge queue: {reason}")
+        else:
+            emit(t, "updated", pr=t.get("pr", ""), reason=f"merged {a['base']} into {t['branch']}"
+                 + (f"; {t['agent']} resolved the conflicts in {', '.join(conflicted)}" if conflicted else ""))
+    except RuntimeError as e:  # the push is done; a card left where it was is fixed by the queue's next check
+        say(f"== could not report it: {e}")
+    shared_unlink(wt / REPORT_FILE)
+    set_stage(t, "")
+    say(f"== task {t['id']}: conflict fix {'blocked' if reason else 'pushed'}.")
+
+
+def fix_conflicts(t, wt, base, say):
+    """(why it cannot be merged or "", the agent's report, the conflicted files, whether the merge commit is kept:
+    made but not pushed, so it is never undone)."""
+    r = git_shared(wt, "merge", "--no-ff", "--no-commit", base)
+    conflicted = unmerged(wt)
+    merging = lambda: git_shared(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0
+    if r.returncode != 0 and not conflicted:
+        return f"git merge {base} failed: {git_said(r)}", "", [], False
+    if not merging():  # up to date: nothing to fix
+        say(f"== {t['branch']} already has {base}")
+        return "", "", [], False
+    report = ""
+    if conflicted:
+        say(f"== conflicts: {', '.join(conflicted)}")
+        code = run_agent_process(t["agent"], build_fix_prompt(t, base, conflicted), wt, say, "conflict fixer")
+        say(f"== agent exited with code {code}")
+        report = agent_file(wt / REPORT_FILE) or ""
+        if not report.strip():
+            return f"the conflict fixer exited without a report (exit {code}), see `task log {t['id']}`", "", conflicted, False
+        if AgentReport(report).blocked:
+            return f"the conflict fixer could not resolve them: {AgentReport(report).blocked}", report, conflicted, False
+        if not merging():
+            return "the conflict fixer ended the merge itself (a commit, an abort or a reset); task-hub makes the " \
+                   "merge commit", report, conflicted, False
+        git_shared(wt, "add", "-A", check=True)
+        left = unmerged(wt) + [f for f in conflicted
+                               if CONFLICT_MARKER.search((shared_read(wt / f) or b"").decode(errors="replace"))]
+        if left:
+            return f"conflict markers are left in {', '.join(dict.fromkeys(left))}", report, conflicted, False
+    git_shared(wt, "commit", "-q", "--no-edit", check=True)  # MERGE_HEAD: a commit with both parents
+    failed = push_failed(wt, t["branch"])
+    if failed:
+        return failed, report, conflicted, True
+    say(f"== pushed the merge of {base} into {t['branch']}")
+    return "", report, conflicted, False
+
+
 # ---------- sync: board and runs in, new runs out ----------
 
 def sync(started_here=False):
     """started_here: someone ran `task` or `task start` by hand, so the tasks it starts belong where they are.
     Not for `task watch`: it starts whatever becomes Ready, wherever it happens to run."""
     slots = parallel()  # a bad value stops before anything changes
+    merge = merge_config()
     lines, changed, errors = [], [], []
     open_ = tasks()
+    queued = {e["id"] for e in read_queue()} if merge["queue"] else set()
     # a card that left the open columns (GitHub moves it to Done when its Issue closes, e.g. the PR
     # was merged) no longer needs its worktree or herdr workspace: clean up from local state only
     all_ = None  # every card, Done ones too: read once, and only when a run's card left the open columns
@@ -2686,6 +3539,7 @@ def sync(started_here=False):
             if card and card["status"] == DONE and not any(
                     e.get("id") == t["id"] and e.get("time", "") >= t.get("started", "") for e in events_named(DONE)):
                 move_to_top(card)
+                to_team(t, f"the Status {DONE}", lambda team, n: team.move(n, DONE, share_config(team.repo)))
                 emit(t, DONE, pr=t.get("pr", ""))
             left = cleanup(t)
             if left:
@@ -2708,16 +3562,19 @@ def sync(started_here=False):
                 slow = check_slow(t)
                 if slow:
                     lines.append(f"slow: task {t['id']} {slow} (stop it with Ctrl-C in its tab)")
-            elif StatusLifecycle.needs_merge_watch(t) and pr_merged(t):
-                # GitHub's "Closes ..." works only for PRs into the default branch, and can miss even those
-                gh("issue", "close", t["id"], "--repo", board()["issues"])
-                set_status(t, DONE)
-                cleanup(t)
+            elif StatusLifecycle.needs_merge_watch(t):
+                merged, pull = pr_merged(t)
+                if merged:
+                    close_merged(t)
+                elif merge["queue"] and pull and t["id"] not in queued:
+                    lines += watch_conflict(t, pull, merge)
         except RuntimeError as e:
             errors.append({"id": t["id"], "error": str(e)})
             continue
         if t["status"] != before:
             changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
+    if merge["queue"]:
+        merge_queue(open_, merge, lines, changed, errors)
     if any(c["now"] in (DONE, "cleaned up (card is Done)") for c in changed):
         try:
             lines += archive_lines(archive_overflow())
@@ -2767,6 +3624,217 @@ def sync(started_here=False):
     if started:
         lines += table("started", started, ["id", "agent", "where"])
     return lines, board_
+
+
+# ---------- triggers: cards task-hub makes on its own (docs/triggers.md) ----------
+
+TRIGGER_KEYS = {"ci", "issues", "issue_label", "ready"}  # any other name in [triggers] is a recurring goal
+CI_FAILED = {"failure", "timed_out", "startup_failure"}  # a run's conclusion that needs fixing
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+DEFAULT_BRANCH_MAX_AGE = 24 * 3600  # a repo's default branch, asked once a day
+
+
+def parse_schedule(text):
+    """`daily`, `weekly [mon..sun]` (Monday), or `monthly [1-31]` (the 1st), each with an optional HH:MM (00:00) in the
+    machine's own time zone: (period, day, (hour, minute)). ValueError says what is wrong."""
+    words, clock = text.lower().split(), (0, 0)
+    if words and re.fullmatch(r"\d{1,2}:\d{2}", words[-1]):
+        clock = tuple(map(int, words.pop().split(":")))
+        if clock[0] > 23 or clock[1] > 59:
+            raise ValueError(f"{text!r}: {clock[0]}:{clock[1]:02d} is not a time of day")
+    if words == ["daily"]:
+        return "daily", None, clock
+    if words[:1] == ["weekly"] and len(words) <= 2:
+        name = words[1] if len(words) == 2 else "monday"
+        day = next((i for i, d in enumerate(WEEKDAYS) if name in (d, d[:3])), None)
+        if day is not None:
+            return "weekly", day, clock
+    if words[:1] == ["monthly"] and len(words) <= 2:
+        day = int(words[1]) if len(words) == 2 and words[1].isdigit() else 1 if len(words) == 1 else 0
+        if 1 <= day <= 31:
+            return "monthly", day, clock
+    raise ValueError(f"unknown schedule {text!r}: use daily, weekly [mon..sun], or monthly [1-31], "
+                     "each with an optional HH:MM")
+
+
+def due_period(schedule, when):
+    """The period `when` (a local time) is in, e.g. 2026-10-17, 2026-W42, or 2026-10, once its day and time have
+    come; else None. A day past the month's end (monthly 31) is its last day."""
+    period, day, (hour, minute) = schedule
+    date = when.date()
+    if period == "daily":
+        key, start = date.isoformat(), date
+    elif period == "weekly":
+        year, week, _ = date.isocalendar()
+        key, start = f"{year}-W{week:02d}", date + datetime.timedelta(days=day - date.weekday())
+    else:
+        key, start = date.strftime("%Y-%m"), date.replace(day=min(day, calendar.monthrange(date.year, date.month)[1]))
+    return key if when >= datetime.datetime.combine(start, datetime.time(hour, minute)) else None
+
+
+def parse_recurring(name, value):
+    """A recurring goal, `<schedule> <owner/repo> <goal>`, as a dict."""
+    words = value.split()
+    at = next((i for i, w in enumerate(words) if re.fullmatch(r"[\w.-]+/[\w.-]+", w)), None)
+    if not at or at == len(words) - 1:
+        raise ValueError(f"[triggers] {name} must be `<schedule> <owner/repo> <goal>`, "
+                         f"e.g. `weekly mon jyoka/app Bump the dependencies`; got {value!r}")
+    try:
+        schedule = parse_schedule(" ".join(words[:at]))
+    except ValueError as e:
+        raise ValueError(f"[triggers] {name}: {e}") from None
+    return {"name": name, "schedule": schedule, "repo": words[at], "goal": " ".join(words[at + 1:])}
+
+
+def trigger_config():
+    """[triggers] as a dict, or None when nothing is configured there. ValueError says what is wrong."""
+    if not config().has_section("triggers"):
+        return None
+    s = config()["triggers"]
+    repos = {}
+    for k in ("ci", "issues"):  # a repo named twice, in any case, is asked once: one card per occurrence
+        firsts = {}
+        for r in re.split(r"[\s,]+", s.get(k, "")):
+            if r:
+                firsts.setdefault(r.lower(), r)
+        repos[k] = list(firsts.values())
+    for k, names in repos.items():
+        for r in names:
+            if not re.fullmatch(r"[\w.-]+/[\w.-]+", r):
+                raise ValueError(f"[triggers] {k} takes repos written owner/name; got {r!r}")
+    if repos["issues"] and board_config()[2].lower() in (r.lower() for r in repos["issues"]):
+        raise ValueError(f"[triggers] issues names the board's own Issue repo {board_config()[2]}: "
+                         "its Issues are tasks already")
+    recurring = [parse_recurring(k, v) for k, v in s.items() if k not in TRIGGER_KEYS]
+    ready = {n for n in re.split(r"[\s,]+", s.get("ready", "").lower()) if n}
+    for n in ready - {r["name"] for r in recurring}:
+        raise ValueError(f"[triggers] ready names {n!r}, which is not a recurring goal in [triggers]: only those can "
+                         "go to Ready (ci and issues cards always wait in Backlog for you)")
+    if not (repos["ci"] or repos["issues"] or recurring):
+        return None
+    return {**repos, "label": s.get("issue_label", "").strip(), "recurring": recurring, "ready": ready}
+
+
+def default_branch(repo, state):
+    cached = state.setdefault("default_branch", {}).get(repo)
+    if isinstance(cached, list) and len(cached) == 2 and isinstance(cached[1], (int, float)) \
+            and 0 <= time.time() - cached[1] < DEFAULT_BRANCH_MAX_AGE:
+        return cached[0]
+    name = gh_json("repo", "view", repo, "--json", "defaultBranchRef")["defaultBranchRef"]["name"]
+    state["default_branch"][repo] = [name, time.time()]
+    return name
+
+
+def ci_occurrences(repo, state, open_):
+    """The newly failed runs on repo's default branch, as one card: the latest completed run of each workflow."""
+    title = f"Fix failing CI on {repo}"
+    if any(t["title"] == title for t in open_):  # being fixed already: its run, or a later one, waits for that card
+        return []
+    branch = default_branch(repo, state)
+    latest = {}
+    for r in gh_json("run", "list", "--repo", repo, "--branch", branch, "--limit", "20",
+                     "--json", "databaseId,workflowName,status,conclusion,url,displayTitle") or []:
+        if r.get("status") == "completed":  # newest first
+            latest.setdefault(r.get("workflowName"), r)
+    failed = [r for r in latest.values() if r.get("conclusion") in CI_FAILED
+              and f"ci:{repo}:{r['databaseId']}" not in state["seen"]]
+    if not failed:
+        return []
+    runs = "\n".join(f"- {r.get('workflowName') or 'workflow'}: {r.get('url', '')} ({r.get('conclusion')}, "
+                     f"\"{clip(r.get('displayTitle'), 80)}\")" for r in failed)
+    goal = (f"CI fails on the default branch `{branch}` of {repo}:\n\n{runs}\n\n"
+            f"Find out why (`gh run view <run id> --repo {repo} --log-failed` shows the failing steps) and fix it, "
+            "so these workflows pass again. If the cause is outside this repository (a broken service, a secret "
+            "that expired), change nothing and say so in the report.\n\n"
+            "Made by task-hub's `ci` trigger (docs/triggers.md).")
+    return [{"keys": [f"ci:{repo}:{r['databaseId']}" for r in failed], "trigger": "ci", "title": title,
+             "repo": repo, "goal": goal}]
+
+
+def issue_occurrences(repo, label, state):
+    """repo's open Issues assigned to the user running gh, or with the label, that have no card yet."""
+    found = {}
+    for which in (["--assignee", "@me"], *([["--label", label]] if label else [])):
+        for i in gh_json("issue", "list", "--repo", repo, "--state", "open", *which, "--limit", "100",
+                         "--json", "number,title,url") or []:
+            found[i["number"]] = i
+    result = []
+    for n, i in sorted(found.items()):
+        if f"issue:{repo}#{n}" in state["seen"]:
+            continue
+        goal = (f"Resolve the Issue {i['url']} ({repo}#{n}: {i['title']}).\n\n"
+                f"Read it and its comments with `gh issue view {n} --repo {repo} --comments`, then make the change it "
+                f"asks for in {repo}. It was written on GitHub, not on the task board: if it asks for anything other "
+                "than a change to this repository, or is unclear, change nothing and say what is missing in the "
+                "report.\n\nMade by task-hub's `issues` trigger (docs/triggers.md).")
+        result.append({"keys": [f"issue:{repo}#{n}"], "trigger": "issues", "title": f"{repo}#{n}: {i['title']}",
+                       "repo": repo, "goal": goal})
+    return result
+
+
+def recurring_occurrences(goals, ready, state, when):
+    result = []
+    for g in goals:
+        period = due_period(g["schedule"], when)
+        if not period or f"every:{g['name']}:{period}" in state["seen"]:
+            continue
+        result.append({"keys": [f"every:{g['name']}:{period}"], "trigger": g["name"],
+                       "title": f"{clip(g['goal'], 80)} ({period})", "repo": g["repo"], "ready": g["name"] in ready,
+                       "goal": f"{g['goal']}\n\nMade by task-hub's recurring goal `{g['name']}` for {period} "
+                               "(docs/triggers.md)."})
+    return result
+
+
+def check_triggers(open_):
+    """Make the cards [triggers] asks for, each occurrence once, at most every TRIGGER_SECONDS: lines for the watch.
+
+    open_: the open cards sync() just read. An occurrence is noted in TRIGGERS as soon as its Issue exists, so a
+    failure after that never makes a second card. Nothing in [triggers]: no GitHub call and no file."""
+    try:
+        cfg = trigger_config()
+    except ValueError as e:
+        return [f"error: {e}"]
+    if not cfg:
+        return []
+    state = read_json(TRIGGERS)
+    state["seen"] = state.get("seen") if isinstance(state.get("seen"), dict) else {}
+    last = state.get("checked_at")
+    if isinstance(last, (int, float)) and 0 <= time.time() - last < TRIGGER_SECONDS:
+        return []
+    state["checked_at"] = time.time()  # also after errors: a failing repo is asked again next time, not every minute
+    made, errors, occurrences = [], [], []
+    for kind, repo, find in [*(("ci", r, lambda r=r: ci_occurrences(r, state, open_)) for r in cfg["ci"]),
+                             *(("issues", r, lambda r=r: issue_occurrences(r, cfg["label"], state))
+                               for r in cfg["issues"])]:
+        try:
+            occurrences += find()
+        except (RuntimeError, KeyError, TypeError, ValueError) as e:  # gh failed, or answered in another shape
+            errors.append({"trigger": kind, "error": f"{repo}: {e}"})
+    occurrences += recurring_occurrences(cfg["recurring"], cfg["ready"], state, datetime.datetime.now())
+    try:
+        write_atomic(TRIGGERS, json.dumps(state))
+        for o in occurrences:
+            if any(k in state["seen"] for k in o["keys"]):  # noted by an earlier occurrence in this check
+                continue
+            def noted(url, o=o):  # before the card exists: never a second Issue for this occurrence
+                state["seen"].update({k: {"at": now(), "issue": url} for k in o["keys"]})
+                write_atomic(TRIGGERS, json.dumps(state))
+            t = None
+            try:
+                t, _ = create_task(o["title"], o["repo"], o["goal"], created=noted)
+                if o.get("ready"):
+                    set_status(t, READY)
+            except RuntimeError as e:
+                where = f" (Issue #{t['id']} is on the board in {t['status']})" if t else \
+                    f" (its Issue was made but is not on the board: {state['seen'][o['keys'][0]]['issue']})" \
+                    if o["keys"][0] in state["seen"] else ""
+                errors.append({"trigger": o["trigger"], "error": f"{o['title']}: {e}{where}"})
+                continue
+            made.append({"id": t["id"], "trigger": o["trigger"], "status": t["status"], "title": o["title"]})
+    except OSError as e:  # nowhere to note what was made: making more could make them again at every check
+        return [f"error: triggers: cannot write {home(TRIGGERS)}: {e}"]
+    return (table("triggered", made, ["id", "trigger", "status", "title"]) if made else []) \
+        + (table("trigger_errors", errors, ["trigger", "error"]) if errors else [])
 
 
 # ---------- updates: this clone and the releases on its origin (docs/release.md) ----------
@@ -3217,6 +4285,10 @@ def events_next(a, wanted):
 
 def cmd_watch(_):
     board(), parallel()  # fail fast on a bad config
+    try:
+        trigger_config()
+    except ValueError as e:
+        fail(str(e), f"fix [triggers] in {home(CONFIG)} (see docs/triggers.md)")
     out(f"watch: checking {board()['url']} every {WATCH_SECONDS}s (Ctrl-C to stop)")
     try:  # afterwards, each card that gets Done checks again
         out(*archive_lines(archive_overflow()))
@@ -3226,7 +4298,8 @@ def cmd_watch(_):
         config.cache_clear()  # pick up edits between checks, while each check uses one configuration
         check = UpdateCheck()
         try:
-            lines, _ = sync()
+            lines, board_ = sync()
+            lines += check_triggers(board_)  # after the starts: a Ready card made now starts at the next check
         except RuntimeError as e:  # a GitHub hiccup must not end the watch
             lines = [f"error: {e}"]
         except SystemExit:  # a config edited into a bad state meanwhile: fail() said why; the next check reads it again
@@ -3243,6 +4316,266 @@ def cmd_watch(_):
             time.sleep(WATCH_SECONDS)
         except KeyboardInterrupt:
             return
+
+
+# ---------- intake: cards from the phone (docs/operations.md) ----------
+
+INTAKE_STATE = STATE / "intake.json"  # the last ntfy message handled, so a restart goes on after it
+INTAKE_READ_TIMEOUT = 120  # seconds with nothing read: ntfy sends a keepalive every 45, so the connection is gone
+INTAKE_RETRY = (5, 300)  # seconds before connecting again: the first, doubled after each failure in a row up to the second
+INTAKE_SECRET_MIN = 16  # characters; a short secret can be guessed by anyone who can write to the topic
+INTAKE_TITLE_MAX = 72
+
+
+def intake_config():
+    """[intake] as (server, topic, token, secret, default repo), or fail(): the topic is on [notify] ntfy's server."""
+    target = ntfy_target()
+    i = config()["intake"] if config().has_section("intake") else {}
+    topic, secret, repo = (i.get(k, "").strip() for k in ("topic", "secret", "repo"))
+    if not target:
+        fail(f"task intake needs [notify] ntfy in {home(CONFIG)}: it replies there",
+             "add:  [notify]  ntfy = https://ntfy.sh/<topic for notifications>  (see docs/operations.md)")
+    if not re.fullmatch(r"[\w-]{1,64}", topic) or topic == target[1]:
+        fail(f"[intake] topic must be a topic name other than [notify] ntfy's; got {topic!r}",
+             "add:  [intake]  topic = <another hard-to-guess topic>  (see docs/operations.md)")
+    if len(secret) < INTAKE_SECRET_MIN or re.search(r"\s", secret):
+        fail(f"[intake] secret must be at least {INTAKE_SECRET_MIN} characters without spaces",
+             "make one with:  python3 -c \"import secrets; print(secrets.token_urlsafe(16))\"")
+    if repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        fail(f"[intake] repo must look like owner/name, got {repo!r}")
+    return target[0], topic, target[2], secret, repo
+
+
+def parse_intake(m, secret, default_repo):
+    """An ntfy message as (card, reason): card is {title, repo, goal}, or None with why it is not one.
+    The message is `<secret> [owner/name:] goal`; the ntfy title, if any, is the card's title.
+    reason starts with "ignored" when the secret is missing or wrong: nothing is said back to such a message."""
+    import hmac
+    word, rest = (re.split(r"\s+", (m.get("message") or "").strip(), maxsplit=1) + [""])[:2]
+    if not hmac.compare_digest(word.encode(), secret.encode()):
+        return None, "ignored: no secret" if not word else "ignored: wrong secret"
+    repo, goal = default_repo, rest.strip()
+    if r := re.match(r"([\w.-]+/[\w.-]+):\s*", goal):
+        repo, goal = r[1], goal[r.end():].strip()
+    if not goal:
+        return None, "rejected: the goal is empty"
+    if not repo:
+        return None, "rejected: no repo (start the goal with `owner/name:`, or set [intake] repo)"
+    title = " ".join((m.get("title") or "").split()) or " ".join(goal.splitlines()[0].split())
+    if len(title) > INTAKE_TITLE_MAX:
+        title = title[:INTAKE_TITLE_MAX - 3].rsplit(" ", 1)[0].rstrip(" ,.;:") + "..."
+    sent = datetime.datetime.fromtimestamp(m["time"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") \
+        if isinstance(m.get("time"), int) else now()
+    return {"title": title, "repo": repo,
+            "goal": f"{goal}\n\n---\nFrom the phone (`task intake`, ntfy message {m.get('id', '?')}, {sent})."}, ""
+
+
+def intake_message(m, secret, default_repo):
+    """Handle one ntfy message: a Backlog card and a reply with its link, or a log line saying why not."""
+    if (m.get("message") or "").lstrip().startswith(ACTION_WORD):  # a button of an In review notification
+        return action_message(m)
+    card, reason = parse_intake(m, secret, default_repo)
+    mid = m.get("id", "?")
+    if reason.startswith("ignored"):  # anyone who knows the topic can write to it: say nothing back
+        return [f"intake: {reason} (message {mid}, {len(m.get('message') or '')} chars)"]
+    if not card:
+        post = ntfy_message("task intake: not registered", reason.removeprefix("rejected: "), 4)
+        line = f"intake: {reason} (message {mid})"
+    else:
+        try:
+            t, url = create_task(card["title"], card["repo"], card["goal"], asked=remember_where_asked)
+        except (RuntimeError, SystemExit) as e:  # GitHub failed, or fail() wrote why to the log
+            post = ntfy_message("task intake: not registered", f"GitHub: {e}" if isinstance(e, RuntimeError)
+                                else "see the intake log on the machine", 4)
+            line = f"intake: error: message {mid}: {e}"
+        else:
+            post = ntfy_message(f"#{t['id']} {BACKLOG}: {card['title']}",
+                                f"repo: {card['repo']}\nApprove it on the board or with `task start {t['id']}`\n{url}",
+                                3, url)
+            line = f"intake: #{t['id']} {BACKLOG} in {card['repo']}: {q(card['title'])} {url} (message {mid})"
+    if post:
+        detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
+    return [line]
+
+
+# ---------- the phone's buttons: Merge and Reject on an In review notification (docs/operations.md) ----------
+
+ACTION_KEY = STATE / "action.key"  # the local secret the buttons' tokens are signed with; never leaves this machine
+ACTIONS_USED = STATE / "intake-actions.json"  # {"used": {token: time}}: the tokens already acted on, newest last
+ACTIONS_USED_MAX = 2000
+ACTION_WORD = "task-hub "  # a button's message starts with it; no [intake] secret can (16 characters at least)
+ACTION_MESSAGE = re.compile(r"task-hub (merge|reject) (\d+) ([\w.-]+/[\w.-]+)#(\d+) ([0-9a-f]{40}) ([0-9a-f]{32})")
+PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
+def action_target():
+    """Where the buttons post: [intake] topic on [notify] ntfy's server, as (server, topic, token), or None when
+    `task intake` is not set up (the notification then has no buttons)."""
+    target = ntfy_target()
+    try:
+        i = config()["intake"] if config().has_section("intake") else {}
+        topic, secret = (i.get(k, "").strip() for k in ("topic", "secret"))
+    except configparser.Error:
+        return None
+    if not target or not re.fullmatch(r"[\w-]{1,64}", topic) or topic == target[1] or len(secret) < INTAKE_SECRET_MIN:
+        return None
+    return target[0], topic, target[2]
+
+
+def action_key():
+    """The key the tokens are signed with: made once, readable only by this user. Linked into place, so two
+    processes making it at once both end up with the one that won."""
+    with contextlib.suppress(FileNotFoundError):
+        if key := ACTION_KEY.read_text().strip():
+            return key.encode()
+    ACTION_KEY.parent.mkdir(parents=True, exist_ok=True)
+    temp = ACTION_KEY.parent / f".{ACTION_KEY.name}.{os.getpid()}.tmp"
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32))
+        with contextlib.suppress(FileExistsError):
+            os.link(temp, ACTION_KEY)
+    finally:
+        temp.unlink(missing_ok=True)
+    return ACTION_KEY.read_text().strip().encode()
+
+
+def action_token(action, tid, repo, number, sha):
+    """One button's token: an HMAC of what it does, to which card, PR and head commit. A new push changes the head,
+    so a button from before it no longer matches."""
+    signed = "\n".join(["task-hub action 1", action, str(tid), repo.lower(), str(number), sha.lower()])
+    return hmac.new(action_key(), signed.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def review_actions(tid, pr, sha):
+    """The In review notification's ntfy buttons: Merge (when [merge] queue = on), Reject and View PR; none without
+    `task intake`. Merge and Reject post `task-hub <action> <id> <owner/name>#<n> <sha> <token>` to [intake] topic."""
+    m = PR_URL.fullmatch(pr)
+    if not m or not re.fullmatch(r"[0-9a-f]{40}", sha) or not (target := action_target()):
+        return []
+    server, topic, token = target
+
+    def button(action, label):
+        return {"action": "http", "label": label, "url": f"{server}/{topic}", "method": "POST",
+                "headers": {"Authorization": f"Bearer {token}"} if token else {}, "clear": True,
+                "body": f"task-hub {action} {tid} {m[1]}#{m[2]} {sha} {action_token(action, tid, m[1], m[2], sha)}"}
+    merge = config()["merge"].get("queue", "").strip().lower() == "on"
+    return [*([button("merge", "Merge")] if merge else []), button("reject", "Reject"),
+            {"action": "view", "label": "View PR", "url": pr, "clear": False}]
+
+
+def action_message(m):
+    """Handle one button: check its token, then queue or reject the PR and say so on [notify] ntfy; a log line."""
+    mid = m.get("id", "?")
+    a = ACTION_MESSAGE.fullmatch((m.get("message") or "").strip())
+    if not a:  # anyone who knows the topic can write to it: say nothing back
+        return [f"intake: refused: not a button's message (message {mid}, {len(m.get('message') or '')} chars)"]
+    action, tid, repo, number, sha, token = a.groups()
+    what = f"{action} #{tid} ({repo}#{number} at {sha[:7]}, message {mid})"
+    if not hmac.compare_digest(token, action_token(action, tid, repo, number, sha)):
+        return [f"intake: refused: forged token: {what}"]  # nothing said back, as to a wrong secret
+    url = f"https://github.com/{repo}/pull/{number}"
+
+    def reply(title, body, priority=3):
+        if post := ntfy_message(f"#{tid} {title}", body, priority, url):
+            detach([sys.executable, "-I", "-c", NTFY_POST], {"TASK_HUB_NTFY": json.dumps(post)})
+
+    def refuse(why, kind="refused"):
+        reply(f"{action} refused", f"{why}\n{url}", 4)
+        return [f"intake: {kind}: {why}: {what}"]
+    used = read_json(ACTIONS_USED).get("used")
+    used = used if isinstance(used, dict) else {}
+    if token in used:
+        return refuse(f"this button was already used ({used[token]})")
+    try:
+        if action == "merge" and not merge_config()["queue"]:
+            return refuse("the merge queue is off ([merge] queue = on)")
+        t = next((x for x in tasks() if x["id"] == tid), None)
+        if not t:
+            return refuse("the card is not on the board, or is Done")
+        pr = pr_view(url)
+        if pr.get("state") != "OPEN":
+            return refuse(f"the PR is {(pr.get('state') or 'gone').lower()}")
+        if pr.get("headRefOid") != sha:
+            return refuse("stale: the PR has new commits since this notification; use the newest one")
+        e = queue_entry(t)
+        if not e or e["pr"].lower() != url.lower():
+            return refuse(f"the card's PR is {e['pr'] if e else 'none'}, not this one")
+        queued = next((x for x in read_queue() if x["id"] == tid), None)
+        if action == "merge":
+            if queued:
+                done = None
+                reply(f"already queued: {t['title']}", f"step {queued.get('step') or 'update'}\n{url}")
+            else:
+                e, n = enqueue(t)
+                done = f"queued {e['pr']} at position {n}"
+                reply(f"PR queued: {t['title']}", f"position {n} in the merge queue of {e['repo']}\n{url}")
+        else:
+            if t["status"] not in (IN_REVIEW, WAIT_FOR_MERGE, BLOCKED) or t["running"]:
+                return refuse(f"the card is {t['status']}{' and running' if t['running'] else ''}")
+            gh("pr", "close", url, "--comment", f"Rejected from the phone (task-hub, task {board()['issues']}#{tid}).")
+            if queued:
+                queue_drop(tid)
+            comment(t, f"{MERGE_MARK}\n\n## Rejected\n\nThe PR {url} was rejected from the phone (`task intake`) "
+                       f"and closed.\n\nRun the task again with what to change (it opens a new PR), or "
+                       f"`task done {tid}` to drop it.")
+            set_status(t, BLOCKED, reason="rejected from the phone: the PR was closed")
+            done = f"closed {url}, the card is {BLOCKED}"
+            reply(f"rejected: {t['title']}", f"the PR was closed and the card is {BLOCKED}\n{url}")
+    except ValueError as x:  # enqueue: it cannot be queued
+        return refuse(x.args[0])
+    except (RuntimeError, SystemExit) as x:  # GitHub failed, or fail() wrote why to the log
+        return refuse(f"GitHub: {x}" if isinstance(x, RuntimeError) else "see the intake log on the machine", "error")
+    if done:  # acted on: the same button never acts again
+        used[token] = now()
+        write_atomic(ACTIONS_USED, json.dumps({"used": dict(list(used.items())[-ACTIONS_USED_MAX:])}))
+        return [f"intake: {done}: {what}"]
+    return [f"intake: already queued: {what}"]
+
+
+def intake_stream(server, topic, token, since):
+    """The messages ntfy sends on topic from since (a message id or a Unix time), as they come."""
+    import urllib.request
+    url = f"{server}/{topic}/json?{urlencode({'since': since})}"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=INTAKE_READ_TIMEOUT) as r:
+        for line in r:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("event") == "message":
+                yield m
+
+
+def cmd_intake(_):
+    import http.client
+    server, topic, token, secret, repo = intake_config()
+    board()  # fail fast on a bad config
+    since = (read_json(INTAKE_STATE) or {}).get("since") or str(int(time.time()))  # the first start: from now on
+    out(f"intake: listening on {server}/{topic} for new cards (Ctrl-C to stop)")
+    delay = INTAKE_RETRY[0]
+    while True:
+        try:
+            for m in intake_stream(server, topic, token, since):
+                delay = INTAKE_RETRY[0]
+                since = str(m.get("id") or since)
+                write_atomic(INTAKE_STATE, json.dumps({"since": since}))  # before the card: never two of one message
+                out(*intake_message(m, secret, repo))
+            why = "the server closed the connection"
+        except (OSError, http.client.HTTPException) as e:  # down, no network, a wrong token (HTTPError), a timeout
+            why = f"{type(e).__name__}: {e}"
+        except KeyboardInterrupt:
+            return
+        if os.environ.get("TASK_WATCH_ONCE"):  # tests
+            return out(f"intake: {why}")
+        out(f"intake: {why}; connecting again in {delay}s")
+        try:
+            time.sleep(delay)
+        except KeyboardInterrupt:
+            return
+        delay = min(delay * 2, INTAKE_RETRY[1])
 
 
 def cmd_update(_):
@@ -3561,34 +4894,48 @@ def cmd_new(a):
             blocker_ids[n] = gh_json("issue", "view", n, "--repo", b["issues"], "--json", "id")["id"]
         except RuntimeError:
             fail(f"--blocked-by {n}: no Issue #{n} in {b['issues']}")
-    f = DATA / "new-issue.md"
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(goal.strip() + "\n")
-    labels = []
     if a["research"]:
         gh("label", "create", RESEARCH_LABEL, "--repo", b["issues"], "--force",
            "--description", "task-hub: the deliverable is the agent's report", "--color", "0E8A16")
-        labels = ["--label", RESEARCH_LABEL]
-    url = gh("issue", "create", "--repo", b["issues"], "--title", a["title"], "--body-file", f,
-             *labels).strip().splitlines()[-1]
-    f.unlink(missing_ok=True)
+    t, url = create_task(a["title"], a["repo"], goal, base=a["base"], agent=a["agent"],
+                         labels=[RESEARCH_LABEL] if a["research"] else [], blocker_ids=blocker_ids,
+                         asked=remember_where_asked)
+    out("task:", f"  id: {t['id']}", f"  status: {BACKLOG}", f"  url: {url}",
+        *([f"  blocked_by: {', '.join('#' + n for n in blockers)} (it starts only after they are done)"] if blockers else []),
+        "help[1]:", "  Move the card to Ready, or run `task start`, when you want an agent to pick it up")
+
+
+def create_task(title, repo, goal, base="", agent="", labels=(), blocker_ids=None, asked=None, created=None):
+    """Make the Issue, put it on the Project in Backlog, and fill its fields: `task new` and the triggers.
+
+    asked(t): just after the card exists (where it was asked for); created(url): just after the Issue exists, before
+    anything else can fail, so a trigger notes its occurrence even when the card is not complete."""
+    b = board()
+    f = DATA / f"new-issue-{os.getpid()}.md"  # `task new` and the watch's triggers may make one at the same time
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(goal.strip() + "\n")
+    try:
+        url = gh("issue", "create", "--repo", b["issues"], "--title", title, "--body-file", f,
+                 *(a for label in labels for a in ("--label", label))).strip().splitlines()[-1]
+    finally:
+        f.unlink(missing_ok=True)
+    if created:
+        created(url)
     item = gh_json("project", "item-add", b["number"], "--owner", b["owner"], "--url", url, "--format", "json")
-    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": a["title"], "repo": a["repo"],
-         "status": None}
-    remember_where_asked(t)
+    t = {"id": url.rstrip("/").rsplit("/", 1)[-1], "item": item["id"], "title": title, "repo": repo, "status": None}
+    if asked:
+        asked(t)
     if blocker_ids:
         this = gh_json("issue", "view", t["id"], "--repo", b["issues"], "--json", "id")["id"]
         for blocker in blocker_ids.values():
             graphql(ADD_BLOCKED_BY, issue=this, blocker=blocker)
     set_status(t, BACKLOG)
-    set_text(t, "Target repo", a["repo"])
-    if a["base"]:
-        set_text(t, "Base branch", a["base"])
-    if a["agent"]:
-        set_text(t, "Agent", a["agent"])
-    out("task:", f"  id: {t['id']}", f"  status: {BACKLOG}", f"  url: {url}",
-        *([f"  blocked_by: {', '.join('#' + n for n in blockers)} (it starts only after they are done)"] if blockers else []),
-        "help[1]:", "  Move the card to Ready, or run `task start`, when you want an agent to pick it up")
+    set_text(t, "Target repo", repo)
+    if base:
+        set_text(t, "Base branch", base)
+    if agent:
+        set_text(t, "Agent", agent)
+    return t, url
 
 
 def pick(candidates):
@@ -3650,8 +4997,12 @@ def cmd_done(a):
         fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
              "stop the agent in its herdr workspace first, then retry")
     left = cleanup(t)
-    if issue(t)["state"] != "CLOSED":
+    i = issue(t)
+    t["link"] = i["link"]  # read anyway: closing the team's copy too costs no other read
+    t["link_project"] = i["link_project"]
+    if i["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
+    to_team(t, "the close", lambda team, n: team.close(n))
     set_status(t, DONE)
     try:
         archived = archive_lines(archive_overflow())
@@ -3661,11 +5012,111 @@ def cmd_done(a):
         *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []), *archived)
 
 
+def enqueue(t):
+    """`task merge <id>` and the phone's Merge button: the card's PR joins the merge queue, as (entry, position).
+    Raises ValueError(why, what to do) when it cannot; the caller has made sure it is not queued yet."""
+    if t["status"] not in (IN_REVIEW, WAIT_FOR_MERGE, BLOCKED):
+        raise ValueError(f"task {t['id']} is {t['status']}; only In review, {WAIT_FOR_MERGE} or Blocked tasks with a PR "
+                         "can be queued")
+    if t["running"]:
+        raise ValueError(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
+                         "queue it once it has finished")
+    e = queue_entry(t)
+    if not e:
+        raise ValueError(f"task {t['id']} has no open PR to merge",
+                         "a research task's report has nothing to merge: `task done` it")
+    n = change_queue(lambda q: q.append(e) or position(q, e))
+    column = queue_column()
+    if t["status"] != column:
+        set_status(t, column)
+    emit(t, "queued", pr=e["pr"], reason=f"position {n} in the merge queue of {e['repo']}")
+    return e, n
+
+
+def cmd_merge(a):
+    """Approve a PR for the merge queue (or, with --cancel, take it out); no id: the queue as it is."""
+    if not merge_config()["queue"]:
+        fail("the merge queue is off", f"set  [merge]  queue = on  in {home(CONFIG)} (docs/operations.md)")
+    if a.get("id") is None:
+        q = read_queue()
+        out(*(table("queue", [{**e, "position": position(q[:n + 1], e)} for n, e in enumerate(q)],
+                    ["position", "id", "repo", "step", "pr"]) if q else ["queue: empty"]))
+        return
+    t = get(a["id"])
+    queued = next((e for e in read_queue() if e["id"] == t["id"]), None)
+    if a["cancel"]:
+        if not queued:
+            out(f"merge: #{t['id']} is not queued (no-op)")
+            return
+        queue_drop(t["id"])
+        if t["status"] == WAIT_FOR_MERGE:
+            set_status(t, IN_REVIEW)
+        out("merge:", f"  id: {t['id']}", "  queued: no", f"  status: {t['status']}")
+        return
+    if queued:
+        out(f"merge: #{t['id']} already queued, step {queued.get('step') or 'update'} (no-op)")
+        return
+    try:
+        e, n = enqueue(t)
+    except ValueError as x:
+        fail(*x.args)
+    out("merge:", f"  id: {t['id']}", f"  pr: {e['pr']}", f"  status: {t['status']}", f"  position: {n}",
+        "help[1]:", f"  `task watch` keeps it up to date with its base and merges it once its checks pass; "
+                    f"`task merge {t['id']} --cancel` takes it out")
+
+
+def cmd_share(a):
+    to, project = a["to"] or "", a["project"] or ""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", to):
+        fail(f"--to must be the team's repo as owner/name, got {to!r}", f"usage: {COMMANDS['share'][3]}", 2)
+    if project and not re.fullmatch(r"[\w.-]+/\d+", project):
+        fail(f"--project must look like owner/number, got {project!r}", f"usage: {COMMANDS['share'][3]}", 2)
+    t = get(a["id"])
+    i = issue(t)
+    if i["link"]:  # the same share again changes nothing; one task has one copy
+        out(f"share: #{t['id']} already shared as {i['link']} (no-op)",
+            f"  issue: https://github.com/{i['link'].replace('#', '/issues/')}", *share_pr(t, i["link"]))
+        return
+    try:
+        settings = share_config(to)
+    except RuntimeError as e:
+        fail(str(e), f"fix it in {home(CONFIG)}")
+    team = TeamGitHub(to, project or settings["project"])
+    column = team.prepare(t["status"], settings)
+    try:
+        number, url = team.create_issue(settings["title"] + t["title"], share_body(i["body"]))
+    except RuntimeError as e:
+        fail(f"cannot create an Issue in {to}: {e}",
+             f"check that `gh auth status` shows an account that can open Issues in {to}; nothing was changed")
+    ref = team.ref(number)
+    try:  # first: from now on `task share` finds the copy, whatever fails after it
+        comment(t, f"{LINK_MARK}\nShared to {ref}: {url}\n" +
+                (f"Project: {team.project}\n" if team.project else ""))
+    except RuntimeError as e:
+        fail(f"made {url}, but could not note it on #{t['id']}: {e}",
+             f"close {url} and run this again, or comment `{LINK_MARK} {ref}` on #{t['id']} by hand")
+    try:
+        for body in i["own_comments"]:
+            team.comment(number, body)
+        team.add_card(url)
+        lines = share_pr(t, ref)
+    except RuntimeError as e:
+        fail(f"made and linked {url}, but then: {e}",
+             "add the rest by hand on GitHub (task-hub's reports, the card on the Project); "
+             "`task share` will not make another Issue")
+    out("share:", f"  id: {t['id']}", f"  issue: {url}", f"  comments: {len(i['own_comments'])}",
+        *([f"  project: {team.project}", f"  status: {column or '(none)'}"] if team.card else []), *lines,
+        *([f"help: the team's Project has no column for {t['status']}: set  [share]  status.{t['status']} = <column>"]
+          if team.card and not column else []))
+
+
 COMMANDS = {
     # name: (handler, positional args (optional ones end with ?), flags(name -> takes_value), help)
     "start": (cmd_start, ["id?"], {"agent": True},
               "task start [<id>] [--agent name]  # approve a Backlog task or re-run a Blocked one; no id = pick one"),
     "watch": (cmd_watch, [], {}, f"task watch  # start Ready cards automatically (checks every {WATCH_SECONDS}s)"),
+    "intake": (cmd_intake, [], {}, "task intake  # turn messages on the [intake] ntfy topic into Backlog cards (from "
+               "the phone)"),
     "show": (cmd_show, ["id"], {"full": False, "digest": False},
              "task show <id> [--full | --digest]  # the Issue and its latest report; --digest: only what to decide from"),
     "log": (cmd_log, ["id"], {"full": False}, "task log <id> [--full]  # the run's output on this machine"),
@@ -3676,6 +5127,14 @@ COMMANDS = {
             'task new --title "..." --repo owner/name [--base branch] [--agent name] [--research] [--blocked-by 12,14] '
             '(--goal "..." | --goal-file path)'),
     "done": (cmd_done, ["id"], {}, "task done <id>  # close or cancel by hand (a merged PR closes it automatically)"),
+    "merge": (cmd_merge, ["id?"], {"cancel": False},
+              "task merge [<id>] [--cancel]  # approve the task's PR for the merge queue ([merge] queue = on): `task watch` "
+              "merges its base into it (an agent fixes conflicts), waits for its checks and merges it, one PR per repo at "
+              "a time; --cancel takes it out; no id: the queue"),
+    "share": (cmd_share, ["id"], {"to": True, "project": True},
+              "task share <id> --to owner/name [--project owner/number]  # copy a task to a team's GitHub: an Issue "
+              "with its Goal and task-hub's reports, and a card on the team's Project ([share] in the config); "
+              "its PR then closes both"),
     "list": (cmd_list, [], {"watch": False, "max-age": True},
              "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
              f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "
@@ -3694,6 +5153,7 @@ COMMANDS = {
                  "task feedback [--feature]  # report a bug (or ask for a feature) on task-hub's GitHub: opens the "
                  "form with the version and OS filled in, or prints its URL"),
     "_run": (cmd_run, ["id"], {}, "task _run <id>  # internal: one agent run, started by task-hub"),
+    "_fix": (cmd_fix, ["id", "base"], {}, "task _fix <id> <base>  # internal: one conflict fix, started by the merge queue"),
     "_kiro-copy": (cmd_kiro_copy, ["key"], {"to": True},
                    "task _kiro-copy kiro-hook|kiro-workflow [--to FILE]  # internal, for windows/install.ps1 and "
                    "doctor.ps1: writes Kiro's hook or workflow as Kiro on this OS runs it, or without --to prints the "

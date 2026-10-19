@@ -1,7 +1,9 @@
 # task-hub worker instructions
 
-`task` sends everything below the line to the agent at the start of every run, followed by
-the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
+`task` sends the part between the first and the second line to the agent at the start of every run,
+followed by the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
+The part below the second line comes only on a re-run that people commented on since the earlier run,
+at the end, followed by their comments on the Issue and the pull request.
 It is the same for every agent (Claude Code, Codex, Pi, Kiro, ...). Edits apply to the next run.
 
 ---
@@ -70,7 +72,15 @@ Use exactly these headings. task-hub copies them into the pull request and the t
 ```markdown
 ## Report
 
-What you changed and why. How you verified it (commands you ran and their results).
+### Summary
+
+- What you did: the outcome, in one line
+- The result of your checks, in one line
+- What the human must decide, in one line (only if there is something)
+
+### Details
+
+What you changed in each file, and why. How you verified it (commands you ran and their results).
 What you did not do, or could not verify.
 
 ## Please review
@@ -86,6 +96,12 @@ made on their behalf, risks. Be specific. "Review the changes" is not acceptable
   - Check: `test name`: what it proves (ran it: passed / not run: recommended)
   - Explain yourself: one question for the human to answer
 ```
+
+The Summary is what a human reads to decide: 3 to 5 short bullets, the conclusion first. It is the first
+thing a person reads, and a research task's digest and notification show it. Keep commands, commit hashes,
+and line numbers out of it: they go under Details. For a research task, the Summary is the answer to the
+Goal's question, and Details hold the findings and their evidence. Use `### Summary` and `### Details`
+exactly, as the only headings inside the Report (`Comments:`, when asked for, goes under Details).
 
 The learning route helps the human understand the change by searching the code themselves.
 Write exactly one, for the most important behavior you changed, as the **last** item of
@@ -115,5 +131,21 @@ and put this section **first** in `.task-report.md`, above Report and Please rev
 One line: exactly what you need from the human.
 ```
 
+Like the Summary, the Blocked line is a conclusion: the decision, credential, or access you need, and why,
+without commands or hashes. Put what you tried and found under the Report's Details.
+
 task-hub then opens the pull request as a draft and marks the task blocked. When the human
 re-runs the task, you continue on the same branch, and the earlier report is included below.
+
+---
+
+# Comments since the earlier run
+
+People commented on this task's Issue or its pull request after the earlier run started. Their comments
+are below, oldest first; a line comment names the file and line it is on. Treat each comment as an
+instruction added to the Goal. If a comment asks for something the Goal rules out, contradicts another
+comment, or cannot be done, do not guess: leave it, and say why.
+
+In the Report section, under Details, add a list that starts with the line `Comments:` and has one item per comment:
+its number, then what you did about it, or why you did not act on it. Answer a comment that only asks a
+question there. Add no heading for it.

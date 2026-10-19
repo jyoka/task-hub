@@ -199,7 +199,7 @@
     winget の GitHub CLI を消すのに UAC が要った)。入れたものは記録し、アンインストールはそれだけを消します。
     Windows の実機を毎回借りなくてよいように、CI が標準のユーザーでもインストーラを通し、版を出す前に本物のボードで
     1 枚を PR まで進めます([windows-easy-setup.md](architecture/designs/windows-easy-setup.md))。
-22. **Linux では、エージェントを専用の Linux ユーザーで動かせます(`[sandbox] mode = user`)。既定は off です。**
+28. **Linux では、エージェントを専用の Linux ユーザーで動かせます(`[sandbox] mode = user`)。既定は off です。**
     誰も見ていない実行でも、エージェントはあなたの権限で HOME 全体(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、
     デスクトップ)に届いていました。`mode = user` では、エージェント(実装、reviewer、replanner)を権限の低いユーザー
     `task-agent` で動かします(`sudo -n -u task-agent -H -D <worktree>`)。あなたの HOME には、Unix の権限で届きません。
@@ -255,7 +255,7 @@
     ユーザーで worktree に git を動かします。`user` の間はエージェントの worktree で使わないよう sandbox.md に
     書き、直すのは別のタスクにしました。
     詳しくは [sandbox.md](sandbox.md)。
-23. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
+29. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
     Custom Rules(ひとりでしてよい、承認が要る、禁止)と同じ 3 段階を、`can:` / `ask:` / `never:` の行で書きます。
     カードのラベルにしなかったのは、規則には中身(どのコマンドか、どのドメインか)があり、ラベルでは書けないからです。
     task-hub は開始のたびに worktree の `.claude/settings.local.json` に allow / ask / deny として書き、コミットから
@@ -265,6 +265,74 @@
     届き、指示書([worker/PROMPT.md](../worker/PROMPT.md))が従うよう求めます。Codex の `-c` や Kiro の
     `--trust-tools` への変換は、それぞれの形式を実物で確かめてから足します。
 
+22. **スマートフォンからの登録(`task intake`)は、LLM を使わず、合言葉で受け付け、Backlog にだけ置きます。** 外出先から
+    「Y で X をして」と送れるように、ntfy のトピックを購読して文をカードにします。通知(決定事項 19 のあとの ntfy)と
+    同じサーバーとトークンを使い、返事もそこに出します。文の形は `<合言葉> [owner/name:] ゴール` だけです。タイトルは
+    ゴールの 1 行目(ntfy の見出しがあればそれ)で、整えるのにエージェントは使いません: 登録のたびに費用がかからず、
+    外から書ける入口でエージェントに文を読ませない(指示を混ぜられても何も実行できない)ためです。公開の ntfy.sh の
+    トピックは名前を知っていれば誰でも読み書きできるので、先頭が `[intake] secret` でない文は記録して捨て、返事も
+    しません(合言葉があるかを外から確かめられないように)。合言葉が合っても Ready には動かさず、始めるのはいつも
+    人です(決定事項 2)。同じ文から 2 枚作らないよう、カードを作る前に文の id を `state/intake.json` に書き、
+    GitHub の失敗でもその文はもう試しません([operations.md](operations.md#スマートフォンからカードを作るtask-intake))。
+23. **正本は個人の Project のままで、チームへは人が選んだタスクを一方向に写します(`task share`)。** チームの Project を
+    task-hub のボードにすると、チームに task-hub の欄と列が要り、ボードごとに毎分の読み取りが増えます。正本を手元に移すと、
+    今の入口(スマホで Ready に移す)と同期の仕組みを作り直すことになります。そこで、チームの GitHub には人が選んだタスクの
+    写し(Issue とカード)だけを作り、つなぎ先を個人の Issue のコメントに残します(別のマシンでも読め、実行の中は `launch`
+    が読んだものを使うので呼び出しが増えません)。PR の `Closes` を 2 つにして、マージで両方を閉じます。写すのは task-hub が
+    書いたもの(Goal、Report、仕分け)だけで、人のコメントはどちらにも写しません。チームの Issue の本文は task-hub が
+    上書きするので、先頭に「意見はコメントへ」と書きます。つないだあとは、task-hub が Status を変えたとき、実行を始めるとき、
+    コメントを書いたとき、閉じたときに写し、写しの失敗では個人のカードも実行も止めません。共有先は「つなぎ手」の部品にして、GitHub 以外の道具に移っても
+    `task share` を変えずに済むようにしました([team-sync.md](architecture/designs/team-sync.md))。
+24. **再実行では、前回の実行より後の人のコメントもエージェントに渡します。** それまでエージェントが見るのは Goal と
+    リポジトリ(と前回のレポート)だけで、人の答えは Goal に書き足すことにしていました。けれども PR を読んだ人は、
+    行へのコメントやレビューで直してほしいところを書きます。それを Goal に書き写させるのは手間で、どの行の話かも
+    失われます。そこで再実行のとき、Issue のコメントと、タスクの PR の会話のコメント、レビューの本文、行へのコメント
+    (ファイルと行を添えて)をプロンプトに入れます。「前回」は手元の記録の前回の開始(なければ最後のレポートのコメント)で、
+    その実行が始まってから書かれたもの(実行中に書かれたものを含む)を渡します。前の実行に渡したものをまた渡すのは、
+    開始からコメントを読むまでの数秒に書かれたものだけです。task-hub のコメントは人と同じアカウントで書かれるので、書いた人ではなく `<!-- task-hub` の目印で除き、
+    bot は GitHub のユーザーの種類で除きます。エージェントはコメントを Goal への追加の指示として扱い、レポートでコメント
+    ごとに対応を答え、reviewer はそれを受け入れ条件と同じように確かめます。そのための指示は worker/PROMPT.md と
+    worker/REVIEW.md の最後の部分にあり、コメントがあるときだけ送ります。コメントがなければプロンプトは今までと同じです。
+    コメントは写さず、Goal も書き換えません(Goal は人が書いたままの正本です)。読むのは REST で、再実行 1 回につき
+    最大 4 回です(毎分の同期では呼びません)。読めなければ開始の失敗として Blocked にします。黙って渡さずに始めると、
+    人の指示が抜けたまま進むからです([task-format.md](task-format.md#人のコメント))。
+25. **task-hub が自分で作るカードは、Backlog に入れます。** `[triggers]`([triggers.md](triggers.md))を書くと、
+    `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標に気づいてカードを作ります。カードを Ready に移すことが
+    承認(決定事項 2)なのは変わりません。Ready に入れられるのは、人が設定に目標の文まで書いた繰り返しの目標で、
+    `ready` に名前を書いたものだけです。Issue の文章はボードの外で誰かが書いたものなので、いつも人が読んでから
+    Ready に移します。同じことに 2 枚作らないよう、Issue ができた直後に `triggers.json` に記録します。Project に足す前に
+    失敗すると、Issue だけが残ることがあります(2 枚目を作るよりよい)。確かめるのは `task watch` だけで、5 分に 1 回までです
+    (1 つの Project を見張る 1 台のマシン、GitHub の費用は 1 時間に数十)。
+26. **承認した PR は、マージキューが 1 つずつ新しくしてマージします(`[merge] queue`、既定はオフ)。** 6 つほどの
+    タスクを並べて動かすと、1 つがマージされるたびに残りの PR が古くなり、main と競合しました。そのたびに「競合を解く」
+    タスクを手で登録し(PR のブランチから、origin/main を 2 つの親を持つ本当のマージコミットで取り込み、PR のブランチに
+    戻す)、2 回マージしていました。reviewer は PR を作る前に 1 回動くだけで、あとから見直しません。そこで、人が承認した
+    PR(`task merge <番号>`、または wait for merge の列に動かす)をキューに入れ、`task watch` がリポジトリごとに先頭の 1 つだけを
+    進めます。1 つずつなのは、マージのたびに次の PR が取り込む base が変わるからです。手順は、base を PR のブランチに
+    マージして push する → 競合したら同じ手順(本当のマージコミット、両方の機能を残す、ぶつかった設計の決定事項の番号を
+    付け直す)をエージェントに頼む(`task _fix`。エージェントはファイルを直すだけで、マージコミットと push は task-hub が
+    行う。決定事項 3)→ PR のチェックを待つ → `gh pr view` の `mergeStateStatus` が CLEAN なら、チェックが通ったコミットに
+    限って(`--match-head-commit`)`gh pr merge --merge` します。解けない競合、残った競合の印、落ちたチェック、時間内に
+    終わらないチェックは、理由(チェックならそのリンク)を付けてカードを Blocked にし、マージしません。キューに入るのは
+    人が承認したものだけで、自動で入れるのは後の段階(Merge pipeline の 2/4 以降)です。チェックは既定で PR のすべてを
+    待ちます(`[merge] checks = required` で必須のものだけ。このときは必須でないチェックが動いている、落ちている
+    `UNSTABLE` でも、必須のものが通ればマージします)。ブランチの保護がないリポジトリでは「必須」が 1 つもなく、
+    落ちた CI のままマージしてしまうからです。キューに入れていない In review の PR が競合したことは、毎分すでに読んでいる
+    マージの確認(REST)の `mergeable_state` から分かるので、呼び出しを増やさずに `conflict` で 1 回知らせます(PR の
+    コミットごとに 1 回)。`[merge] prefix = on` なら承認の前に解いておきますが、マージはしません
+    ([operations.md](operations.md#マージキュー))。
+27. **スマートフォンからの承認は、In review の通知のボタンで、PR とコミットごとの使い捨てのトークンで受け付けます。**
+    マシンが 1 日中開発を続けても、マージを決めるのは人のままにしたいからです。それまでは /chief の会話か GitHub の画面が
+    要りました。ntfy の通知に Merge(マージキューに入れる)、Reject、View PR のボタンを付け、Merge と Reject は
+    `[intake] topic` に文を送り、`task intake` が受けます(決定事項 22 の入口を使い、常駐を増やさない)。トピックは
+    誰でも書けるので、ボタンには合言葉を入れず、する事、カード、リポジトリ、PR、PR の先頭のコミットの HMAC を付けます。
+    鍵はこのマシンだけにある `state/action.key` で、通知のトピックを読める人にも作れません。受けたら `gh pr view` で
+    今の先頭のコミットと比べ、違えば断ります: 新しい push のあとに、見ていないコミットを古い承認でマージしないためです。
+    実行したトークンは `state/intake-actions.json` に記録して 2 度は使わせません(`task merge --cancel` のあとに同じ
+    ボタンでまた入れられないように)。合わないトークンは記録だけして返事をしません(決定事項 22 と同じ)。Reject は PR を
+    閉じてカードを Blocked にします。Done にしないのは、PR が要らないことと、タスクが要らないことは別だからです。直して
+    再実行するか、`task done` でやめるかは人が選びます
+    ([operations.md](operations.md#スマートフォンから-pr-を承認するボタン))。
 ### 提案: 1 タスクあたりの時間とトークンの上限(未実装)
 
 決定事項 18 と 19 のとおり、上限は `task stats` の実績を見てから決めます。2026-10-17 の時点で、このリポジトリを
@@ -296,14 +364,20 @@ stateDiagram-v2
     state "In progress" as InProgress
     state "In review" as InReview
     state "wait for merge" as WaitForMerge
-    [*] --> Backlog: task new
-    Backlog --> Ready: task start
+    [*] --> Backlog: task new, trigger
+    Backlog --> Ready: task start, ready trigger
     Blocked --> Ready: task start
     Ready --> Ready: task start --agent
     Ready --> InProgress: launch
     Ready --> Blocked: launch failed
     InProgress --> Blocked: setup failed, finish, run stopped
     InProgress --> InReview: finish
+    InReview --> WaitForMerge: task merge
+    Blocked --> WaitForMerge: task merge
+    Blocked --> InReview: task merge
+    WaitForMerge --> InReview: task merge --cancel
+    InReview --> Blocked: merge queue
+    WaitForMerge --> Blocked: merge queue
     InReview --> Done: PR merged, task done
     WaitForMerge --> Done: PR merged, task done
     Backlog --> Done: task done
@@ -328,6 +402,7 @@ In progress の中には段階があります(0.6)。ステートチャートの
 | `retry` | 差し戻しを受けた実装エージェント(1 回まで) | `review_loop` |
 | `finishing` | commit、push、PR、Issue へのコメント、カードを動かす | `cmd_run` |
 | `replanning` | エージェント自身の Blocked を replanner が仕分ける(カードはもう Blocked) | `run_replan` |
+| `conflict-fix` | マージキュー(または `[merge] prefix`)の競合の解消。カードは In review か wait for merge のまま(`task _fix`) | `launch_fix` |
 
 ```mermaid
 stateDiagram-v2
@@ -368,15 +443,17 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
 - マシンがスリープすると実行は一時停止し、Ready のカードは Mac が起きて `task watch`(または `task`)が動くまで始まりません。
 - 組み込みのエージェントコマンド (Codex を除く) は承認のプロンプトをスキップします。[agents.md](agents.md#安全性) を参照してください。
   Linux では `[sandbox] mode = user` で、エージェントを専用のユーザーで動かし、HOME に届かないようにできます
-  (決定事項 22)。Mac と Windows にはまだありません。
+  (決定事項 28)。Mac と Windows にはまだありません。
 - ネットワークが必要なテストコマンドは、Codex のデフォルトのサンドボックスでは失敗することがあります。そのコマンドを調整してください。
 - Blocked by は、最初の実行より前に付けたときだけ効きます。一度実行したタスクの再実行は、同じブランチの続きから
   なので、あとから付けた前提の変更は入りません。PR を閉じてリモートの `task/<番号>` を消しても、Base branch が
   同じなら手元の worktree が再利用されます。前提を取り込んで最初からやり直す仕事は、新しいタスクとして登録してください。
 - 前後関係のない並行のタスクが同じファイルを変えると、先にマージされた PR とあとの PR が競合することがあります。
-  task-hub はまだ検知しません(GitHub の PR の画面で分かります)。
+  `[merge] queue = on` のときは、In review の PR が競合したことを `conflict` の出来事で知らせ、承認した PR は
+  マージキューが競合を解いてからマージします(決定事項 26)。既定(オフ)では検知しません(GitHub の PR の画面で分かります)。
 - 実行中の情報はマシンごとです。あるマシンで In progress のカードを別のマシンの `task` が見ると、
   「このマシンでは動いていない」として Blocked にします。1 つの Project は 1 台のマシンで使ってください。
+  トリガー([triggers.md](triggers.md))の記録もマシンごとなので、2 台の `task watch` は同じことにカードを 2 枚作ります。
 
 ### 未対応の指摘 (2026-09-23 のレビュー)
 
