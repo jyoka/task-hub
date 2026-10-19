@@ -22,7 +22,7 @@ Issue は「直す」「作る」ものだけに絞っています。空の Issu
    分けます。同じ clone でブランチを切り替えると、動いているボードのコードまで変わるためです
    ([docs/setup.md](docs/setup.md#インストール))
 2. `main` からブランチを切る。名前は `fix/...`、`feat/...`、`docs/...` のように、何の変更かが分かるものにします
-3. 変更し、テストを足し、下の「テスト」を通す
+3. 変更し、テストを足す。手元では関係する短いテストを通し、全部は PR の GitHub Actions で通す
 4. push して、`main` に向けた PR を出す。本文には次を書きます
    - 何を、なぜ変えたか(関係する Issue があれば `Closes #番号`)
    - どう確かめたか(動かしたコマンドと結果)
@@ -54,7 +54,7 @@ slack-triage/          Slackトリアージ: スレッドをコピーして ⌃�
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
-tests/test_task.py     テスト: python3 tests/run.py(並べて動かす。1 件ずつなら python3 -m unittest discover -s tests -v)
+tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 tests/bench.py         弱い PC 向けの計測(テストではない。頼まれたときとリリースの前に動かす。docs/benchmark.md)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
@@ -67,10 +67,25 @@ docs/                  セットアップ、エージェント、設計、形式
 
 ## テスト
 
-`bin/task` は Python 3.10 以上の標準ライブラリだけで書いています。テストも同じで、インストールは要りません。
+全部のテストは GitHub Actions の `macos` で動かします。使うのは GitHub の Mac です。
+手元の Mac では、変えたところに関係する短いテストだけを動かします。
+PR(外の fork も含む)、main への push、Actions からの手動実行で動きます。
+同じ PR やブランチで新しい実行が始まると、古い実行は取り消します。
+
+- Python の全部のテスト(CLI、インストーラ、Rust TUI の PTY テストも含む)
+- Rust のビルドとテスト(Cargo のキャッシュを使う)
+- Kiro の拡張の `npm test`
+- Python の Ruff と差分の空白の確認
+
+結果は PR の `macos / test` で確認します。ログは各実行の `macos-test-evidence` に 14 日残ります。
+Windows の専用テストは、これまでどおり `windows` で動きます。
+Claude Code の mod の `claude plugin test claude/task-board` は、Claude CLI のある環境で必要なときに確かめます。
+
+`bin/task` は Python 3.10 以上の標準ライブラリだけで書いています。Python のテストにも追加のインストールは要りません。
+手元で一部を確かめる例です。
 
 ```
-python3 tests/run.py
+python3 tests/run.py test_intake
 ```
 
 テストを 1 件ずつ別のプロセスで、2 つずつ並べて動かします(約 8 分)。並べる数は `-j 4` のように指定できます。
@@ -82,7 +97,8 @@ python3 tests/run.py
 - 名前を渡すと、その文字を含むテストだけを動かします(例: `python3 tests/run.py test_task`)。このときは待ちません
 
 1 件ずつ順に動かすときは `python3 -m unittest discover -s tests -v` です(全体で 13 分ほど)。
-作業中は変えた部分のテストだけを動かし、全部のテストは最後に 1 回だけ動かします。
+手元で全部を動かす `python3 tests/run.py` は、人から頼まれたときだけ使います。
+PR を出す前に、手元の全部のテストを繰り返す必要はありません。
 
 ```
 python3 -m unittest tests.test_task.TaskTest -k feedback -v
@@ -96,7 +112,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
-| `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit と一時的な HOME で動かす。cargo がない、または Windows では skip |
+| `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
 | `kiro/board-extension` の `npm test` | Kiro IDE の拡張。Node.js 22.18 以上か 23.6 以上([docs/kiro-ide.md](docs/kiro-ide.md)) |
 
 - バグを直すときは、まず使う人から見た動きで再現するテストを書き、失敗するのを見てから直します

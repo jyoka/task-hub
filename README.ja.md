@@ -41,9 +41,9 @@ flowchart LR
 
 - **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
 - **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
-- **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書いて Ready に戻すと、同じ PR で続きます
+- **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します(LLM は使いません)
+- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません)
 - **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
 - **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
@@ -88,6 +88,8 @@ GitHub Project の準備(列と欄)、スキルのインストール、常駐の
 | **ターミナルだけ** | `task new` で登録、`task start <番号>` で開始、`task list` で様子を見ます |
 
 Ready のカードを自動で始めるには、`task watch` を動かしておきます(1 分ごとに確認)。
+設定に `[triggers]` を書くと、`task watch` は CI の失敗、あなたに割り当てられた Issue、繰り返しの目標のカードを
+自分で作ります。カードは Backlog に入り、承認するのはあなたです([docs/triggers.md](docs/triggers.md))。
 
 例: 「ログインを直す」を頼んで、マージするまで。
 
@@ -110,7 +112,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | **Ready** | 承認済み。枠(最大 5)が空けば始まる。待ち先があれば、終わるまで待つ | なし |
 | **In progress** | worker が作業中。自動レビューと差し戻しもこの間 | なし |
 | **In review** | PR ができた(調べものはレポートだけ) | PR をレビューしてマージ |
-| **Blocked** | エージェントが何かを必要としている、自動レビューが通らなかった、または実行が失敗した | 答えを Goal に書き足して Ready へ |
+| **Blocked** | エージェントが何かを必要としている、自動レビューが通らなかった、または実行が失敗した | 答えを Goal に書き足すか、Issue や PR にコメントして Ready へ |
 | **Done** | PR がマージされた。後片付けが済み、これを待っていたタスクが始まる | なし |
 
 列の上にあるのは、最後に動いたカードです。カードが 100 枚を超えると、古い Done のカードをアーカイブします。
@@ -124,12 +126,15 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task new --title ... --repo owner/name --goal ...` | タスクを登録する(`--base`、`--agent`、`--research`、`--blocked-by 12,14`) |
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
+| `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
 | `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
 | `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
+| `task merge [<番号>] [--cancel]` | PR をマージキューに入れる(`[merge] queue = on`。既定はオフ)。`task watch` が base に追いつかせ、競合はエージェントが解き、チェックが通ったらリポジトリごとに 1 つずつマージする([operations.md](docs/operations.md#マージキュー)) |
 | `task done <番号>` | 手で閉じる・取り消す |
+| `task share <番号> --to owner/name [--project owner/番号]` | 選んだタスクをチームの Issue と Project に出す。その後の Status と Report も写す |
 | `task update` | 最新のリリースに更新する |
 | `task feedback [--feature]` | バグ報告・機能の要望のフォームを開く |
 
@@ -145,6 +150,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+| | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
 | | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
 
 ## バグ報告と要望

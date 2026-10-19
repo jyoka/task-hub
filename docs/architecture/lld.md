@@ -10,21 +10,33 @@
 
 ```mermaid
 flowchart TB
-    commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
+    commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_merge、cmd_share、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
+    mergeq["merge queue<br/>merge_config、read_queue、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged"]
+    sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
     config["config<br/>config、board_config、parallel、agent_command、check_ready、sandbox_mode、check_sandbox"]
     output["output(TOON)<br/>out、table、fail、q"]
     updates["updates<br/>UpdateCheck、cmd_update"]
+    triggers["triggers<br/>check_triggers、trigger_config、parse_schedule、due_period、*_occurrences"]
 
     commands --> sync
     commands --> runone
     commands --> boardl
     commands --> updates
+    commands --> triggers
+    triggers --> boardl
+    commands --> sharing
+    commands --> mergeq
+    sync --> mergeq
+    mergeq --> start
+    mergeq --> boardl
+    mergeq --> runstate
+    sharing --> boardl
     sync --> start
     sync --> boardl
     sync --> runstate
@@ -89,6 +101,8 @@ classDiagram
 | `updated`、`closed` | GitHub | カードを最後に変えた時刻、Issue が閉じているか |
 | `blockers`、`waits_for` | GitHub + 計算 | Blocked by のリンク、まだ始められない理由 |
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
+| `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
+| `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
 | `running` | 計算(`alive`) | 実行のプロセスが生きているか |
 
 ## 2. プロセス
@@ -131,17 +145,21 @@ flowchart LR
 | コマンド | 主な関数 | GitHub | 手元に書くもの |
 |---|---|---|---|
 | `task` | `sync(started_here=True)`、`cmd_home` | ボードを読む、開始、片付け | runs、events、asked |
-| `task watch` | `archive_overflow`、ループで `sync` | 同上 + 開始時のアーカイブの確認 | 同上 |
+| `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.7 節) | 同上 + triggers |
 | `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
-| `task new` | `cmd_new` | Issue、カード、欄、Blocked by | events、asked |
-| `task done <id>` | `cleanup`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ | runs を消す、events |
+| `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
+| `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
+| `task merge [<id>] [--cancel]` | `merge_config`、`get`、`enqueue`(`queue_entry`。PR がなければ `find_pr`)、`change_queue`、`set_status(wait for merge)`(列があるとき。Blocked からは列がなければ In review) | 読む、Status | merge-queue、events |
+| `task done <id>` | `cleanup`、`issue`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ。つないだタスクはチームの Issue も閉じ、カードを Done に | runs を消す、events |
+| `task share <id> --to` | `get`、`issue`、`share_config`、`TeamGitHub`、`share_pr` | 読む、チームの Project を読む、チームの Issue とコメントとカード、個人の Issue につなぎ先のコメント、開いている PR の本文 | なし(つなぎ先は GitHub のコメント) |
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
 | `task events`、`task stats` | `events_named`、`cmd_stats` | なし | なし |
 | `task update` | `cmd_update`、`restart_watch`、`copy_kiro`。かんたんセットアップで入れた clone は `update_by_installer`(新しい版のインストーラを動かす) | なし(origin のタグを読む) | LIB を新しい版に、Kiro のフックとワークフローのコピー |
 | `task feedback` | `cmd_feedback`、`open_in_browser` | なし(ブラウザで Issue の画面を開くだけ) | なし |
 | `task _run <id>` | `cmd_run` | 3.3 の図 | runs、logs、metrics、events |
+| `task _fix <id> <base>` | `cmd_fix`、`fix_conflicts`、`build_fix_prompt`(`launch_fix` が起動) | `issue`(Goal)、git push、Issue にコメント、Blocked のときだけ Status | runs、logs、events |
 
 新しいコマンドは `COMMANDS` の表に `名前: (関数, 位置引数, フラグ, 使い方)` を 1 行足し、`cmd_<名前>(a)` を書きます。
 引数の解析、`--help`、エラーの形(`error:` と `help:` を stdout)は `main` が共通で行います。
@@ -175,6 +193,9 @@ sequenceDiagram
             S->>GH: Issue を閉じる、Done
         end
     end
+    opt [merge] queue = on
+        S->>S: merge_queue(4.8)
+    end
     opt 何かが Done になった
         S->>GH: archive_overflow
     end
@@ -196,7 +217,8 @@ sequenceDiagram
     L->>L: copy_env_files([env])
     L->>GH: issue(本文、ラベル、前回のレポート)
     L->>L: write_rules(Goal の Rules → .claude/settings.local.json)
-    L->>L: build_prompt → prompts/<id>.md
+    L->>GH: human_comments(再実行のときだけ。REST)
+    L->>L: build_prompt → prompts/<id>.md、prompts/<id>-comments.md
     L->>H: task_workspace(タブを開く)
     L->>L: save_run(記録を先に)
     L->>GH: set_status(In progress)
@@ -259,13 +281,133 @@ sequenceDiagram
     P->>P: 手元の情報(stage、waits_for、running)を毎回計算
 ```
 
+### 4.5 チームに出す(`task share`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as cmd_share
+    participant GH as 個人のボード
+    participant C as TeamGitHub
+    participant T as チームの GitHub
+    S->>GH: get、issue(つなぎ先のコメントがあれば、それを出して終わり)
+    S->>C: prepare(Status と欄を決める)
+    C->>T: PROJECT_QUERY(列、欄、値がなければ何も作らずに fail)
+    S->>C: create_issue(接頭辞 + タイトル、注意 + Goal)
+    C->>T: gh issue create --assignee @me(書けなければ fail。何も変えていない)
+    S->>GH: つなぎ先のコメント(<!-- task-hub link -->)
+    loop task-hub のコメント(Report、replan)
+        S->>C: comment
+        C->>T: gh issue comment
+    end
+    S->>C: add_card
+    C->>T: gh project item-add、item-edit(Status、既定の欄)
+    S->>GH: share_pr: 開いている PR に Closes を足す(実行中なら案内だけ)
+```
+
+- Status は `<repo>.status.<列>`、`status.<列>`、チームの同じ名前の列、`SHARE_STATUS` の順で決めます
+- つなぎ先のコメントは Issue を作った直後に書きます。そのあとの失敗でも、もう一度の `task share` は Issue を作りません
+- つなぎ先は `viewerDidAuthor` が true のコメントだけから読みます。公開のコメントから別の Issue への書き込みを許しません
+- 実行の中では GitHub を読み直しません。`launch` が `issue()` で読んだつなぎ先を `runs/<id>.json` の `link` に入れ、
+  `finish` の `AgentReport.pr_body` がそれで `Closes` を足します。実行中に共有したタスクは、その実行の PR に足りないので、
+  終わってからもう一度 `task share` を呼ぶと `add_closes` が足します
+- つなぎ手(`TeamGitHub`)は共有先の種類ごとの部品で、`prepare`、`create_issue`、`comment`、`add_card`、`edit`、`move`、
+  `close` を持ちます。Jira などは同じ形のつなぎ手を足します([designs/team-sync.md](designs/team-sync.md))
+
+### 4.6 つないだタスクのその後(`to_team`)
+
+つないだあとの変化は、`to_team(t, 何を, 変更)` がチームに写します。`t["link"]` が空なら何もしません。つなぎ先を知るために
+GitHub を読むことはありません(実行の中は `launch` が読んで `runs/<id>.json` に入れた `link`、`task done` は自分で読む
+`issue()` の `link`)。失敗は止めずに stderr に `warning: task <id>: could not copy <何を> to <org/app#12>: ...` を 1 行出します
+(8 章)。
+
+| いつ | 呼ぶところ | チームへ |
+|---|---|---|
+| 実行を始めるとき | `launch`(`issue()` を読んだ直後) | `edit`: タイトル(`[share]` の接頭辞 + 個人のタイトル)と本文(`share_body`: 注意 + 今の Goal)を上書き |
+| Status を変えたとき | `set_status` の最後(出来事とカードの並べ替えのあと) | `move`: `TEAM_CARD_QUERY` でカード、列、今の列を読み、`share_column` の列と違うときだけ `gh project item-edit` |
+| task-hub がコメントを書いたとき | `comment`(本文が `<!-- task-hub report -->` か `<!-- task-hub replan -->` で始まるときだけ) | `comment`: 同じ本文。人のコメントとつなぎ先のコメントは写さない |
+| `task done` | `cmd_done` | `close`、そのあと `set_status(Done)` の `move` |
+| マージを見つけた同期(GitHub が閉じなかった) | `sync` | `close`、そのあと `set_status(Done)` の `move` |
+| GitHub がカードを Done にした | `sync`(片付けの前) | `move`(Done) |
+
+- 列の決め方は `task share` と同じ `share_column` です(`<repo>.status.<列>`、`status.<列>`、チームの同じ名前の列、
+  `SHARE_STATUS`)。`[share]` に書いた列がチームにないときは、写さずに warning を出します
+- チームの Issue が複数の Project にあるときは、共有時に保存した Project のカードだけを動かします。古いコメントでは `[share]` の Project を使い、どちらにも指定がないときだけ最初のカードを使います。指定した Project のカードがなければ、ほかのカードは動かしません
+- 実行中に共有したタスクは、その実行の `link` が空なので、その実行の間は写しません(PR の `Closes` と同じ)
+
+### 4.7 トリガー(`check_triggers`)
+
+`task watch` の 1 回の確認で、`sync` が返した開いているカードを渡して呼びます。`trigger_config` が `None`
+(`[triggers]` がない、または何も書いていない)なら、GitHub にもファイルにも触りません。
+`trigger_config` は `ci` と `issues` のリポジトリを、大文字と小文字を区別せずに 1 つにまとめます(最初の書き方を使う)。
+
+1. `triggers.json` の `checked_at` から `TRIGGER_SECONDS`(既定 300、テストは `TASK_TRIGGER_SECONDS`)たっていなければ何もしない
+2. `checked_at` を先に書く(失敗するリポジトリにも 5 分に 1 回しか聞かない)
+3. 1 回のこと(occurrence)を集める。どれも `seen` にあるキーは除く
+   - `ci_occurrences`: 同じタイトルの開いたカードがあれば何もしない。`default_branch`(1 日取っておく)の
+     `gh run list` から、ワークフローごとに最後に終わった実行を取り、`CI_FAILED` のものを 1 枚にまとめる。キーは `ci:<repo>:<run id>`
+   - `issue_occurrences`: `gh issue list --assignee @me`、`issue_label` があれば `--label` も。キーは `issue:<repo>#<番号>`
+   - `recurring_occurrences`: `due_period` が今の周期を返したもの。キーは `every:<名前>:<周期>`
+4. occurrence ごとに `create_task`。キーがもう `seen` にあれば(同じ確認の前の occurrence が書いた)作らない。`created` で Issue の URL が分かった直後に `seen` に書く。`ready` なら Backlog のあと `set_status(Ready)`
+
+GitHub の失敗はリポジトリごと、カードごとに `trigger_errors` に出し、ほかは続けます。`triggers.json` が書けなければ
+何も作らずに `error:` を返します。
+
+### 4.8 マージキュー(`merge_queue`、`[merge] queue = on` のときだけ)
+
+`sync` は、カードごとの確認(マージの確認を含む)のあとで `merge_queue` を呼びます。wait for merge の列にあって
+キューにないカードを、動かした順(`updated`)にキューの最後に足し(`queued`)、そのあとリポジトリごとに先頭の 1 つだけ
+`merge_step` で 1 段進めます。1 つの段の GitHub か git の失敗は `github_errors` に出し、次の確認で同じ段をやり直します。
+
+```mermaid
+stateDiagram-v2
+    [*] --> update: task merge、wait for merge の列
+    update --> ci: base をマージして push、またはもう追いついている
+    update --> fixing: 競合(launch_fix、fixed = base の sha)
+    fixing --> update: task _fix が終わった
+    update --> Blocked: 同じ base でまた競合
+    ci --> ci: チェック待ち(ci-wait はコミットごとに 1 回)
+    ci --> update: BEHIND、DIRTY、CONFLICTING
+    ci --> merged: CLEAN、HAS_HOOKS、checks = required なら UNSTABLE も(gh pr merge --merge --match-head-commit)
+    ci --> Blocked: チェックが落ちた、ci_minutes を過ぎた、ほかの mergeStateStatus
+```
+
+- 図の `fixing` はキューの `step` には書きません(`step` は `update` のまま)。`task _fix` が生きている間は、`tasks()` の
+  `running` で待ちます
+- キューに残す条件は、カードが `queue_column()`(列があれば wait for merge、なければ In review)にあることです。
+  ほかの列に動いたカードは何もせずに外します
+- `merge_block` は Issue に `<!-- task-hub merge -->` のコメントを書き、カードを Blocked(理由は `merge queue: ...`)に
+  してから、最後にキューから外します(GitHub の失敗のときは残して、次に試し直す)
+- マージしたら、`sync` のマージの確認と同じ `close_merged`(Issue を閉じる、Done、`cleanup`)を呼びます
+- `watch_conflict`: キューにない In review のカードは、マージの確認(`pr_merged` の REST)の `mergeable_state` が
+  `dirty` のとき、`conflict` を PR の先頭のコミット(`sha`)ごとに 1 回書きます。`[merge] prefix = on` なら、その `sha` で
+  `conflict-fix` をまだ出していなければ `launch_fix` します。どちらも `events.jsonl` で「1 回」を判定します(`check_slow` と同じ)
+- `launch_fix` は `launch` と同じく `launch_lock` を取ってから、実行の記録(`stage: conflict-fix`、`started`、空の
+  `pid`、`branch` は PR のブランチ)を書き、`task _fix <id> <base>` をログ付きのバックグラウンドで起動します(herdr の
+  タブは開きません)。カードは動かしません
+- `[sandbox] mode = user` では、キューの git(`merge_worktree`、`merge_update`、`push_failed`、`fix_conflicts`、`cmd_fix`)も
+  `git_shared` で専用ユーザーから動かし、push はそのユーザーのログインで行います。レポートと競合の印は `shared_read` で読み、
+  `task _fix` の作業フォルダは `launch` と同じく worktree の外です(約束 14)
+- `cmd_fix`(`fix_conflicts`)は `git merge --no-ff --no-commit origin/<base>` で止まった競合をエージェントに渡し、
+  レポートに `## Blocked` がない、`MERGE_HEAD` が残っている、`git add -A` のあとに未解決のファイルも
+  `<<<<<<<`、`>>>>>>>` の行もない、を確かめてから `git commit --no-edit`(親が 2 つ)と push をします。どれかが
+  だめなら `git merge --abort`、`reset --hard`、`clean -fd` で元に戻し、カードを Blocked にします。push だけが
+  失敗したときは、作ったマージコミットを戻さずに worktree に残して Blocked にします(`push_failed`。`merge_update` も同じ)
+  理由に入れる git の出力は `git_said` で整えます。`\r` で描き直された行は最後の描画だけ、ANSI の消去コードと
+  sideband の空白は消し、300 文字ほどに収まるよう行ごとに `remote:`(フックのことば)、`! [rejected]` の順に残します。
+  長すぎる行は 300 文字で切るので、少なくとも 1 行は必ず残ります。`run(..., check=True)` が失敗したときの
+  例外の文(競合の修正の `git add`、`git commit` のフックの失敗など)も `git_said` を通します。`run` は
+  `text=True` を使わずに自分で読みます(`text=True` の universal newlines は `\r` を改行に変え、描き直しが別の行になるため)
+
 ## 5. 手元のファイル
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`、`[sandbox]`)。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
+| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
+| `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
@@ -275,15 +417,25 @@ sequenceDiagram
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
 | `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/triggers.json` | `check_triggers`(`task watch` だけ) | `check_triggers` | `{checked_at, seen: {キー: {at, issue}}, default_branch: {repo: [名前, UNIX 時刻]}}` |
+| `state/intake.json` | `cmd_intake`(文を 1 つ扱う前に) | `cmd_intake`(つなぎ直すとき、起動したとき) | `{since}`。最後に扱った ntfy の文の id(ntfy の `since=` に渡す) |
+| `state/action.key` | `action_key`(初めて要るとき。0600。一時ファイルから `os.link` で置くので、2 つのプロセスが同時に作っても 1 つ) | `action_token`(`task _run` の通知、`task intake`) | 64 文字の 16 進。ボタンのトークンの HMAC-SHA256 の鍵。どこにも送らない |
+| `state/intake-actions.json` | `action_message`(ボタンを実行したあと) | `action_message` | `{used: {トークン: 時刻}}`。実行したトークン(新しい順に `ACTIONS_USED_MAX` 個) |
 | `share/repos/<owner>/<name>` | `ensure_clone`(`[sandbox] mode = user` では専用ユーザー) | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント(`[sandbox] mode = user` ではどちらも専用ユーザー。task-hub の読み書きも `shared_read`、`shared_write` でそのユーザーから) | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/worktrees/<id>/.claude/settings.local.json` | `write_rules`(Goal に Rules があるとき) | エージェント(Claude Code) | JSON。`permissions` の `allow` / `ask` / `deny`。`.git/info/exclude` でコミットしない |
 | `share/sandbox-used` | `check_sandbox`(`[sandbox] mode = user` のときと、`off` で専用ユーザーの ACL を見つけたとき) | `refuse_after_user`(読むだけ)、`check_sandbox`(`off` で ACL がなく `repos` と `worktrees` が無くなったら消す) | 空のファイル |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
+| `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
 
 `state` は `~/.local/state/task-hub`、`share` は `~/.local/share/task-hub` です。
+
+GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-hub report -->`(レポート)、`<!-- task-hub replan -->`
+(仕分け)、`<!-- task-hub link -->`(つなぎ先。次の行に `Shared to org/app#12: <URL>`)。チームの Issue の本文の先頭の
+`<!-- task-hub shared -->` と上書きの注意(`SHARE_NOTICE`)。`human_comments` は、`<!-- task-hub` で始まるコメントを
+人のものとして数えません(task-hub は人と同じアカウントで書くので、書いた人では分けられません)。
 
 ### 出来事(events.jsonl の 1 行)
 
@@ -292,7 +444,9 @@ sequenceDiagram
  "pr": "https://github.com/...", "reason": "...", "digest": {"verdict": "pass", "review": "...", "pr": "..."}}
 ```
 
-`event` は Status の名前(Backlog、Ready、In progress、In review、Blocked、Done)、`replan`、`slow` のどれかです。
+`event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
+マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict` のどれかです。`conflict` と
+`[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
 空の欄は書きません。
 
 ### 実行の集計(metrics.jsonl の 1 行)
@@ -323,7 +477,11 @@ sequenceDiagram
 ## 6. 並行と所有
 
 - 1 つのファイルを書くのは 1 者だけにします。`runs/<id>.json` は `launch` が作り、そのあとは `task _run` だけが
-  書きます(同期は書かない。`slow` を 1 回だけにする判定も `events.jsonl` を見る)
+  書きます(同期は書かない。`slow` を 1 回だけにする判定も `events.jsonl` を見る)。マージキューも同じで、実行が
+  生きていないときに `merge_worktree` か `launch_fix` が書き、そのあとは `task _fix` だけが書きます。`alive` は
+  `_run <id>` と `_fix <id> <base>` のどちらも、そのタスクの実行と見なします
+- `merge-queue.json` だけは `task merge` と同期の 2 者が書くので、読んで変えて書く間 `merge-queue.lock` を持ちます。
+  キューを進めるのは `merge-queue.work.lock` を取れた 1 つの task-hub だけです
 - JSON はすべて `write_atomic`(一時ファイルから置き換え。Windows は置き換えを試し直す)で書きます。読む側は
   古いか新しいかの完全なファイルだけを見ます
 - 追記のファイル(events、metrics)は 1 行ずつ書きます。書けなくても実行もコマンドも止めません
@@ -343,12 +501,23 @@ sequenceDiagram
 | `MOVE_TO_TOP` | GraphQL | 1 | Status を変えるとき |
 | `ARCHIVE_ITEM` | GraphQL | 1 枚ごとに 1 | 100 枚を超えたとき |
 | `ADD_BLOCKED_BY` | GraphQL | 1 | `task new --blocked-by` |
+| `gh run list`(既定のブランチの 20 件) | REST | 1 回 | `[triggers] ci` のリポジトリごと、5 分に 1 回まで |
+| `gh repo view`(既定のブランチ) | GraphQL(gh) | 1 前後 | `[triggers] ci` のリポジトリごと、1 日 1 回 |
+| `gh issue list`(割り当て、ラベル) | GraphQL(gh) | 1 前後 | `[triggers] issues` のリポジトリごとに 1〜2、5 分に 1 回まで |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
+| 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
 | `git fetch`、`push` | git | - | 開始、終わり |
+| マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`git fetch`、`merge`、`push` | gh(GraphQL)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
+| チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |
+| つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
+| 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
+| ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
+| ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
+| ボタンの文(`task intake`) | `gh pr view`(PR の今の先頭のコミット)、Merge は `cmd_merge` と同じ呼び出し、Reject は `gh pr close --comment`、`gh issue comment`、Status | ボタン 1 回につき ボードの読み 1 + GraphQL 1 + 操作の分 | 人がボタンを押したときだけ。合わないトークン、使ったトークンは GitHub を呼ばない |
 | `sudo -n -u <user> -H -D <dir> --`(`[sandbox] mode = user` のときだけ) | エージェントの CLI、`[check]`、`[setup]`、clone と worktree への git、そこのファイルの読み書き(`as_agent`)。開始の前に `check_sandbox` が共有のフォルダに書けるかを試す | - | エージェントの起動ごと、git ごと |
 | `gh api repos/<repo>/compare/<base>...<branch>`(`[sandbox] mode = user` のときだけ) | `branch_compare`: 専用ユーザーが push したあと、先に進んでいるか(`ahead_by`)と PR の大きさ(`files`)を GitHub から読む | REST 1 回 | 実行の終わりに 2 回 |
 
@@ -402,8 +571,16 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする |
 | 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、もここ(エージェントは起動しない) |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
+| `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
+| `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
+| `task intake` のボタンの失敗(GitHub)、断った(古いコミット、閉じた PR、キューがオフなど) | 1 行記録し、ntfy に「refused」を理由つきで返す。トークンは使ったことにしないので、理由を直せば同じボタンをまた押せる。合わないトークンは記録だけで返事なし |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
+| トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
+| マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
+| `task _fix` の失敗 | マージを取り消して何も push しない。カードを Blocked にしてコメント。それも書けなければカードは元の列のまま、キューの次の確認が同じ base でまた競合を見つけて Blocked にする |
+| `task share` の失敗 | チームの Project の列、欄、値がない、チームのリポジトリに書けない: 何も作らずに `error:` と `help:`。Issue を作ったあとの失敗: 作った Issue の URL を出して終わる(つなぎ先のコメントは書いてあるので、もう一度でも Issue は増えない) |
+| つないだタスクの写しの失敗(4.6) | 無視して stderr に `warning:` を 1 行(実行の中ならログに)。個人のカード、コメント、PR、実行は写しがないときと同じに進む。次の変化のときにまた写す(`move` は今の列を読むので、取りこぼした Status も次で合う) |
 
 ## 9. 守る約束(テストで確かめているもの)
 
@@ -417,13 +594,24 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 8. 手元の JSON は、書き込みの途中で読んでも壊れていない
 9. アンインストールは、インストーラが記録したものだけを消す。ジャンクションは先を消さずに外す。作業中のタスクがある
    あいだ、Windows のアンインストールは見張りだけを止める
-10. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = off` でも、`repos` か `worktrees` に専用ユーザーかそのグループの ACL(access か default)が残る間と、`share/sandbox-used` があって `repos` か `worktrees` がまだある(空でも)間は、あなたのユーザーでそこに git を動かさず、ファイルも触らない(`refuse_after_user`、`agent_acl`)
-11. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
+10. `task share` でつないでいないタスクの PR、Status、GitHub の呼び出しは、`task share` を足す前と同じ(`[share]` を書いただけでは何も変わらない)。
+    チームのリポジトリに書けないとき、個人のカードと PR は変わらない。同じタスクを 2 回出しても、チームの Issue は 1 つ
+11. つないだタスクの Status はチームのカードに対応表で写り、チームの列が変わらない変化では mutation を呼ばない。Report と仕分けは
+    同じ本文がチームの Issue にも付き、人のコメントは写らない。開始ごとにチームの本文が今の Goal になる。`task done` と、GitHub が
+    閉じなかったマージでチームの Issue も閉じる。チームへの写しが失敗しても、個人のカードと実行は写しがないときと同じに進む
+12. トリガーは同じ CI の実行、Issue、周期にカードを 2 枚作らない。`ci` と `issues` のカードは Backlog に入る。`[triggers]` がなければ何も変わらない
+13. マージキューは、人が承認した PR(`task merge`、wait for merge の列)だけをマージし、リポジトリごとに承認した順に 1 つずつ
+    マージする。解けない競合と落ちたチェックではマージせず、カードを Blocked にする。`[merge] queue` がオフ(既定)なら、
+    GitHub の呼び出しもカードの動きも足す前と同じ
+14. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = off` でも、`repos` か `worktrees` に専用ユーザーかそのグループの ACL(access か default)が残る間と、`share/sandbox-used` があって `repos` か `worktrees` がまだある(空でも)間は、あなたのユーザーでそこに git を動かさず、ファイルも触らない(`refuse_after_user`、`agent_acl`)
+15. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
 
 ## 10. テストの仕組み
 
 - `tests/test_task.py`: `bin/task` を別プロセスで動かすブラックボックスのテスト。GitHub は 1 つの JSON ファイルを
-  持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です
+  持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
+  偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
+  bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、

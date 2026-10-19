@@ -14,7 +14,7 @@
 | カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
-| Issue のコメント | task-hub のレポート(下記) | task-hub |
+| Issue のコメント | task-hub のレポート(下記)。人のコメントは、再実行のときにエージェントへの追加の指示として渡ります(下記) | task-hub / あなた |
 
 ### 開始の条件: Blocked by と Ready conditions
 
@@ -69,7 +69,7 @@ Goal に `Rules` の見出し(`##` でも `###` でも)を書くと、そのタ�
 - 承認するときは、その規則を `ask:` から `can:` に移して、カードを Ready に戻します
 
 Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
-カードを Ready に戻します。
+カードを Ready に戻します。Issue や PR にコメントで書いてもかまいません([人のコメント](#人のコメント))。
 
 実行中の情報(ブランチ、プロセス、herdr のワークスペース、worktree、ログ)は手元のマシンの
 `~/.local/state/task-hub/runs/<番号>.json` にだけ保存され、GitHub には載りません。
@@ -87,6 +87,14 @@ Need the Stripe test key.
 
 ## Report
 
+### Summary                <- 3 to 5 bullets: what was done, the check's result, what to decide
+
+- Added the save check for required fields.
+- The tests pass.
+- Decide whether an empty name is an error.
+
+### Details                <- per-file changes, commands and results, what was not done
+
 What changed, how it was verified, what was not done.
 
 ## Please review
@@ -101,6 +109,20 @@ Exact files, decisions, and risks to check.
   - Check: ...
   - Explain yourself: ...
 ```
+
+Report は、人が判断に要る結論を先に置くため、`### Summary`(要点)と `### Details`(詳細)の 2 つに分けます。
+
+- 要点: 3〜5 行の箇条書き。何をしたか(結論)、確かめた結果を 1 行、人に判断してほしいことがあればその 1 行。
+  コマンド、コミットのハッシュ、行番号は入れません
+- 詳細: 変えたファイルごとの説明、実行したコマンドと結果、やっていないこと。人のコメントへの `Comments:` の
+  箇条書き([人のコメント](#人のコメント))もここに書きます
+- research タスクでは、要点に調べた結論(Goal の問いへの答え)を、詳細に調べたことと根拠を書きます
+- `## Blocked` の 1 行も同じ考えで、人に求めること(決めてほしいこと、鍵、権限)とその理由だけを書き、
+  試したことは Report の詳細に回します
+
+区切りは `##` より下の `###` 見出しなので、task-hub が読み取る `##` の見出しは変わらず、PR の本文と Issue の
+コメントにはどちらもそのまま載ります。research タスクの digest の `report`([operations.md](operations.md#判断用の要点digest))
+と通知には、要点だけが出ます。
 
 Please review の最後の項目は、人がコードを自分で探して理解するための学習ルート(Learning route)です。
 変えた中でいちばん大事な動きについて、次の 6 行を 1 つの項目の下に字下げして書きます。
@@ -166,6 +188,33 @@ Decision: answered
 ```
 
 最新の `answered` のコメントは、次の実行のプロンプトに「Replanner notes」として入ります。
+
+## 人のコメント
+
+再実行(Blocked や In review のカードを Ready に戻す、`task start`)のとき、task-hub は前回の実行より後に人が書いた
+次のコメントを、プロンプトの最後に「Comments since the earlier run」として古い順に入れます。
+
+| どこの | 何を | 添えるもの |
+|---|---|---|
+| Issue | コメント | 書いた人、日時 |
+| タスクの PR | 会話のコメント | 書いた人、日時 |
+| タスクの PR | レビューの本文(送信済みのものだけ。本文が空のレビューは除く) | 判定(`changes requested` など)、書いた人、日時 |
+| タスクの PR | 行へのコメント | ファイルと行(`lines 10-12` のような範囲、行が変わったあとは前の版の行と `outdated`)、書いた人、日時 |
+
+- 「前回の実行」は、このマシンでの前回の開始の時刻(`runs/<番号>.json` の `started`)です。記録がなければ(別のマシンで
+  実行した)、Issue の最後のレポートのコメントの時刻です。どちらもなければ(初めての実行)コメントは渡しません。
+  タスクの PR は、手元の記録の PR だけを見ます
+- task-hub 自身のコメント(`<!-- task-hub` で始まるもの: レポート、仕分け、つなぎ先)と bot のコメント(GitHub の
+  ユーザーの種類が Bot、または名前が `[bot]` で終わる)は入れません
+- エージェントは、コメントを Goal への追加の指示として扱い、レポートの Report の詳細(`### Details`)の中に `Comments:` で始まる箇条書きで、
+  コメントごとに何をしたか、しなかったならその理由を書きます([worker/PROMPT.md](../worker/PROMPT.md) の最後の部分)
+- reviewer にも同じコメントが Goal のすぐ後に渡り、受け入れ条件と同じように 1 つずつ確かめます
+  ([worker/REVIEW.md](../worker/REVIEW.md) の最後の部分)。渡したコメントは `~/.local/share/task-hub/prompts/<番号>-comments.md`
+  に残ります
+- 渡すコメントがなければ、プロンプトは今までと同じです(指示書の最後の部分も入りません)
+- コメントはどこにも写さず、Goal も書き換えません
+- 読むのは REST API で、再実行のたびに Issue のコメント 1 回、PR があれば会話のコメント、レビュー、行へのコメントの
+  3 回です。コメントは前回の実行より後に変わったものの、レビューは全部の、それぞれ最初の 100 件までを見ます
 
 ## 実行終了時の処理
 

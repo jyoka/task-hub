@@ -10,8 +10,9 @@ task-hub が何でできていて、データがどこを流れるかの全体�
 ## 1. 目的と範囲
 
 GitHub Project をかんばんにして、そのカードをコーディングエージェントに実行させます。人が決めるのは
-「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする)」の 2 つだけです。その間の準備、実行、レビュー、
-PR、止まったときの仕分け、後片付けを task-hub が行います。
+「始めてよいか(Ready に移す)」と「入れてよいか(PR をマージする。`[merge] queue` なら PR をマージキューに入れる)」の 2 つだけです。その間の準備、実行、レビュー、
+PR、止まったときの仕分け、後片付けを task-hub が行います。人が選んだタスクは、チームの GitHub(組織のリポジトリの Issue と
+Project)にも写せます(`task share`。写す向きは個人 → チームだけ)。
 
 範囲外: タスクの中身を決めること(人と `/chief`)、コードの品質の最終判断(人のレビュー)、複数マシンの調停。
 
@@ -22,8 +23,10 @@ flowchart LR
     you(["あなた"])
     chat["エージェントの会話<br/>Claude Code / Kiro / Codex / Pi<br/>/task、/chief"]
     slack["Slack のスレッド<br/>コピーして ⌃⌥S"]
+    phone["スマートフォン<br/>ntfy のトピックに送る"]
     th["task-hub<br/>あなたの Mac で動く"]
     gh[("GitHub<br/>Issue、Project、PR")]
+    team[("チームの GitHub<br/>組織のリポジトリ、Project")]
     agents["エージェントの CLI<br/>claude -p、codex、pi、kiro-cli"]
     herdr["herdr<br/>タブ、通知"]
     os["OS の通知<br/>macOS、Windows"]
@@ -32,8 +35,11 @@ flowchart LR
     you -- "Ready に移す、マージする" --> gh
     you -- "コピー" --> slack
     slack -- "タスクの案" --> th
+    you -- "合言葉つきの文" --> phone
+    phone -- "task intake(Backlog だけ。ボタン: Merge、Reject)" --> th
     chat -- "task new / start / done / list" --> th
     th -- "読む、書く(gh)" --> gh
+    th -- "task share: Issue、カード。その後の Status、本文、コメント、閉じる(gh)" --> team
     th -- "起動する" --> agents
     agents -- "worktree を編集" --> th
     th -- "タブ、通知" --> herdr
@@ -41,7 +47,8 @@ flowchart LR
     th -- "出来事(events.jsonl)" --> chat
 ```
 
-状態の正本は GitHub です。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+状態の正本は GitHub の個人のボードです。手元に持つのは実行中の情報、ログ、出来事、集計、キャッシュだけです。
+チームの GitHub は写しです。task-hub がそこを読むのは、写すときのチームの Project の列と、つないだカードの今の列だけです。
 
 ## 3. 部品(C4 レベル 2)
 
@@ -62,6 +69,9 @@ flowchart TB
         sync["同期と開始<br/>sync、launch"]
         board["ボードの読み書き<br/>board、tasks、set_status"]
         notify["出来事と通知<br/>emit、notify"]
+        trig["トリガー<br/>check_triggers(task watch だけ)"]
+        links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
+        mergeq["マージキュー(任意)<br/>task merge、merge_queue"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -76,8 +86,10 @@ flowchart TB
 
     subgraph ext["外のもの"]
         gh[("GitHub")]
+        team[("チームの GitHub")]
         agents["エージェントの CLI"]
-        herdr["herdr"]
+        herdr["herdr、OS の通知"]
+        ntfy["ntfy<br/>(任意。スマートフォンへ)"]
     end
 
     skills --> cli
@@ -91,9 +103,22 @@ flowchart TB
     khook -. "task events" .-> cli
     piext -. "task events --next" .-> cli
     cli --> sync
+    cli --> trig
+    trig -- "カードを作る(create_task)" --> board
+    trig -- "gh run list、gh issue list" --> gh
+    trig --> state
     sync --> board
     sync -- "起動" --> runner
+    sync --> mergeq
+    cli --> mergeq
+    mergeq -- "gh pr view、checks、merge、git push" --> gh
+    mergeq -- "起動(task _fix)" --> runner
     board -- "gh" --> gh
+    cli --> links
+    links --> board
+    links -- "gh" --> team
+    board -. "set_status、comment(つないだタスク)" .-> links
+    sync -. "開始、マージで閉じる" .-> links
     runner --> board
     runner -- "起動" --> agents
     runner -- "git、gh pr" --> gh
@@ -101,6 +126,7 @@ flowchart TB
     sync --> data
     notify --> state
     notify --> herdr
+    notify -. "[notify] ntfy" .-> ntfy
     board --> state
     runner --> state
     cli --> cfg
@@ -108,13 +134,17 @@ flowchart TB
 
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
-| `bin/task` | CLI、同期、開始、ボードの読み書き、通知 | GitHub のボード、手元の状態、作業場所 |
+| `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md)) | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
+| `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする。In review の通知のボタン(Merge、Reject)の文も受ける | Backlog のカードの登録、トークンの合ったボタンの PR をマージキューに入れる、または PR を閉じてカードを Blocked にする、ntfy への返事だけ(Ready には動かさない) |
+| マージキュー(`[merge] queue`、既定はオフ) | 人が承認した PR(`task merge`、wait for merge の列)を、リポジトリごとに 1 つずつ base に追いつかせ、チェックを待ってマージする。競合は `task _fix` がエージェントに解かせる。キューにない In review の PR の競合は知らせるだけ | `merge-queue.json`、PR のブランチへのマージコミットの push、承認した PR のマージ、止めたときの Blocked とコメント |
+| `task _fix <番号> <base>` | 1 回の競合の解消(base のマージを始め、エージェントがファイルを直し、task-hub がマージコミットを作って push) | そのタスクの worktree、PR のブランチ、Issue のコメント、カード(Blocked のときだけ) |
 
 ## 4. データの流れ
 
@@ -140,7 +170,7 @@ sequenceDiagram
     Task->>Task: 待ち先と枠を確かめる
     Task->>GH: In progress にする
     Task->>Run: 起動(herdr のタブ、またはバックグラウンド)
-    Run->>Agent: プロンプト(Goal、前回のレポート)
+    Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
     Run->>Agent: reviewer(新しいコンテキスト)
     Agent-->>Run: .task-review.md(pass / needs changes)
@@ -151,8 +181,12 @@ sequenceDiagram
     Task->>Task: worktree、ブランチ、タブを片付ける
 ```
 
+`[merge] queue = on` のときは、最後の「あなたが PR をマージする」が「`task merge` でキューに入れる」になります。
+その先は 4.5 のとおり task-hub がマージします。
+
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
-理由を仕分けて Issue にコメントします。人が Goal に答えを書き足して Ready に戻すと、同じブランチと PR で続きます。
+理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
+PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
 
 ### 4.2 出来事と通知
 
@@ -171,7 +205,21 @@ flowchart LR
 
 通知は LLM を使いません。会話のエージェントを起こすのは、出来事が書かれたときだけです。
 
-### 4.3 ボードの読み取り
+### 4.3 トリガー
+
+`[triggers]` を書いたときだけ、`task watch` の 1 回の確認で `sync` のあとに `check_triggers` が動きます(5 分に 1 回まで)。
+
+```mermaid
+flowchart LR
+    watch["task watch<br/>sync のあと"] --> trig["check_triggers"]
+    trig -- "gh run list(REST)、gh issue list" --> gh[("GitHub")]
+    trig -- "まだ記録にないものだけ" --> seen[("triggers.json")]
+    trig -- "create_task(Backlog、ready なら Ready)" --> gh
+```
+
+Ready に入ったカードは、次の確認の `sync` が始めます。詳しくは [triggers.md](../triggers.md) です。
+
+### 4.4 ボードの読み取り
 
 ```mermaid
 flowchart LR
@@ -183,6 +231,36 @@ flowchart LR
     stale -. "これより前に読んだボードは使わない" .-> cache
 ```
 
+### 4.5 マージキュー
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You as あなた
+    participant Task as task watch(sync)
+    participant Q as merge-queue.json
+    participant Fix as task _fix
+    participant GH as GitHub
+    You->>Task: task merge 12(または wait for merge の列へ)
+    Task->>Q: 最後に足す(queued)
+    loop 1 分ごと、リポジトリごとに先頭の 1 つだけ
+        Task->>GH: gh pr view(状態、ブランチ、mergeStateStatus)
+        alt base を取り込む段
+            Task->>Task: git merge origin/base(worktree で)
+            alt きれいに入った
+                Task->>GH: push(updated)
+            else 競合
+                Task->>Fix: 起動(conflict-fix)
+                Fix->>Fix: エージェントが直す、マージコミット
+                Fix->>GH: push(updated)、解けなければ Blocked
+            end
+        else チェックの段
+            Task->>GH: gh pr checks(ci-wait、落ちたら Blocked)
+            Task->>GH: CLEAN なら gh pr merge --merge(merged、Done)
+        end
+    end
+```
+
 ## 5. 責任の分担
 
 | 判断が要る(LLM) | 決まっている(コード) |
@@ -191,6 +269,7 @@ flowchart LR
 | 評価する(reviewer) | git、push、PR、Issue へのコメント |
 | 止まった理由を仕分ける(replanner) | 判定の読み取り、reviewer の書き換えの取り消し |
 | 会話を分けて提案する(/chief) | replanner の根拠と実物の照合、通知、並び順、アーカイブ |
+| マージの競合を解く(`task _fix`) | マージキューの順番、base の取り込み、マージコミットと push、競合の印の確認、チェック待ち、マージ |
 
 ## 6. 信頼の境界
 
@@ -201,6 +280,14 @@ flowchart LR
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
+- マージキューに入るのは、あなたが承認した PR(`task merge`、wait for merge の列)だけです。競合を解くエージェントも
+  ファイルを直すだけで、マージコミット、push、マージは task-hub が行います
+- 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
+- `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
+  記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです
+- 通知の Merge と Reject のボタンには合言葉を入れず、カード、PR、PR の先頭のコミット、する事の HMAC(鍵は
+  このマシンの `state/action.key`)を付けます。`task intake` は、合わないトークン、使ったトークン、PR に新しい
+  push があったあとのトークンを断ります
 
 ## 7. 配置
 
@@ -229,7 +316,7 @@ flowchart TB
 
 | 項目 | 目標と、守っている仕組み |
 |---|---|
-| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST |
+| GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST。マージキューは、キューのあるリポジトリごとに 1 分に `gh pr view` と `gh pr checks` を 1 回ずつ足す(キューが空なら 0)。承認していない PR の競合はマージの確認の REST から読むので増えない。トリガーは 5 分に 1 回まで(リポジトリごとに 1 時間 12〜24 ポイント) |
 | 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない |
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |
@@ -247,3 +334,4 @@ flowchart TB
 | 出来事の種類 | `emit` を呼び、`[notify] events` と読む側のフィルタに足す | [lld.md](lld.md) の 6 章 |
 | Status の列 | `StatusLifecycle` と design.md の図を一緒に変える | [design.md](../design.md) |
 | 実行の段階 | `set_stage` を呼び、design.md の段階の表に足す | [design.md](../design.md) |
+| トリガーの種類 | `*_occurrences` 関数を足して `check_triggers` から呼ぶ。1 回のことを表す記録のキーを決める | [lld.md](lld.md) の 4.7 節、[triggers.md](../triggers.md) |
