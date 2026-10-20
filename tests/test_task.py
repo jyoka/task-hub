@@ -34,6 +34,7 @@ KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
 KIRO_WATCH = BIN.parent.parent / "kiro" / "task-events-watch"
 KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.workflow.json"
 UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
+SANDBOX_USER = os.environ.get("TASK_TEST_SANDBOX_USER", "task-agent")  # tests/test_task.py runs as it when it can
 
 FAKE_GH = r'''#!/usr/bin/env python3
 import fcntl, json, os, re, shutil, subprocess, sys, tempfile
@@ -292,6 +293,18 @@ elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?he
     out = [{"merged_at": p.get("merged_at") or ("2026-09-23T00:00:00Z" if p.get("merged") else None),
             "body": p.get("body", "")}
            for p in prs if state == "all" or p["state"] != "OPEN"][:1]
+elif a[0] == "api" and "/compare/" in a[1]:  # REST: repos/<owner>/<name>/compare/<base>...<head>, from the origin
+    import subprocess, urllib.parse
+    repo, spec = a[1].split("/", 1)[1].split("/compare/")
+    base, head = (urllib.parse.unquote(x) for x in spec.split("..."))
+    bare = os.environ["TASK_CLONE_URL"].removeprefix("file://").format(repo=repo)
+    git = lambda *x: subprocess.run(["git", "-c", "safe.directory=*", "-C", bare, *x], capture_output=True, text=True)
+    if git("rev-parse", "--verify", "-q", f"refs/heads/{head}").returncode != 0:
+        fail("HTTP 404: Not Found (gh: Not Found)")
+    numstat = [line.split("\t", 2) for line in git("diff", "--numstat", f"{base}...{head}").stdout.splitlines()]
+    out = {"ahead_by": int(git("rev-list", "--count", f"{base}..{head}").stdout),
+           "files": [{"filename": n, "additions": int(p) if p.isdigit() else 0, "deletions": int(m) if m.isdigit() else 0}
+                     for p, m, n in numstat]}
 elif cmd in (["repo", "view"], ["run", "list"], ["issue", "list"]):  # the triggers ask the work repos
     db["trigger_calls"] = db.get("trigger_calls", 0) + 1
     repo = a[2] if cmd == ["repo", "view"] else opt("--repo")
@@ -405,6 +418,28 @@ if mode == "env":  # proves the agent got the env files: writes what it read
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
+if mode == "sandbox":  # proves what an agent run as the [sandbox] user can reach: its worktree, not your HOME
+    def seen(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return "hidden"
+    import getpass
+    you = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent  # the test's HOME
+    Path("seen.txt").write_text(f"readme: {seen('README.md')}\nsecret: {seen(you / 'secret.txt')}\n"
+                                 f"config: {seen(you / '.config/task-hub/config.ini')[:7]}\n"
+                                 f"gh token: {os.environ.get('GH_TOKEN', 'unset')}\n"
+                                 f"rules: {seen('.claude/settings.local.json')[:1]}\nuser: {getpass.getuser()}\n")
+    # what it can set up for task-hub's git: a hook and an fsmonitor that say who ran them
+    ran = f"id -un >> {you / 'shared/ran-by'}"
+    common = Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                 capture_output=True, text=True, check=True).stdout.strip())
+    (common / "hooks").mkdir(exist_ok=True)
+    (common / "hooks/pre-commit").write_text(f"#!/bin/sh\n{ran}\n")
+    (common / "hooks/pre-commit").chmod(0o755)
+    subprocess.run(["git", "config", "core.fsmonitor", f"{ran}; false"], check=True)
+if mode == "rules":  # what the Goal's Rules became in Claude Code's settings
+    Path("seen.txt").write_text(Path(".claude/settings.local.json").read_text())
 if mode == "needsetup":  # proves [setup] ran first: writes what setup left in the virtualenv
     Path("hello.txt").write_text("setup seen: " + Path(".venv/marker").read_text().strip() + "\n")
     Path(".task-report.md").write_text(report)
@@ -1155,7 +1190,7 @@ class TaskTest(unittest.TestCase):
 
     def origin_files(self, branch):
         bare = self.root / "origins" / "jyoka/app.git"
-        return subprocess.run(["git", "-C", str(bare), "ls-tree", "--name-only", branch],
+        return subprocess.run(["git", "-c", "safe.directory=*", "-C", str(bare), "ls-tree", "--name-only", branch],
                               capture_output=True, text=True).stdout.split()
 
     def push_branch(self, branch, filename):
@@ -1747,6 +1782,206 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertEqual(len(self.agent_calls()), 1)
+
+    def new_with_goal(self, goal):
+        out = self.task("new", "--title", "Add hello", "--repo", "jyoka/app", "--goal", goal)
+        return re.search(r"id: (\d+)", out).group(1)
+
+    def test_goal_rules_reach_claude_code_settings_but_never_the_pr(self):
+        tid = self.new_with_goal("Say hello. MODE:rules\n\n### Rules\n\nOnly the app folder, please.\n"
+                                 "- can: Bash(npm test *), `Read`\n- ask: Bash(git push *)\n"
+                                 "- never: Read(~/.ssh/**), Bash(curl a,b), WebFetch\n\n### Notes\n\n- see: x\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:seen.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(seen), {"permissions": {"allow": ["Bash(npm test *)", "Read"],
+                                                            "ask": ["Bash(git push *)"],
+                                                            "deny": ["Read(~/.ssh/**)", "Bash(curl a,b)", "WebFetch"]}})
+        self.assertNotIn(".claude", self.origin_files(f"task/{tid}"))
+
+    def test_rules_taken_out_of_the_goal_leave_no_settings_behind(self):
+        tid = self.new_with_goal("Say hello. MODE:blocked\n\n## Rules\n\n- never: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        settings = self.root / ".local/share/task-hub/worktrees" / tid / ".claude/settings.local.json"
+        self.assertTrue(settings.exists())
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok\n"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertFalse(settings.exists())
+
+    def test_unknown_rule_word_stops_the_start(self):
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Rules\n\n- maybe: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn('starting "maybe:"', self.comments(tid)[-1])
+
+    def test_unknown_sandbox_mode_stops_the_start(self):
+        self.write_config("\n[sandbox]\nmode = bwrap\n")  # the earlier, dropped mode is refused too
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("[sandbox] mode must be off or user", self.comments(tid)[-1])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "[sandbox] mode = user is for Linux")
+    def test_sandbox_user_that_does_not_exist_stops_the_start(self):
+        self.write_config("\n[sandbox]\nmode = user\nuser = no-such-task-agent\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("user no-such-task-agent does not exist", self.comments(tid)[-1])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_the_clones_while_the_agent_user_still_has_an_acl_on_them(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        # what a mode = user run's agent could have left in the shared clone: your git would run it as you
+        data = self.root / ".local/share/task-hub"
+        ran = self.root / "planted-ran"
+        clone = data / "repos/jyoka/app"
+        hook = clone / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
+        hook.chmod(0o755)
+        subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
+                       check=True)
+        subprocess.run(["setfacl", "-m", "u:nobody:rwx", str(data / "repos")], check=True)
+        tid2 = self.new("ok")
+        self.task("start", tid2)
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertIn("nobody still has an ACL on", self.comments(tid2)[-1])
+        self.assertIn("setup_agent_user.sh uninstall", self.comments(tid2)[-1])
+        self.assertFalse(ran.exists())
+        # emptied folders keep their default ACL, so what off mode makes there next is the agent's to write
+        subprocess.run(["setfacl", "-b", str(data / "repos")], check=True)
+        shutil.rmtree(data / "repos")
+        (data / "repos").mkdir()
+        subprocess.run(["setfacl", "-d", "-m", "u:nobody:rwx", str(data / "worktrees")], check=True)
+        for d in (data / "worktrees").iterdir():
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("still has an ACL on ~/.local/share/task-hub/worktrees", self.comments(tid2)[-1])
+        subprocess.run(["setfacl", "-b", str(data / "worktrees")], check=True)  # what uninstall does
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")  # emptied, not deleted
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
+        self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_what_the_agent_planted_even_after_the_setup_is_undone(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        data = self.root / ".local/share/task-hub"
+        ran = self.root / "planted-ran"
+        clone = data / "repos/jyoka/app"
+        hook = clone / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
+        hook.chmod(0o755)
+        subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
+                       check=True)
+        subprocess.run(["setfacl", "-R", "-m", "u:nobody:rwX", str(data / "repos")], check=True)
+        tid2 = self.new("ok")
+        self.task("start", tid2)
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("For you, not task-hub: sudo scripts/setup_agent_user.sh uninstall",
+                      self.comments(tid2)[-1])
+        self.assertIn("(not just empty them): docs/sandbox.md", self.comments(tid2)[-1])
+        # uninstall takes the ACLs away, but what the agent planted is still in the clone
+        subprocess.run(["setfacl", "-bR", str(data / "repos")], check=True)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertFalse(ran.exists())
+        # emptied folders are not enough either: the marker stays until both are gone
+        for d in (data / "repos", data / "worktrees"):
+            for c in d.iterdir():
+                shutil.rmtree(c)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        self.assertTrue((data / "sandbox-used").exists())
+        # with no ACL left, what off mode makes there next is yours
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
+        self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl") and shutil.which("sudo")
+                         and subprocess.run(["sudo", "-n", "-u", SANDBOX_USER, "-D", "/", "--", "true"],
+                                            capture_output=True, stdin=subprocess.DEVNULL).returncode == 0,
+                         f"needs a sandbox user {SANDBOX_USER} you can sudo to without a password (docs/sandbox.md)")
+    def test_agent_run_as_the_sandbox_user_sees_only_its_worktree_yet_the_run_opens_a_pr(self):
+        """The real thing: the agent, and every git command on the clone and worktree, run as another Linux user."""
+        me, agent = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(), SANDBOX_USER
+        data = self.root / ".local/share/task-hub"
+        shared = [data / "repos", data / "worktrees", self.root / "origins", self.root / "shared"]
+        for d in shared:
+            d.mkdir(parents=True, exist_ok=True)
+        acl = lambda *a: subprocess.run(["setfacl", *map(str, a)], check=True)
+        acl("-m", f"u:{agent}:x", self.root, self.root / ".local", self.root / ".local/share", data)  # a way in only
+        for d in shared:  # as setup_agent_user.sh shares them: both users read and write, new files too
+            acl("-R", "-m", f"u:{agent}:rwX,u:{me}:rwX", d)
+            acl("-R", "-d", "-m", f"u:{agent}:rwX,u:{me}:rwX", d)
+        self.calls.touch()
+        acl("-m", f"u:{agent}:rw", self.calls)
+        # GitHub's side belongs to neither: here the agent's user owns it, as its git refuses a repository of yours
+        bare = self.root / "origins" / "jyoka/app.git"
+        subprocess.run(["sudo", "-n", "-u", agent, "-D", "/", "--", "cp", "-r", str(bare), f"{bare}.own"], check=True)
+        shutil.rmtree(bare)
+        os.rename(f"{bare}.own", bare)
+        (self.root / "secret.txt").write_text("my ssh key\n")
+        (self.root / "secret.txt").chmod(0o600)
+        (self.root / ".config").chmod(0o700)
+        self.write_config(f"\n[sandbox]\nmode = user\nuser = {agent}\n", pass_env="TASK_TEST_AGENT_CALLS",
+                          reviewer="agent")  # the reviewer's snapshot and restore are git as that user too
+        self.env["GH_TOKEN"] = "gho_secret"  # the fake gh ignores it; the agent must not get it
+        try:
+            tid = self.new_with_goal("Say hello. MODE:sandbox\n\n## Rules\n\n- never: WebFetch\n")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid, timeout=60), "In review", self.task("log", tid, "--full"))
+            self.assertIn(f"== sandbox: user {agent}", self.task("log", tid, "--full"))
+            show = lambda *a: subprocess.run(["git", "-c", "safe.directory=*", "-C", str(bare), *a], capture_output=True, text=True).stdout
+            self.assertEqual(show("show", f"task/{tid}:seen.txt"), "readme: app\nsecret: hidden\nconfig: hidden\n"
+                                                                    f"gh token: unset\nrules: {{\nuser: {agent}\n")
+            self.assertIn("reviewed by the agent itself", "\n".join(self.comments(tid)))
+            self.assertTrue(self.pr(tid))  # the agent's user committed and pushed; task-hub opened the PR
+            self.assertNotIn(".claude", self.origin_files(f"task/{tid}"))
+            # the hook and fsmonitor the agent set up did run, for task-hub's commit, but only ever as the agent's user
+            self.assertEqual(set((self.root / "shared/ran-by").read_text().split()), {agent})
+            metrics = json.loads((self.root / ".local/state/task-hub/metrics.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(metrics["files"], 2)  # seen.txt and hello.txt: the PR's size, as GitHub has it
+            # going back to off now needs both shared folders deleted (docs/sandbox.md)
+            self.assertTrue((self.root / ".local/share/task-hub/sandbox-used").exists())
+        finally:  # what the agent's user made: removed as that user, before the test's folder goes
+            for d in shared:
+                subprocess.run(["sudo", "-n", "-u", agent, "-D", "/", "--", "rm", "-rf", "--", str(d)],
+                               stdin=subprocess.DEVNULL)
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")

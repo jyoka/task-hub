@@ -199,6 +199,72 @@
     winget の GitHub CLI を消すのに UAC が要った)。入れたものは記録し、アンインストールはそれだけを消します。
     Windows の実機を毎回借りなくてよいように、CI が標準のユーザーでもインストーラを通し、版を出す前に本物のボードで
     1 枚を PR まで進めます([windows-easy-setup.md](architecture/designs/windows-easy-setup.md))。
+28. **Linux では、エージェントを専用の Linux ユーザーで動かせます(`[sandbox] mode = user`)。既定は off です。**
+    誰も見ていない実行でも、エージェントはあなたの権限で HOME 全体(ほかのリポジトリ、`~/.ssh`、`gh` のログイン、
+    デスクトップ)に届いていました。`mode = user` では、エージェント(実装、reviewer、replanner)を権限の低いユーザー
+    `task-agent` で動かします(`sudo -n -u task-agent -H -D <worktree>`)。あなたの HOME には、Unix の権限で届きません。
+    検討した選択肢です(2026-10)。
+
+    | 選択肢 | エージェント CLI のログイン | git push と PR | `[env]` | ネットワーク | 判定 |
+    |---|---|---|---|---|---|
+    | 専用の Linux ユーザー | そのユーザーで一度ログイン。記録はそのユーザーの HOME に残る | そのユーザーが自分の GitHub のトークンで commit と push。PR はあなたの `gh` で API だけ | 共有のフォルダにコピー | 絞れない | **採用**。root での用意が要るが、外で動く git の抜け道を、動かす主体を分けて閉じられる |
+    | bubblewrap(`bwrap`) | 同じパスに bind するだけ | 外のあなたの git が、エージェントの書いた worktree で commit と push | worktree にコピー | そのまま | 実装したが取りやめ(下記) |
+    | rootless podman | イメージかマウントで渡す。ログインの更新が外に残るよう工夫が要る | bwrap と同じ問題か、中に資格情報を入れる | 届く | `--network` で絞れる | 不採用。言語とエージェント CLI 入りのイメージを保つ手間。ネットワークを絞る段階で再検討 |
+    | エージェント自身のサンドボックス(Claude Code の `/sandbox`、Codex の `-s`) | 要らない | そのまま | 届く | Claude Code は許可リスト | 不採用(決定事項 4: ベンダーごとに設定が違う)。併用はできる |
+    | `systemd-run --user` の `ProtectHome` など | bind で渡す | bwrap と同じ問題 | 届く | 絞れる | 不採用。ユーザーのサービスでは多くの項目が使えない |
+
+    **bwrap をやめた理由(2026-10-17、人が選択)。** 最初は bwrap で、エージェントに worktree だけを見せ、commit と push は
+    決定事項 3 のとおり task-hub が外で行う作りにしました。ところが、外のあなたの git が、エージェントの書いた
+    ファイルの上で動きます。git は worktree の `.git`、`commondir`、clone の config、入れ子のリポジトリの config を読み、
+    `core.fsmonitor`、hook、`filter.*.clean`、`diff.*.textconv` などのコマンドを動かします。`.git` の向け替えを
+    読むだけの bind と `-c core.fsmonitor= -c core.hooksPath=/dev/null` で塞ぐと、次は入れ子のリポジトリの
+    `filter.*.clean` が見つかり、コマンドを動かす設定の種類は `-c` では尽くせませんでした。根の問題は、**あなたの
+    ユーザーが、エージェントの握るファイルの上でコードを動かしうる git を動かす**ことです。
+
+    そこで、次の約束にしました(2026-10-17、人が選択)。
+
+    - **あなたのユーザーは、エージェントの握るファイルの上で git を動かさない。** clone と worktree への git
+      (clone、fetch、worktree、`add`、`commit`、`diff`、reviewer の後の `restore`、`cleanup`)は、すべて `task-agent` で
+      動かします(`git_shared`)。エージェントの仕込んだ hook や filter が動いても、`task-agent` の権限です。
+      そこのファイルの読み書き(レポート、Rules、`[env]` のコピー、`.git/info/exclude`)も `task-agent` で行います
+      (`shared_read`、`shared_write`)。エージェントの置いたリンクが、あなたのファイルに届かないようにするためです。
+      `[check]` と `[setup]` も `task-agent` で動きます。
+    - **commit と push は `task-agent` が自分のトークンで行う。** トークンは、タスクのリポジトリの contents と
+      pull requests だけの fine-grained にします。あなたの `gh` は、PR を開くこと、Issue とカードだけに使い、
+      push した結果(先に進んでいるか、PR の大きさ)は GitHub の API(`compare`)から読みます。決定事項 3 の
+      「エージェントは commit しない」は、エージェントの実行の中では変わりません。commit するのは、エージェントが
+      終わったあとの task-hub で、それを `task-agent` の権限で行うだけです。
+    - **task-hub 自身のプロセスは worktree の外で動く。** herdr のペインと `task _run` の作業フォルダは
+      `~/.local/share/task-hub` です。git を見るシェルのプロンプトが、worktree の中であなたの git を動かさないためです。
+
+    代償です。ユーザー、共有のフォルダ(グループと ACL)、NOPASSWD の sudo を、人がマシンごとに一度 root で
+    用意します(workenv_setting の `setup_agent_user.sh`)。エージェント CLI にも `task-agent` で一度ログインします。
+    使用量の記録は `task-agent` の HOME に残るので、`task stats` はトークンを読めません(フォローアップ)。
+    エージェントは、共有のフォルダにあるほかのタスクの worktree にも届きます。ネットワークは絞りません。
+    `user` から `off` に戻すときは、`setup_agent_user.sh uninstall` でセットアップを戻し、そのうえで `repos` と
+    `worktrees` を消します。`off` では task-hub があなたのユーザーで git を動かすので、エージェントが clone に
+    仕込んだ設定や hook があれば、あなたの権限で動くからです。uninstall は ACL を外すだけで、仕込まれたものは
+    残ります。`off` の task-hub は、`repos` と `worktrees` の実際の ACL(access と default)に `task-agent` か
+    `task-agents` のエントリーが残る間と、`user` が動いた印(`share/sandbox-used`)があって両方のどちらかが
+    まだある間は、開始と後片付けを断ります。空にしただけでは足りません。既定の ACL や残ったプロセスから、
+    次の clone もエージェントが書けるからです。印は、開始のときにモードを決めるところ(`check_sandbox`)で、
+    `user` のときと、`off` で ACL を見つけたときにだけ作るので、印ができる前に `user` を使ったマシンも ACL から
+    拾えます。断るメッセージの手順(uninstall、プロセスを止める、フォルダを消す)は人がするもので、task-hub は
+    どれも動かしません。
+    task-hub のボードの画面のうち、task-rs の diff の欄と `g`、Kiro の拡張の inspect の画面は、まだあなたの
+    ユーザーで worktree に git を動かします。`user` の間はエージェントの worktree で使わないよう sandbox.md に
+    書き、直すのは別のタスクにしました。
+    詳しくは [sandbox.md](sandbox.md)。
+29. **タスクごとの決まりは、Goal の `Rules` に書き、Claude Code には権限の設定として渡します。** OpenAI の「dots」の
+    Custom Rules(ひとりでしてよい、承認が要る、禁止)と同じ 3 段階を、`can:` / `ask:` / `never:` の行で書きます。
+    カードのラベルにしなかったのは、規則には中身(どのコマンドか、どのドメインか)があり、ラベルでは書けないからです。
+    task-hub は開始のたびに worktree の `.claude/settings.local.json` に allow / ask / deny として書き、コミットから
+    除外します。deny は `--dangerously-skip-permissions` でも効き、ask は誰も答えない `-p` の実行では断られます
+    (どちらも code.claude.com の permissions と permission-modes の文書で確認し、deny は 2026-10-17 に Claude Code
+    2.1.302 で確認)。書くファイルはエージェント名で分けません(決定事項 4)。ほかのエージェントには Goal の文章として
+    届き、指示書([worker/PROMPT.md](../worker/PROMPT.md))が従うよう求めます。Codex の `-c` や Kiro の
+    `--trust-tools` への変換は、それぞれの形式を実物で確かめてから足します。
+
 22. **スマートフォンからの登録(`task intake`)は、LLM を使わず、合言葉で受け付け、Backlog にだけ置きます。** 外出先から
     「Y で X をして」と送れるように、ntfy のトピックを購読して文をカードにします。通知(決定事項 19 のあとの ntfy)と
     同じサーバーとトークンを使い、返事もそこに出します。文の形は `<合言葉> [owner/name:] ゴール` だけです。タイトルは
@@ -267,6 +333,21 @@
     閉じてカードを Blocked にします。Done にしないのは、PR が要らないことと、タスクが要らないことは別だからです。直して
     再実行するか、`task done` でやめるかは人が選びます
     ([operations.md](operations.md#スマートフォンから-pr-を承認するボタン))。
+### 提案: 1 タスクあたりの時間とトークンの上限(未実装)
+
+決定事項 18 と 19 のとおり、上限は `task stats` の実績を見てから決めます。2026-10-17 の時点で、このリポジトリを
+作業しているマシンの記録は 2 回だけです(claude、所要時間の中央値 45 秒、1 回の実行で約 22 万トークン。うち
+reviewer が約 11 万)。線を引くには少なすぎるので、次の形を提案し、数字は実績がたまってから決めます。
+
+| 上限 | 線の引き方(案) | 超えたとき(案) |
+|---|---|---|
+| 時間 | `slow` と同じく、エージェントごとの中央値の倍数。たとえば 10 倍、最低 1 時間。実績が 10 回未満なら 3 時間 | 第 1 段階は出来事 `over budget` を出すだけ。第 2 段階で、エージェントを止めて途中までを push し、Blocked(`budget`) |
+| トークン | 実行中の Claude Code の記録を `agent_usage` で読み、エージェントごとの中央値の 5 倍、最低 200 万 | 同じ |
+| クレジット(Kiro) | 同じ読み方で、中央値の 5 倍 | 同じ |
+| タスクごとの上書き | Goal の `Budget` の見出しに `2h, 3M tokens` のような行(`Rules` の中には書けない。`can` / `ask` / `never` 以外の語は開始を止めるため) | 上の線の代わりに使う |
+
+設定ではなくコードの定数から始めるのは、決定事項 19 と同じ理由です。`task stats` の `slow` と `over budget` の
+件数を見て、止めるかを決めます。
 
 ## Status の遷移
 
@@ -361,6 +442,8 @@ Python 3 の標準ライブラリだけを使い、あとは git、gh、そし�
 
 - マシンがスリープすると実行は一時停止し、Ready のカードは Mac が起きて `task watch`(または `task`)が動くまで始まりません。
 - 組み込みのエージェントコマンド (Codex を除く) は承認のプロンプトをスキップします。[agents.md](agents.md#安全性) を参照してください。
+  Linux では `[sandbox] mode = user` で、エージェントを専用のユーザーで動かし、HOME に届かないようにできます
+  (決定事項 28)。Mac と Windows にはまだありません。
 - ネットワークが必要なテストコマンドは、Codex のデフォルトのサンドボックスでは失敗することがあります。そのコマンドを調整してください。
 - Blocked by は、最初の実行より前に付けたときだけ効きます。一度実行したタスクの再実行は、同じブランチの続きから
   なので、あとから付けた前提の変更は入りません。PR を閉じてリモートの `task/<番号>` を消しても、Base branch が

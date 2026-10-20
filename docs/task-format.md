@@ -39,6 +39,35 @@
 - 決済のテスト用キーが `.env` にあること
 ```
 
+### Rules: タスクごとの決まり
+
+Goal に `Rules` の見出し(`##` でも `###` でも)を書くと、そのタスクでエージェントにしてよいこと、承認が要ること、
+してはいけないことを決められます。1 行に 1 つの段階と、カンマ区切りの規則を書きます。
+
+```markdown
+### Rules
+
+- can: Bash(npm test *), Bash(npm run lint)
+- ask: Bash(npm publish *)
+- never: WebFetch, Read(~/.ssh/**), Bash(curl *)
+```
+
+| 行 | Claude Code の設定 | 意味 |
+|---|---|---|
+| `can:` | `permissions.allow` | 聞かずにしてよい |
+| `ask:` | `permissions.ask` | 人の承認が要る。誰も答えない実行では断られ、エージェントは Blocked で承認を求める |
+| `never:` | `permissions.deny` | してはいけない。`--dangerously-skip-permissions` でも効く |
+
+- 規則の書き方は Claude Code の権限の規則そのままです(`Bash(...)`、`Read(...)`、`WebFetch(domain:...)`、`mcp__...`)
+- task-hub は開始のたびに worktree の `.claude/settings.local.json` に書きます。リポジトリの `.claude/settings.json` と
+  合わさり、deny はどこに書いたものも優先します。このファイルはコミットしません
+- Rules を Goal から消すと、次の実行で task-hub が書いたファイルも消します
+- `can` / `ask` / `never` 以外の語で始まる `語:` の行があると、エージェントを起動せずに Blocked にします。
+  語のない文章の行は、そのままエージェントへの指示として読まれます
+- リポジトリが `.claude/settings.local.json` をコミットしているときは、上書きせずに Blocked にします
+- Claude Code 以外のエージェントには、Goal の一部として文章で届きます。コードで止めるのは Claude Code だけです
+- 承認するときは、その規則を `ask:` から `can:` に移して、カードを Ready に戻します
+
 Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
 カードを Ready に戻します。Issue や PR にコメントで書いてもかまいません([人のコメント](#人のコメント))。
 

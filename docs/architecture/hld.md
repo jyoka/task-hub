@@ -274,6 +274,8 @@ sequenceDiagram
 ## 6. 信頼の境界
 
 - エージェントは worktree の中だけを編集します。git と GitHub の操作はすべて task-hub が行います
+- Linux で `[sandbox] mode = user` のときは、エージェントを専用の Linux ユーザーで動かします。あなたの HOME(ほかのリポジトリ、`gh` のログイン、鍵)は Unix の権限で届きません。clone と worktree に対する git とファイルの読み書きも、task-hub はそのユーザーで行い、commit と push もそのユーザーのログインでします。push した結果は GitHub の API で読みます([sandbox.md](../sandbox.md))。既定は off です
+- Goal の Rules は、Claude Code には権限の設定(`.claude/settings.local.json`)として渡ります
 - reviewer と replanner の書き換えは、実行の前の状態に戻してから結果を読みます
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
