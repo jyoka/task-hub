@@ -7,6 +7,7 @@
   use_herdr(), which put a fake herdr (workspaces, tabs, panes in one JSON file) on PATH.
 """
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import importlib.machinery
@@ -5224,6 +5225,41 @@ class TaskTest(unittest.TestCase):
             self.assertIn(why, self.events_of(tid)[-1]["reason"])
             self.task()  # it leaves the queue: the next one goes on
         self.assertEqual(self.gh()["merged_order"], [self.pr(first)["url"]])
+
+    def queue_by_hand(self, tid, queued):
+        """An entry as `task merge` writes it, queued at the given time, with the card left where it is."""
+        queue = self.root / ".local/state/task-hub/merge-queue.json"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(json.dumps({"queue": [{"id": tid, "repo": "jyoka/app", "pr": self.pr(tid)["url"],
+                                                "queued": queued, "step": "update"}]}))
+        return queue
+
+    def with_wait_for_merge(self):
+        db = self.gh()
+        next(f for f in db["fields"] if f["name"] == "Status")["options"].append({"id": "O_wait", "name": "wait for merge"})
+        self.save_db(db)
+
+    def test_an_entry_queued_after_the_board_was_read_stays_for_the_next_check(self):
+        self.queue_on()
+        self.with_wait_for_merge()
+        tid, = self.in_review("first")
+        # `task merge` ran after this check read the board: the card is still In review in what the check read
+        later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        queue = self.queue_by_hand(tid, later)
+        out = self.task()
+        self.assertNotIn("left the queue", out)
+        self.assertEqual([e["id"] for e in json.loads(queue.read_text())["queue"]], [tid])
+        self.assertEqual(self.queue_events(tid), [])
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
+
+    def test_an_entry_queued_before_the_board_was_read_leaves_when_its_card_moved(self):
+        self.queue_on()
+        self.with_wait_for_merge()
+        tid, = self.in_review("first")
+        queue = self.queue_by_hand(tid, "2026-01-01T00:00:00Z")  # then a human moved the card back to In review
+        self.assertIn(f"merge: task {tid}: left the queue (In review)", self.task())
+        self.assertEqual(json.loads(queue.read_text())["queue"], [])
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
 
     def test_a_failing_check_blocks_the_card_with_its_link_and_the_next_waits_for_it(self):
         self.queue_on()
