@@ -338,10 +338,12 @@
     そこで、書いたリポジトリの Backlog のカードは待ち先が終わったら Ready に移し、自動レビュー(reviewer)が `pass` の
     In review の PR はマージキュー(決定事項 26)に入れます。マージはキューだけが行うので、base への追いつき、競合の解決、
     チェック待ちは人が承認したときと同じです。レビューなしでマージしないよう、`[merge] queue = on` と `[runner] reviewer` が
-    ないときは何もせずに止めます。Blocked の答えは決めません(replanner のまま)。どちらもカードごと(Ready)、レビューごと
-    (キュー)に 1 回だけで、人が Backlog に戻したカードやキューから外した PR はもう動かしません。止める手段を人に
-    残すためです。「1 回」は `events.jsonl` の出来事(`autopilot`、`In review` の digest、`queued`)で決め、新しいファイルと
-    GitHub への問い合わせを足しません(`watch_conflict` と同じ)。カードごとに外すのは Goal の `Autopilot: off` の行です。
+    ないときは何もせずに止めます。Blocked の答えは決めません(replanner のまま)。Ready に移すのは一度も Backlog から
+    出ていないカードだけ、キューに入れるのはレビューごとに 1 回だけで、前に動いたカード、人が Backlog に戻したカード、
+    キューから外した PR はもう動かしません。止める手段を人に残すためです。マージするのはレビューした中身だけです:
+    カードの最後の Status がその In review で、PR の先頭のコミットが実行の push したもの、draft でない(違えば `skip` を
+    出して人に任せる)。「1 回」は `events.jsonl` の出来事(`autopilot`、`In review` の digest、`queued`)で決め、新しいファイルと
+    毎分の GitHub への問い合わせを足しません(`watch_conflict` と同じ。キューに入れる前の `gh pr view` だけ、レビューごとに 1 回)。カードごとに外すのは Goal の `Autopilot: off` の行です。
     ラベルにしなかったのは、ラベルを読むと毎分のボードの読み取り(ITEMS_QUERY)が重くなり、本文はすでに読んでいるからです。
     チェックもブランチの保護もないリポジトリ(無料のプランの private)では、マージを止めるのはレビューの判定だけです。
     この弱さは [autopilot.md](autopilot.md) に書き、守りを足すなら GitHub Actions のテストを足すよう案内します

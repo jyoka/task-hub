@@ -411,15 +411,21 @@ stateDiagram-v2
 オフ、`[runner] reviewer` が空なら `fail` します(`cmd_watch` も始めるときに呼ぶ)。
 
 - `autopilot_merge`: カードごとの確認のあと、`merge_queue` の前に呼びます。`repos` の In review のカードで、
-  動いていない、`autopilot_off` でない、`events.jsonl` の最後の `In review` の digest の `verdict` が `pass` で `pr` がある、
-  その時刻より後の `queued` がない、なら `enqueue`(`task merge` と同じ)をして `autopilot`(`action: merge`、`pr`)を書きます。
-  `enqueue` の ValueError(PR がない、実行が戻った)は飛ばし、RuntimeError は `github_errors` に出します。キューに入った
-  カードは同じ確認の `merge_queue` が進めます
-- `autopilot_ready`: 始める前のボード(`board_`)で、`repos` の Backlog のカードを番号順に見ます。待ち先(`waits_for`)が
-  ない、動いていない、`autopilot_off` でない、`autopilot`(`action: ready`)がまだない、なら `set_status(Ready)` と
-  `autopilot`(`action: ready`)。カードの辞書の Status が変わるので、同じ確認の開始の一覧に入ります
+  `autopilot_off` でない、`events.jsonl` でカードの最後の Status の出来事が `In review` で、その digest の `verdict` が
+  `pass` で `pr` がある、その時刻より後に `queued` も `autopilot`(`merge`、`skip`)もない、`running` でも
+  `alive(load_run(id))` でもない(同じ確認で `watch_conflict` が始めた競合の解決は `running` に出ないため)、なら
+  `pr_view` を 1 回読みます。実行の `pr` が digest の `pr` と違う、draft、開いていない、`headRefOid` が In review の
+  出来事の `sha` と違う、のどれかなら `autopilot`(`action: skip`)を書いて人に任せ、どれでもなければ `enqueue`
+  (`task merge` と同じ)をして `autopilot`(`action: merge`、`pr`)を書きます。`enqueue` の ValueError(PR がない、
+  実行が戻った)は飛ばし、RuntimeError は `github_errors` に出します。キューに入ったカードは同じ確認の `merge_queue` が進めます
+- `autopilot_ready`: 始める前のボード(`board_`)で、`repos` の Backlog のカードを番号順に見ます。Issue が開いている、
+  待ち先(`waits_for`)がない、動いていない、`autopilot_off` でない、`runs/<id>.json` がない、`events.jsonl` に Backlog
+  以外の Status の出来事がない(`left_backlog`)、なら `set_status(Ready)` と `autopilot`(`action: ready`)。カードの
+  辞書の Status が変わるので、同じ確認の開始の一覧に入ります。`sync` は `autopilot_ready` のあとで `updated` と
+  `github_errors` の表を出すので、その失敗も表に出ます
 - `autopilot_off` は `tasks()` が Issue の本文(ITEMS_QUERY ですでに読んでいる)から `AUTOPILOT_OFF`(行全体が
-  `autopilot: off`、大文字と小文字、前後の空白を問わない)で求めます。実行の記録には保存しません
+  `autopilot: off`。大文字と小文字、前後の空白、箇条書きの印、`*`、`_`、`` ` ``、終わりの `.` を問わない)で求めます。
+  実行の記録には保存しません
 
 ## 5. 手元のファイル
 
@@ -628,9 +634,10 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     GitHub の呼び出しもカードの動きも足す前と同じ
 14. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = off` でも、`repos` か `worktrees` に専用ユーザーかそのグループの ACL(access か default)が残る間と、`share/sandbox-used` があって `repos` か `worktrees` がまだある(空でも)間は、あなたのユーザーでそこに git を動かさず、ファイルも触らない(`refuse_after_user`、`agent_acl`)
 15. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
-16. `[autopilot]` は、書いたリポジトリのカードだけを、カードごとに 1 回 Ready に移し、自動レビューが `pass` の PR だけを
-    レビューごとに 1 回マージキューに入れる。待ち先のあるカード、`Autopilot: off` のカード、人が Backlog に戻したカード、
-    人がキューから外した PR、Blocked のカードは動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
+16. `[autopilot]` は、書いたリポジトリの一度も Backlog から出ていないカードだけを Ready に移し、最後の実行の自動レビューが
+    `pass` で、その後に変わっていない PR だけをレビューごとに 1 回マージキューに入れる。待ち先のあるカード、`Autopilot: off`
+    のカード、前に動いたカード、閉じた Issue、人がキューから外した PR、レビューのあとに変わった PR、draft、Blocked のカードは
+    動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
     `[autopilot]` がなければ何も変わらない
 
 ## 10. テストの仕組み

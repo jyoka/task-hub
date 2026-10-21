@@ -8,8 +8,8 @@
 | Backlog のカードを Ready に移す | 待ち先(Blocked by)がすべて終わったら、`task watch` が Ready に移し、同じ確認で始める |
 | PR をマージする | 実行が In review で終わり、自動レビュー(reviewer)の判定が `pass` なら、マージキューに入れる。キューが base に追いつかせ、チェックを待ってマージする |
 
-Blocked になったカード、自動レビューが通らなかったカード、PR のない調べもの(research)のカードは、今までどおり
-あなたを待ちます。あなたは通知と `task events`、毎朝のまとめで、あとから何が起きたかを読みます。
+Blocked になったカード、自動レビューが通らなかったカード、PR のない調べもの(research)のカード、一度でも
+Backlog から出たカードは、今までどおりあなたを待ちます。あなたは通知と `task events`、毎朝のまとめで、あとから何が起きたかを読みます。
 
 ## 設定
 
@@ -28,20 +28,30 @@ reviewer = agent              ; 必須。自動レビューが pass のものだ
 
 - `repos` を書いたのに `[merge] queue = on` か `[runner] reviewer` がないと、`task` と `task watch` は何もせずに
   `error:` で止まります。レビューなしでマージしないためです
-- `task watch` と `task` の確認のたびに動きます(1 分に 1 回)。GitHub への問い合わせは増えません。ボードの読み取りと
-  `events.jsonl` だけで決めます
+- `task watch` と `task` の確認のたびに動きます(1 分に 1 回)。決めるのはボードの読み取りと `events.jsonl` です。
+  GitHub への問い合わせが増えるのは、キューに入れる前に PR を 1 回読むとき(`gh pr view`、レビューごとに 1 回)だけです
+
+### 入れたときの、今の Backlog のカード
+
+`repos` を書いた次の確認で、そのリポジトリの Backlog のカードのうち、**一度も Backlog から出ていないものはすべて**
+Ready に移ります(待ち先のあるものは、待ち先が終わってから)。引き継ぎのメモ、PRD、人がする手順のカードには、
+書く前に Goal に `Autopilot: off` の行を足します。前に動いたカード(Blocked のあとに Backlog に戻したものなど)は動かしません。
 
 ## 1 枚のカードに 1 回
 
 | する事 | 条件 | 1 回の決め方 |
 |---|---|---|
-| Ready に移す | Backlog にある、Target repo が `repos` にある、待ち先がない、動いていない、Goal に `Autopilot: off` の行がない | そのカードに `autopilot`(`action: ready`)の出来事がまだない |
-| マージキューに入れる | In review にある、Target repo が `repos` にある、最後の In review の出来事の判定が `pass` で PR がある、動いていない、Goal に `Autopilot: off` の行がない | その In review のあとに `queued` の出来事がまだない |
+| Ready に移す | Backlog にある、Issue が開いている、Target repo が `repos` にある、待ち先がない、動いていない、Goal に `Autopilot: off` の行がない | 一度も Backlog から出ていない(このマシンに実行の記録がなく、`events.jsonl` に Backlog 以外の Status の出来事がない) |
+| マージキューに入れる | In review にある、Target repo が `repos` にある、カードの最後の Status の出来事がその In review で、判定が `pass`、PR がある、動いていない(競合を解く実行も)、Goal に `Autopilot: off` の行がない。PR がその実行の PR で、draft でなく、開いていて、先頭のコミットが実行の push したもののまま | その In review のあとに `queued` も `autopilot`(`merge`、`skip`)もない |
 
-- Ready にするのはカードごとに 1 回だけです。あなたがカードを Backlog に戻すと、オートパイロットはもう動かしません
-  (止めておきたいカードは Backlog に戻します)
+- Ready にするのは、一度も Backlog から出ていないカードだけです。前に動いたカード、あなたが `task start` したカード、
+  Backlog に戻したカードは動かしません(止めておきたいカードは Backlog に戻します)
 - キューに入れるのはレビューごとに 1 回だけです。`task merge <番号> --cancel` でキューから外したカードは、もう入れません。
   次の実行でまたレビューが `pass` になれば、もう一度入れます
+- レビューのあとで PR が変わったとき(あなたの push、`[merge] prefix = on` の競合の解決)、draft にしたとき、
+  別の PR になったときは、`autopilot`(`action: skip`)を 1 回出して、あなたに任せます。レビューした中身だけを
+  マージするためです。`task merge <番号>` で入れられます
+- カードを In review の列に手で動かしても、最後の実行が Blocked なら、そのときの古い `pass` ではマージしません
 - `[triggers]` やスマートフォン(`task intake`)で作ったカードも、Backlog に入れば同じに扱います
 
 ## カードごとに外す(`Autopilot: off`)
@@ -53,7 +63,8 @@ Goal に次の 1 行を書くと、そのカードは Ready に移さず、PR �
 Autopilot: off
 ```
 
-行の頭と終わりの空白、大文字と小文字は区別しません。このカードは、いつもどおり Ready に移すか `task start` で始め、
+行の頭と終わりの空白、大文字と小文字は区別しません。箇条書き(`- Autopilot: off`)、強調やコード
+(`**Autopilot: off**`、`` `Autopilot: off` ``)、終わりの句点(`Autopilot: off.`)でも効きます。このカードは、いつもどおり Ready に移すか `task start` で始め、
 PR はあなたがマージします(`task merge <番号>` も使えます)。
 
 ## チェックのないリポジトリ
@@ -72,6 +83,7 @@ private のリポジトリ)、GitHub はいつでもマージを許します。*
 |---|---|---|---|
 | `autopilot` | `ready` | Ready に移した | どの設定で |
 | `autopilot` | `merge` | マージキューに入れた | レビューが通ったこと、キューの何番目か |
+| `autopilot` | `skip` | レビューは通ったが、入れずにあなたに任せた | PR が変わった、draft、開いていない、別の PR |
 
 そのあとはいつもの出来事が続きます(`Ready`、`In progress`、`In review`、`queued`、`merged`、`Done`)。
 `autopilot` は通知の既定(`[notify] events`)に入っているので、OS の通知と、ntfy を設定していればスマートフォンにも出ます。

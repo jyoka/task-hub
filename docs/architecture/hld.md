@@ -263,9 +263,10 @@ sequenceDiagram
 
 ### 4.6 オートパイロット
 
-`[autopilot] repos` に書いたリポジトリでは、`sync` が人の 2 つの判断をします。Backlog のカードは待ち先が終わったら
-Ready に移し(同じ確認で始まる)、自動レビューが `pass` の In review の PR はマージキュー(4.5)に入れます。
-どちらも `autopilot` の出来事と通知を出します。判断に使うのは、ボードの読み取りと `events.jsonl` だけです。
+`[autopilot] repos` に書いたリポジトリでは、`sync` が人の 2 つの判断をします。一度も Backlog から出ていないカードは
+待ち先が終わったら Ready に移し(同じ確認で始まる)、最後の実行の自動レビューが `pass` で、そのあと変わっていない
+In review の PR はマージキュー(4.5)に入れます。どちらも `autopilot` の出来事と通知を出します。判断に使うのは、
+ボードの読み取り、`events.jsonl`、キューに入れる前の `gh pr view` の 1 回です。
 
 ```mermaid
 flowchart LR
@@ -273,6 +274,7 @@ flowchart LR
     ready --> run["実行、自動レビュー"]
     run -- "pass" --> review["In review"]
     review -- "autopilot_merge(enqueue)" --> queue["マージキュー → merged、Done"]
+    review -- "PR が変わった、draft(skip)" --> you
     run -- "Blocked、needs changes" --> you(["あなた"])
 ```
 
