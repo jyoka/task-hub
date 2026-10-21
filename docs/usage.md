@@ -67,7 +67,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow, update, conflict   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
 
 [intake]
@@ -86,6 +86,9 @@ deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
 prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
 
+[autopilot]
+repos = jyoka/app         ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
+
 [sandbox]
 mode = user             ; Linux だけ。エージェントを専用のユーザーで動かす(既定 off)
 user = task-agent       ; そのユーザー(これが既定)
@@ -100,6 +103,7 @@ user = task-agent       ; そのユーザー(これが既定)
 | `[sandbox]` | エージェントと、worktree への git を専用の Linux ユーザーで動かし、あなたの HOME(ほかのリポジトリ、鍵、`gh` のログイン)に届かせない([sandbox.md](sandbox.md)) | そのユーザーを用意し、GitHub のトークンをどこまで許すか |
 | `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
 | `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
+| `[autopilot]` | 書いたリポジトリの Backlog のカードを、待ち先が終わったら Ready に移す。自動レビューが `pass` の PR をマージキューに入れる([autopilot.md](autopilot.md)) | どのリポジトリを任せるか。任せたくないカードには Goal に `Autopilot: off` |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 

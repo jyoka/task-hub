@@ -66,8 +66,12 @@ RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's repo
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
 # [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`);
-# "conflict": an In review PR that conflicts with its base now ([merge] queue = on)
-NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict"
+# "conflict": an In review PR that conflicts with its base now ([merge] queue = on);
+# "autopilot": a card [autopilot] moved to Ready or queued for merge in the human's place
+NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict, autopilot"
+# a line of the Goal that keeps [autopilot] off this one card, both its start and its merge (a note, a PRD, a step
+# only a human can do). Also as a list item, in emphasis or code, with a period: a miss would start the card
+AUTOPILOT_OFF = re.compile(r"(?im)^[ \t]*(?:[-*+][ \t]+)?[*_`]*autopilot[*_`]*:[*_`]*[ \t]*[*_`]*off[*_`]*\.?[*_`]*[ \t]*$")
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
@@ -381,7 +385,7 @@ def config():
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
-                 "sandbox": {"mode": "off", "user": ""}})
+                 "sandbox": {"mode": "off", "user": ""}, "autopilot": {"repos": ""}})
     try:
         c.read(CONFIG, encoding="utf-8-sig")  # Windows: Notepad may save it with a BOM
     except UnicodeDecodeError:
@@ -872,6 +876,7 @@ def tasks(include_done=False, max_age=0):
                            "reason": n.get("stateReason") or ""}
                           for n in (content.get("blockedBy") or {}).get("nodes") or [] if n]}
         t["mentioned"] = mentioned_blockers(content.get("body") or "")
+        t["autopilot_off"] = bool(AUTOPILOT_OFF.search(content.get("body") or ""))
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
     for t in result:
@@ -3515,6 +3520,7 @@ def sync(started_here=False):
     Not for `task watch`: it starts whatever becomes Ready, wherever it happens to run."""
     slots = parallel()  # a bad value stops before anything changes
     merge = merge_config()
+    autopilot = autopilot_config()
     lines, changed, errors = [], [], []
     open_ = tasks()
     queued = {e["id"] for e in read_queue()} if merge["queue"] else set()
@@ -3573,6 +3579,8 @@ def sync(started_here=False):
             continue
         if t["status"] != before:
             changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
+    if autopilot:
+        autopilot_merge(open_, autopilot, lines, changed, errors)
     if merge["queue"]:
         merge_queue(open_, merge, lines, changed, errors)
     if any(c["now"] in (DONE, "cleaned up (card is Done)") for c in changed):
@@ -3580,12 +3588,13 @@ def sync(started_here=False):
             lines += archive_lines(archive_overflow())
         except RuntimeError as e:  # the next card that gets Done tries again
             errors.append({"id": "", "error": f"archiving old Done cards: {e}"})
+    board_ = tasks() if changed else open_
+    if autopilot:  # before the starts: what it approves starts in this same check
+        autopilot_ready(board_, autopilot, lines, errors)
     if changed:
         lines += table("updated", changed, ["id", "title", "now"])
     if errors:
         lines += table("github_errors", errors, ["id", "error"])
-
-    board_ = tasks() if changed else open_
     free = slots - sum(t["status"] == IN_PROGRESS for t in board_)
     waiting = [t for t in board_ if t["status"] == READY and t["waits_for"]]
     if waiting:  # never started, so they take no slot; each starts once what it waits for is done
@@ -3624,6 +3633,112 @@ def sync(started_here=False):
     if started:
         lines += table("started", started, ["id", "agent", "where"])
     return lines, board_
+
+
+# ---------- autopilot: the human's two decisions, made by task-hub for the listed repos (docs/autopilot.md) ----------
+
+def autopilot_config():
+    """[autopilot] repos as a set of lower-case owner/name; empty when unset. It merges through the merge queue after
+    the automated review, so it needs both: a bad value or a missing one stops before anything changes."""
+    repos = {r.strip().lower() for r in re.split(r"[,\s]+", config()["autopilot"].get("repos", "")) if r.strip()}
+    for r in sorted(repos):
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", r):
+            fail(f"[autopilot] repos takes repos written owner/name; got {r!r}",
+                 f"fix it in {home(CONFIG)} (see docs/autopilot.md)")
+    if repos and not merge_config()["queue"]:
+        fail("[autopilot] merges through the merge queue, which is off",
+             f"set  [merge]  queue = on  in {home(CONFIG)} (see docs/autopilot.md)")
+    if repos and not config()["runner"].get("reviewer", "").strip():
+        fail("[autopilot] merges only what the automated review passed, and no reviewer is set",
+             f"set  [runner]  reviewer = agent  in {home(CONFIG)} (see docs/autopilot.md)")
+    return repos
+
+
+def all_events():
+    """Every event in EVENTS, oldest first, from one read; a line that is not an event is left out."""
+    events = []
+    for line in (event_lines_of(EVENTS.read_text(errors="replace")) if EVENTS.exists() else []):
+        with contextlib.suppress(ValueError):
+            e = json.loads(line)
+            if isinstance(e, dict) and e.get("event"):
+                events.append(e)
+    return events
+
+
+def left_backlog():
+    """The ids of the cards task-hub ever moved out of Backlog (its Status events)."""
+    return {e.get("id") for e in all_events() if e["event"] in StatusLifecycle.all and e["event"] != BACKLOG}
+
+
+def autopilot_ready(board_, repos, lines, errors):
+    """Move the listed repos' Backlog cards to Ready, as the human would, when nothing it waits for is open and its
+    Goal does not say `Autopilot: off`. Only cards that never left Backlog: one that ran before, or that the human
+    started or moved back to Backlog, stays with the human."""
+    candidates = [t for t in board_ if t["status"] == BACKLOG and (t.get("repo") or "").lower() in repos
+                  and not t["waits_for"] and not t["running"] and not t.get("autopilot_off") and not t["closed"]
+                  and not (RUNS / f"{t['id']}.json").exists()]
+    left = left_backlog() if candidates else set()
+    for t in sorted(candidates, key=lambda t: int(t["id"])):
+        if t["id"] in left:
+            continue
+        try:
+            set_status(t, READY)
+            emit(t, "autopilot", action="ready", reason=f"moved to Ready: [autopilot] repos lists {t['repo']}")
+        except RuntimeError as e:  # the next check tries again
+            errors.append({"id": t["id"], "error": f"autopilot: {e}"})
+            continue
+        lines.append(f"autopilot: task {t['id']} moved to Ready")
+
+
+def autopilot_merge(open_, repos, lines, changed, errors):
+    """Queue the PR of each listed repo's In review card whose last run's automated review passed, as `task merge`
+    would, unless its Goal says `Autopilot: off`. Only what was reviewed: the card's newest Status event is that In
+    review, and the PR is the one the run opened, still at the commit the run pushed and not a draft. Once per review:
+    a PR that was in the queue since (queued by anyone, then taken out) or that autopilot skipped is the human's."""
+    cards = [t for t in open_ if t["status"] == IN_REVIEW and (t.get("repo") or "").lower() in repos
+             and not t.get("autopilot_off")]
+    if not cards:
+        return
+    statuses, done = {}, {}
+    for e in all_events():
+        if e["event"] in StatusLifecycle.all:
+            statuses[e.get("id")] = e  # the newest last
+        elif e.get("event") == "queued" or (e.get("event") == "autopilot" and e.get("action") in ("merge", "skip")):
+            done.setdefault(e.get("id"), []).append(e["time"])
+    for t in cards:
+        last = statuses.get(t["id"]) or {}
+        d = last.get("digest") or {}
+        # an In review without a digest (a cancelled merge) has no verdict; no PR: a research task's report
+        if last.get("event") != IN_REVIEW or d.get("verdict", "").lower() != "pass" or not d.get("pr"):
+            continue
+        if any(time_ >= last["time"] for time_ in done.get(t["id"], [])):
+            continue
+        # its own run, or a conflict fix this check just started ([merge] prefix): t["running"] predates it
+        if t["running"] or alive(load_run(t["id"])):
+            continue
+        try:
+            pr = pr_view(d["pr"])
+            why = ("its PR is not the one the review passed" if (t.get("pr") or d["pr"]) != d["pr"] else
+                   "its PR is a draft" if pr.get("isDraft") else
+                   "its PR is not open" if pr.get("state") != "OPEN" else
+                   "its PR changed since its review" if not last.get("sha") or pr.get("headRefOid") != last["sha"]
+                   else "")
+            if why:
+                emit(t, "autopilot", action="skip", pr=d["pr"], reason=f"{why}; it waits for you (`task merge "
+                                                                          f"{t['id']}` queues it)")
+                lines.append(f"autopilot: task {t['id']} left to you: {why}")
+                continue
+            e, n = enqueue(t)
+        except ValueError:  # its PR is gone or its run is back: the next check looks again
+            continue
+        except RuntimeError as err:
+            errors.append({"id": t["id"], "error": f"autopilot: {err}"})
+            continue
+        emit(t, "autopilot", action="merge", pr=e["pr"],
+             reason=f"queued for merge: the automated review passed (position {n} in the queue of {e['repo']})")
+        lines.append(f"autopilot: task {t['id']} queued for merge")
+        if t["status"] != IN_REVIEW:
+            changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
 
 
 # ---------- triggers: cards task-hub makes on its own (docs/triggers.md) ----------
@@ -4284,7 +4399,7 @@ def events_next(a, wanted):
 
 
 def cmd_watch(_):
-    board(), parallel()  # fail fast on a bad config
+    board(), parallel(), autopilot_config()  # fail fast on a bad config
     try:
         trigger_config()
     except ValueError as e:

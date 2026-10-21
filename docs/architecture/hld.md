@@ -261,12 +261,31 @@ sequenceDiagram
     end
 ```
 
+### 4.6 オートパイロット
+
+`[autopilot] repos` に書いたリポジトリでは、`sync` が人の 2 つの判断をします。一度も Backlog から出ていないカードは
+待ち先が終わったら Ready に移し(同じ確認で始まる)、最後の実行の自動レビューが `pass` で、そのあと変わっていない
+In review の PR はマージキュー(4.5)に入れます。どちらも `autopilot` の出来事と通知を出します。判断に使うのは、
+ボードの読み取り、`events.jsonl`、キューに入れる前の `gh pr view` の 1 回です。
+
+```mermaid
+flowchart LR
+    backlog["Backlog<br/>待ち先なし、Autopilot: off なし"] -- "autopilot_ready" --> ready["Ready → launch"]
+    ready --> run["実行、自動レビュー"]
+    run -- "pass" --> review["In review"]
+    review -- "autopilot_merge(enqueue)" --> queue["マージキュー → merged、Done"]
+    review -- "PR が変わった、draft(skip)" --> you
+    run -- "Blocked、needs changes" --> you(["あなた"])
+```
+
+詳しくは [autopilot.md](../autopilot.md) です。
+
 ## 5. 責任の分担
 
 | 判断が要る(LLM) | 決まっている(コード) |
 |---|---|
-| 実装する(worker) | いつ始めるか(Ready、待ち先、枠) |
-| 評価する(reviewer) | git、push、PR、Issue へのコメント |
+| 実装する(worker) | いつ始めるか(Ready、待ち先、枠)。`[autopilot]` のリポジトリでは Ready に移すことも |
+| 評価する(reviewer。`[autopilot]` ではその `pass` がマージの承認になる) | git、push、PR、Issue へのコメント |
 | 止まった理由を仕分ける(replanner) | 判定の読み取り、reviewer の書き換えの取り消し |
 | 会話を分けて提案する(/chief) | replanner の根拠と実物の照合、通知、並び順、アーカイブ |
 | マージの競合を解く(`task _fix`) | マージキューの順番、base の取り込み、マージコミットと push、競合の印の確認、チェック待ち、マージ |
@@ -280,8 +299,9 @@ sequenceDiagram
 - 秘密情報は `[env]` に書いたリポジトリにだけ、コピーで渡します。コミットからは除外します
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
-- マージキューに入るのは、あなたが承認した PR(`task merge`、wait for merge の列)だけです。競合を解くエージェントも
-  ファイルを直すだけで、マージコミット、push、マージは task-hub が行います
+- マージキューに入るのは、あなたが承認した PR(`task merge`、wait for merge の列)と、`[autopilot]` に書いたリポジトリで
+  自動レビューが `pass` の PR だけです。競合を解くエージェントもファイルを直すだけで、マージコミット、push、マージは
+  task-hub が行います。`[autopilot]` のリポジトリにチェックもブランチの保護もなければ、マージを止めるのはレビューの判定だけです
 - 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
 - `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は
   記録するだけで捨て、返事もしません。合言葉のある文も Backlog に置くだけで、始めるのはあなたです

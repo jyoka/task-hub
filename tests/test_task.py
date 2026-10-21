@@ -6278,6 +6278,215 @@ class TaskTest(unittest.TestCase):
             self.assertIn(why, out)
         self.assertEqual(self.cards(), [])
 
+    # --- [autopilot]: cards of listed repos start and merge without the human ---
+
+    def autopilot(self, repos="jyoka/app", merge="queue = on\n", reviewer=True):
+        self.write_config(f"[autopilot]\nrepos = {repos}\n" + (f"[merge]\n{merge}" if merge else ""), reviewer=reviewer)
+
+    def autopilot_events(self, tid):
+        return [e.get("action") for e in self.events_of(tid) if e["event"] == "autopilot"]
+
+    def test_no_autopilot_leaves_backlog_and_in_review_cards_to_the_human(self):
+        self.write_config(reviewer=True)
+        waiting = self.new("ok", "waits for approval")
+        reviewed, = self.in_review("ok")
+        self.task()
+        self.task()
+        self.assertEqual((self.status(waiting), self.status(reviewed)), ("Backlog", "In review"))
+        self.assertEqual(self.pr(reviewed)["state"], "OPEN")
+        self.assertFalse([e for e in self.events_file().read_text().split("\n")[:-1] if '"autopilot"' in e])
+
+    def test_autopilot_approves_listed_repos_backlog_cards_once_their_blockers_are_done(self):
+        self.origin("jyoka/web")
+        self.autopilot()
+        go = self.new("ok", "go")
+        other = self.new("ok", "other repo", "jyoka/web")
+        note = self.new("ok\n\nAutopilot: off", "a handoff note")
+        blocker = self.new("ok", "blocker")
+        self.move(blocker, "Blocked")  # a human holds it: nothing that waits for it starts
+        later = self.new("later", "later", "jyoka/app", "--blocked-by", f"#{blocker}")  # go is merged by then
+        out = self.task()
+        self.assertIn("started", out)
+        self.assertEqual(self.wait(go), "In review")
+        self.assertEqual([self.status(t) for t in (other, note, later)], ["Backlog"] * 3)
+        self.assertEqual(self.autopilot_events(go)[0], "ready")
+        self.assertEqual([e["event"] for e in self.events_of(go)][:3], ["Backlog", "Ready", "autopilot"])
+        self.assertTrue(self.notifications_of(go, "autopilot"), "the human hears what it did")
+        self.task("done", blocker)  # its Issue closed: what waited for it goes on
+        self.task()
+        self.assertEqual(self.wait(later), "In review")
+        self.assertEqual([self.status(t) for t in (other, note)], ["Backlog"] * 2)
+
+    def test_autopilot_approves_a_card_only_once(self):
+        self.autopilot()
+        tid = self.new("ok")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.move(tid, "Backlog")  # parked by the human
+        self.task()
+        self.task()
+        self.assertEqual(self.status(tid), "Backlog")
+        self.assertEqual(self.autopilot_events(tid).count("ready"), 1)
+
+    def test_autopilot_merges_the_pr_once_the_automated_review_passed(self):
+        self.autopilot()
+        tid = self.new("ok")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        out = self.task()  # queued, then the queue merges it: no checks on this PR, so the review is the only gate
+        self.assertIn("merged", out)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
+        self.assertEqual(self.autopilot_events(tid), ["ready", "merge"])
+        merge = [e for e in self.events_of(tid) if e.get("action") == "merge"][0]
+        self.assertEqual(merge["pr"], self.pr(tid)["url"])
+        self.assertIn("automated review passed", merge["reason"])
+        self.assertEqual(self.queue_events(tid), ["queued", "merged", "Done"])
+
+    def test_autopilot_leaves_a_blocked_review_and_a_cancelled_merge_to_the_human(self):
+        self.autopilot()
+        blocked = self.new("ok REVIEW=blocked", "the reviewer stops it")
+        self.task()
+        self.assertEqual(self.wait(blocked), "Blocked")
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)  # autopilot off: this one goes to the human
+        reviewed = self.new("ok", "reviewed")
+        self.task("start", reviewed)
+        self.assertEqual(self.wait(reviewed), "In review")
+        self.autopilot()
+        self.task("merge", reviewed)
+        self.task("merge", reviewed, "--cancel")  # the human took it back out: autopilot must not queue it again
+        self.task()
+        self.task()
+        self.assertEqual((self.status(blocked), self.status(reviewed)), ("Blocked", "In review"))
+        self.assertEqual(self.pr(reviewed)["state"], "OPEN")
+        self.assertNotIn("merge", self.autopilot_events(blocked) + self.autopilot_events(reviewed))
+
+    def test_autopilot_off_in_the_goal_leaves_the_start_and_the_merge_to_the_human(self):
+        self.autopilot()
+        tid = self.new("ok\n\n  AUTOPILOT: Off  ", "the human's own")
+        self.task()
+        self.assertEqual(self.status(tid), "Backlog")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.task()
+        self.assertEqual(self.status(tid), "In review")
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
+        self.assertEqual(self.autopilot_events(tid), [])
+
+    def edit_issue(self, tid, **changes):
+        """The human edits the Issue on GitHub (its Goal, or closes it)."""
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["issues"][tid].update(changes)
+            self.db.write_text(json.dumps(db))
+        self.edited_on_github()
+
+    def test_autopilot_never_merges_on_the_verdict_of_an_older_run(self):
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.edit_issue(tid, body="Say hello. MODE:ok REVIEW=blocked")  # a rework the reviewer then rejects
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "Blocked")
+        with self.db_lock():  # the human readies the PR and drags the card to In review to look at it
+            db = json.loads(self.db.read_text())
+            for pr in db["prs"].values():
+                pr["isDraft"] = False
+            self.db.write_text(json.dumps(db))
+        self.move(tid, "In review")
+        self.autopilot()
+        self.task()
+        self.task()
+        self.assertEqual(self.pr(tid)["state"], "OPEN", "the reviewer rejected the last run")
+        self.assertEqual(self.status(tid), "In review")
+        self.assertNotIn("merge", self.autopilot_events(tid))
+
+    def test_autopilot_never_merges_a_pr_changed_or_drafted_after_its_review(self):
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)
+        pushed, drafted = self.in_review("pushed", "drafted")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seed = self.root / "human-push"
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{pushed}", str(bare), str(seed)], check=True,
+                       capture_output=True)
+        (seed / "extra.txt").write_text("not reviewed\n")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", "a human's push"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", f"task/{pushed}"], check=True,
+                       capture_output=True)
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["prs"][f"jyoka/app task/{drafted}"]["isDraft"] = True
+            self.db.write_text(json.dumps(db))
+        self.autopilot()
+        self.task()
+        self.task()
+        for tid, why in ((pushed, "changed since its review"), (drafted, "draft")):
+            self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+            skips = [e for e in self.events_of(tid) if e["event"] == "autopilot"]
+            self.assertEqual([e["action"] for e in skips], ["skip"], "told once, not every check")
+            self.assertIn(why, skips[0]["reason"])
+        self.assertNotIn("merged_order", self.gh())
+
+    def test_autopilot_does_not_queue_a_pr_whose_conflict_fix_is_running(self):
+        self.write_config("[merge]\nqueue = on\nprefix = on\n", reviewer=True)
+        tid, = self.in_review("first")
+        self.push_to_main("hello.txt", "main's own greeting\n")
+        self.autopilot(merge="queue = on\nprefix = on\n")
+        out = self.task()
+        self.assertIn("started the conflict fix", out)
+        self.assertNotIn("queued for merge", out)
+        self.fix_ended(tid)
+        self.task()  # the fix changed the PR after its review: the human looks at it
+        self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+        self.assertEqual(self.autopilot_events(tid), ["skip"])
+
+    def test_autopilot_off_takes_list_marks_emphasis_and_a_period(self):
+        self.autopilot()
+        ids = [self.new(f"ok\n\n{line}", f"note {n}") for n, line in enumerate(
+            ["- Autopilot: off", "**Autopilot: off**", "Autopilot: off.", "* `Autopilot: off`", "**Autopilot:** off"])]
+        self.task()
+        self.assertEqual([self.status(t) for t in ids], ["Backlog"] * len(ids))
+
+    def test_autopilot_reports_a_failed_move_to_ready(self):
+        self.autopilot()
+        tid = self.new("ok")
+        db = self.gh()
+        db["down"] = "item-edit"
+        self.save_db(db)
+        out = self.task()
+        self.assertIn("github_errors", out)
+        self.assertIn("autopilot", out)
+        self.assertEqual(self.status(tid), "Backlog")
+
+    def test_autopilot_starts_only_cards_that_never_left_backlog(self):
+        self.write_config(reviewer=True)
+        parked = self.new("ok REVIEW=blocked", "parked after a stop")
+        self.task("start", parked)
+        self.assertEqual(self.wait(parked), "Blocked")
+        self.move(parked, "Backlog")  # parked by the human
+        closed = self.new("ok", "closed")
+        self.edit_issue(closed, state="CLOSED")
+        self.autopilot()
+        self.task()
+        self.task()
+        self.assertEqual((self.status(parked), self.status(closed)), ("Backlog", "Backlog"))
+        self.assertEqual(self.autopilot_events(parked) + self.autopilot_events(closed), [])
+
+    def test_bad_autopilot_config_stops_before_anything_changes(self):
+        tid = self.new("ok")
+        for repos, merge, reviewer, why in [("app", "queue = on\n", True, "owner/name"),
+                                            ("jyoka/app", "", True, "the merge queue, which is off"),
+                                            ("jyoka/app", "queue = on\n", False, "no reviewer is set")]:
+            self.autopilot(repos, merge, reviewer)
+            self.assertIn(why, self.task(code=1))
+            self.env["TASK_WATCH_ONCE"] = "1"
+            self.assertIn(why, self.task("watch", code=1))
+            self.env.pop("TASK_WATCH_ONCE")
+        self.assertEqual(self.status(tid), "Backlog")
+
+
 class SlowThresholdTableTest(unittest.TestCase):
     """The task-board mod works out the usual time in TypeScript (claude/task-board/hooks/panel.ts slowThreshold);
     both sides are held to the same table, so they cannot drift apart."""

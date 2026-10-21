@@ -159,6 +159,7 @@ The docs are in Japanese.
 | [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
 | | [triggers.md](docs/triggers.md) Cards task-hub makes on its own | | |
+| | [autopilot.md](docs/autopilot.md) Autopilot: task-hub approves and merges for chosen repos | | |
 | | [sandbox.md](docs/sandbox.md) Sandboxed runs (Linux) | | |
 
 ## Bug reports and feature requests

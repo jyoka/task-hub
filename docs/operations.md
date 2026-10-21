@@ -197,7 +197,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow, update, conflict   ; 既定。列の名前か replan、slow、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot   ; 既定。列の名前か replan、slow、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
 ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
 ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
@@ -388,6 +388,8 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
   入れ直すときも同じです
 - カードを wait for merge の列に動かす(GitHub の画面やスマートフォンで): 次の確認でキューの最後に入ります(動かした順)
 - In review の通知の Merge ボタンを押す(`task intake` が要ります。[スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
+- `[autopilot]` に書いたリポジトリでは、自動レビューが `pass` の In review の PR を、task-hub があなたの代わりに入れます
+  ([autopilot.md](autopilot.md))
 
 `task merge` は今のキューを、`task merge <番号> --cancel` はキューから外します(wait for merge のカードは In review に
 戻します)。カードを wait for merge(列がなければ In review)から別の列に動かしても外れます。
