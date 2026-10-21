@@ -151,6 +151,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
 | | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
+| | [autopilot.md](docs/autopilot.md) オートパイロット(選んだリポジトリの承認とマージを task-hub がする) | | |
 | | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
 
 ## バグ報告と要望

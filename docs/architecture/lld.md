@@ -193,11 +193,17 @@ sequenceDiagram
             S->>GH: Issue を閉じる、Done
         end
     end
+    opt [autopilot] repos
+        S->>S: autopilot_merge(4.9)
+    end
     opt [merge] queue = on
         S->>S: merge_queue(4.8)
     end
     opt 何かが Done になった
         S->>GH: archive_overflow
+    end
+    opt [autopilot] repos
+        S->>GH: autopilot_ready(4.9): Backlog を Ready に
     end
     S->>S: Ready で待ち先がないものを番号順に、枠([runner] parallel)の数だけ
     S->>S: launch
@@ -399,11 +405,27 @@ stateDiagram-v2
   例外の文(競合の修正の `git add`、`git commit` のフックの失敗など)も `git_said` を通します。`run` は
   `text=True` を使わずに自分で読みます(`text=True` の universal newlines は `\r` を改行に変え、描き直しが別の行になるため)
 
+### 4.9 オートパイロット(`autopilot_merge`、`autopilot_ready`、`[autopilot] repos` があるときだけ)
+
+`sync` の最初に `autopilot_config` が `repos`(小文字の owner/name の集合)を返します。書き間違い、`[merge] queue` が
+オフ、`[runner] reviewer` が空なら `fail` します(`cmd_watch` も始めるときに呼ぶ)。
+
+- `autopilot_merge`: カードごとの確認のあと、`merge_queue` の前に呼びます。`repos` の In review のカードで、
+  動いていない、`autopilot_off` でない、`events.jsonl` の最後の `In review` の digest の `verdict` が `pass` で `pr` がある、
+  その時刻より後の `queued` がない、なら `enqueue`(`task merge` と同じ)をして `autopilot`(`action: merge`、`pr`)を書きます。
+  `enqueue` の ValueError(PR がない、実行が戻った)は飛ばし、RuntimeError は `github_errors` に出します。キューに入った
+  カードは同じ確認の `merge_queue` が進めます
+- `autopilot_ready`: 始める前のボード(`board_`)で、`repos` の Backlog のカードを番号順に見ます。待ち先(`waits_for`)が
+  ない、動いていない、`autopilot_off` でない、`autopilot`(`action: ready`)がまだない、なら `set_status(Ready)` と
+  `autopilot`(`action: ready`)。カードの辞書の Status が変わるので、同じ確認の開始の一覧に入ります
+- `autopilot_off` は `tasks()` が Issue の本文(ITEMS_QUERY ですでに読んでいる)から `AUTOPILOT_OFF`(行全体が
+  `autopilot: off`、大文字と小文字、前後の空白を問わない)で求めます。実行の記録には保存しません
+
 ## 5. 手元のファイル
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
@@ -445,7 +467,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ```
 
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
-マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict` のどれかです。`conflict` と
+マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict`、オートパイロットの `autopilot`
+(`action` は `ready` か `merge`)のどれかです。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
 空の欄は書きません。
 
@@ -605,6 +628,10 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     GitHub の呼び出しもカードの動きも足す前と同じ
 14. `[sandbox] mode = user` のとき、task-hub は自分のユーザーで、clone と worktree に git を動かさず、そこのファイルを直接読み書きしない(`git_shared`、`shared_read`、`shared_write`、`shared_unlink`、`as_agent` を通して専用ユーザーで)。エージェントの用意した hook や git の設定は、動いても専用ユーザーの権限でしか動かない。task-hub 自身のプロセス(herdr のペイン、`task _run`)の作業フォルダも worktree の外に置く。それでも commit、push(専用ユーザーのログイン)、PR(あなたの `gh` で API だけ)はできる。`mode = off` でも、`repos` か `worktrees` に専用ユーザーかそのグループの ACL(access か default)が残る間と、`share/sandbox-used` があって `repos` か `worktrees` がまだある(空でも)間は、あなたのユーザーでそこに git を動かさず、ファイルも触らない(`refuse_after_user`、`agent_acl`)
 15. Goal の Rules は `.claude/settings.local.json` になり、コミットされない
+16. `[autopilot]` は、書いたリポジトリのカードだけを、カードごとに 1 回 Ready に移し、自動レビューが `pass` の PR だけを
+    レビューごとに 1 回マージキューに入れる。待ち先のあるカード、`Autopilot: off` のカード、人が Backlog に戻したカード、
+    人がキューから外した PR、Blocked のカードは動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
+    `[autopilot]` がなければ何も変わらない
 
 ## 10. テストの仕組み
 

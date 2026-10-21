@@ -68,6 +68,11 @@ Goal に `Rules` の見出し(`##` でも `###` でも)を書くと、そのタ�
 - Claude Code 以外のエージェントには、Goal の一部として文章で届きます。コードで止めるのは Claude Code だけです
 - 承認するときは、その規則を `ask:` から `can:` に移して、カードを Ready に戻します
 
+### Autopilot: off
+
+`[autopilot]`([autopilot.md](autopilot.md))に書いたリポジトリのカードでも、Goal に `Autopilot: off` の行があれば、
+task-hub は Ready に移さず、PR もマージキューに入れません。引き継ぎのメモ、PRD、人がする手順のカードに書きます。
+
 Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
 カードを Ready に戻します。Issue や PR にコメントで書いてもかまいません([人のコメント](#人のコメント))。
 
