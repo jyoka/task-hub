@@ -52,6 +52,9 @@ read only (see below).
 
 In a terminal narrower than 110 columns, the details go under the board. In a short one, the events take fewer rows.
 
+At the bottom of the board, a small pixel art and a line to cheer you on, a different one each day (it changes at
+local midnight). It shows only in the rows the cards leave free, so it never takes a card's row.
+
 ### Keys in the reader
 
 The reader stays on the task you opened it on. No key in it selects another card.
