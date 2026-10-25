@@ -532,6 +532,7 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 |---|---|
 | エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。Issue の本文に答えを書き足すか、環境を修正します |
 | `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
+| `the watchdog stopped the agent: no output and no CPU used` | エージェントが 45 分以上黙っていて、その子孫も CPU を使っていませんでした(下の「黙って止まったコマンド」)。`task log <番号>` の `== watchdog:` の行の前を読みます |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
 | `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
@@ -591,6 +592,21 @@ task-hub はカードを動かしません(確認するのは PR がマージさ
 herdr のそのタスクのタブでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
 push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
 として Blocked になります。
+
+### 黙って止まったコマンド
+
+エージェントの出力が 45 分なく、エージェントが動かしたコマンド(その子孫)も前の確認から CPU を使っていなければ、
+`task _run` がそのコマンドを止めます(SIGTERM、10 秒後に SIGKILL)。エージェント自身は止めないので、
+コマンドの失敗を受け取って続けます。ログには次の行が出ます。
+
+```text
+== watchdog: no output for 45 min and no CPU used by what the agent started: stopping it (4242 sleep)
+```
+
+CPU を使って黙っているコマンド(出力しない長いテストやビルド)は止めません。止めたあと(止めるものがなければ 45 分から)
+さらに 10 分黙っていて、子孫も CPU を使っていなければ、エージェントも止め(`== watchdog: no output for 55 min: stopping the agent`)、
+カードは Blocked になります。しきい値は設定できません(決定事項 19)。Windows では子孫の CPU が分からないので、watchdog は
+何も止めません。
 
 ## タスクを取り消す
 

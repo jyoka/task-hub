@@ -15,7 +15,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
+    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -101,7 +101,7 @@ classDiagram
 | `updated`、`closed` | GitHub | カードを最後に変えた時刻、Issue が閉じているか |
 | `blockers`、`waits_for` | GitHub + 計算 | Blocked by のリンク、まだ始められない理由 |
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
-| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行を止めたシグナル。5 章 |
+| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行を止めたシグナル(watchdog がエージェントを止めたときは `silent`)。5 章 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
 | `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
 | `running` | 計算(`alive`) | 実行のプロセスが生きているか |
@@ -145,6 +145,15 @@ flowchart LR
   `[sandbox] mode = user` では、グループのうち専用ユーザーのプロセスへは `as_agent` の `kill` でも送ります。
   `task _run` は起動したエージェントの pid と開始時刻を `agent_pid`、`agent_started` に書き、終わったら空に戻します。
   エージェントには制御端末がありません(`/dev/tty` に問いかけるコマンドは失敗します。stdin は今までどおり空です)
+- `agent_process` はエージェントの出力を別のスレッドで読み、`task _run` の側で watchdog(`Watchdog`)を動かします。
+  出力が `SILENT_SECONDS`(45 分)なく、かつエージェントの子孫(ppid をたどった先と、グループに残ったもの。エージェント自身と、
+  `[sandbox] mode = user` の `sudo` は除く)が前の確認から CPU を使っていない(`ps -o time` の値もプロセスの顔ぶれも同じ)ときだけ、
+  その子孫に SIGTERM、`AGENT_STOP_SECONDS` 後に残っていれば SIGKILL を送ります(`signal_pids`)。`ps` は黙っている間だけ
+  `SILENT_CHECK`(60 秒)ごとに動かします。出力が来たら数え直します。子孫を止めてから(止めるものがなければ `SILENT_SECONDS` から)
+  さらに `SILENT_GRACE`(10 分)黙っていて、子孫も CPU を使っていなければ、`stop_agent` でグループを止め、`interrupted` に `silent` を書きます。
+  そのあとは普通のレポートなしの終わりと同じで、`finish` が「the watchdog stopped the agent」で Blocked にします
+  (自動の再開は designs/durable-runs.md のタスク 4)。`ps` がない(Windows)か失敗したときは、子孫の CPU が分からないので
+  どちらの段も動きません。テストは `TASK_SILENT_SECONDS` と `TASK_SILENT_GRACE_SECONDS` で短くします
 - `task _run` が SIGHUP か SIGTERM を受けたら(ペインを閉じた、シャットダウン、`kill`)、`interrupted` にシグナルの名前を
   書いて、その場で終わります。エージェントが動いていれば、先にそのグループを止めます(`Interrupted`)。ほかの間(`[setup]`、
   git、GitHub)は待たずに終わり、動いている git は止めません。push もカードの移動もしないので、In progress のカードは
@@ -562,6 +571,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
 | ボタンの文(`task intake`) | `gh pr view`(PR の今の先頭のコミット)、Merge は `cmd_merge` と同じ呼び出し、Reject は `gh pr close --comment`、`gh issue comment`、Status | ボタン 1 回につき ボードの読み 1 + GraphQL 1 + 操作の分 | 人がボタンを押したときだけ。合わないトークン、使ったトークンは GitHub を呼ばない |
 | `sudo -n -u <user> -H -D <dir> --`(`[sandbox] mode = user` のときだけ) | エージェントの CLI、`[check]`、`[setup]`、clone と worktree への git、そこのファイルの読み書き(`as_agent`)。開始の前に `check_sandbox` が共有のフォルダに書けるかを試す | - | エージェントの起動ごと、git ごと |
+| `ps -A -o pid=,ppid=,pgid=,stat=,time=,comm=`(Windows にはない) | `agent_descendants`: watchdog がエージェントの子孫と CPU 時間を読む | - | エージェントの出力が 45 分近く途切れている間だけ、60 秒ごと |
 | `gh api repos/<repo>/compare/<base>...<branch>`(`[sandbox] mode = user` のときだけ) | `branch_compare`: 専用ユーザーが push したあと、先に進んでいるか(`ahead_by`)と PR の大きさ(`files`)を GitHub から読む | REST 1 回 | 実行の終わりに 2 回 |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
@@ -618,6 +628,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | `task intake` のボタンの失敗(GitHub)、断った(古いコミット、閉じた PR、キューがオフなど) | 1 行記録し、ntfy に「refused」を理由つきで返す。トークンは使ったことにしないので、理由を直せば同じボタンをまた押せる。合わないトークンは記録だけで返事なし |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
+| エージェントが黙って止まった(出力も CPU もない) | watchdog が子孫を止め、エージェントは続ける。さらに 10 分黙っていればエージェントのグループを止め、`interrupted: silent`、レポートがなければ Blocked。`ps` が動かないとき(Windows)は子孫の CPU が分からないので、何も止めない |
 | `task _run` が SIGHUP、SIGTERM を受けた | エージェントが動いていればグループを止め、`interrupted` を書いて終わる。カードは In progress のままで、次の同期が止まった実行として Blocked にする |
 | reviewer か replanner の途中で `task _run` が落ちた(kill -9、クラッシュ) | worktree に書き換えが残る。記録の `snap` が残っているので、次の `launch` が `ensure_worktree` で `restore` してから始める |
 | トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
@@ -662,7 +673,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
   偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
   bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます。`MODE:slowtree` は子のプロセスを 1 つ持って待ち続け
-  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は書き換えてから待ち続けます(約束 2 のテスト)
+  (グループごと止まるかのテスト)、`MODE:hang` は黙って `sleep` を待ち、`MODE:busy` は黙って CPU を使う子を待ち、`MODE:silent` は
+  自分が黙って止まります(watchdog のテスト)。偽物の reviewer の `REVIEW=edithang` は書き換えてから待ち続けます(約束 2 のテスト)
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、
