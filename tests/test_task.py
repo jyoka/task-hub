@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import unittest.mock
 import urllib.parse
@@ -422,8 +423,8 @@ report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please re
 print(f"fake agent working, mode {mode}")
 if mode == "crash":
     sys.exit(1)
-# works a bit, then keeps running until stopped; once resumed (# Resumed), as "ok". "hang": resumed too
-if mode == "hang" or mode in ("slow", "slowtree") and "# Resumed" not in prompt:
+# works a bit, then keeps running until stopped; once resumed (# Resumed), as "ok". "frozen": resumed too
+if mode == "frozen" or mode in ("slow", "slowtree") and "# Resumed" not in prompt:
     Path("hello.txt").write_text("partial work\n")
     if mode == "slowtree":  # with a child of its own (a test run, a dev server), which must stop with it
         # QUIETKID: one that does not hold the agent's output open (its run would wait for it to end)
@@ -443,6 +444,18 @@ if mode == "retryhang":  # sent back by the reviewer, then cut short in its retr
         import time; time.sleep(60)
     else:
         Path("hello.txt").write_text("fixed after review\n")
+if mode in ("hang", "hangterm", "busy"):  # waits without a word on a command that hangs, or one that works a while
+    command = {"hang": ["sleep", "60"], "hangterm": ["sh", "-c", "trap '' TERM; sleep 60"],  # sleep ignores it too
+               "busy": [sys.executable, "-c", "import time\nend = time.time() + 4\nwhile time.time() < end: pass"]}[mode]
+    code = subprocess.run(command).returncode
+    print(f"the command exited with {code}", flush=True)
+    Path("hello.txt").write_text(f"the command exited with {code}\n")
+    Path(".task-report.md").write_text(report)
+    sys.exit(0)
+# works a bit, then hangs itself, with nothing of its own running; "silentonce": once resumed (# Resumed), as "ok"
+if mode == "silent" or mode == "silentonce" and "# Resumed" not in prompt:
+    Path("hello.txt").write_text("partial work\n")
+    import time; time.sleep(60)
 if mode == "env":  # proves the agent got the env files: writes what it read
     seen = [Path(p).read_text().strip() for p in (".env", "voice/.env") if Path(p).exists()]
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
@@ -4389,6 +4402,115 @@ class TaskTest(unittest.TestCase):
         self.wait_for(lambda: process_gone(agent) and process_gone(child))
         self.assertEqual(len(self.agent_calls()), 1)  # never resumed (lld.md 9, promise 17)
 
+    def test_watchdog_stops_a_silent_command_that_uses_no_cpu_and_the_agent_goes_on(self):
+        """tasks#170: a test's cleanup hung in waitpid and the worker waited 20 minutes and more. With no output for
+        TASK_SILENT_SECONDS and no CPU used, what the agent waits on is stopped; the agent sees it fail and reports."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="60")
+        tid = self.new("hang")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=30), "In review", self.task("log", tid, "--full"))
+        log = self.task("log", tid, "--full")
+        self.assertRegex(log, r"== watchdog: no output for \d+ s and no CPU used by what the agent started: "
+                              r"stopping it \(\d+ sleep\)")
+        self.assertNotIn("stopping the agent", log)
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with -15\n")  # SIGTERM was enough
+        self.assertEqual(self.run_state(tid).get("interrupted", ""), "")
+
+    def test_watchdog_kills_a_silent_command_that_ignores_sigterm(self):
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="60")
+        tid = self.new("hangterm")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=40), "In review", self.task("log", tid, "--full"))
+        self.assertRegex(self.task("log", tid, "--full"), r"stopping it \(\d+ sh, \d+ sleep\)")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with -9\n")  # SIGKILL, AGENT_STOP_SECONDS after the SIGTERM
+
+    def test_watchdog_leaves_a_silent_command_that_uses_cpu(self):
+        """A long test or build that prints nothing but works: a quiet log alone is no hang (docs/lessons.md)."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="1")
+        tid = self.new("busy")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=30), "In review", self.task("log", tid, "--full"))
+        self.assertNotIn("watchdog", self.task("log", tid, "--full"))
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with 0\n")
+
+    def test_watchdog_stops_nothing_when_it_cannot_see_the_cpu_of_what_the_agent_started(self):
+        """Windows has no ps (and ps may fail): whether a silent build still works is unknown, so silence alone stops
+        nothing there. Where ps works, an agent silent with nothing under it is stopped after the grace, and one whose
+        descendant keeps using CPU is not."""
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+        task.SILENT_SECONDS, task.SILENT_GRACE, task.SILENT_CHECK = 60.0, 30.0, 10.0
+        clock = [1000.0]
+
+        def run(descendants):
+            said, stopped = [], []
+            with unittest.mock.patch.object(task.time, "monotonic", lambda: clock[0]), \
+                    unittest.mock.patch.object(task, "agent_descendants", lambda _pid: descendants()), \
+                    unittest.mock.patch.object(task, "stop_agent", lambda proc: stopped.append(proc) or -15), \
+                    unittest.mock.patch.object(task, "signal_pids", lambda pids, sig: None):
+                dog = task.Watchdog(types.SimpleNamespace(pid=4242), said.append)
+                for _ in range(60 * 60):  # an hour, a check each second
+                    clock[0] += 1
+                    if dog.watch():
+                        break
+            return said, stopped
+
+        with unittest.mock.patch.object(task, "WINDOWS", True):
+            self.assertEqual(run(lambda: None), ([], []))  # ps unknown: nothing said, nothing stopped
+        said, stopped = run(lambda: {})
+        self.assertEqual(len(stopped), 1)
+        self.assertRegex(said[-1], r"== watchdog: no output for \d+ s: stopping the agent")
+        cpu = [0.0]
+
+        def busy():
+            cpu[0] += 1
+            return {4243: (cpu[0], "make")}
+        self.assertEqual(run(busy), ([], []))  # a descendant using CPU: left alone
+
+    def test_watchdog_stops_an_agent_still_silent_after_the_grace_and_notes_why(self):
+        """Silent itself, with nothing to stop under it: SILENT_GRACE later its group is stopped, as `silent`. It is
+        resumed once (run_worker); silent again, the card is Blocked with the watchdog's reason."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="2")
+        tid = self.new("silent")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=60), "Blocked")
+        log = self.task("log", tid, "--full")
+        self.assertRegex(log, r"== watchdog: no output for \d+ s: stopping the agent")
+        self.assertNotIn("no CPU used by what the agent started", log)  # nothing of its own ran
+        self.assertIn("== the watchdog stopped the agent (no output and no CPU used) during agent; resuming it once",
+                      log)
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertIn("the watchdog stopped the agent: no output and no CPU used", self.comments(tid)[-1])
+        self.assertEqual(self.run_state(tid)["interrupted"], "silent")
+        self.assertEqual(self.run_state(tid)["agent_pid"], "")
+        self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))  # what it did before is pushed, as with Ctrl-C
+
+    def test_watchdog_stop_is_resumed_once_and_the_agent_goes_on(self):
+        """durable-runs.md task 6: an agent the watchdog stopped goes to the one resume, as `silent`."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="2")
+        tid = self.new("silentonce")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=60), "In review", self.task("log", tid, "--full"))
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("It stopped during: agent (the watchdog stopped the agent", calls[1]["prompt"])
+        self.assertIn("Resumed once at agent: the watchdog stopped the agent (no output and no CPU used).",
+                      self.comments(tid)[-1])
+        self.assertEqual(self.run_state(tid)["interrupted"], "silent")
+        self.assertEqual([(e["stage"], e["reason"]) for e in self.events_of(tid) if e["event"] == "resumed"],
+                         [("agent", "silent")])
+
     def test_sighup_or_sigterm_stops_the_agent_group_and_notes_why(self):
         """The pane closed (SIGHUP), a shutdown or `kill` (SIGTERM): the agent and what it started stop with the
         run, which notes why and ends there. The card stays In progress, and the next sync resumes it (decision 1)."""
@@ -4512,7 +4634,7 @@ class TaskTest(unittest.TestCase):
                     self.assertIn("== the [resume] command did nothing; starting the agent again in a new session", log)
 
     def test_a_resumed_run_that_stops_again_is_blocked(self):
-        tid = self.new("hang")
+        tid = self.new("frozen")
         self.task("start", tid)
         self.kill_run_and_agent(tid)
         self.task()

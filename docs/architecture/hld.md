@@ -135,7 +135,7 @@ flowchart TB
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
 | `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md))。In progress で `task _run` が死んだカードを、1 回だけ再開する(`relaunch`)。2 回目は Blocked | GitHub のボード、手元の状態、作業場所 |
-| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める。記録の段階(`resume_stage`)から続ける。エージェントが外から kill されたら、その場で 1 回だけ再開する | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める。出力も CPU もなく黙って止まったコマンドは watchdog が止める。記録の段階(`resume_stage`)から続ける。エージェントが外から kill されたとき、watchdog がエージェントを止めたときは、その場で 1 回だけ再開する | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く。再開のときは `[resume]` のコマンド(なければ `[agents]` の新しいセッション)で、「# Resumed」の節を足したプロンプトから続ける | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |

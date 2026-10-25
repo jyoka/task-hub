@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import platform
+import queue
 import re
 import secrets
 import shlex
@@ -35,6 +36,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -133,9 +135,10 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
 # stopped. head: HEAD before the agent's launch. snap: `<tree> <HEAD>` while a reviewer or replanner runs, so a run
 # that dies before restore leaves the next launch something to restore. review_attempt: 0 or 1, the review running.
 # interrupted: why the run or its agent last stopped (SIGHUP, SIGTERM, SIGINT, "the agent was killed (SIGKILL)",
-# "the run process is gone"). resumes: how often this run was resumed (MAX_RESUMES), resumed: the stages it was
-# resumed at, space-separated. resume_stage: where relaunch tells the next `_run` to go on from (it reads and empties
-# it), resumed_at: when relaunch started it again. launch empties them all (RUN_FRESH)
+# "silent" when the Watchdog stopped the agent, "the run process is gone"). resumes: how often this run was resumed
+# (MAX_RESUMES), resumed: the stages it was resumed at, space-separated. resume_stage: where relaunch tells the next
+# `_run` to go on from (it reads and empties it), resumed_at: when relaunch started it again. launch empties them all
+# (RUN_FRESH)
 RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted", "resumes", "resumed",
              "resume_stage", "resumed_at")
 MAX_RESUMES = 1  # a run that stops unexpectedly is resumed this often, then Blocked (decision 7); no setting
@@ -161,6 +164,12 @@ DETACHED = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CR
 # only the run, which stops the group), on Windows its own process group in the run's console (taskkill /T stops it)
 AGENT_GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
 AGENT_STOP_SECONDS = 10  # how long a stopped agent has to exit before it is killed
+# the watchdog (Watchdog, decision 19): an agent with no output for SILENT_SECONDS (claude's Bash may wait 30 minutes)
+# whose descendants used no CPU since the last check gets those descendants stopped; still silent SILENT_GRACE
+# later, the agent too. ps runs every SILENT_CHECK while it is that silent. Tests make them seconds
+SILENT_SECONDS = float(os.environ.get("TASK_SILENT_SECONDS") or 45 * 60)
+SILENT_GRACE = float(os.environ.get("TASK_SILENT_GRACE_SECONDS") or 10 * 60)
+SILENT_CHECK = min(60.0, SILENT_SECONDS / 4)
 
 
 # ---------- output (TOON) ----------
@@ -1170,12 +1179,17 @@ def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
 RESUMED_LINE = re.compile(r"\n\nResumed once at [^\n]*")
 
 
+def interrupted_text(why):
+    """`interrupted` as people and agents read it: "silent" (the Watchdog) says nothing on its own."""
+    return "the watchdog stopped the agent (no output and no CPU used)" if why == "silent" else why
+
+
 def resumed_line(t):
     """The report's line on where the run was resumed (decision 11: the Issue's report and the `resumed` event,
     no notification of its own); "" for a run never resumed."""
     stages = (t.get("resumed") or "").split()
-    return f"Resumed once at {', '.join(stages)}: {t.get('interrupted') or 'the run process is gone'}." \
-        if stages else ""
+    why = interrupted_text(t.get("interrupted") or "the run process is gone")
+    return f"Resumed once at {', '.join(stages)}: {why}." if stages else ""
 
 
 def issue(t):
@@ -2012,7 +2026,7 @@ def resume_prompt(prompt, stage, why):
     """The prompt of an agent started again after it was cut short: all of its first prompt, then # Resumed
     (worker/PROMPT.md), enough to work from without the conversation, which the agent may not have kept."""
     return "\n".join([prompt.rstrip("\n"), "", instruction_parts(WORKER_PROMPT)[2], "",
-                      f"It stopped during: {stage} ({why})", ""])
+                      f"It stopped during: {stage} ({interrupted_text(why)})", ""])
 
 
 def prompt_file(t):
@@ -2348,8 +2362,9 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False):
     proc = None
     if t is not None:
         t["agent_running"] = True  # never saved: tells cmd_run's signal handler there is an agent to stop
-        # never saved either: whether task-hub itself stopped it (Ctrl-C), and how many tool calls it showed
-        t["agent_stopped"], t["agent_steps"], t["agent_group"] = False, 0, 0
+        # never saved either: whether task-hub itself stopped it (Ctrl-C) or the Watchdog did, and how many tool calls
+        # it showed
+        t["agent_stopped"], t["agent_silenced"], t["agent_steps"], t["agent_group"] = False, False, 0, 0
     try:
         argv, env = windows_command(agent_command(agent, prompt, resume))
         argv = as_agent(argv, wt, [*pass_env(), *env])
@@ -2361,13 +2376,38 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False):
             t["agent_group"] = proc.pid  # never saved: kept after it ends, for what it left in its group (run_worker)
             save_run(t)
         steps = STEPS.get(step_format(agent), Steps)(wt)
-        for line in proc.stdout:
-            for shown in steps.read(line.rstrip("\n")):
-                say(shown)
-                if t is not None and shown.startswith("· "):  # tool_step's form
-                    t["agent_steps"] += 1
+        lines = queue.Queue()  # read in a thread, so the watchdog runs while the agent is silent
+
+        def read():
+            try:
+                for line in proc.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+        threading.Thread(target=read, daemon=True).start()
+        dog = Watchdog(proc, say)
+        while True:
+            try:
+                line = lines.get(timeout=min(1.0, SILENT_CHECK))
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
+            if line:
+                dog.heard()
+                for shown in steps.read(line.rstrip("\n")):
+                    say(shown)
+                    if t is not None and shown.startswith("· "):  # tool_step's form
+                        t["agent_steps"] += 1
+            if dog.watch():  # it stopped the agent: what left its group may hold the output open, so not read on
+                if t is not None:
+                    t["interrupted"], t["agent_silenced"] = "silent", True
+                    save_run(t)
+                break
         for shown in steps.close():
             say(shown)
+        if dog.stopped is not None:
+            return dog.stopped
         code = proc.wait()
         return 1 if code == 0 and steps.failed else code
     except (KeyboardInterrupt, Interrupted) as e:  # Ctrl-C in the pane stops the agent; still push what it did
@@ -2427,6 +2467,112 @@ def stop_agent(proc):
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=AGENT_STOP_SECONDS)
     return proc.returncode if proc.returncode is not None else -9
+
+
+class Watchdog:
+    """Stops what a silent agent waits on (decision 19). A log that is only quiet is no hang (docs/lessons.md): it
+    acts only when the agent printed nothing for SILENT_SECONDS and its descendants used no CPU since the last check
+    (ps), so a long test or build that works without printing is left alone. Then the descendants, never the agent
+    itself, get SIGTERM and AGENT_STOP_SECONDS later SIGKILL; the agent sees its command fail and goes on. Still
+    silent, and its descendants still idle, SILENT_GRACE after that (after SILENT_SECONDS when there was nothing to
+    stop), the agent's whole group is stopped (stop_agent). Without ps (Windows) whether the descendants use CPU is
+    unknown, so the watchdog stops nothing: silence alone is no hang."""
+
+    def __init__(self, proc, say):
+        self.proc, self.say = proc, say
+        self.stopped = None  # the agent's exit code, once the watchdog stopped it
+        self.kill, self.kill_at = {}, 0.0  # descendants sent SIGTERM, to get SIGKILL at kill_at if still there
+        self.heard()
+
+    def heard(self):
+        """The agent printed a line: it is not silent."""
+        self.last, self.checked, self.before, self.cut_at = time.monotonic(), 0.0, None, None
+
+    def watch(self):
+        """Called after each line and each second without one. True once it stopped the agent itself."""
+        at = time.monotonic()
+        if self.kill and at >= self.kill_at:
+            left = [pid for pid in self.kill if pid in (agent_descendants(self.proc.pid) or {})]
+            signal_pids(left, signal.SIGKILL)
+            self.kill = {}
+        silent = at - self.last
+        # ps starts one check early, so the first decision at SILENT_SECONDS has a check before it to compare with
+        if silent < SILENT_SECONDS - SILENT_CHECK or at - self.checked < SILENT_CHECK:
+            return False
+        self.checked = at
+        before, self.before = self.before, agent_descendants(self.proc.pid)
+        seen = self.before
+        idle = seen is not None and seen == before  # the same processes, none with more CPU time
+        if silent < SILENT_SECONDS:
+            return False
+        if idle and seen and self.cut_at is None:
+            self.cut_at = at
+            self.kill, self.kill_at = seen, at + AGENT_STOP_SECONDS
+            shown = ", ".join(f"{pid} {name}" for pid, (_cpu, name) in sorted(seen.items()))
+            self.say(f"== watchdog: no output for {span(silent)} and no CPU used by what the agent started: "
+                     f"stopping it ({shown})")
+            signal_pids(seen, signal.SIGTERM)
+        elif idle and at - (self.last + SILENT_SECONDS if self.cut_at is None else self.cut_at) >= SILENT_GRACE:
+            self.say(f"== watchdog: no output for {span(silent)}: stopping the agent")
+            self.stopped = stop_agent(self.proc)
+            return True
+        return False
+
+
+def span(seconds):
+    return f"{seconds / 60:.0f} min" if seconds >= 120 else f"{seconds:.0f} s"
+
+
+def agent_descendants(pid):
+    """{pid: (CPU seconds, command name)} of what the agent started and what is left in its group (AGENT_GROUP),
+    the agent itself left out, from `ps -o time`; None when ps cannot be run (Windows). With [sandbox] mode = user
+    the agent is under sudo: each sudo with one child is passed through to it."""
+    if WINDOWS:
+        return None
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "time=",
+                            "-o", "comm="],
+                           capture_output=True, text=True, errors="replace", timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    table = {}
+    for line in r.stdout.splitlines():
+        with contextlib.suppress(ValueError):
+            p, parent, group, stat, cpu, name = line.split(None, 5)
+            if not stat.startswith("Z"):  # exited, only its status left for its parent: nothing to stop
+                table[int(p)] = (int(parent), int(group), cpu_seconds(cpu), Path(name.strip()).name)
+    children = {}
+    for p, (parent, *_rest) in table.items():
+        children.setdefault(parent, []).append(p)
+    agent = [pid]
+    while agent[-1] in table and table[agent[-1]][3] == "sudo" and len(children.get(agent[-1], [])) == 1:
+        agent.append(children[agent[-1]][0])
+    found, todo = set(), list(children.get(agent[-1], [])) + [p for p, v in table.items() if v[1] == pid]
+    while todo:
+        p = todo.pop()
+        if p not in found and p not in agent and p != os.getpid():
+            found.add(p)
+            todo += children.get(p, [])
+    return {p: (table[p][2], table[p][3]) for p in found}
+
+
+def cpu_seconds(s):
+    """ps's `time`: [[dd-]hh:]mm:ss, with hundredths on macOS (0:01.25)."""
+    days, _, clock = s.rpartition("-")
+    seconds = sum(float(x) * 60 ** i for i, x in enumerate(reversed(clock.split(":"))))
+    return (int(days) if days else 0) * 86400 + seconds
+
+
+def signal_pids(pids, sig):
+    """Send sig to these processes. With [sandbox] mode = user they may be another user's: that user sends it too."""
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, sig)
+    if pids and sandbox_mode() != "off":
+        with contextlib.suppress(OSError, RuntimeError):
+            run(*as_agent(["kill", "-s", sig.name[3:], "--", *map(str, pids)]))
 
 
 def step_format(name):
@@ -2842,7 +2988,8 @@ def review_loop(t, report, code, say, record, resume_at="", why=""):
 
 def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
     """The task's agent at stage (agent, retry); its exit code. Killed by something other than task-hub (POSIX: a
-    negative code; never Ctrl-C), it is started again in place, once (MAX_RESUMES) for the whole run.
+    negative code; never Ctrl-C) or stopped by the Watchdog, it is started again in place, once (MAX_RESUMES) for
+    the whole run.
     resumed_why: this `_run` was itself started again (relaunch) to go on with it, cut short for that reason."""
     if resumed_why:
         return run_resumed_worker(t, prompt, stage, label, say, record, resumed_why)
@@ -2850,13 +2997,14 @@ def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
     # Windows: an exit code never says a signal ended it
     if WINDOWS or code >= 0 or t.get("agent_stopped") or int(t.get("resumes") or 0) >= MAX_RESUMES:
         return code
-    why = f"the agent was killed ({signal_name(-code)})"
+    why = "silent" if t.get("agent_silenced") else f"the agent was killed ({signal_name(-code)})"
+    said = interrupted_text(why)
     # what the killed agent started (a test run, a subagent) may still write the worktree: never two agents at once
     if t.get("agent_group") and not stop_group(t["agent_group"], (signal.SIGKILL,)):
-        say(f"== {why} during {stage}; what it left in process group {t['agent_group']} does not stop, "
+        say(f"== {said} during {stage}; what it left in process group {t['agent_group']} does not stop, "
             "so it is not resumed")
         return code
-    say(f"== {why} during {stage}; resuming it once")
+    say(f"== {said} during {stage}; resuming it once")
     note_resume(t, stage, why)
     emit(t, "resumed", stage=stage, reason=why)
     return run_resumed_worker(t, prompt, stage, label, say, record, why)
@@ -3146,7 +3294,12 @@ def finish(t, report, code, say, auto_review="", blocked_override="", again=Fals
         git_shared(wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
         ahead = (branch_compare(t, base) or {}).get("ahead_by", 0) > 0
 
-    if not report.strip():
+    # the Watchdog stopped the last agent, after its one resume (run_worker); `interrupted` stays "silent" after a
+    # resume, so it would also name a resumed agent that ended on its own
+    if not report.strip() and t.get("agent_silenced"):
+        # how long it was silent is in the log: a descendant may have used CPU for a while before it hung
+        parsed.blocked = f"the watchdog stopped the agent: no output and no CPU used, see `task log {t['id']}`"
+    elif not report.strip():
         parsed.blocked = f"agent exited without a report (exit {code}), see `task log {t['id']}`"
     elif blocked_override:
         parsed.blocked = blocked_override
