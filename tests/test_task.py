@@ -28,6 +28,7 @@ import types
 import unittest
 import unittest.mock
 import urllib.parse
+import uuid
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
@@ -887,6 +888,9 @@ FAKE_STEPS = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
 from pathlib import Path
 cli, prompt, argv = Path(sys.argv[0]).name, sys.argv[-1], sys.argv[1:-1]
+if os.environ.get("TASK_TEST_STEPS_CALLS"):  # the arguments of each launch, for the tests of {session}
+    with open(os.environ["TASK_TEST_STEPS_CALLS"], "a") as f:
+        f.write(json.dumps({"cli": cli, "argv": argv, "resumed": "# Resumed" in prompt}) + "\n")
 given = lambda flag, value: any(a == flag and b == value for a, b in zip(argv, argv[1:]))
 stream = {"codex": "--json" in argv, "pi": given("--mode", "json"), "kiro-cli": given("--output-format", "stream-json")}[cli]
 cwd = os.path.realpath(os.getcwd())
@@ -1427,11 +1431,37 @@ class TaskTest(unittest.TestCase):
             loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
-            cmd = task.agent_command("claude", "do it")
+            cmd = task.agent_command("claude", "do it", session="S")
+            resumed = task.agent_command("claude", "go on", resume=True, session="S")
         # claude -p ends without waiting for a backgrounded test, so the run has no report (tasks#47, #51)
-        self.assertEqual(cmd, ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
-                               "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions",
-                               "--output-format", "stream-json", "--verbose", "do it"])
+        claude = ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
+                  "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions",
+                  "--output-format", "stream-json", "--verbose"]
+        self.assertEqual(cmd, [*claude, "--session-id", "S", "do it"])
+        self.assertEqual(resumed, [*claude, "--resume", "S", "go on"])  # the same conversation (durable-runs.md A)
+
+    def test_builtin_resume_commands_only_go_with_the_builtin_agent_commands(self):
+        """durable-runs.md A: pi and claude go on with their saved conversation by default, codex and kiro start a
+        new session. An [agents] command of your own never gets the built-in [resume] (another program or model)."""
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            for config, expected in (
+                    ("", {"pi": "pi -p --mode json --session-id {session} {prompt}", "codex": None, "kiro": None,
+                          "fake": None}),
+                    ("pi = /opt/pi -p --mode json --model m {prompt}\n", {"pi": None}),
+                    ("pi = /opt/pi -p --session-id {session} {prompt}\n\n[resume]\npi = /opt/pi -p --session-id {session} "
+                     "{prompt}\nfake = \n", {"pi": "/opt/pi -p --session-id {session} {prompt}", "fake": None}),
+                    ("\n[resume]\npi =\n", {"pi": None})):
+                with self.subTest(config):
+                    self.write_config(config)
+                    task.config.cache_clear()
+                    self.assertEqual({name: task.resume_command(name) for name in expected}, expected)
+                    if expected["pi"] is None:
+                        self.assertEqual(task.agent_command("pi", "P", resume=True, session="S"),
+                                         task.agent_command("pi", "P", session="S"))  # [agents]: a new session
+            self.assertEqual(task.agent_command("pi", "P", resume=True, session="S")[-3:], ["--session-id", "S", "P"])
 
     def test_unknown_agent_on_a_card_blocks_only_that_card(self):
         bad, good = self.new(title="bad"), self.new(title="good")
@@ -4644,6 +4674,56 @@ class TaskTest(unittest.TestCase):
                 self.assertIn("== agent, resumed: fake ([resume])", log)
                 if not argv:
                     self.assertIn("== the [resume] command did nothing; starting the agent again in a new session", log)
+
+    def test_a_resume_gets_the_session_of_the_launch_it_goes_on_with(self):
+        """durable-runs.md A: {session} is a new UUID for each launch, kept in runs/<id>.json for the agent's and the
+        retry's launch; the resume command gets the same one, after the run itself died (relaunch) too. A new
+        session gets a new one (claude's --session-id refuses one in use): with no [resume], or after a [resume]
+        command that did nothing."""
+        for resume in (f"{self.root}/agent --resume {{session}}", "false {session}", ""):
+            with self.subTest(resume):
+                self.write_config(extra=f"\n[resume]\nfake = {resume} {{prompt}}\n" if resume else "")
+                cfg = self.root / ".config" / "task-hub" / "config.ini"
+                cfg.write_text(cfg.read_text().replace(f"fake = {self.root}/agent {{prompt}}",
+                                                       f"fake = {self.root}/agent --session-id {{session}} {{prompt}}"))
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.wait_for(lambda: self.run_state(tid).get("session"))
+                first = self.run_state(tid)["session"]
+                self.assertEqual(str(uuid.UUID(first)), first)
+                self.assertEqual(self.run_state(tid)["session_role"], "agent")
+                self.kill_run_and_agent(tid)
+                self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                calls = [c["argv0"] for c in self.agent_calls()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0], ["--session-id", first])
+                if not resume.endswith("--resume {session}"):  # a new session's launch has a new id
+                    self.assertEqual(calls[1][0], "--session-id")
+                    self.assertNotEqual(calls[1][1], first)
+                    self.assertEqual(self.run_state(tid)["session"], calls[1][1])
+                else:
+                    self.assertEqual(calls[1], ["--resume", first])
+
+    def test_builtin_pi_is_resumed_in_its_own_session(self):
+        """The built-in pi gets --session-id {session}, and its resume ([resume] pi, built in) the same id."""
+        self.fake_steps()
+        steps = self.root / "steps-calls.jsonl"
+        self.env["TASK_TEST_STEPS_CALLS"] = str(steps)
+        tid = self.new("ok WAIT", "Add hello", "jyoka/app", "--agent", "pi")
+        self.task("start", tid)
+        self.wait_for(lambda: "· bash: cargo test -p task-rs" in self.task("log", tid, "--full"))
+        os.killpg(int(self.run_state(tid)["agent_pid"]), signal.SIGKILL)  # the agent only: resumed in place
+        self.wait_for(lambda: steps.exists() and len(steps.read_text().splitlines()) == 2)
+        (self.root / "claude.release").touch()
+        self.assertEqual(self.wait(tid), "In review")
+        calls = [json.loads(line) for line in steps.read_text().splitlines()]
+        session = self.run_state(tid)["session"]
+        self.assertEqual([(c["argv"], c["resumed"]) for c in calls],
+                         [(["-p", "--mode", "json", "--session-id", session], False),
+                          (["-p", "--mode", "json", "--session-id", session], True)])
+        self.assertIn("== agent, resumed: pi ([resume])", self.task("log", tid, "--full"))
 
     def test_a_resumed_run_that_stops_again_is_blocked(self):
         tid = self.new("frozen")

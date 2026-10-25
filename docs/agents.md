@@ -11,14 +11,16 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 
 ## 組み込みのエージェント
 
-| 名前 | task-hub が実行するコマンド | 補足 |
-|---|---|---|
-| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
-| `codex` | `codex exec -s workspace-write --json {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
-| `pi` | `pi -p --mode json {prompt}` | Pi の print モード。`--mode json` は途中の手順をログに出すためです |
-| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
+| 名前 | task-hub が実行するコマンド | 再開のコマンド(`[resume]`) | 補足 |
+|---|---|---|---|
+| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose --session-id {session} {prompt}` | 同じコマンドの `--session-id` を `--resume` にしたもの | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
+| `codex` | `codex exec -s workspace-write --json {prompt}` | なし(新しいセッション) | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
+| `pi` | `pi -p --mode json --session-id {session} {prompt}` | 同じコマンド | Pi の print モード。`--mode json` は途中の手順をログに出すためです。`--session-id` はその ID の会話がなければ作り、あれば続けます(pi 1.4.0 で確認) |
+| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | なし(新しいセッション) | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
 
-`{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。
+`{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。`{session}` も同じく
+1 つの引数で、起動ごとに新しく作る UUID(会話の ID)に置き換わります。再開では、止まった起動と同じ ID が入ります
+([止まった実行の再開](#止まった実行の再開resume))。
 
 ## エージェントの選び方
 
@@ -127,18 +129,34 @@ aider = aider --yes-always --message {prompt}
 
 予期せず止まった実行(クラッシュ、kill、再起動、ペインを閉じた)は、task-hub が 1 回だけ再開します
 ([operations.md の「実行中のタスクを止める」](operations.md#実行中のタスクを止める))。再開のエージェントには、
-元のプロンプトに「# Resumed」の節(`worker/PROMPT.md` の最後の部分)を足して渡します。コマンドは、`[resume]` に
-同じ名前があればそれ、なければ `[agents]` のコマンド(新しいセッション。worktree の途中の仕事から続けます)です。
-組み込みの `[resume]` はまだありません。
+元のプロンプトに「# Resumed」の節(`worker/PROMPT.md` の最後の部分)を足して渡します。コマンドは次の順に選びます。
+
+1. `[resume]` に同じ名前があればそれ。値が空なら再開のコマンドはなし(3 になる)
+2. `[agents]` のコマンドが組み込みのままの `pi` と `claude` は、組み込みの再開のコマンド([上の表](#組み込みのエージェント))。
+   `[agents]` で自分のコマンドに変えたら、`[resume]` に書かない限り使いません(別のプログラムやモデルで続けないため)
+3. それもなければ `[agents]` のコマンド(新しいセッション。worktree の途中の仕事から続けます)
+
+エージェントの会話を続けるには、`[agents]` と `[resume]` の両方に `{session}` を書きます。task-hub は実装エージェントの
+起動(`agent` と、レビューの差し戻しの `retry`)ごとに新しい UUID を作り、`runs/<id>.json` の `session` に残してから
+起動します。再開では、止まった起動と同じ値を `[resume]` のコマンドに渡します。reviewer と replanner は毎回新しい値です。
+`{session}` を書かないコマンドは、会話の ID を受け取らず、再開は新しいセッションになります。
 
 ```ini
+[agents]
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna --session-id {session} {prompt}
+
 [resume]
-; the command that goes on with the agent's own saved conversation, when it has one
+; the command that goes on with the agent's own saved conversation, under the same {session}
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna --session-id {session} {prompt}
 myagent = myagent --continue {prompt}
 ```
 
 `[resume]` のコマンドが手順を 1 つも出さず、レポートも書かずに 0 以外で終わったら(続ける会話が見つからなかった、など)、
-同じ再開の中で 1 回だけ `[agents]` のコマンドで起動し直します。
+同じ再開の中で 1 回だけ `[agents]` のコマンドで起動し直します。そのときの `{session}` は新しい値です
+(`claude --session-id` は使われている ID を断り、`claude --resume` はない ID で 1 で終わります。2.1.310 で確認)。
+
+pi も claude も、会話をそれぞれの置き場所(pi は `~/.pi/agent/sessions/`、claude は `~/.claude/projects/`)に実行ごとに
+残します。task-hub はそれを消しません。
 
 ## 始める前の確認と、実行に渡す環境変数
 
