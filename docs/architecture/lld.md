@@ -5,7 +5,7 @@
 
 ## 1. bin/task の構成
 
-1 ファイル(約 5,400 行、Python 3.10 以上の標準ライブラリだけ)を、見出しのコメント `# ---------- ... ----------` で
+1 ファイル(約 5,700 行、Python 3.10 以上の標準ライブラリだけ)を、見出しのコメント `# ---------- ... ----------` で
 分けています。上の層は下の層だけを呼びます。
 
 ```mermaid
@@ -14,10 +14,10 @@ flowchart TB
     mergeq["merge queue<br/>merge_config、read_queue、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged"]
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
-    runone["one run<br/>cmd_run、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
+    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、run_replan、finish、upsert_pr"]
+    start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
-    runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run"]
+    runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
     config["config<br/>config、board_config、parallel、agent_command、check_ready、sandbox_mode、check_sandbox"]
     output["output(TOON)<br/>out、table、fail、q"]
@@ -74,7 +74,7 @@ classDiagram
         review
         auto_review
         pr_body(t)
-        issue_comment(pr)
+        issue_comment(pr, resumed)
     }
     class ReviewResult {
         verdict: pass / needs changes / blocked
@@ -101,7 +101,8 @@ classDiagram
 | `updated`、`closed` | GitHub | カードを最後に変えた時刻、Issue が閉じているか |
 | `blockers`、`waits_for` | GitHub + 計算 | Blocked by のリンク、まだ始められない理由 |
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
-| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行を止めたシグナル。5 章 |
+| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行かエージェントが最後に止まった理由(`SIGHUP`、`SIGTERM`、`SIGINT`、`the agent was killed (SIGKILL)`、`the run process is gone`)。5 章 |
+| `resumes`、`resumed`、`resume_stage`、`resumed_at` | 手元(`runs/<id>.json`。`relaunch` と `task _run` が書き、`launch` が空に戻す) | この実行を再開した回数(`MAX_RESUMES` まで)、再開した段階(空白で区切る)、次の `task _run` が続ける段階(読んだら空にする)、`relaunch` が起動し直した時刻。4.3 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
 | `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
 | `running` | 計算(`alive`) | 実行のプロセスが生きているか |
@@ -138,7 +139,12 @@ flowchart LR
   (出力が流れたり描き直されたりすると、最初の行が画面から消えるため)。8 秒たっても消えなければ Enter を送ってもう 8 秒待ち、
   それでも残っていれば自分で消して開始の失敗にします。先に消した方が決まるので、あきらめたあとに実行が遅れて始まることはありません。
   ランチャーがすでに消えていたら(直前に始まった)、失敗にしません
-- `task _run` は自分の pid を記録します。同期は `alive` でプロセスを確かめ、消えていてカードが In progress なら Blocked にします
+- `task _run` は自分の pid を記録します。同期は `alive` でプロセスを確かめ、消えていてカードが In progress なら、
+  `resumable` が通れば 1 回だけ `relaunch` で再開し、通らなければ Blocked にします(4.1)。`relaunch` は残ったエージェントの
+  グループを先に止め(`stop_left_agent`)、`launch` と同じ起動の部分(`start_run`)で `task _run <id>` を始めます。
+  コマンドの形は同じなので、`alive` と task-rs はそのまま実行と見なします
+- エージェントだけが外から kill されたとき(POSIX で終了コードが負、task-hub が止めたのではない)は、同じ `task _run` が
+  その場で 1 回だけ起動し直します(`run_worker`)。Windows は終了コードでシグナルを見分けられないので、その場では再開しません
 - エージェントは自分のプロセスグループで動きます(`AGENT_GROUP`。POSIX は `start_new_session`、Windows は
   `CREATE_NEW_PROCESS_GROUP`)。ペインの Ctrl-C と、閉じたペインの SIGHUP は `task _run` にだけ届き、`task _run` がグループごと
   止めます(`stop_agent`: SIGTERM、`AGENT_STOP_SECONDS` の 10 秒待って SIGKILL。Windows は `taskkill /T /F`)。
@@ -148,10 +154,11 @@ flowchart LR
 - `task _run` が SIGHUP か SIGTERM を受けたら(ペインを閉じた、シャットダウン、`kill`)、`interrupted` にシグナルの名前を
   書いて、その場で終わります。エージェントが動いていれば、先にそのグループを止めます(`Interrupted`)。ほかの間(`[setup]`、
   git、GitHub)は待たずに終わり、動いている git は止めません。push もカードの移動もしないので、In progress のカードは
-  そのままで、次の同期が止まった実行として扱います。終わったあと(In review でタブを閉じるとき)の SIGHUP は記録しません。
+  そのままで、次の同期が 1 回だけ再開します(ペインを閉じたときも。design.md の決定事項 7)。終わったあと(In review でタブを閉じるとき)の SIGHUP は記録しません。
   シグナルを受けた中では `say` を使わず、「stopped by」の 1 行を `os.write` で stdout とログに直接書きます
   (シグナルが `print` の途中に届くと、同じバッファへの書き込みが「reentrant call」で失敗し、記録せずに終わるため)。
-  Ctrl-C は今までどおり、途中までを push して Blocked にします
+  Ctrl-C は今までどおり、途中までを push して Blocked にします。エージェントの外(`[setup]`、git)で受けた Ctrl-C は
+  `interrupted` に `SIGINT` を書いて終わり、次の同期は再開せずに Blocked にします
 - herdr のタブで動かすときは、環境変数を `HOME`、`PATH`、`TASK_*`、`GIT_AUTHOR_*`、`GIT_COMMITTER_*`、`[runner] pass_env` だけに絞ります
 
 ## 3. コマンド
@@ -198,8 +205,11 @@ sequenceDiagram
         S->>L: cleanup: タブ、worktree、ブランチ、記録
     end
     loop 開いているカード
-        alt In progress で、プロセスが消えた
-            S->>GH: コメント、Blocked
+        alt In progress で、プロセスが消えて、resumable
+            S->>L: launch_lock、stop_left_agent、resumes、resume_stage、resumed の出来事
+            S->>S: relaunch(start_run。カードは In progress のまま、GitHub は 0)
+        else In progress で、プロセスが消えて、resumable でない
+            S->>GH: コメント、Blocked(理由に、再開しなかったわけ)
         else In progress で、生きている
             S->>L: check_slow(長引いたら slow を 1 回)
         else In review、wait for merge
@@ -239,6 +249,7 @@ sequenceDiagram
     L->>L: write_rules(Goal の Rules → .claude/settings.local.json)
     L->>GH: human_comments(再実行のときだけ。REST)
     L->>L: build_prompt → prompts/<id>.md、prompts/<id>-comments.md
+    Note over L,H: ここから start_run(relaunch も同じ)
     L->>H: task_workspace(タブを開く)
     L->>L: save_run(記録を先に)
     L->>GH: set_status(In progress)
@@ -249,15 +260,22 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
+    start{"resume_stage?"} -- "なし、preparing、setup" --> setup
+    start -- "agent" --> agent
+    start -- "review(snap で戻してから)" --> rv
+    start -- "retry(prompts/&lt;id&gt;-retry.md)" --> retry
+    start -- "finishing(prompts/&lt;id&gt;-finish.json)" --> finish
     setup{"[setup] あり?"} -- "失敗" --> blockedS["Blocked<br/>(エージェントは動かない)"]
-    setup -- "成功、またはなし" --> agent["agent<br/>run_agent_process"]
+    setup -- "成功、またはなし" --> agent["agent<br/>run_worker"]
+    agent -- "外から kill された(1 回だけ)" --> agent
     agent --> report{"レポートあり、<br/>Blocked でない?"}
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
     review -- "あり" --> rv["run_review<br/>snapshot(snap に記録)→ reviewer → restore"]
     rv -- "pass" --> finish
-    rv -- "needs changes(1 回目)" --> retry["retry<br/>差し戻しつきで agent"]
+    rv -- "needs changes(1 回目)" --> retry["retry<br/>差し戻しつきで run_worker"]
+    retry -- "外から kill された(1 回だけ)" --> retry
     retry --> rv
     rv -- "2 回目も不合格、blocked" --> finish
     finish["finish<br/>add -A、commit、push、upsert_pr、comment、set_status"]
@@ -265,6 +283,27 @@ flowchart TB
     finish -- "エージェント自身の Blocked" --> replan["run_replan<br/>仕分けてコメント、replan の出来事"]
     finish -- "ほかの Blocked" --> stay["タブを残す"]
 ```
+
+再開(`resume_stage` が空でない、または、その場の再開)のエージェントには、元のプロンプト全体に「# Resumed」の節
+(`worker/PROMPT.md` の 3 つ目の部分と `It stopped during: <段階> (<理由>)`)を足して渡します(`resume_prompt`)。
+コマンドは `[resume] <名前>` があればそれ、なければ `[agents] <名前>`(新しいセッション)です。`[resume]` のコマンドが
+手順(`· ` の行)を 1 つも出さず、レポートもなく 0 以外で終わったら、同じ再開の中で 1 回だけ `[agents]` のコマンドで
+起動し直します。再開の回数は実行全体で `MAX_RESUMES`(1)回です。
+
+| `resume_stage` | 続け方 |
+|---|---|
+| `preparing`、`setup` | 最初から(`[setup]` は何度動かしても同じ結果になる約束。プロンプトは作り直さない) |
+| `agent` | エージェントを再開のコマンドで起動。そのあとは今までどおり review、finish |
+| `review` | `snap` で worktree を戻し(`release_snapshot`)、reviewer を新しく起動。`review_attempt` が 1 なら 2 回目のレビュー(差し戻しは増えない) |
+| `retry` | 差し戻しのプロンプト(`prompts/<id>-retry.md`)で、エージェントを再開のコマンドで起動。そのあと 2 回目のレビュー |
+| `finishing` | `prompts/<id>-finish.json`(`review_loop` の結果とエージェントの終了コード)で `finish` をもう一度。commit、push、PR は同じ結果になる。Issue の最後のレポートが「Resumed once」の行のほかは同じ本文なら、コメントを書かない |
+
+再開した実行の Issue のレポート(`finish`、`report_comment`)には、`Resumed once at <段階>: <理由>.` の 1 行が入ります
+(`resumed_line`)。`finishing` で止まったときに、レポートがもう Issue にあれば書き直さないので、その行は入りません
+(出来事 `resumed` とログには残ります)。
+
+その場の再開の前に、kill されたエージェントのグループに残ったもの(エージェントが始めたテストやサブエージェント)を
+SIGKILL で止めます。止まらなければ再開しません。
 
 `finish` の判定:
 
@@ -445,8 +484,8 @@ stateDiagram-v2
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
@@ -469,6 +508,8 @@ stateDiagram-v2
 | `share/sandbox-used` | `check_sandbox`(`[sandbox] mode = user` のときと、`off` で専用ユーザーの ACL を見つけたとき) | `refuse_after_user`(読むだけ)、`check_sandbox`(`off` で ACL がなく `repos` と `worktrees` が無くなったら消す) | 空のファイル |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 | `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
+| `share/prompts/<id>-retry.md` | `review_loop`(差し戻しの前)。`launch` が消す | 再開した `task _run`(`retry` から) | Markdown(差し戻しのプロンプト) |
+| `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由 |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
 
@@ -487,6 +528,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ```
 
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
+再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
 マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict`、オートパイロットの `autopilot`
 (`action` は `ready` か `merge`)のどれかです。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
@@ -495,7 +537,10 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ### 実行の集計(metrics.jsonl の 1 行)
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
-`retried`、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`。
+`retried`、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`、
+`resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
+`started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
+起動は、`usage` に `agent, resumed` のような役で入ります。
 
 ### Kiro の拡張がタスクの中身を読むところ
 
@@ -520,7 +565,9 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ## 6. 並行と所有
 
 - 1 つのファイルを書くのは 1 者だけにします。`runs/<id>.json` は `launch` が作り、そのあとは `task _run` だけが
-  書きます(同期は書かない。`slow` を 1 回だけにする判定も `events.jsonl` を見る)。マージキューも同じで、実行が
+  書きます(同期は書かない。`slow` を 1 回だけにする判定も `events.jsonl` を見る)。ただし `relaunch` は、`launch_fix` と
+  同じく、`launch_lock` を持って実行が生きていないことを確かめてから書きます(`resumes`、`resume_stage`、`resumed_at`、
+  空の `pid`)。そのあとは、起動した `task _run` だけが書きます。マージキューも同じで、実行が
   生きていないときに `merge_worktree` か `launch_fix` が書き、そのあとは `task _fix` だけが書きます。`alive` は
   `_run <id>` と `_fix <id> <base>` のどちらも、そのタスクの実行と見なします
 - `merge-queue.json` だけは `task merge` と同期の 2 者が書くので、読んで変えて書く間 `merge-queue.lock` を持ちます。
@@ -531,7 +578,11 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 - 同じタスクの実行は 1 つだけです。プロセスが生きているタスク(`alive`)は、Status が何でも開始しません
 - 同じマシンの 2 つの task-hub(`task watch` と `task start` など)が同じ Ready のカードを読んでも、開始するのは
   `launch_lock` を取った 1 つだけです。ロックは OS のファイルロック(POSIX は `flock`、Windows は `msvcrt.locking`)なので、
-  持っていたプロセスが落ちても残りません。開始の失敗で Blocked にするまでロックを持ちます
+  持っていたプロセスが落ちても残りません。開始の失敗で Blocked にするまでロックを持ちます。止まった実行の再開も同じで、
+  再開するのはロックを取った 1 つだけです
+- 同じ worktree で 2 つのエージェントは動きません。`relaunch` は、残ったエージェントのグループ(`agent_pid`)を止めてから
+  始めます。pid の使い回しは `ps -o etime` の開始時刻を `agent_started` と比べて避けます(5 秒より離れていれば別のプロセス)。
+  止まらなければ再開せず Blocked にします
 - キャッシュは正しさに関わりません。書けない、読めない、壊れているときは GitHub から読むだけです
 
 ## 7. 外部の呼び出し
@@ -557,6 +608,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
+| 再開のエージェント(`[resume]` のコマンド、なければ `[agents]`) | 同上 | 元のプロンプト(数 KB)を 1 回送り直す | 再開ごと(1 実行に 1 回まで) |
+| `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
@@ -611,15 +664,22 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | 失敗 | 扱い |
 |---|---|
 | GitHub の失敗(同期の中) | その回の `github_errors` に出し、次の回にまた試す。watch は止めない |
-| GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする |
+| GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする(段階が空なので再開しない) |
 | 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、もここ(エージェントは起動しない) |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
 | `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | `task intake` のボタンの失敗(GitHub)、断った(古いコミット、閉じた PR、キューがオフなど) | 1 行記録し、ntfy に「refused」を理由つきで返す。トークンは使ったことにしないので、理由を直せば同じボタンをまた押せる。合わないトークンは記録だけで返事なし |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
-| `task _run` が SIGHUP、SIGTERM を受けた | エージェントが動いていればグループを止め、`interrupted` を書いて終わる。カードは In progress のままで、次の同期が止まった実行として Blocked にする |
-| reviewer か replanner の途中で `task _run` が落ちた(kill -9、クラッシュ) | worktree に書き換えが残る。記録の `snap` が残っているので、次の `launch` が `ensure_worktree` で `restore` してから始める |
+| `task _run` が SIGHUP、SIGTERM を受けた | エージェントが動いていればグループを止め、`interrupted` を書いて終わる。カードは In progress のままで、次の同期が 1 回だけ再開する |
+| `task _run` が落ちた(kill -9、クラッシュ、再起動) | 次の同期が `resumable` を確かめ、通れば `relaunch` で段階から 1 回だけ再開する。カードは In progress のまま |
+| エージェントだけが外から kill された | 同じ `task _run` がその場で 1 回だけ起動し直す(POSIX) |
+| 再開も止まった(2 回目) | Blocked。理由は `the run stopped unexpectedly again, after resuming once at <段階>`。残ったレポートはコメントに載せる |
+| `resumable` でない(段階、Ctrl-C、worktree がない、HEAD が動いた、`snap` や再開に要るプロンプトがない) | Blocked。理由は `the run stopped unexpectedly; not resumed: <わけ>` |
+| `relaunch` の失敗(残ったエージェントが止まらない、herdr のタブが開かない、ファイルが書けない) | Blocked。理由は `the run stopped unexpectedly; could not resume it: <わけ>`。同期の残りは止めない |
+| 再開のコマンドが何もせずに失敗した(会話が見つからないなど) | 同じ再開の中で 1 回だけ `[agents]` のコマンド(新しいセッション)で起動し直す |
+| 出来事 `resumed`、metrics の失敗 | 無視する(実行とコマンドを止めない) |
+| reviewer か replanner の途中で `task _run` が落ちた(kill -9、クラッシュ) | worktree に書き換えが残る。reviewer なら、再開が `snap` で戻してからレビューし直す。再開しないとき(replanner、2 回目)は、記録の `snap` が残っているので、次の `launch` が `ensure_worktree` で `restore` してから始める |
 | トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 | マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
@@ -655,6 +715,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     のカード、前に動いたカード、閉じた Issue、人がキューから外した PR、レビューのあとに変わった PR、draft、Blocked のカードは
     動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
     `[autopilot]` がなければ何も変わらない
+17. 予期せず止まった実行は 1 回だけ自動で再開し、2 回目は Blocked にする。Ctrl-C で止めた実行は再開しない。同じ worktree で 2 つのエージェントは動かない
+18. 再開しても、reviewer と replanner の書き換えは結果に残らず、Issue のレポートは 1 つ
 
 ## 10. テストの仕組み
 
@@ -662,7 +724,10 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
   偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
   bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます。`MODE:slowtree` は子のプロセスを 1 つ持って待ち続け
-  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は書き換えてから待ち続けます(約束 2 のテスト)
+  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は 1 回目だけ書き換えてから待ち続けます(約束 2、18 のテスト)。
+  再開のテスト(約束 17、18)は、`task _run` とエージェントを外から kill します。`MODE:slow` と `MODE:slowtree` は
+  「# Resumed」のプロンプトでは `ok` と同じに終わり、`MODE:hang` は再開でも待ち続け、`MODE:retryhang` は差し戻しの
+  あとで待ち続けます。偽物の `gh` の `hang_status` は、カードをその Status に動かす呼び出しで 1 回だけ止まります(`finishing` の再開のテスト)
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、

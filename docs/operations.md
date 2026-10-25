@@ -533,7 +533,10 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。Issue の本文に答えを書き足すか、環境を修正します |
 | `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
-| `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
+| `the run stopped unexpectedly again, after resuming once at <段階>` | `task _run` プロセスが予期せず止まり(クラッシュ、kill、Mac の再起動、herdr のペインを閉じた)、task-hub が 1 回だけ再開しましたが、再開した実行もまた止まりました。`task log <番号>` で止まったところを見てから Ready に戻します |
+| `the run stopped unexpectedly; not resumed: <わけ>` | `task _run` プロセスが止まりましたが、再開しませんでした。わけは、Ctrl-C で止めた(`it was stopped with Ctrl-C`)、worktree が消えた、worktree で誰かがコミットした(`HEAD moved`)、続けるのに要る記録やプロンプトがない、などです。直してから Ready に戻します |
+| `the run stopped unexpectedly; could not resume it: <わけ>` | 再開しようとしましたが、起動できませんでした(残ったエージェントが止まらない、herdr のタブが開かない、など)。わけを直してから Ready に戻します |
+| `the run stopped unexpectedly` | 実行は終わっていましたが、カードを動かす前に GitHub に届きませんでした。残ったレポートはこのコメントに載っています。再開した実行が終わったあとでも、この理由です |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
 | `could not start: the run did not start in herdr tab ...` | herdr のペインが 16 秒の間に `task _run` を始めませんでした(シェルが立ち上がらない、など)。そのタブを見てから Ready に戻します(戻すと、そのタブは閉じます)。あとからそのタブで実行が始まることはありません |
@@ -589,8 +592,13 @@ task-hub はカードを動かしません(確認するのは PR がマージさ
 ## 実行中のタスクを止める
 
 herdr のそのタスクのタブでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
-push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
-として Blocked になります。
+push してカードを Blocked にします。やめるなら `task done <番号>` です(下の「タスクを取り消す」)。
+
+ペインを閉じても止まりません。予期せず止まった実行(クラッシュ、kill、Mac の再起動、ペインを閉じた)は、次の確認で
+task-hub が 1 回だけ自動で再開します。カードは In progress のままで、続きは止まった段階(エージェント、レビュー、
+差し戻し、finish)からです。新しいタブ(またはバックグラウンド)で動き、Issue のレポートに `Resumed once at <段階>` の
+1 行が入ります。出来事 `resumed` も出ますが、既定では通知しません(`[notify] events` に `resumed` を足せば通知します)。
+再開した実行もまた止まったら、`the run stopped unexpectedly again, after resuming once at <段階>` として Blocked になります。
 
 ## タスクを取り消す
 

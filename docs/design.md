@@ -78,8 +78,16 @@
    (`herdr worktree create` は親リポジトリ用に 2 つ目のワークスペースも開いてしまうため使っていません。)herdr が
    ない場合、実行はログ付きのバックグラウンドプロセスになります。task-hub は自分が作成したタブと workspace だけを
    閉じます。
-7. **停止した実行を検出します。** `task _run` は自分の pid を記録します。そのプロセスが消えているのに
-   カードがまだ In progress の場合、次の確認でログへの案内をコメントしてカードを Blocked にします。
+7. **予期せず止まった実行は、1 回だけ自動で再開します。2 回目は Blocked にします。** `task _run` は自分の pid を記録します。
+   そのプロセスが消えているのにカードがまだ In progress の場合(クラッシュ、kill、再起動、herdr のペインを閉じた)、
+   次の確認でカードを In progress のまま、記録の段階から `task _run` を起動し直します(`relaunch`)。エージェントだけが
+   外から kill されたときは、生きている `task _run` がその場で起動し直します。回数は定数の `MAX_RESUMES`(1)で、設定は
+   ありません(決定事項 19 と同じく、実績を見るまで線を引かない)。再開した実行が止まったとき、Ctrl-C で止めたとき、
+   worktree が変わっていた(消えた、HEAD が動いた)とき、続けるのに要る記録がないときは、今までどおりログへの案内と
+   理由をコメントして Blocked にします。知らせ方は Issue のレポートの「Resumed once at <段階>」の 1 行と出来事 `resumed`
+   で、既定の通知には入れません(終わったときの In review か Blocked の通知で足りるため)。ペインを閉じても止まらなく
+   なったので、実行を止めるのは Ctrl-C です。やめるなら、そのあと `task done` です(2026-10-25 の決めたこと 1、2、11。
+   [architecture/designs/durable-runs.md](architecture/designs/durable-runs.md))。
 8. **登録は明示的に行います。** `/task` スキルは、明示的な依頼があったときだけ実行するようすべてのエージェントに指示します。
    明示的な依頼は、`/task` と打つことと、「タスクにして」のように言葉で頼むことです。そのため、Claude Code でも
    `disable-model-invocation: true` は付けず(付けると `/task` と打ったときしか動かない)、skill の説明で約束します。
@@ -348,6 +356,16 @@
     チェックもブランチの保護もないリポジトリ(無料のプランの private)では、マージを止めるのはレビューの判定だけです。
     この弱さは [autopilot.md](autopilot.md) に書き、守りを足すなら GitHub Actions のテストを足すよう案内します
     ([architecture/designs/autopilot.md](architecture/designs/autopilot.md))。
+31. **再開は task-hub が起こし、段階から続け、会話はエージェントに任せます。** 止まった実行を最初からやり直すと、
+    それまでの調べものと試したことを捨て、人が気づくまで止まったままでした。そこで、再開を起こすのはエージェントでなく
+    task-hub(同期と `task _run`)にし、どこから続けるかは今の `stage` の記録で決めます(`resume_stage`。`review` は
+    `snap` で reviewer の書き換えを戻してから、`retry` は保存した差し戻しのプロンプトで、`finishing` は保存した
+    レビューの結果で)。会話の続きはエージェントの CLI の仕事にして、task-hub は `[resume] <名前>` のコマンドを使うだけです
+    (なければ `[agents]` の新しいセッション)。どちらでも、元のプロンプトに「# Resumed」の節(`worker/PROMPT.md`)を
+    足すので、会話が残っていなくても worktree から続けられます。エージェントの名前で分ける処理はありません(決定事項 4)。
+    同じ worktree で 2 つのエージェントが書かないよう、再開の前に残ったエージェントのプロセスグループを止めます。
+    会話の ID(`{session}`)と、Pi Durable の実行役(B)は別のタスクで足し、どちらを本採用するかは比べてから人が決めます
+    ([architecture/designs/durable-runs.md](architecture/designs/durable-runs.md))。
 ### 提案: 1 タスクあたりの時間とトークンの上限(未実装)
 
 決定事項 18 と 19 のとおり、上限は `task stats` の実績を見てから決めます。2026-10-17 の時点で、このリポジトリを
@@ -408,6 +426,11 @@ In progress の中には段階があります(0.6)。ステートチャートの
 `events.jsonl` にも書きません(`/chief` を起こす回数が増えて費用が上がるため)。`task list` と `task show` は、
 実行がまだ生きているときだけ `In progress › review` のように出します。実行が終わると `stage` は空に戻ります。
 
+予期せず止まった実行は、`stage` が `preparing` から `finishing` までなら、その段階から 1 回だけ続けます(決定事項 7、31)。
+`preparing` と `setup` は最初から、`agent` と `retry` はエージェントを再開のコマンドで、`review` は記録の `snap`
+(`<tree> <HEAD>`)で worktree を戻してから reviewer を新しく、`finishing` は `finish` をもう一度(Issue のレポートは
+同じ本文なら書かない)です。`replanning` と `conflict-fix` では再開しません(カードはもう In progress にないため)。
+
 | 段階 | 中身 | 書くところ |
 |---|---|---|
 | `preparing` | worktree、`[env]`、プロンプト、herdr のタブ、実行の開始を確かめる | `launch` |
@@ -431,7 +454,17 @@ stateDiagram-v2
         review --> retry: needs changes(1 回目)
         retry --> review
         review --> finishing
+        state "中断(_run かエージェントが止まった)" as cut
+        agent --> cut
+        retry --> cut
+        review --> cut
+        finishing --> cut
+        cut --> agent: 再開(1 回)
+        cut --> retry: 再開(1 回)
+        cut --> review: snap で戻してから
+        cut --> finishing: もう一度 finish
     }
+    InProgress --> Blocked: 2 回目の中断、または再開できない
     finishing --> replanning: エージェント自身の Blocked
     note right of replanning: Status は Blocked、プロセスは生きている
 ```

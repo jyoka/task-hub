@@ -2,8 +2,10 @@
 
 `task` sends the part between the first and the second line to the agent at the start of every run,
 followed by the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
-The part below the second line comes only on a re-run that people commented on since the earlier run,
-at the end, followed by their comments on the Issue and the pull request.
+The part between the second and the third line comes only on a re-run that people commented on since the
+earlier run, at the end, followed by their comments on the Issue and the pull request.
+The part below the third line comes only when task-hub starts an agent again after it was cut short
+(a crash, a kill, a restart, a closed pane), at the very end, followed by the stage it stopped in and why.
 It is the same for every agent (Claude Code, Codex, Pi, Kiro, ...). Edits apply to the next run.
 
 ---
@@ -149,3 +151,19 @@ comment, or cannot be done, do not guess: leave it, and say why.
 In the Report section, under Details, add a list that starts with the line `Comments:` and has one item per comment:
 its number, then what you did about it, or why you did not act on it. Answer a comment that only asks a
 question there. Add no heading for it.
+
+---
+
+# Resumed
+
+This run was cut short (the agent or task-hub stopped unexpectedly), and task-hub started it again, once.
+Everything above is the prompt it started with. The worktree still holds what was done before it stopped.
+You may remember that conversation, or this may be a new session that knows only this prompt.
+
+- Before anything else, run `git status` and `git diff` to see what is already done. Go on from there;
+  if you remember the conversation, pick up where it stopped. Do not start over from scratch.
+- A command may have been cut short too. Before you run again one that changes anything outside the
+  worktree, or one that does harm when it runs twice (a migration, a release, a message sent, a line
+  appended to a file), check whether it already ran, and say in the Report what you found.
+- Write `.task-report.md` as usual when you finish. Do not mention the interruption unless it changed
+  something the human must know.

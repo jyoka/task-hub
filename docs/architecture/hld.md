@@ -134,10 +134,10 @@ flowchart TB
 
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
-| `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md)) | GitHub のボード、手元の状態、作業場所 |
-| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md))。In progress で `task _run` が死んだカードを、1 回だけ再開する(`relaunch`)。2 回目は Blocked | GitHub のボード、手元の状態、作業場所 |
+| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める。記録の段階(`resume_stage`)から続ける。エージェントが外から kill されたら、その場で 1 回だけ再開する | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
-| エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
+| エージェントの CLI | Goal を実装し、テストし、レポートを書く。再開のときは `[resume]` のコマンド(なければ `[agents]` の新しいセッション)で、「# Resumed」の節を足したプロンプトから続ける | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
@@ -188,9 +188,14 @@ sequenceDiagram
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
 PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
 
-実行そのものが止まったとき(ペインを閉じた、シャットダウン、kill)は、`task _run` がエージェントとその子を止め、止まった理由を
-実行の記録(`runs/<id>.json`)に残します。次の同期がカードを Blocked にします。reviewer か replanner の途中で止まっても、
-その書き換えは次の実行が始める前に記録から戻すので、PR には入りません。
+実行そのものが予期せず止まったとき(クラッシュ、kill、再起動、ペインを閉じた)は、task-hub が 1 回だけ自動で再開します。
+`task _run` が SIGHUP か SIGTERM を受けたら、エージェントとその子を止め、止まった理由を実行の記録(`runs/<id>.json`)に
+残します。次の同期は、カードを In progress のまま、記録の段階(agent、review、retry、finishing など)から `task _run` を
+起動し直します。エージェントだけが kill されたときは、同じ `task _run` がその場で起動し直します。再開したエージェントには、
+元のプロンプトに「# Resumed」の節(worktree の途中の仕事を先に見る、2 回走らせてまずいコマンドは確かめる)を足して渡します。
+再開も止まったら(2 回目)、worktree が変わっていたら、Ctrl-C で止めたときは、今までどおり Blocked です。reviewer か
+replanner の途中で止まっても、その書き換えは記録から戻してから続けるので、PR には入りません。Issue のレポートは 1 つで、
+「Resumed once at <段階>」の 1 行が入ります([design.md](../design.md) の決定事項 7)。
 
 ### 4.2 出来事と通知
 
@@ -341,7 +346,7 @@ flowchart TB
 | 項目 | 目標と、守っている仕組み |
 |---|---|
 | GitHub の利用上限 | `task watch` は 1 時間で約 60 ポイント。必要な欄だけを取る問い合わせ、ボードのキャッシュ、マージの確認は REST。マージキューは、キューのあるリポジトリごとに 1 分に `gh pr view` と `gh pr checks` を 1 回ずつ足す(キューが空なら 0)。承認していない PR の競合はマージの確認の REST から読むので増えない。トリガーは 5 分に 1 回まで(リポジトリごとに 1 時間 12〜24 ポイント) |
-| 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない |
+| 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない。予期せず止まった実行は 1 回だけ段階から再開する。同じ worktree で 2 つのエージェントを動かさない(再開の前に残ったエージェントを止める) |
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |
 | 軽い | Python 標準ライブラリだけ。依存のインストールは要らない |
@@ -352,7 +357,7 @@ flowchart TB
 
 | 足したいもの | 入口 | 詳しく |
 |---|---|---|
-| エージェント | `[agents]` にコマンドのひな形を足す | [agents.md](../agents.md) |
+| エージェント | `[agents]` にコマンドのひな形を足す。再開で会話を続けるコマンドがあれば `[resume]` に足す | [agents.md](../agents.md) |
 | コマンド | `COMMANDS` の表に 1 行と `cmd_*` 関数 | [lld.md](lld.md) の 3 章 |
 | 表示 | `task list` の出力と `events.jsonl` を読む(書かない)。タスクの中身は `runs/<番号>.json` から worktree とログをたどる | [lld.md](lld.md) の 5 章、[designs/task-inspection.md](designs/task-inspection.md) |
 | 出来事の種類 | `emit` を呼び、`[notify] events` と読む側のフィルタに足す | [lld.md](lld.md) の 6 章 |

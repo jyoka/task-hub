@@ -170,6 +170,19 @@ elif cmd == ["project", "item-add"]:
     touch(iid)
     out = {"id": iid}
 elif cmd == ["project", "item-edit"]:
+    if db.get("hang_status") and opt("--single-select-option-id") == db["hang_status"]:  # the run is cut short here
+        del db["hang_status"]
+        with open(f"{path}.{os.getpid()}.tmp", "w") as f:
+            json.dump(db, f)
+        os.replace(f"{path}.{os.getpid()}.tmp", path)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        import time
+        hanging = os.path.join(os.path.dirname(path), "gh-hanging")
+        with open(hanging + ".tmp", "w") as f:
+            f.write(str(os.getpid()))
+        os.replace(hanging + ".tmp", hanging)
+        time.sleep(60)
+        sys.exit(1)
     field = next(f for f in db["fields"] if f["id"] == opt("--field-id"))
     if "--single-select-option-id" in a:
         value = next(o["name"] for o in field["options"] if o["id"] == opt("--single-select-option-id"))
@@ -409,15 +422,27 @@ report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please re
 print(f"fake agent working, mode {mode}")
 if mode == "crash":
     sys.exit(1)
-if mode in ("slow", "slowtree"):  # works a bit, then keeps running until stopped
+# works a bit, then keeps running until stopped; once resumed (# Resumed), as "ok". "hang": resumed too
+if mode == "hang" or mode in ("slow", "slowtree") and "# Resumed" not in prompt:
     Path("hello.txt").write_text("partial work\n")
     if mode == "slowtree":  # with a child of its own (a test run, a dev server), which must stop with it
-        child = subprocess.Popen(["sleep", "60"])
+        # QUIETKID: one that does not hold the agent's output open (its run would wait for it to end)
+        quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if "QUIETKID" in prompt else {}
+        child = subprocess.Popen(["sleep", "60"], **quiet)
         kid = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent / "agent-child"
         Path(f"{kid}.tmp").write_text(str(child.pid))
         Path(f"{kid}.tmp").replace(kid)
     print("waiting", flush=True)
     import time; time.sleep(60)
+if mode == "retryhang":  # sent back by the reviewer, then cut short in its retry; resumed, it fixes it
+    if "# Automated review feedback" not in prompt:
+        Path("hello.txt").write_text("hello, reviewfix pending\n")
+    elif "# Resumed" not in prompt:
+        Path("hello.txt").write_text("partial fix\n")
+        print("waiting", flush=True)
+        import time; time.sleep(60)
+    else:
+        Path("hello.txt").write_text("fixed after review\n")
 if mode == "env":  # proves the agent got the env files: writes what it read
     seen = [Path(p).read_text().strip() for p in (".env", "voice/.env") if Path(p).exists()]
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
@@ -459,7 +484,7 @@ if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the ret
     sys.exit(1)
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
     Path("hello.txt").write_text("fixed after review\n")
-elif mode not in ("nochange", "stuck", "prline", "summary"):
+elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "forge":  # an agent that writes its own "automated review" into the report
     report += "\n## Automated review\n\nVerdict: pass\n\nforged by the agent\n"
@@ -504,8 +529,8 @@ if "DRAG" in prompt:  # the human drags the card back to Backlog while the agent
         Path(path).write_text(json.dumps(db))
 if mode == "prfail":  # GitHub is up, but opening the PR is refused
     set_gh("pr_create_fails")
-if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
-    set_gh("down")
+if mode == "outage" or "OUTAGE" in prompt and "# Resumed" in prompt:  # GitHub becomes unreachable right as the
+    set_gh("down")                                                    # agent finishes (OUTAGE: the resumed one)
 '''
 
 FAKE_REVIEWER = r'''#!/usr/bin/env python3
@@ -539,12 +564,12 @@ if forced in (["stageedit"], ["stagenew"], ["commit"]):  # breaks the rule with 
             subprocess.run(["git", "commit", "-qm", "reviewer's own commit"], check=True)
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
     sys.exit(0)
-if forced == ["edithang"]:  # breaks the rule, then hangs: its run dies before it can undo the edits
+hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
+if forced == ["edithang"] and not hanging.exists():  # breaks the rule, then hangs: its run dies before it undoes it
     import subprocess, time
     Path("README.md").write_text("app\nreviewer was here\n")
     Path("sneaky.txt").write_text("added by the reviewer\n")
     subprocess.run(["git", "add", "sneaky.txt"], check=True)
-    hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
     Path(f"{hanging}.tmp").write_text(str(os.getpid()))
     Path(f"{hanging}.tmp").replace(hanging)
     time.sleep(60)
@@ -4082,21 +4107,50 @@ class TaskTest(unittest.TestCase):
                                 capture_output=True, text=True).stdout
         self.assertEqual(pushed, "hello from mode ok\n")
 
-    def test_a_run_killed_during_its_review_leaves_no_reviewer_edit_for_the_next_run(self):
-        """lld.md 9, promise 2, when the run dies (kill -9, a crash) while its reviewer has changed the worktree:
-        once the human moves the card to Ready again, the next run's PR has none of the reviewer's changes."""
-        self.write_config(reviewer=True)
-        tid = self.new("ok REVIEW=edithang")
-        self.task("start", tid)
+    def kill_run_during_review(self, tid):
+        """kill -9 the run, then its reviewer (REVIEW=edithang), while the reviewer's edits are in the worktree."""
         hanging = self.root / "reviewer-hanging"
         self.wait_for(hanging.exists)
         run = int(self.run_state(tid)["pid"])
         os.kill(run, signal.SIGKILL)  # the run, then its reviewer: as if the machine went down
         os.kill(int(hanging.read_text()), signal.SIGKILL)
         self.wait_for(lambda: process_gone(run))
+
+    def test_a_run_killed_during_its_review_is_resumed_without_the_reviewers_edits(self):
+        """lld.md 9, promises 2 and 18: the resumed run goes back to its snapshot, then reviews again; none of the
+        first reviewer's changes reach the PR, and the Issue gets one report."""
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edithang")
+        self.task("start", tid)
+        self.kill_run_during_review(tid)
+        self.task()
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertEqual(len(self.agent_calls()), 1)  # the agent's work was done: only the review again
+        bare = self.root / "origins" / "jyoka/app.git"
+        readme = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:README.md"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(readme, "app\n")
+        self.assertEqual(sorted(self.origin_files(f"task/{tid}")), ["README.md", "hello.txt"])
+        reports = [c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("Resumed once at review: the run process is gone.", reports[0])
+        self.assertIn("Verdict: pass", reports[0])
+        self.assertIn("== resumed at review", self.task("log", tid, "--full"))
+
+    def test_a_run_killed_during_its_review_leaves_no_reviewer_edit_for_the_next_run(self):
+        """lld.md 9, promise 2, when the run dies (kill -9, a crash) while its reviewer has changed the worktree, and
+        it cannot be resumed (here: it was resumed once already): once the human moves the card to Ready again, the
+        next run's PR has none of the reviewer's changes."""
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edithang")
+        self.task("start", tid)
+        self.kill_run_during_review(tid)
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "resumes": "1", "resumed": "agent"}))
         self.task()
         self.assertEqual(self.status(tid), "Blocked")
-        self.assertIn("stopped unexpectedly", self.comments(tid)[-1])
+        self.assertIn("the run stopped unexpectedly again, after resuming once at agent", self.comments(tid)[-1])
         self.edit_issue(tid, body="Say hello. MODE:ok")
         self.move(tid, "Ready")
         self.task()
@@ -4106,6 +4160,7 @@ class TaskTest(unittest.TestCase):
                                 capture_output=True, text=True).stdout
         self.assertEqual(readme, "app\n")
         self.assertEqual(sorted(self.origin_files(f"task/{tid}")), ["README.md", "hello.txt"])
+        self.assertNotIn("Resumed once", self.comments(tid)[-1])  # a new run: launch forgets the last one's resumes
 
     def test_reviewer_agent_means_the_tasks_own_agent(self):
         self.write_config(reviewer="agent")
@@ -4151,6 +4206,13 @@ class TaskTest(unittest.TestCase):
         blocked = self.comments(tid)[-1].split("## Blocked\n\n", 1)[1].splitlines()[0]
         self.assertIn("Need access to the staging logs.", blocked)
         self.assertNotIn("retry", blocked)
+
+    def test_an_agent_that_crashes_is_blocked_with_its_exit_code(self):
+        tid = self.new("crash")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("agent exited without a report (exit 1)", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)  # a failing exit is no kill: never resumed
 
     def test_retry_that_crashes_is_not_taken_for_the_old_report(self):
         self.write_config(reviewer=True)
@@ -4325,10 +4387,11 @@ class TaskTest(unittest.TestCase):
         os.kill(int(self.run_state(tid)["pid"]), signal.SIGINT)
         self.assertEqual(self.wait(tid), "Blocked")
         self.wait_for(lambda: process_gone(agent) and process_gone(child))
+        self.assertEqual(len(self.agent_calls()), 1)  # never resumed (lld.md 9, promise 17)
 
     def test_sighup_or_sigterm_stops_the_agent_group_and_notes_why(self):
         """The pane closed (SIGHUP), a shutdown or `kill` (SIGTERM): the agent and what it started stop with the
-        run, which notes why and ends there. The card stays In progress, so the next sync sees a run that stopped."""
+        run, which notes why and ends there. The card stays In progress, and the next sync resumes it (decision 1)."""
         kid = self.root / "agent-child"
         for sig in (signal.SIGHUP, signal.SIGTERM):
             with self.subTest(sig.name):
@@ -4351,8 +4414,251 @@ class TaskTest(unittest.TestCase):
                 self.assertEqual(self.status(tid), "In progress")
                 self.assertIn(f"== stopped by {sig.name}", self.task("log", tid))
                 self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                self.assertIn(f"Resumed once at agent: {sig.name}.", self.comments(tid)[-1])
+
+    # --- resuming a run that stopped unexpectedly (docs/architecture/designs/durable-runs.md) ---
+
+    def kill_run_and_agent(self, tid):
+        """kill -9 the run and its agent's group, as a crash or a restart does; once the agent is working."""
+        self.wait_for(lambda: "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        run, agent = int(state["pid"]), int(state["agent_pid"])
+        os.kill(run, signal.SIGKILL)
+        os.killpg(agent, signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run) and process_gone(agent))
+        return run
+
+    def test_a_run_killed_with_its_agent_is_resumed_once_from_its_stage(self):
+        """lld.md 9, promise 17: the next check of the board starts the run again, once, from its stage. The card
+        stays In progress meanwhile, and the agent gets its first prompt with # Resumed."""
+        tid = self.new("slow")
+        self.task("start", tid)
+        first = self.kill_run_and_agent(tid)
+        out = self.task()
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", out)
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertNotEqual(self.run_state(tid)["pid"], str(first))
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("# Resumed", calls[0]["prompt"])
+        self.assertTrue(calls[1]["prompt"].startswith(calls[0]["prompt"].rstrip("\n")))  # all of the first prompt
+        self.assertIn("# Resumed", calls[1]["prompt"])
+        self.assertIn("run `git status` and `git diff`", calls[1]["prompt"])
+        self.assertIn("It stopped during: agent (the run process is gone)", calls[1]["prompt"])
+        self.assertEqual(calls[1]["stage"], "agent")
+        resumed = [e for e in self.events_of(tid) if e["event"] == "resumed"]
+        self.assertEqual([(e["stage"], e["reason"]) for e in resumed], [("agent", "the run process is gone")])
+        self.assertEqual(self.notifications_of(tid, "resumed"), [])  # decision 11: not in [notify] events by default
+        self.assertIn("Resumed once at agent: the run process is gone.", self.comments(tid)[-1])
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["status"], record["resumed"], record["interrupted"]),
+                         ("In review", ["agent"], "the run process is gone"))
+        state = self.run_state(tid)
+        self.assertEqual((state["resumes"], state["resume_stage"], state["stage"]), ("1", "", ""))
+        self.assertTrue(state["resumed_at"])
+
+    def test_a_run_killed_during_its_retry_after_review_is_resumed_there(self):
+        """The retry's prompt was kept (prompts/<id>-retry.md): the resumed run goes on with it, then reviews again."""
+        self.write_config(reviewer=True)
+        tid = self.new("retryhang")
+        self.task("start", tid)
+        self.wait_for(lambda: self.run_state(tid).get("stage") == "retry")
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 3)
+        self.assertIn("# Automated review feedback", calls[2]["prompt"])
+        self.assertIn("It stopped during: retry (the run process is gone)", calls[2]["prompt"])
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        last = self.comments(tid)[-1]
+        self.assertIn("Verdict: pass", last)
+        self.assertIn("Resumed once at retry: the run process is gone.", last)
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["resumed"], record["retried"], record["reviews"]), (["retry"], True, ["pass"]))
+
+    def test_a_run_in_herdr_is_resumed_in_a_new_tab(self):
+        self.use_herdr(workspaces=[("w2", "別のプロジェクト")])
+        tid = self.new_in_herdr("w2", "slow")
+        self.task("start", tid)
+        old_tab = self.run_state(tid)["tab"]
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertIn(old_tab, self.herdr_db()["closed"])
+        self.assertTrue(self.run_state(tid)["tab"])
+        self.assertNotEqual(self.run_state(tid)["tab"], old_tab)
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_a_resume_uses_the_agents_resume_command_and_a_new_session_when_that_does_nothing(self):
+        """[resume] <agent> when there is one; one that ends at once with nothing done (no step, no report, a failing
+        exit: the conversation was not found) gets one more go as [agents] <agent>, within the same resume."""
+        for command, argv in ((f"{self.root}/agent --resumed {{prompt}}", ["--resumed"]), ("false {prompt}", [])):
+            with self.subTest(command):
+                self.write_config(extra=f"\n[resume]\nfake = {command}\n")
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.kill_run_and_agent(tid)
+                self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                calls = self.agent_calls()
+                self.assertEqual([c["argv0"] for c in calls], [[], argv])
+                self.assertIn("# Resumed", calls[1]["prompt"])
+                log = self.task("log", tid, "--full")
+                self.assertIn("== agent, resumed: fake ([resume])", log)
+                if not argv:
+                    self.assertIn("== the [resume] command did nothing; starting the agent again in a new session", log)
+
+    def test_a_resumed_run_that_stops_again_is_blocked(self):
+        tid = self.new("hang")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.wait_for(lambda: len(self.agent_calls()) == 2 and self.run_state(tid).get("agent_pid"))
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly again, after resuming once at agent", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len([e for e in self.events_of(tid) if e["event"] == "resumed"]), 1)
+
+    def test_a_resumed_run_that_ends_but_cannot_reach_github_is_blocked_as_ended(self):
+        """It ended normally (stage ""), with its report kept: not "stopped unexpectedly again" (operations.md)."""
+        tid = self.new("slow OUTAGE")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.wait_for(lambda: len(self.agent_calls()) == 2 and not self.run_state(tid).get("stage")
+                      and process_gone(int(self.run_state(tid)["pid"])))
+        self.assertIn("could not finish", self.task("log", tid))
+        db = self.gh(); db["down"] = False; self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        last = self.comments(tid)[-1]
+        self.assertIn("the run stopped unexpectedly, see", last)
+        self.assertNotIn("again", last)
+        self.assertIn("Ran the tests: 3 passed.", last)  # the kept report reaches GitHub
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_an_agent_killed_while_its_run_lives_is_resumed_in_place(self):
+        """The run sees its agent end by a signal it did not send, and starts it again at once, itself (POSIX)."""
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.wait_for(lambda: "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        os.killpg(int(state["agent_pid"]), signal.SIGKILL)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.run_state(tid)["pid"], state["pid"])  # the same run
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("It stopped during: agent (the agent was killed (SIGKILL))", calls[1]["prompt"])
+        log = self.task("log", tid, "--full")
+        self.assertIn("== the agent was killed (SIGKILL) during agent; resuming it once", log)
+        resumed = [e for e in self.events_of(tid) if e["event"] == "resumed"]
+        self.assertEqual([(e["stage"], e["reason"]) for e in resumed], [("agent", "the agent was killed (SIGKILL)")])
+        self.assertIn("Resumed once at agent: the agent was killed (SIGKILL).", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["resumed"], ["agent"])
+
+    def test_an_agent_killed_in_place_has_what_it_started_stopped_before_it_resumes(self):
+        """Only the agent itself is killed (the OOM killer, `kill <pid>`): what it started is still in its group, and
+        must not go on writing the worktree beside the resumed agent."""
+        tid = self.new("slowtree QUIETKID")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        agent, child = int(self.run_state(tid)["agent_pid"]), int(kid.read_text())
+        os.kill(agent, signal.SIGKILL)  # the agent, not its group
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertTrue(process_gone(child))
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_run_killed_while_its_agent_lives_stops_that_agent_before_resuming(self):
+        """Two agents must never write the same worktree: relaunch stops the one left (and what it started) first."""
+        tid = self.new("slowtree")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        run, agent, child = int(state["pid"]), int(state["agent_pid"]), int(kid.read_text())
+        os.kill(run, signal.SIGKILL)  # the run only: its agent, in a session of its own, goes on
+        self.wait_for(lambda: process_gone(run))
+        self.assertFalse(process_gone(agent))
+        self.task()
+        self.assertTrue(process_gone(agent) and process_gone(child))  # before the new run started its agent
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_pid_given_to_another_process_is_not_stopped_as_the_agent_left(self):
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(other.kill)
+        # its agent_pid now names a process that started later: pids are handed out again
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "agent_pid": str(other.pid),
+                                                  "agent_started": "2026-01-01T00:00:00Z"}))
+        self.task()
+        self.assertIsNone(other.poll())
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_a_run_cut_short_in_finish_is_resumed_without_a_second_report(self):
+        """lld.md 9, promise 18: finish again gives the same commit, push and PR; the Issue's report is not
+        written again."""
+        tid = self.new("ok")
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["hang_status"] = f"O_{STATUS_OPTIONS.index('In review')}"  # the gh moving the card hangs, once
+            self.db.write_text(json.dumps(db))
+        self.task("start", tid)
+        hanging = self.root / "gh-hanging"
+        self.wait_for(hanging.exists)
+        run = int(self.run_state(tid)["pid"])
+        self.assertEqual(self.run_state(tid)["stage"], "finishing")
+        os.kill(run, signal.SIGKILL)
+        os.kill(int(hanging.read_text()), signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run))
+        self.assertEqual(len([c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]), 1)
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len([c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]), 1)
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertIn("== the report is on the Issue already", self.task("log", tid, "--full"))
+        self.assertEqual(self.origin_files(f"task/{tid}"), ["README.md", "hello.txt"])
+
+    def test_a_run_whose_worktree_changed_is_not_resumed(self):
+        for change, why in (("commit", "the worktree's HEAD moved"), ("remove", "is gone")):
+            with self.subTest(change):
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.kill_run_and_agent(tid)
+                wt = self.run_state(tid)["worktree"]
+                if change == "commit":  # someone committed in it meanwhile
+                    subprocess.run(["git", "-C", wt, "commit", "-q", "--allow-empty", "-m", "by hand"], check=True,
+                                   env=self.env)
+                else:
+                    shutil.rmtree(wt)
+                calls = len(self.agent_calls())
+                self.task()
                 self.assertEqual(self.status(tid), "Blocked")
-                self.assertIn("stopped unexpectedly", self.comments(tid)[-1])
+                self.assertIn("the run stopped unexpectedly; not resumed: ", self.comments(tid)[-1])
+                self.assertIn(why, self.comments(tid)[-1])
+                self.assertEqual(len(self.agent_calls()), calls)
+
+    def test_ctrl_c_outside_the_agent_is_never_resumed(self):
+        self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait_for(lambda: "setting up" in self.task("log", tid))
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGINT)
+        self.wait_for(lambda: process_gone(run))
+        self.assertEqual(self.run_state(tid)["interrupted"], "SIGINT")
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("not resumed: it was stopped with Ctrl-C", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
 
     def test_sigterm_outside_the_agent_ends_the_run_at_once_and_notes_why(self):
         """In [setup], git, or a GitHub call: the run ends as it did before it had a handler, and notes why."""
