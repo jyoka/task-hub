@@ -52,6 +52,7 @@ kiro/                  Kiro IDE 用の部品と、かんたんセットアップ
 kiro/board-extension/  Kiro IDE の拡張: ボードをサイドバーとステータスバーに出す。船の絵と実績バッジつき(task list と手元の events.jsonl・metrics.jsonl を読むだけで、LLM は使わない)
 slack-triage/          Slackトリアージ: スレッドをコピーして ⌃⌥S でタスクを提案する(docs/slack-triage.md)
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
+durable/               実験: B の実行役(Pi Durable、Node)。[agents] durable で動くエージェントの 1 つ(durable/README.md)
 rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
@@ -75,6 +76,7 @@ PR(外の fork も含む)、main への push、Actions からの手動実行で�
 - Python の全部のテスト(CLI、インストーラ、Rust TUI の PTY テストも含む)
 - Rust のビルドとテスト(Cargo のキャッシュを使う)
 - Kiro の拡張の `npm test`
+- B の実行役(`durable/`)の `npm test`(`npm ci` のあと。続く Python のテストが task-hub の下でも動かす)
 - Python の Ruff と差分の空白の確認
 
 結果は PR の `macos / test` で確認します。ログは各実行の `macos-test-evidence` に 14 日残ります。
@@ -113,6 +115,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
+| `durable` の `npm test` | B の実行役(実験)。pi-ai の faux provider で、ツールの途中の kill -9 からの再開、ロック、`restart_limit`、ログイン。Node.js 22.19 以上で、先に `npm ci --ignore-scripts`([durable/README.md](durable/README.md)) |
 | `kiro/board-extension` の `npm test` | Kiro IDE の拡張。Node.js 22.18 以上か 23.6 以上([docs/kiro-ide.md](docs/kiro-ide.md)) |
 
 - バグを直すときは、まず使う人から見た動きで再現するテストを書き、失敗するのを見てから直します

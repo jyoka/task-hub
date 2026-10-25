@@ -1,0 +1,21 @@
+#!/bin/sh
+# The shell of the runner's bash tool (runner.ts, NodeExecutionEnv's shellPath), started as `group-shell -c <command>`.
+# Pi Durable starts each command in a process group of its own, which a kill -9 of the runner's group does not reach:
+# while the command runs, a file named after that group stays in the folder $TASK_DURABLE_GROUPS, so that the runner,
+# started again on the session, stops what the killed run left before it goes on (never two writers in one worktree).
+# The file holds this shell's start time (ps lstart). A command that ends by itself takes its file away, but one that
+# Pi Durable stops (timeout, abort, the runner closing on SIGTERM) is SIGKILLed with this shell, and its file stays:
+# so the runner stops a group only while its leader is still this shell (same pid, pgid and start time), never a
+# dead group or one whose id came back to another process.
+groups=$TASK_DURABLE_GROUPS
+unset TASK_DURABLE_GROUPS
+shell=/bin/bash
+[ -x "$shell" ] || shell=bash
+if [ -z "$groups" ]; then
+    exec "$shell" "$@"
+fi
+mkdir -p "$groups" && LC_ALL=C ps -o lstart= -p $$ > "$groups/.$$" && mv -f "$groups/.$$" "$groups/$$"
+"$shell" "$@"
+code=$?
+rm -f "$groups/$$" "$groups/.$$"
+exit $code

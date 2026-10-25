@@ -519,6 +519,7 @@ stateDiagram-v2
 | `share/repos/<owner>/<name>` | `ensure_clone`(`[sandbox] mode = user` では専用ユーザー) | worktree の元 | git |
 | `share/worktrees/<id>` | `ensure_worktree`、エージェント(`[sandbox] mode = user` ではどちらも専用ユーザー。task-hub の読み書きも `shared_read`、`shared_write` でそのユーザーから) | `finish`、`cleanup`、Kiro の拡張(変更のタブ。読むだけの git) | git worktree |
 | `share/worktrees/<id>/.claude/settings.local.json` | `write_rules`(Goal に Rules があるとき) | エージェント(Claude Code) | JSON。`permissions` の `allow` / `ask` / `deny`。`.git/info/exclude` でコミットしない |
+| `share/worktrees/<id>/.task-durable/` | B の実行役(`durable/`、`[agents] durable` のときだけ) | B の実行役、比べる実験(`*.usage.json`) | `<session>.sqlite`(と `-wal`、`-shm`。Pi Durable の会話とタスク)、`<session>.lock`(持ち主の pid。O_EXCL で作り、死んだ持ち主のものは取り直す)、`<session>.groups/<番号>`(動いている bash のコマンドのプロセスグループ。`group-shell` がコマンドの間だけ置き、中身はグループの先頭の開始時刻(`ps` の `lstart`)。次の起動は、先頭がまだその `group-shell`(pid、pgid、開始時刻が同じ)のグループだけを止め、ファイルは全部消す。Pi Durable が SIGKILL で止めたコマンド(timeout、SIGTERM での close)のファイルは残るため)、`<session>.usage.json`(`harness.usage()`)、`.gitignore`(`*`。task-hub はコミットしない)。`cleanup` が worktree と一緒に消す |
 | `share/sandbox-used` | `check_sandbox`(`[sandbox] mode = user` のときと、`off` で専用ユーザーの ACL を見つけたとき) | `refuse_after_user`(読むだけ)、`check_sandbox`(`off` で ACL がなく `repos` と `worktrees` が無くなったら消す) | 空のファイル |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 | `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
@@ -623,6 +624,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 | 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
+| B の実行役のモデル(`durable/`、既定は `openai-codex/gpt-6-luna`、thinking `medium`) | pi-ai の `openai-codex` provider。pi の `auth.json` を読むだけ(`CredentialStore` の `modify` を断るので、切れかけたトークンは更新せず理由つきで 1 で終わる) | ChatGPT のサブスクリプション。再開では元のプロンプトを送り直さず、SQLite の会話から続ける | エージェントのターンごと |
 | `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
@@ -670,6 +672,11 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   `totalTokens`、`cost`)と `model`、`provider`。`agent_usage` はまだ読まない。
 - pi 1.4.0 の `bash` ツールのコマンドは自分のプロセスグループで動く。エージェントのグループを止めても(`stop_group`、
   `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。
+- B の実行役(`durable/`)は `step_format` が None(`Steps` そのもの)で、自分で `· <名前>: <入力の 1 つ>` と文の 1 行、
+  最後の答えの全文をテキストで出す。Pi Durable 1.4.0 の `NodeExecutionEnv` も bash のコマンドを自分のプロセスグループで
+  動かす(`detached`)ので、実行役はシェルを `durable/scripts/group-shell` にして、そのグループを `.task-durable/<session>.groups`
+  に残す。同じ `{session}` の次の起動が、続ける前にそれを止める(task-hub の `stop_group` は届かないため)。
+  止めるのは先頭の開始時刻が記録と同じグループだけで、別のプロセスに渡った古い番号は止めない。
 - 失敗: claude は `== claude ended with <subtype>`、codex は `ERROR: <message>`(`error` と `turn.failed` の同じ文は 1 回)、
   pi は `== pi ended with <stopReason>: <errorMessage>`、kiro は `== kiro ended with an error: <message>`。
   pi の `--mode json` は失敗でも 0 で終わる(`pi -p` は 1)ので、`Steps.failed` が立ったら `agent_process` は 1 を返す。
@@ -757,6 +764,11 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   再開のテスト(約束 17、18)は、`task _run` とエージェントを外から kill します。`MODE:slow` と `MODE:slowtree` は
   「# Resumed」のプロンプトでは `ok` と同じに終わり、`MODE:frozen` は再開でも待ち続け、`MODE:retryhang` は差し戻しの
   あとで待ち続けます。偽物の `gh` の `hang_status` は、カードをその Status に動かす呼び出しで 1 回だけ止まります(`finishing` の再開のテスト)
+- `tests/test_task.py` の `test_durable_runner_*`: B の実行役を `[agents] durable` と `[resume] durable` で動かす。モデルは
+  pi-ai の faux provider(`durable/test/faux-agent.ts`。会話の記録だけから答えるので、kill -9 のあとの起動も同じに続く)。
+  K1(エージェントのグループだけ)と K2(`task _run` ごと)で kill -9 して、In review まで続くことを確かめる。`durable/` を
+  入れていなければ飛ばす。実行役そのものは `durable/` の `npm test`(同じ faux provider。ツールの途中の kill、ロック、
+  `restart_limit`、ログイン)
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、

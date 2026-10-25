@@ -88,6 +88,7 @@ flowchart TB
         gh[("GitHub")]
         team[("チームの GitHub")]
         agents["エージェントの CLI"]
+        durable["B の実行役(実験)<br/>durable/、Pi Durable"]
         herdr["herdr、OS の通知"]
         ntfy["ntfy<br/>(任意。スマートフォンへ)"]
     end
@@ -121,6 +122,7 @@ flowchart TB
     sync -. "開始、マージで閉じる" .-> links
     runner --> board
     runner -- "起動" --> agents
+    runner -- "起動([agents] durable)" --> durable
     runner -- "git、gh pr" --> gh
     runner --> data
     sync --> data
@@ -138,6 +140,7 @@ flowchart TB
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める。出力も CPU もなく黙って止まったコマンドは watchdog が止める。記録の段階(`resume_stage`)から続ける。エージェントが外から kill されたとき、watchdog がエージェントを止めたときは、その場で 1 回だけ再開する | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く。`{session}` を受けると、その ID で会話を保存する。再開のときは `[resume]` のコマンド(組み込みの pi と claude は既定のもの、なければ `[agents]` の新しいセッション)で、同じ `{session}` と「# Resumed」の節を足したプロンプトから続ける | worktree のファイルと `.task-report.md` だけ |
+| B の実行役(実験、`durable/`) | エージェントの 1 つ([durable/README.md](../../durable/README.md))。worktree の `.task-durable/` に会話と途中のツールの呼び出しを SQLite で持ち、同じ `{session}` で起動し直されると、そこから続ける(`harness.resume()`)。pi のログインを読むだけで使う | worktree のファイルと `.task-report.md`、自分の `.task-durable/` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
 | mod、Kiro の拡張 | ボードを表示する。Kiro の拡張(VS Code でも動く)は、カードの Goal、変更、ログを読み取り専用のタブで開く | 何も書かない(`task list` と手元のファイルを読む。拡張は worktree を読むだけの git で読む) |
 | Kiro の hook と workflow、Pi の拡張 | 出来事を会話に届ける | 自分のカーソルのファイルだけ |
