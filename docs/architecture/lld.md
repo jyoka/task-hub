@@ -784,3 +784,5 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `python3 tests/run.py`: テストを 1 件ずつ別プロセスで 2 つずつ、低い優先度で動かす(約 8 分)。全部のテストは 1 台に同時に 1 つ
   (一時ディレクトリの `task-hub-tests.lock`、持ち主の pid が死んでいれば取り直す)
 - `tests/bench.py`: 弱い PC 向けの計測。使い捨ての HOME と偽物の `gh` で、1 度に 1 プロセスずつ動かす([benchmark.md](../benchmark.md))。テストではない
+- `tests/durable_bench.py`: 止まった実行の再開の A、B、C を、本物のエージェントとモデルで比べる実験。使い捨ての HOME、偽物の `gh`、手元の bare リポジトリで、
+  同じ課題を同じ落とし方(T1〜T4 × K1〜K3)で 63 回動かし、1 回ごとに 1 行の JSON を残す([durable-runs-comparison.md](../durable-runs-comparison.md))。テストではない

@@ -58,6 +58,7 @@ windows/               Windows 用のインストーラ(install.ps1)と、task w
 tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 tests/bench.py         弱い PC 向けの計測(テストではない。頼まれたときとリリースの前に動かす。docs/benchmark.md)
+tests/durable_bench.py 止まった実行の再開の A・B・C を本物のモデルで比べる実験(テストではない。頼まれたときだけ。docs/durable-runs-comparison.md)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
@@ -114,6 +115,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
+| `tests/test_durable_bench.py` | `tests/durable_bench.py` の 63 回の試行の組み合わせと、`--report` の表(モデルは呼ばない) |
 | `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
 | `durable` の `npm test` | B の実行役(実験)。pi-ai の faux provider で、ツールの途中の kill -9 からの再開、ロック、`restart_limit`、ログイン。Node.js 22.19 以上で、先に `npm ci --ignore-scripts`([durable/README.md](durable/README.md)) |
 | `kiro/board-extension` の `npm test` | Kiro IDE の拡張。Node.js 22.18 以上か 23.6 以上([docs/kiro-ide.md](docs/kiro-ide.md)) |
