@@ -218,7 +218,7 @@ installs it: it follows only `v1.2.3` tags, so other task-hub users do not get t
 
 ```sh
 uname -m    # must print arm64
-gh release download task-rs-v0.2.0 -R jyoka/task-hub -p 'task-rs-aarch64-apple-darwin' \
+gh release download task-rs-v0.3.0 -R jyoka/task-hub -p 'task-rs-aarch64-apple-darwin' \
   -O ~/.local/bin/task-rs --clobber
 chmod +x ~/.local/bin/task-rs
 task-rs fetch && task-rs tui
