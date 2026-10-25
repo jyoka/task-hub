@@ -376,7 +376,10 @@
     (なければ `[agents]` の新しいセッション)。どちらでも、元のプロンプトに「# Resumed」の節(`worker/PROMPT.md`)を
     足すので、会話が残っていなくても worktree から続けられます。エージェントの名前で分ける処理はありません(決定事項 4)。
     同じ worktree で 2 つのエージェントが書かないよう、再開の前に残ったエージェントのプロセスグループを止めます。
-    会話の ID(`{session}`)と、Pi Durable の実行役(B)は別のタスクで足し、どちらを本採用するかは比べてから人が決めます
+    会話の ID は `{session}` で渡します。task-hub が起動ごとに UUID を決めて `runs/<id>.json` に残し、再開で同じ値を
+    渡すので、CLI の出力から ID を拾う処理は要りません。組み込みの `pi`(`--session-id`)と `claude`(`--session-id`、
+    `--resume`)は既定の `[resume]` を持ち、`[agents]` が組み込みのままのときだけ使います。Pi Durable の実行役(B)は
+    別のタスクで足し、どちらを本採用するかは比べてから人が決めます
     ([architecture/designs/durable-runs.md](architecture/designs/durable-runs.md))。
 ### 提案: 1 タスクあたりの時間とトークンの上限(未実装)
 

@@ -103,6 +103,7 @@ classDiagram
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
 | `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行かエージェントが最後に止まった理由(`SIGHUP`、`SIGTERM`、`SIGINT`、`the agent was killed (SIGKILL)`、watchdog がエージェントを止めたときの `silent`、`the run process is gone`)。5 章 |
 | `resumes`、`resumed`、`resume_stage`、`resumed_at` | 手元(`runs/<id>.json`。`relaunch` と `task _run` が書き、`launch` が空に戻す) | この実行を再開した回数(`MAX_RESUMES` まで)、再開した段階(空白で区切る)、次の `task _run` が続ける段階(読んだら空にする)、`relaunch` が起動し直した時刻。4.3 |
+| `session`、`session_role` | 手元(`runs/<id>.json`。`task _run` が実装エージェントの起動の前に書き、`launch` が空に戻す) | その起動の `{session}`(UUID)と段階(`agent`、`retry`)。再開は同じ段階なら同じ値をコマンドに渡す。4.3 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
 | `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
 | `running` | 計算(`alive`) | 実行のプロセスが生きているか |
@@ -295,9 +296,13 @@ flowchart TB
 
 再開(`resume_stage` が空でない、または、その場の再開)のエージェントには、元のプロンプト全体に「# Resumed」の節
 (`worker/PROMPT.md` の 3 つ目の部分と `It stopped during: <段階> (<理由>)`)を足して渡します(`resume_prompt`)。
-コマンドは `[resume] <名前>` があればそれ、なければ `[agents] <名前>`(新しいセッション)です。`[resume]` のコマンドが
-手順(`· ` の行)を 1 つも出さず、レポートもなく 0 以外で終わったら、同じ再開の中で 1 回だけ `[agents]` のコマンドで
-起動し直します。再開の回数は実行全体で `MAX_RESUMES`(1)回です。
+コマンドは `[resume] <名前>` があればそれ(空なら、なし)、なければ `[agents] <名前>` が組み込みのままの `pi` と `claude` は
+`DEFAULT_RESUME`、どれでもなければ `[agents] <名前>`(新しいセッション)です(`resume_command`)。`{session}` は
+`agent_command` が起動ごとの UUID に置き換えます。実装エージェントの起動(`run_worker`)は、新しい値を `session` と
+`session_role` に残してから起動し(`start_session`)、再開(`run_resumed_worker`)は `session_role` が同じ段階なら
+`session` を渡します(なければ新しい値)。reviewer、replanner、conflict fixer は毎回新しい値です。`[resume]` のコマンドが
+手順(`· ` の行)を 1 つも出さず、レポートもなく 0 以外で終わったら、同じ再開の中で 1 回だけ `[agents]` のコマンドで、
+新しい `{session}` で起動し直します(claude の `--session-id` は使われている ID を断る)。再開の回数は実行全体で `MAX_RESUMES`(1)回です。
 
 | `resume_stage` | 続け方 |
 |---|---|
@@ -494,7 +499,7 @@ stateDiagram-v2
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
@@ -617,7 +622,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
-| 再開のエージェント(`[resume]` のコマンド、なければ `[agents]`) | 同上 | 元のプロンプト(数 KB)を 1 回送り直す | 再開ごと(1 実行に 1 回まで) |
+| 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
 | `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
@@ -637,7 +642,7 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
 |---|---|---|---|
 | `claude` | `--output-format stream-json`(kiro-cli でない) | `ClaudeSteps`(`stream_json_lines`) | claude 2.1.296 |
 | `codex` | `codex`、`exec`、`--json` | `CodexSteps` | codex-cli 0.160.0 |
-| `pi` | `pi`、`--mode json` | `PiSteps` | pi 1.1.0 |
+| `pi` | `pi`、`--mode json` | `PiSteps` | pi 1.1.0、1.4.0 |
 | `kiro` | `kiro-cli`、`--output-format stream-json` | `KiroSteps` | kiro-cli 2.28.0 |
 
 - ツールの呼び出しは `· <名前>: <入力の 1 つ>`(`tool_step`。パスは worktree からの相対、`shown_path`)。
@@ -654,6 +659,17 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
     止まった後に compact して続けることがある。そのときは次の `agent_start` で、持っていたものを 1 行にする
     (`error` なら書かない)。失敗かどうかも、最後に持っているメッセージの `stopReason` で決める。
   - kiro: `agent_message_chunk` をためて、`tool_call` で 1 行、`runFinished` で全文。
+- pi 1.4.0 の `--mode json` は 1.1.0 と同じ出来事で、`PiSteps` は同じに直す(本物の出力で確かめた)。違いは、最初に
+  `role: system` の `message_start` と `message_end` が出る(assistant でないので書かない)ことと、`message_update` に
+  `usage` が付くことだけ。`--session-id` の初回は stderr に `Warning: No project session found with id ...` が出る
+  (JSON でない行なのでそのまま書く)。
+- pi 1.4.0 の `--session-id` の動き(本物で確かめた): その ID の会話がなければ作り、あれば読んで続ける。会話は
+  `~/.pi/agent/sessions/--<cwd の / を - にしたもの>--/<時刻>_<id>.jsonl`。kill -9 で終わっていないツールの呼び出しは、
+  結果のないまま記録に残り、次の起動で pi-ai が `No result provided`(`isError`)の結果を補ってモデルに送る。
+  使った量は、記録の assistant のメッセージの `usage`(`input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`、
+  `totalTokens`、`cost`)と `model`、`provider`。`agent_usage` はまだ読まない。
+- pi 1.4.0 の `bash` ツールのコマンドは自分のプロセスグループで動く。エージェントのグループを止めても(`stop_group`、
+  `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。
 - 失敗: claude は `== claude ended with <subtype>`、codex は `ERROR: <message>`(`error` と `turn.failed` の同じ文は 1 回)、
   pi は `== pi ended with <stopReason>: <errorMessage>`、kiro は `== kiro ended with an error: <message>`。
   pi の `--mode json` は失敗でも 0 で終わる(`pi -p` は 1)ので、`Steps.failed` が立ったら `agent_process` は 1 を返す。

@@ -39,6 +39,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -79,12 +80,21 @@ AUTOPILOT_OFF = re.compile(r"(?im)^[ \t]*(?:[-*+][ \t]+)?[*_`]*autopilot[*_`]*:[
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
 # how long a herdr pane gets to begin the run, twice (the second time after one more Enter)
 HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # tests: a dead pane fails in seconds
+CLAUDE_P = ("env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
+            " claude -p --dangerously-skip-permissions --output-format stream-json --verbose")
+# {session}: a new UUID for each launch (claude wants a UUID); a resume passes the one of the launch it goes on with
 DEFAULT_AGENTS = {
-    "claude": "env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
-              " claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}",
+    "claude": f"{CLAUDE_P} --session-id {{session}} {{prompt}}",
     "codex": "codex exec -s workspace-write --json {prompt}",
-    "pi": "pi -p --mode json {prompt}",
+    "pi": "pi -p --mode json --session-id {session} {prompt}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}",
+}
+# [resume] <name> by default, while [agents] <name> is the built-in one (resume_command): it goes on with the
+# conversation saved under {session}. pi's --session-id makes the session when it is missing and goes on with it when
+# it is there (checked on pi 1.4.0); claude's --session-id refuses a session that is there, and --resume one that is not
+DEFAULT_RESUME = {
+    "claude": f"{CLAUDE_P} --resume {{session}} {{prompt}}",
+    "pi": DEFAULT_AGENTS["pi"],
 }
 LOG_LINE_MAX = 200  # a step of an agent's JSON output, as one log line (docs/operations.md)
 # [sandbox] mode = user (docs/sandbox.md): the agent, and every git command and file task-hub touches in the shared
@@ -128,7 +138,7 @@ TRIGGER_SECONDS = float(os.environ.get("TASK_TRIGGER_SECONDS") or 300)  # `task 
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage", "link", "link_project", "agent_pid", "agent_started", "head", "snap", "review_attempt",
-            "interrupted", "resumes", "resumed", "resume_stage", "resumed_at"]
+            "interrupted", "resumes", "resumed", "resume_stage", "resumed_at", "session", "session_role"]
 # stage: where the run is (docs/design.md); never on GitHub or in EVENTS.
 # link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
 # agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
@@ -137,10 +147,11 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
 # interrupted: why the run or its agent last stopped (SIGHUP, SIGTERM, SIGINT, "the agent was killed (SIGKILL)",
 # "silent" when the Watchdog stopped the agent, "the run process is gone"). resumes: how often this run was resumed
 # (MAX_RESUMES), resumed: the stages it was resumed at, space-separated. resume_stage: where relaunch tells the next
-# `_run` to go on from (it reads and empties it), resumed_at: when relaunch started it again. launch empties them all
-# (RUN_FRESH)
+# `_run` to go on from (it reads and empties it), resumed_at: when relaunch started it again. session: the {session}
+# of the task's agent's last launch, session_role: that launch's stage (agent, retry), so a resume there goes on with
+# its conversation. launch empties them all (RUN_FRESH)
 RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted", "resumes", "resumed",
-             "resume_stage", "resumed_at")
+             "resume_stage", "resumed_at", "session", "session_role")
 MAX_RESUMES = 1  # a run that stops unexpectedly is resumed this often, then Blocked (decision 7); no setting
 RESUME_STAGES = ("preparing", "setup", "agent", "review", "retry", "finishing")  # the stages a run can go on from
 GH = os.environ.get("TASK_GH", "gh")
@@ -440,22 +451,39 @@ def board_config():
     return owner, number, issues
 
 
-def agent_command(name, prompt, resume=False):
-    """The agent's command line. resume: [resume] <name> when there is one (it goes on with the agent's own saved
-    conversation), else [agents] <name>, a new session that has only the prompt to go on from."""
+def agent_command(name, prompt, resume=False, session=""):
+    """The agent's command line, with prompt for {prompt} and session for {session}, each as one argument.
+    resume: the resume command when there is one (it goes on with the agent's own saved conversation), else
+    [agents] <name>, a new session that has only the prompt to go on from."""
     c = config()
     if not c.has_option("agents", name):
         fail(f"unknown agent {name!r}", f"agents: {', '.join(c['agents'])} (add more in {home(CONFIG)})", 2)
-    section = "resume" if resume and has_resume_command(name) else "agents"
+    command = resume_command(name) if resume else None
+    section = "resume" if command else "agents"
     try:
-        parts = shlex.split(c[section][name])
+        parts = shlex.split(command or c["agents"][name])
     except ValueError as e:  # a quote left open, or cut by a ; or # that starts a comment
         raise RuntimeError(f"[{section}] {name} in {home(CONFIG)} cannot be read: {e}") from None
-    return [prompt if part == "{prompt}" else part for part in parts]
+    return [{"{prompt}": prompt, "{session}": session}.get(part, part) for part in parts]
+
+
+def resume_command(name):
+    """[resume] <name> (empty: none), else the built-in one (DEFAULT_RESUME) while [agents] <name> is the built-in one
+    too: an agent command of your own goes on in a new session unless [resume] names how it goes on. None: none."""
+    c = config()
+    if c.has_option("resume", name):
+        return c["resume"][name].strip() or None
+    if name in DEFAULT_RESUME and c["agents"].get(name) == DEFAULT_AGENTS[name]:
+        return DEFAULT_RESUME[name]
+    return None
 
 
 def has_resume_command(name):
-    return config().has_option("resume", name)
+    return resume_command(name) is not None
+
+
+def new_session():
+    return str(uuid.uuid4())
 
 
 def windows_command(argv):
@@ -2332,12 +2360,13 @@ def short(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e4 else f"{n / 1e3:.1f}k" if n >= 1e3 else str(n)
 
 
-def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=False):
+def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=False, session=None):
     """Run one agent launch; its role, agent, seconds, and what it used (when readable) go into the `usage` list.
-    t: the run, whose record notes the agent's pid while it runs. resume: with [resume] <agent> (agent_command)."""
+    t: the run, whose record notes the agent's pid while it runs. resume: with [resume] <agent> (agent_command).
+    session: its {session}; None, a new one."""
     say(f"== {label}: {agent}" + (" ([resume])" if resume and has_resume_command(agent) else ""))
     began = time.time()
-    code = agent_process(agent, prompt, wt, say, t, resume)
+    code = agent_process(agent, prompt, wt, say, t, resume, session)
     if usage is not None:
         ended = time.time()
         entry = {"role": label, "agent": agent, "seconds": round(ended - began)}
@@ -2358,7 +2387,7 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=
     return code
 
 
-def agent_process(agent, prompt, wt, say, t=None, resume=False):
+def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
     proc = None
     if t is not None:
         t["agent_running"] = True  # never saved: tells cmd_run's signal handler there is an agent to stop
@@ -2366,7 +2395,7 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False):
         # it showed
         t["agent_stopped"], t["agent_silenced"], t["agent_steps"], t["agent_group"] = False, False, 0, 0
     try:
-        argv, env = windows_command(agent_command(agent, prompt, resume))
+        argv, env = windows_command(agent_command(agent, prompt, resume, session or new_session()))
         argv = as_agent(argv, wt, [*pass_env(), *env])
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env},
@@ -2729,8 +2758,8 @@ def unwrapped(command):
 
 
 class PiSteps(JsonSteps):
-    """`pi -p --mode json` (checked on pi 1.1.0). A tool call is shown when it starts to run, and the text of a
-    message that calls tools by its first line. The last message of a run is held: pi may compact its context and go
+    """`pi -p --mode json` (checked on pi 1.1.0 and 1.4.0). A tool call is shown when it starts to run, and the text
+    of a message that calls tools by its first line. The last message of a run is held: pi may compact its context and go
     on (after a context overflow or an answer cut short), and then it is shown by its first line. When pi settles, or
     the output ends, the held one is shown in full, as `pi -p` prints it, or why it failed: `pi -p` then exits 1,
     but pi --mode json exits 0, so `failed` is set."""
@@ -2993,7 +3022,8 @@ def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
     resumed_why: this `_run` was itself started again (relaunch) to go on with it, cut short for that reason."""
     if resumed_why:
         return run_resumed_worker(t, prompt, stage, label, say, record, resumed_why)
-    code = run_agent_process(t["agent"], prompt, Path(t["worktree"]), say, label, record["usage"], t)
+    code = run_agent_process(t["agent"], prompt, Path(t["worktree"]), say, label, record["usage"], t,
+                             session=start_session(t, stage))
     # Windows: an exit code never says a signal ended it
     if WINDOWS or code >= 0 or t.get("agent_stopped") or int(t.get("resumes") or 0) >= MAX_RESUMES:
         return code
@@ -3013,15 +3043,27 @@ def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
 def run_resumed_worker(t, prompt, stage, label, say, record, why):
     """The agent started again after it was cut short: [resume] <agent> if there is one, with # Resumed after its
     prompt. A [resume] command that did nothing (no tool call, no report, a failing exit: it found no conversation
-    to go on with) gets one more go as [agents] <agent>, a new session, within the same resume."""
+    to go on with) gets one more go as [agents] <agent>, a new session, within the same resume.
+    The resume command gets the {session} of the launch cut short at stage (none recorded: a new one); [agents]
+    <agent>, a new session, always a new one: claude's --session-id refuses one in use."""
     wt = Path(t["worktree"])
     text = resume_prompt(prompt, stage, why)
-    code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed", record["usage"], t, resume=True)
+    session = t.get("session") if t.get("session_role") == stage and has_resume_command(t["agent"]) else ""
+    code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed", record["usage"], t, resume=True,
+                             session=session or start_session(t, stage))
     if has_resume_command(t["agent"]) and code != 0 and not t.get("agent_stopped") and not t.get("agent_steps") \
             and agent_file(wt / REPORT_FILE) is None:
         say("== the [resume] command did nothing; starting the agent again in a new session")
-        code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed in a new session", record["usage"], t)
+        code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed in a new session", record["usage"], t,
+                                 session=start_session(t, stage))
     return code
+
+
+def start_session(t, stage):
+    """A new {session} for the task's agent at stage (agent, retry), saved before the launch for a resume to read."""
+    t["session"], t["session_role"] = new_session(), stage
+    save_run(t)
+    return t["session"]
 
 
 def signal_name(signum):
