@@ -238,6 +238,26 @@ class WindowsTest(unittest.TestCase):
     def run_state(self, tid):
         return json.loads((self.root / ".local/state/task-hub/runs" / f"{tid}.json").read_text())
 
+    def working(self, tid, calls=1, not_pid=""):
+        """The pid of the task's run once its agent has started (the `calls`th agent of the task), as a run other
+        than not_pid: a resumed run records itself anew."""
+        end = time.time() + 60
+        while len(self.agent_calls()) < calls or self.run_state(tid).get("pid") in ("", None, not_pid):
+            if time.time() > end:
+                self.fail(f"task {tid}'s agent {calls} never started; log:\n{self.task('log', tid, '--full')}")
+            time.sleep(0.2)
+        return self.run_state(tid)["pid"]
+
+    def kill_run(self, pid):
+        """taskkill the run and what it started (its agent), as a crash or a restart does."""
+        subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+        time.sleep(1)  # the killed processes let go of their files
+
+    def events(self, tid, event):
+        path = self.root / ".local/state/task-hub/events.jsonl"
+        lines = path.read_text(encoding="utf-8").split("\n")[:-1] if path.exists() else []
+        return [e for e in map(json.loads, lines) if e["id"] == tid and e["event"] == event]
+
     def branch_file(self, tid, name):
         bare = self.root / "origins" / "jyoka/app.git"
         return subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:{name}"], capture_output=True,
@@ -255,36 +275,54 @@ class WindowsTest(unittest.TestCase):
         self.assertEqual(self.branch_file(tid, "hello.txt"), "hello from mode ok\n")
         self.assertIn("挨拶を追加する", self.task("list"))
 
-    def test_a_running_task_is_alive_until_it_is_killed(self):
-        tid = self.new("slow")
+    def test_a_running_task_is_alive_until_it_is_killed_then_resumed_once(self):
+        # docs/architecture/designs/durable-runs.md: a run that stops unexpectedly is started again once, from its
+        # stage, and a resumed run that stops again is Blocked (decision 7)
+        tid = self.new("frozen")  # hangs in its agent, resumed or not
         self.task("start", tid)
-        self.started(tid)
+        first = self.working(tid)
         self.env["TASK_WATCH_ONCE"] = "1"
         self.task("watch")  # alive: the watch leaves it In progress
         self.assertEqual(self.status(tid), "In progress")
-        subprocess.run(["taskkill", "/PID", self.run_state(tid)["pid"], "/T", "/F"], capture_output=True)
-        time.sleep(1)
-        self.task("watch")  # gone: blocked as stopped
+        self.kill_run(first)
+        self.task("watch")  # gone: resumed once, the card staying In progress
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual([(e["stage"], e["reason"]) for e in self.events(tid, "resumed")],
+                         [("agent", "the run process is gone")])
+        second = self.working(tid, calls=2, not_pid=first)  # a new `_run` really runs, and starts the agent again
+        self.assertIn("# Resumed", self.agent_calls()[1]["prompt"])
+        self.task("watch")  # and the watch knows it for the run
+        self.assertEqual(self.status(tid), "In progress")
+        self.kill_run(second)
+        self.task("watch")  # gone again: blocked as stopped
         self.assertEqual(self.status(tid), "Blocked")
-        self.assertIn("the run stopped unexpectedly", self.gh()["issues"][tid]["comments"][-1]["body"])
+        self.assertIn("the run stopped unexpectedly again, after resuming once at agent",
+                      self.gh()["issues"][tid]["comments"][-1]["body"])
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.events(tid, "resumed")), 1)
 
     def test_a_pid_handed_to_another_process_is_not_the_run(self):
         # Windows hands out pids again soon: the watch must not take another process for the run, even one whose
-        # command line says `_run 1` somewhere, as an agent's prompt can
-        tid = self.new("slow")
+        # command line says `_run 1` somewhere, as an agent's prompt can; nor stop it as what the agent left
+        tid = self.new("slow")  # resumed, it ends as "ok"
         self.task("start", tid)
-        pid = self.started(tid)
-        subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+        pid = self.working(tid)
+        self.kill_run(pid)
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", f"_run {tid} in a prompt"])
         self.addCleanup(other.wait)
         self.addCleanup(other.kill)  # cleanups run last first: kill, then wait
         state = self.root / ".local/state/task-hub/runs" / f"{tid}.json"
-        state.write_text(json.dumps({**self.run_state(tid), "pid": str(other.pid)}))
+        state.write_text(json.dumps({**self.run_state(tid), "pid": str(other.pid), "agent_pid": str(other.pid)}))
         self.env["TASK_WATCH_ONCE"] = "1"
-        self.task("watch")
-        self.assertEqual(self.status(tid), "Blocked")
-        self.assertIn("the run stopped unexpectedly", self.gh()["issues"][tid]["comments"][-1]["body"])
+        self.task("watch")  # not the run: resumed
+        self.assertEqual(len(self.events(tid, "resumed")), 1)
+        self.finish(tid, "In review")
         self.assertIsNone(other.poll())  # and left alone
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("# Resumed", calls[1]["prompt"])
+        self.assertIn("Resumed once at agent: the run process is gone.",
+                      self.gh()["issues"][tid]["comments"][-1]["body"])
 
     def test_a_run_outlives_the_job_of_the_watch_that_started_it(self):
         # Task Scheduler runs the watch in a job and ends what is left in it when the task stops (install.ps1

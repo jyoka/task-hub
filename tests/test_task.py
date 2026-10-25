@@ -1281,7 +1281,8 @@ class TaskTest(unittest.TestCase):
         return self.root / ".local/state/task-hub/runs" / f"{tid}.json"
 
     def fake_running(self, tid):
-        """Make a task look like a live run on this machine."""
+        """Make a task look like a live run on this machine. It has no stage: once killed, it is Blocked, not resumed
+        (resumable)."""
         proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", str(tid)])  # as `task _run`
         self.addCleanup(proc.kill)
         self.move(tid, "In progress")
@@ -1291,18 +1292,29 @@ class TaskTest(unittest.TestCase):
         return proc
 
     def test_a_pid_now_another_tasks_run_is_not_this_run(self):
-        # pids are handed out again (the run files outlive a restart): another task's run is not this one
+        # pids are handed out again (the run files outlive a restart): another task's run is not this one, so this
+        # run is gone and is resumed once (durable-runs.md), and the other one is left alone
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
+        self.addCleanup(other.kill)
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "pid": str(other.pid)}))
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(other.poll())
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_dead_run_with_no_stage_is_blocked_not_resumed(self):
+        # a run file with no stage (a run that had ended, or one from before durable runs): nothing to go on from
         tid = self.new()
         proc = self.fake_running(tid)
         proc.kill()
         proc.wait()
-        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
-        self.addCleanup(other.kill)
-        state = json.loads(self.run_file(tid).read_text())
-        self.run_file(tid).write_text(json.dumps({**state, "pid": str(other.pid)}))
         self.task()
         self.assertEqual(self.status(tid), "Blocked")
-        self.assertIn("the run stopped unexpectedly", self.comments(tid)[-1])
+        self.assertIn("the run stopped unexpectedly, see", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
 
     # --- registering ---
 
