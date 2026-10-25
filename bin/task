@@ -125,8 +125,14 @@ TRIGGERS = STATE / "triggers.json"
 TRIGGER_SECONDS = float(os.environ.get("TASK_TRIGGER_SECONDS") or 300)  # `task watch` checks them at most this often
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
-            "research", "stage", "link", "link_project"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
-# link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again
+            "research", "stage", "link", "link_project", "agent_pid", "agent_started", "head", "snap", "review_attempt",
+            "interrupted"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+# link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
+# agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
+# stopped. head: HEAD before the agent's launch. snap: `<tree> <HEAD>` while a reviewer or replanner runs, so a run
+# that dies before restore leaves the next launch something to restore. review_attempt: 0 or 1, the review running.
+# interrupted: the signal that stopped the run (SIGHUP, SIGTERM). launch empties them all (RUN_FRESH)
+RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted")
 GH = os.environ.get("TASK_GH", "gh")
 # the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
 # A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
@@ -144,6 +150,10 @@ WINDOWS = os.name == "nt"  # docs/windows.md: no ps, env, sh or osascript, and b
 # without a window, which the programs it starts (git, the agent) share instead of each opening one
 DETACHED = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if WINDOWS \
     else {"start_new_session": True}
+# the agent and what it starts, as one group the run can stop: its own session (a closed pane's SIGHUP and Ctrl-C reach
+# only the run, which stops the group), on Windows its own process group in the run's console (taskkill /T stops it)
+AGENT_GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+AGENT_STOP_SECONDS = 10  # how long a stopped agent has to exit before it is killed
 
 
 # ---------- output (TOON) ----------
@@ -1692,6 +1702,9 @@ def ensure_worktree(t):
         if not first:  # recover legacy ownership before fetch, base checks, or env setup can fail
             t["worktree"] = str(wt)
             save_run(t)
+        if first.get("snap"):  # the last run died while a reviewer or replanner had the worktree: undo its edits
+            restore(wt, first["snap"].split())
+            save_run({**first, "snap": ""})
     repo_dir = ensure_clone(t["repo"])
     if first.get("branch") and first.get("base", "") != t.get("base", ""):
         if git_shared(repo_dir, "rev-parse", "--verify", "-q", f"origin/task/{t['id']}").returncode == 0:
@@ -1740,6 +1753,7 @@ def launch(t):
         raise RuntimeError('the card has no valid "Target repo" (owner/name)')
     t["branch"] = t.get("branch") or f"task/{t['id']}"
     t["agent"] = t.get("agent") or config()["runner"]["agent"]
+    t.update(dict.fromkeys(RUN_FRESH, ""))  # of the last run (tasks() reads them in), which is over
     if not config().has_option("agents", t["agent"]):  # a typo on one card must not stop the others
         raise RuntimeError(f'unknown agent "{t["agent"]}" on the card')
     for key in ("reviewer", "replanner"):  # found now, not after the agent's work
@@ -1920,6 +1934,22 @@ def snapshot(wt):
     git_shared(wt, "add", "-A", check=True)
     return (git_shared(wt, "write-tree", check=True).stdout.strip(),
             git_shared(wt, "rev-parse", "HEAD", check=True).stdout.strip())
+
+
+def hold_snapshot(t):
+    """snapshot of the run's worktree, also kept in its record until release_snapshot: if the run dies before then,
+    the next launch restores it (ensure_worktree)."""
+    t["snap"] = " ".join(snapshot(Path(t["worktree"])))
+    save_run(t)
+    return t["snap"].split()
+
+
+def release_snapshot(t, snap):
+    """restore, then forget the snapshot; True if the helper had changed the worktree."""
+    edited = restore(Path(t["worktree"]), snap)
+    t["snap"] = ""
+    save_run(t)
+    return edited
 
 
 def restore(wt, snap):
@@ -2118,11 +2148,12 @@ def short(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e4 else f"{n / 1e3:.1f}k" if n >= 1e3 else str(n)
 
 
-def run_agent_process(agent, prompt, wt, say, label, usage=None):
-    """Run one agent launch; its role, agent, seconds, and what it used (when readable) go into the `usage` list."""
+def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None):
+    """Run one agent launch; its role, agent, seconds, and what it used (when readable) go into the `usage` list.
+    t: the run, whose record notes the agent's pid while it runs."""
     say(f"== {label}: {agent}")
     began = time.time()
-    code = agent_process(agent, prompt, wt, say)
+    code = agent_process(agent, prompt, wt, say, t)
     if usage is not None:
         ended = time.time()
         entry = {"role": label, "agent": agent, "seconds": round(ended - began)}
@@ -2143,13 +2174,19 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None):
     return code
 
 
-def agent_process(agent, prompt, wt, say):
+def agent_process(agent, prompt, wt, say, t=None):
     proc = None
+    if t is not None:
+        t["agent_running"] = True  # never saved: tells cmd_run's signal handler there is an agent to stop
     try:
         argv, env = windows_command(agent_command(agent, prompt))
         argv = as_agent(argv, wt, [*pass_env(), *env])
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env})
+                                stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env},
+                                **AGENT_GROUP)
+        if t is not None:
+            t["agent_pid"], t["agent_started"] = str(proc.pid), now()
+            save_run(t)
         steps = STEPS.get(step_format(agent), Steps)(wt)
         for line in proc.stdout:
             for shown in steps.read(line.rstrip("\n")):
@@ -2158,12 +2195,10 @@ def agent_process(agent, prompt, wt, say):
             say(shown)
         code = proc.wait()
         return 1 if code == 0 and steps.failed else code
-    except KeyboardInterrupt:  # Ctrl-C in the pane stops the agent; still push what it did
-        if proc:
-            proc.terminate()
-            code = proc.wait()
-        else:
-            code = 130
+    except (KeyboardInterrupt, Interrupted) as e:  # Ctrl-C in the pane stops the agent; still push what it did
+        code = stop_agent(proc) if proc else 130
+        if isinstance(e, Interrupted):  # SIGHUP, SIGTERM: the whole run stops (cmd_run)
+            raise
         say("== stopped with Ctrl-C")
         return code
     except OSError as e:
@@ -2176,6 +2211,45 @@ def agent_process(agent, prompt, wt, say):
     except RuntimeError as e:  # windows_command: a batch file it cannot run
         say(f"agent cannot run: {e}")
         return 127
+    finally:
+        if t is not None:
+            t["agent_running"] = False
+            if t.get("agent_pid") and (proc is None or proc.returncode is not None):
+                t["agent_pid"] = t["agent_started"] = ""  # nothing of it left to stop
+                save_run(t)
+
+
+class Interrupted(BaseException):
+    """SIGHUP or SIGTERM reached `_run` (its pane closed, a shutdown, kill) while an agent runs: agent_process stops
+    the agent, and cmd_run ends. A BaseException, as KeyboardInterrupt: no `except Exception` stops it."""
+
+
+def signal_agent(pid, sig):
+    """Send sig to the agent's process group. With [sandbox] mode = user its processes are another user's, which
+    this one may not signal: that user sends it too (sudo, the group's leader, is ours and passes it on)."""
+    with contextlib.suppress(OSError):
+        os.killpg(pid, sig)
+    if sandbox_mode() != "off":
+        with contextlib.suppress(OSError, RuntimeError):
+            run(*as_agent(["kill", "-s", sig.name[3:], "--", f"-{pid}"]))
+
+
+def stop_agent(proc):
+    """Stop the agent and everything it started (AGENT_GROUP); its exit code. SIGTERM first, then after
+    AGENT_STOP_SECONDS SIGKILL, also for what it started and left behind. Never waits without a limit."""
+    if WINDOWS:
+        run("taskkill", "/T", "/F", "/PID", str(proc.pid))
+    else:
+        signal_agent(proc.pid, signal.SIGTERM)
+        try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=AGENT_STOP_SECONDS)
+        finally:  # a second Ctrl-C while it waits too
+            # what it left behind: a group's id is never given out again while anything is left in it (POSIX)
+            signal_agent(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=AGENT_STOP_SECONDS)
+    return proc.returncode if proc.returncode is not None else -9
 
 
 def step_format(name):
@@ -2530,9 +2604,9 @@ def run_review(t, report, say, usage=None):
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
     shared_unlink(wt / REVIEW_FILE)
     set_stage(t, "review")
-    snap = snapshot(wt)
-    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage)
-    if restore(wt, snap):
+    snap = hold_snapshot(t)
+    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage, t)
+    if release_snapshot(t, snap):
         return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
                             "Reviewers must only inspect the worktree.")
     text = agent_file(wt / REVIEW_FILE)
@@ -2551,6 +2625,7 @@ def review_loop(t, report, code, say, record):
         return report, code, "", ""
     wt = Path(t["worktree"])
     for attempt in range(2):
+        t["review_attempt"] = str(attempt)
         review = run_review(t, report, say, record["usage"])
         if review is None:
             return report, code, "", ""
@@ -2565,7 +2640,9 @@ def review_loop(t, report, code, say, record):
         record["retried"] = True
         set_stage(t, "retry")
         shared_unlink(wt / REPORT_FILE)  # a retry that dies must not pass for the first run's report
-        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"])
+        t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
+        save_run(t)
+        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"], t)
         report = agent_file(wt / REPORT_FILE) or ""
         if not report.strip() or AgentReport(report).blocked:
             return report, code, review.issue_section(), ""
@@ -2619,9 +2696,9 @@ def run_replan(t, report, say, usage=None):
     wt = Path(t["worktree"])
     shared_unlink(wt / REPLAN_FILE)
     set_stage(t, "replanning")
-    snap = snapshot(wt)
-    code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner", usage)
-    if restore(wt, snap):
+    snap = hold_snapshot(t)
+    code = run_agent_process(name, build_replan_prompt(t, report), wt, say, "replanner", usage, t)
+    if release_snapshot(t, snap):
         say("== replanner changed files; its edits were undone and its result is ignored")
         return "ignored"
     text = agent_file(wt / REPLAN_FILE)
@@ -2658,6 +2735,9 @@ def run_replan(t, report, say, usage=None):
 
 # ---------- one run (called in the herdr pane or background process) ----------
 
+INTERRUPTS = [s for s in (getattr(signal, "SIGHUP", None), signal.SIGTERM) if s]  # Windows has no SIGHUP
+
+
 def cmd_run(a):
     t = {"id": a["id"], **load_run(a["id"])}
     t["pid"] = str(os.getpid())
@@ -2665,11 +2745,43 @@ def cmd_run(a):
     log = None if os.environ.get("TASK_RUN_LOGGED") else open(t["log"], "a")
 
     def say(line):
-        print(line, flush=True)
+        with contextlib.suppress(OSError):  # its pane is gone (SIGHUP): the log goes on
+            print(line, flush=True)
         if log:
             log.write(line + "\n")
             log.flush()
 
+    def stopped(name):
+        t["interrupted"] = name
+        save_run(t)
+        # straight to the files, not through say: in the signal handler, print or log.write may be the very call
+        # the signal cut into, and writing to its buffer again raises "reentrant call" instead of ending the run
+        line = f"== stopped by {name} during {t['stage']}; the next check of the board takes it from there\n"
+        for fd in (1, *([log.fileno()] if log else [])):
+            with contextlib.suppress(OSError):  # its pane is gone (SIGHUP): the log goes on
+                os.write(fd, line.encode())
+        os._exit(128 + signal.Signals[name])
+
+    def interrupted(signum, _frame):
+        if not t.get("stage"):  # the run is over (its tab closing ends it): nothing was cut short
+            os._exit(128 + signum)
+        for s in (*INTERRUPTS, signal.SIGINT):  # once: stopping the agent must not be cut short
+            signal.signal(s, signal.SIG_IGN)
+        if t.get("agent_running"):
+            raise Interrupted(signal.Signals(signum).name)
+        # in git or a GitHub call: end at once, as without this handler, and never kill a git that is writing
+        stopped(signal.Signals(signum).name)
+
+    for s in INTERRUPTS:
+        signal.signal(s, interrupted)
+    try:
+        run_task(t, say)
+    except Interrupted as e:
+        stopped(e.args[0])
+
+
+def run_task(t, say):
+    """The run of cmd_run, from the setup to the card's new Status."""
     wt = Path(t["worktree"])
     if sandbox_mode() != "off":
         os.chdir(DATA)  # nothing of task-hub's own (gh, herdr) runs in the folder the agent writes
@@ -2696,8 +2808,9 @@ def cmd_run(a):
                     "blocked_by": "setup"}, say)
         say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
         return
+    t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
     set_stage(t, "agent")
-    code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"])
+    code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"], t)
     say(f"== agent exited with code {code}")
 
     report = agent_file(wt / REPORT_FILE) or ""

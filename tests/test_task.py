@@ -409,8 +409,13 @@ report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please re
 print(f"fake agent working, mode {mode}")
 if mode == "crash":
     sys.exit(1)
-if mode == "slow":  # works a bit, then keeps running until stopped
+if mode in ("slow", "slowtree"):  # works a bit, then keeps running until stopped
     Path("hello.txt").write_text("partial work\n")
+    if mode == "slowtree":  # with a child of its own (a test run, a dev server), which must stop with it
+        child = subprocess.Popen(["sleep", "60"])
+        kid = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent / "agent-child"
+        Path(f"{kid}.tmp").write_text(str(child.pid))
+        Path(f"{kid}.tmp").replace(kid)
     print("waiting", flush=True)
     import time; time.sleep(60)
 if mode == "env":  # proves the agent got the env files: writes what it read
@@ -534,6 +539,15 @@ if forced in (["stageedit"], ["stagenew"], ["commit"]):  # breaks the rule with 
             subprocess.run(["git", "commit", "-qm", "reviewer's own commit"], check=True)
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
     sys.exit(0)
+if forced == ["edithang"]:  # breaks the rule, then hangs: its run dies before it can undo the edits
+    import subprocess, time
+    Path("README.md").write_text("app\nreviewer was here\n")
+    Path("sneaky.txt").write_text("added by the reviewer\n")
+    subprocess.run(["git", "add", "sneaky.txt"], check=True)
+    hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
+    Path(f"{hanging}.tmp").write_text(str(os.getpid()))
+    Path(f"{hanging}.tmp").replace(hanging)
+    time.sleep(60)
 if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
     Path("coverage.out").write_text("tests ran\n")
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nran the tests\n")
@@ -990,6 +1004,12 @@ finish("All done.\nAdded hello.txt and wrote the report.\n\nThe last line of the
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
+def process_gone(pid):
+    """No such process, or only its exit status left for its parent to collect (a zombie)."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    return r.returncode != 0 or r.stdout.strip().startswith("Z")
+
+
 class TaskTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1044,6 +1064,11 @@ class TaskTest(unittest.TestCase):
                 continue
             if not pid:
                 continue
+            with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):  # its own group (agent_process)
+                agent = int(json.loads(f.read_text()).get("agent_pid") or 0)
+                if agent and str(self.root) in subprocess.run(["ps", "-p", str(agent), "-o", "command="],
+                                                              capture_output=True, text=True).stdout:
+                    os.killpg(agent, signal.SIGKILL)
             try:
                 cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
                 if "_run" not in cmd and "_fix" not in cmd:
@@ -4057,6 +4082,31 @@ class TaskTest(unittest.TestCase):
                                 capture_output=True, text=True).stdout
         self.assertEqual(pushed, "hello from mode ok\n")
 
+    def test_a_run_killed_during_its_review_leaves_no_reviewer_edit_for_the_next_run(self):
+        """lld.md 9, promise 2, when the run dies (kill -9, a crash) while its reviewer has changed the worktree:
+        once the human moves the card to Ready again, the next run's PR has none of the reviewer's changes."""
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edithang")
+        self.task("start", tid)
+        hanging = self.root / "reviewer-hanging"
+        self.wait_for(hanging.exists)
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGKILL)  # the run, then its reviewer: as if the machine went down
+        os.kill(int(hanging.read_text()), signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run))
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("stopped unexpectedly", self.comments(tid)[-1])
+        self.edit_issue(tid, body="Say hello. MODE:ok")
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        readme = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:README.md"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(readme, "app\n")
+        self.assertEqual(sorted(self.origin_files(f"task/{tid}")), ["README.md", "hello.txt"])
+
     def test_reviewer_agent_means_the_tasks_own_agent(self):
         self.write_config(reviewer="agent")
         tid = self.new("ok")
@@ -4265,6 +4315,78 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
+
+    def test_ctrl_c_stops_what_the_agent_started_too(self):
+        tid = self.new("slowtree")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        agent, child = int(self.run_state(tid)["agent_pid"]), int(kid.read_text())
+        os.kill(int(self.run_state(tid)["pid"]), signal.SIGINT)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: process_gone(agent) and process_gone(child))
+
+    def test_sighup_or_sigterm_stops_the_agent_group_and_notes_why(self):
+        """The pane closed (SIGHUP), a shutdown or `kill` (SIGTERM): the agent and what it started stop with the
+        run, which notes why and ends there. The card stays In progress, so the next sync sees a run that stopped."""
+        kid = self.root / "agent-child"
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            with self.subTest(sig.name):
+                kid.unlink(missing_ok=True)
+                tid = self.new("slowtree")
+                self.task("start", tid)
+                self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+                state = self.run_state(tid)
+                run, agent, child = int(state["pid"]), int(state["agent_pid"]), int(kid.read_text())
+                self.assertEqual(os.getpgid(agent), agent)  # its own group: a closed pane's SIGHUP never reaches it
+                self.assertNotEqual(os.getpgid(run), agent)
+                self.assertRegex(state["agent_started"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+                self.assertEqual(state["head"], subprocess.run(["git", "-C", state["worktree"], "rev-parse", "HEAD"],
+                                                               capture_output=True, text=True).stdout.strip())
+                os.kill(run, sig)
+                self.wait_for(lambda: process_gone(run) and process_gone(agent) and process_gone(child))
+                state = self.run_state(tid)
+                self.assertEqual(state["interrupted"], sig.name)
+                self.assertEqual(state["stage"], "agent")  # where it stopped
+                self.assertEqual(self.status(tid), "In progress")
+                self.assertIn(f"== stopped by {sig.name}", self.task("log", tid))
+                self.task()
+                self.assertEqual(self.status(tid), "Blocked")
+                self.assertIn("stopped unexpectedly", self.comments(tid)[-1])
+
+    def test_sigterm_outside_the_agent_ends_the_run_at_once_and_notes_why(self):
+        """In [setup], git, or a GitHub call: the run ends as it did before it had a handler, and notes why."""
+        self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait_for(lambda: "setting up" in self.task("log", tid))
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGTERM)
+        self.wait_for(lambda: process_gone(run))
+        state = self.run_state(tid)
+        self.assertEqual((state["interrupted"], state["stage"]), ("SIGTERM", "setup"))
+        self.assertIn("== stopped by SIGTERM during setup", self.task("log", tid))
+        self.assertEqual(self.agent_calls(), [])
+        self.assertEqual(self.status(tid), "In progress")
+
+    def test_sigterm_while_the_run_prints_still_ends_it_and_notes_why(self):
+        """The signal often lands inside a print of the setup's output: the handler must not write to the stream
+        that print holds (CPython: "reentrant call"), or the run dies through `fail` and never notes why."""
+        chatty = 'i=0; while [ $i -lt 400000 ]; do echo line $i; i=$((i+1)); done'
+        self.write_config(extra=f"\n[setup]\njyoka/app = {chatty}\n")
+        for _ in range(4):  # a race: each run gives it another chance
+            tid = self.new("ok")
+            self.task("start", tid)
+            log = Path(self.run_state(tid)["log"])
+            self.wait_for(lambda: log.exists() and "line 2000\n" in log.read_text())
+            run = int(self.run_state(tid)["pid"])
+            os.kill(run, signal.SIGTERM)
+            self.wait_for(lambda: process_gone(run))
+            tail = log.read_text()[-300:]
+            self.assertIn("== stopped by SIGTERM during setup", tail)
+            self.assertNotIn("reentrant", tail)
+            self.assertEqual(self.run_state(tid)["interrupted"], "SIGTERM")
+            self.assertEqual(self.status(tid), "In progress")
 
     def test_github_down_when_the_run_finishes_keeps_the_report(self):
         tid = self.new("outage")
