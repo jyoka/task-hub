@@ -44,7 +44,7 @@ flowchart LR
 
 - **1 task = 1 branch = 1 worktree = 1 PR.** Up to 5 tasks run at the same time.
 - **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
-- **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
+- **Continue after a stop.** A run that stops unexpectedly (a crash, a restart, a closed pane) is resumed once, from where it stopped; Ctrl-C stops it for good. For a Blocked task, task-hub sorts out why it stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
 - **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used.
 - **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.

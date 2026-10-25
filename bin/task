@@ -128,14 +128,21 @@ TRIGGER_SECONDS = float(os.environ.get("TASK_TRIGGER_SECONDS") or 300)  # `task 
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage", "link", "link_project", "agent_pid", "agent_started", "head", "snap", "review_attempt",
-            "interrupted"]  # stage: where the run is (docs/design.md); never on GitHub or in EVENTS
+            "interrupted", "resumes", "resumed", "resume_stage", "resumed_at"]
+# stage: where the run is (docs/design.md); never on GitHub or in EVENTS.
 # link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
 # agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
 # stopped. head: HEAD before the agent's launch. snap: `<tree> <HEAD>` while a reviewer or replanner runs, so a run
 # that dies before restore leaves the next launch something to restore. review_attempt: 0 or 1, the review running.
-# interrupted: the signal that stopped the run (SIGHUP, SIGTERM), or "silent" when the Watchdog stopped the agent.
-# launch empties them all (RUN_FRESH)
-RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted")
+# interrupted: why the run or its agent last stopped (SIGHUP, SIGTERM, SIGINT, "the agent was killed (SIGKILL)",
+# "silent" when the Watchdog stopped the agent, "the run process is gone"). resumes: how often this run was resumed
+# (MAX_RESUMES), resumed: the stages it was resumed at, space-separated. resume_stage: where relaunch tells the next
+# `_run` to go on from (it reads and empties it), resumed_at: when relaunch started it again. launch empties them all
+# (RUN_FRESH)
+RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted", "resumes", "resumed",
+             "resume_stage", "resumed_at")
+MAX_RESUMES = 1  # a run that stops unexpectedly is resumed this often, then Blocked (decision 7); no setting
+RESUME_STAGES = ("preparing", "setup", "agent", "review", "retry", "finishing")  # the stages a run can go on from
 GH = os.environ.get("TASK_GH", "gh")
 # the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
 # A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
@@ -320,12 +327,14 @@ class AgentReport:
             self.review = review or ""
             self.auto_review = auto_review or ""
 
-    def issue_comment(self, pr=""):
+    def issue_comment(self, pr="", resumed=""):
+        """resumed: resumed_line's, for a run that was resumed."""
         parts = [REPORT_MARK]
         parts += [f"## Blocked\n\n{self.blocked}"] * bool(self.blocked)
         parts += [f"## Report\n\n{self.report}"] * bool(self.report)
         parts += [f"## Please review\n\n{self.review}"] * bool(self.review)
         parts += [self.auto_review] * bool(self.auto_review)
+        parts += [resumed] * bool(resumed)
         parts += [f"PR: {pr}"] * bool(pr)
         return "\n\n".join(parts)
 
@@ -431,15 +440,22 @@ def board_config():
     return owner, number, issues
 
 
-def agent_command(name, prompt):
+def agent_command(name, prompt, resume=False):
+    """The agent's command line. resume: [resume] <name> when there is one (it goes on with the agent's own saved
+    conversation), else [agents] <name>, a new session that has only the prompt to go on from."""
     c = config()
     if not c.has_option("agents", name):
         fail(f"unknown agent {name!r}", f"agents: {', '.join(c['agents'])} (add more in {home(CONFIG)})", 2)
+    section = "resume" if resume and has_resume_command(name) else "agents"
     try:
-        parts = shlex.split(c["agents"][name])
+        parts = shlex.split(c[section][name])
     except ValueError as e:  # a quote left open, or cut by a ; or # that starts a comment
-        raise RuntimeError(f"[agents] {name} in {home(CONFIG)} cannot be read: {e}") from None
+        raise RuntimeError(f"[{section}] {name} in {home(CONFIG)} cannot be read: {e}") from None
     return [prompt if part == "{prompt}" else part for part in parts]
+
+
+def has_resume_command(name):
+    return config().has_option("resume", name)
 
 
 def windows_command(argv):
@@ -1156,7 +1172,24 @@ def comment(t, body):
 
 def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
     """The one comment format task-hub writes on an Issue; the last one is the task's current report."""
-    comment(t, AgentReport(blocked=blocked, report=report, review=review, auto_review=auto_review).issue_comment(pr))
+    comment(t, AgentReport(blocked=blocked, report=report, review=review,
+                           auto_review=auto_review).issue_comment(pr, resumed_line(t)))
+
+
+RESUMED_LINE = re.compile(r"\n\nResumed once at [^\n]*")
+
+
+def interrupted_text(why):
+    """`interrupted` as people and agents read it: "silent" (the Watchdog) says nothing on its own."""
+    return "the watchdog stopped the agent (no output and no CPU used)" if why == "silent" else why
+
+
+def resumed_line(t):
+    """The report's line on where the run was resumed (decision 11: the Issue's report and the `resumed` event,
+    no notification of its own); "" for a run never resumed."""
+    stages = (t.get("resumed") or "").split()
+    why = interrupted_text(t.get("interrupted") or "the run process is gone")
+    return f"Resumed once at {', '.join(stages)}: {why}." if stages else ""
 
 
 def issue(t):
@@ -1323,8 +1356,8 @@ def alive(t):
     if not t.get("pid"):
         if not t.get("started"):
             return False  # no run of this task on this machine
-        # launched but `_run` has not recorded itself yet; give it two minutes
-        return seconds_since(t["started"]) < 120
+        # launched (or resumed, relaunch) but `_run` has not recorded itself yet; give it two minutes
+        return seconds_since(t.get("resumed_at") or t["started"]) < 120
     # this task's own run (or its conflict fix, `_fix <id> <base>`): pids are handed out again (soon on Windows; and
     # the run files outlive a restart), to another task's run too, and an agent's prompt can say _run
     own = rf"\s_(run\s+{t['id']}|fix\s+{t['id']}\s+\S+)\s*$"
@@ -1796,7 +1829,17 @@ def launch(t):
         comments_file(t).write_text(comments + "\n")
     else:
         comments_file(t).unlink(missing_ok=True)
-    cmd = [sys.executable, str(BIN), "_run", t["id"]]
+    for f in (retry_file(t), finish_file(t)):  # the last run's: a resume reads them only from this run
+        f.unlink(missing_ok=True)
+    start_run(t, IN_PROGRESS)
+
+
+def start_run(t, status=""):
+    """Start `task _run <number>` in a herdr tab or workspace (in place of the run's last one), or as a background
+    process: for launch, and for relaunch when a run is resumed. status: the card's new Status, set once the run
+    record is saved and before the run begins (launch); the card of a resumed run stays where it is."""
+    cmd = [sys.executable, str(BIN), "_run", t["id"]]  # alive() and task-rs know a run by this command
+    wt = Path(t["worktree"])
     # with [sandbox] on, your shell, its prompt, and the run itself stay out of the worktree: a git-aware prompt (or
     # gh) there would run git as you on the config the agent can write
     here = wt if sandbox_mode() == "off" else DATA
@@ -1816,7 +1859,8 @@ def launch(t):
         t["workspace"] = res["root_pane"]["workspace_id"]
         t["tab"] = res["tab"]["tab_id"] if home_ws else ""
     save_run(t)  # saved before the run starts: the run reads it, then records its pid
-    set_status(t, IN_PROGRESS)
+    if status:
+        set_status(t, status)
     if t["workspace"]:
         # the pane's shell starts with the herdr server's environment, not ours: a small launcher
         # carries over what the run depends on (config/data under HOME, agents on PATH, settings, [runner] pass_env)
@@ -1866,8 +1910,138 @@ def start_logged(cmd, cwd, log_path):
             return start(DETACHED)
 
 
+# ---------- resuming a run that stopped unexpectedly (docs/architecture/designs/durable-runs.md) ----------
+
+def resumable(t):
+    """Why the run (In progress on the board, its `_run` gone) cannot be resumed; "" when it can. relaunch then
+    starts it again from its stage; anything else is Blocked, as before (decision 7)."""
+    stage, wt = t.get("stage") or "", Path(t.get("worktree") or "/nonexistent")
+    if stage not in RESUME_STAGES:
+        return f"a run does not go on from its stage {stage}" if stage else "the run had ended"
+    if t.get("interrupted") == "SIGINT":
+        return "it was stopped with Ctrl-C"
+    if int(t.get("resumes") or 0) >= MAX_RESUMES:
+        return f"it was resumed {MAX_RESUMES} time(s) already"
+    if not (wt / ".git").exists():
+        return f"its worktree {home(wt)} is gone"
+    # finishing commits itself; during review, a commit is the reviewer's, which its snapshot takes back
+    if t.get("head") and stage not in ("review", "finishing") and \
+            git_shared(wt, "rev-parse", "HEAD").stdout.strip() != t["head"]:
+        return "the worktree's HEAD moved since its agent started (a commit by someone else)"
+    if stage == "review" and not t.get("snap"):  # nothing to undo the reviewer's edits with
+        return "it stopped during review with no snapshot of the worktree to go back to"
+    if stage == "preparing" and not prompt_file(t).exists():
+        return "its prompt is gone"
+    if stage == "retry" and not retry_file(t).exists():
+        return "the prompt of its retry after review is gone"
+    if stage == "finishing" and not finish_file(t).exists():
+        return "what it was finishing with is gone"
+    return ""
+
+
+def stopped_reason(t, why):
+    """The Blocked reason of a run that stopped unexpectedly and was not resumed. why: what kept it from resuming."""
+    if not t.get("stage"):  # it had ended, but could not move the card (GitHub was unreachable); resumed or not
+        return "the run stopped unexpectedly"
+    if int(t.get("resumes") or 0) >= MAX_RESUMES:
+        return f"the run stopped unexpectedly again, after resuming once at {t.get('resumed') or 'some stage'}"
+    return f"the run stopped unexpectedly; {why}"
+
+
+def relaunch(t):
+    """Start a run that stopped unexpectedly again, once, from its stage. The caller holds launch_lock and has
+    checked that the run is not alive, as for launch and launch_fix: then no one else writes its record."""
+    stop_left_agent(t)
+    why = t.get("interrupted") or "the run process is gone"
+    note_resume(t, t["stage"], why)
+    t.update(resume_stage=t["stage"], resumed_at=now(), pid="")
+    save_run(t)
+    emit(t, "resumed", stage=t["stage"], reason=why)
+    try:
+        start_run(t)
+    except BaseException:  # the card is Blocked next (sync): no run is on its way, for alive() to wait two minutes for
+        t.update(resume_stage="", resumed_at="")
+        save_run(t)
+        raise
+
+
+def note_resume(t, stage, why):
+    """Count one resume of the run, at stage, and why it was cut short (both stay for its report and metrics)."""
+    t["resumes"] = str(int(t.get("resumes") or 0) + 1)
+    t["resumed"] = " ".join([*(t.get("resumed") or "").split(), stage])
+    t["interrupted"] = why
+    save_run(t)
+
+
+def stop_left_agent(t):
+    """Stop what is left of the run's agent (agent_pid's process group): two agents must never write the same
+    worktree. A process now holding that pid is another one if it started at another time than agent_started
+    (pids are handed out again); none at all, and what the agent left in its group is stopped, since no process
+    gets a group's id while the group has anyone left in it (POSIX). RuntimeError when it does not stop."""
+    pid = int(t.get("agent_pid") or 0)
+    if not pid:
+        return
+    if WINDOWS:  # no ps; the command line names the task, its prompt being one of the arguments
+        if f"Task {t['id']}:" in windows_command_line(pid):
+            run("taskkill", "/T", "/F", "/PID", str(pid))
+        return
+    r = run("ps", "-p", str(pid), "-o", "etime=")
+    if r.returncode == 0 and r.stdout.strip():
+        started = time.time() - elapsed_seconds(r.stdout.strip())
+        if not t.get("agent_started") or abs(started - epoch(t["agent_started"])) > 5:
+            return  # another process got the pid: the agent's group is long gone
+    if not stop_group(pid, (signal.SIGTERM, signal.SIGKILL)):
+        raise RuntimeError(f"the agent left from the run (process group {pid}) does not stop")
+
+
+def stop_group(pgid, signals):
+    """Send each signal in turn to the process group until nothing is left in it, giving each AGENT_STOP_SECONDS;
+    whether it is empty now (POSIX)."""
+    for sig in signals:
+        signal_agent(pgid, sig)
+        end = time.time() + AGENT_STOP_SECONDS
+        while group_left(pgid) and time.time() < end:
+            time.sleep(0.1)
+        if not group_left(pgid):
+            return True
+    return False
+
+
+def group_left(pgid):
+    """Whether any process is left in the process group (zombies, which only wait for their parent, are not)."""
+    r = run("ps", "-A", "-o", "pgid=,stat=")
+    return any(len(f) == 2 and f[0] == str(pgid) and not f[1].startswith("Z") for f in map(str.split, r.stdout.splitlines()))
+
+
+def elapsed_seconds(etime):
+    """`ps -o etime` ([[dd-]hh:]mm:ss) in seconds."""
+    days, _, rest = etime.rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return int(days or 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def resume_prompt(prompt, stage, why):
+    """The prompt of an agent started again after it was cut short: all of its first prompt, then # Resumed
+    (worker/PROMPT.md), enough to work from without the conversation, which the agent may not have kept."""
+    return "\n".join([prompt.rstrip("\n"), "", instruction_parts(WORKER_PROMPT)[2], "",
+                      f"It stopped during: {stage} ({interrupted_text(why)})", ""])
+
+
 def prompt_file(t):
     return DATA / "prompts" / f"{t['id']}.md"
+
+
+def retry_file(t):
+    """The prompt of the agent's retry after review (review_loop), for a run resumed during it."""
+    return DATA / "prompts" / f"{t['id']}-retry.md"
+
+
+def finish_file(t):
+    """What finish is given besides the report (review_loop's outcome, the agent's exit code), for a run resumed
+    during finishing: it was only in the memory of the run that stopped."""
+    return DATA / "prompts" / f"{t['id']}-finish.json"
 
 
 def comments_file(t):
@@ -1876,12 +2050,13 @@ def comments_file(t):
 
 
 def instruction_parts(path):
-    """A worker/*.md file without its header: the instructions, then the part sent only with comments (or "")."""
-    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), ""][:2]
+    """A worker/*.md file without its header: the instructions, then the part sent only with comments, then the
+    part sent only to a resumed agent (worker/PROMPT.md; "" for those a file does not have)."""
+    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), "", ""][:3]
 
 
 def build_prompt(t, i, comments=""):
-    instructions, about_comments = instruction_parts(WORKER_PROMPT)
+    instructions, about_comments, _ = instruction_parts(WORKER_PROMPT)
     lines = [instructions, "", "# Your task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
              f"Branch: {t['branch']} (already checked out in the current directory)",
              *([f"Based on: {t['base']} (the work continues that branch; the PR goes into it)"] if t.get("base") else []),
@@ -2157,12 +2332,12 @@ def short(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e4 else f"{n / 1e3:.1f}k" if n >= 1e3 else str(n)
 
 
-def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None):
+def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=False):
     """Run one agent launch; its role, agent, seconds, and what it used (when readable) go into the `usage` list.
-    t: the run, whose record notes the agent's pid while it runs."""
-    say(f"== {label}: {agent}")
+    t: the run, whose record notes the agent's pid while it runs. resume: with [resume] <agent> (agent_command)."""
+    say(f"== {label}: {agent}" + (" ([resume])" if resume and has_resume_command(agent) else ""))
     began = time.time()
-    code = agent_process(agent, prompt, wt, say, t)
+    code = agent_process(agent, prompt, wt, say, t, resume)
     if usage is not None:
         ended = time.time()
         entry = {"role": label, "agent": agent, "seconds": round(ended - began)}
@@ -2183,18 +2358,22 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None):
     return code
 
 
-def agent_process(agent, prompt, wt, say, t=None):
+def agent_process(agent, prompt, wt, say, t=None, resume=False):
     proc = None
     if t is not None:
         t["agent_running"] = True  # never saved: tells cmd_run's signal handler there is an agent to stop
+        # never saved either: whether task-hub itself stopped it (Ctrl-C) or the Watchdog did, and how many tool calls
+        # it showed
+        t["agent_stopped"], t["agent_silenced"], t["agent_steps"], t["agent_group"] = False, False, 0, 0
     try:
-        argv, env = windows_command(agent_command(agent, prompt))
+        argv, env = windows_command(agent_command(agent, prompt, resume))
         argv = as_agent(argv, wt, [*pass_env(), *env])
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env},
                                 **AGENT_GROUP)
         if t is not None:
             t["agent_pid"], t["agent_started"] = str(proc.pid), now()
+            t["agent_group"] = proc.pid  # never saved: kept after it ends, for what it left in its group (run_worker)
             save_run(t)
         steps = STEPS.get(step_format(agent), Steps)(wt)
         lines = queue.Queue()  # read in a thread, so the watchdog runs while the agent is silent
@@ -2218,9 +2397,11 @@ def agent_process(agent, prompt, wt, say, t=None):
                 dog.heard()
                 for shown in steps.read(line.rstrip("\n")):
                     say(shown)
+                    if t is not None and shown.startswith("· "):  # tool_step's form
+                        t["agent_steps"] += 1
             if dog.watch():  # it stopped the agent: what left its group may hold the output open, so not read on
                 if t is not None:
-                    t["interrupted"] = "silent"
+                    t["interrupted"], t["agent_silenced"] = "silent", True
                     save_run(t)
                 break
         for shown in steps.close():
@@ -2231,6 +2412,8 @@ def agent_process(agent, prompt, wt, say, t=None):
         return 1 if code == 0 and steps.failed else code
     except (KeyboardInterrupt, Interrupted) as e:  # Ctrl-C in the pane stops the agent; still push what it did
         code = stop_agent(proc) if proc else 130
+        if t is not None:
+            t["agent_stopped"] = True
         if isinstance(e, Interrupted):  # SIGHUP, SIGTERM: the whole run stops (cmd_run)
             raise
         say("== stopped with Ctrl-C")
@@ -2717,7 +2900,7 @@ def shown_path(path, wt):
 
 
 def build_review_prompt(t, report, diff):
-    instructions, about_comments = instruction_parts(WORKER_REVIEW)
+    instructions, about_comments, _ = instruction_parts(WORKER_REVIEW)
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
@@ -2755,16 +2938,31 @@ def run_review(t, report, say, usage=None):
     return ReviewResult(text)
 
 
-def review_loop(t, report, code, say, record):
+RETRY_ASK = "Revise the work once, update .task-report.md, and stop."
+
+
+def review_loop(t, report, code, say, record, resume_at="", why=""):
     """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked).
 
     Each verdict goes into record["reviews"], and record["retried"] says whether the agent was sent back.
     Each launch is measured into record["usage"].
+    resume_at, why: a resumed run (relaunch) goes on from its review ("review": review_attempt says which) or from
+    its retry ("retry", with the retry's prompt as it was saved, then the second review), cut short for why.
     """
-    if not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
-        return report, code, "", ""
     wt = Path(t["worktree"])
-    for attempt in range(2):
+    first = int(t.get("review_attempt") or 0) if resume_at == "review" else 1 if resume_at == "retry" else 0
+    if resume_at == "retry":
+        feedback = retry_file(t).read_text()
+        section = feedback.rpartition("\n# Automated review feedback\n\n")[2].rpartition(f"\n\n{RETRY_ASK}")[0]
+        record["retried"] = True
+        code = run_worker(t, feedback, "retry", "agent retry after review", say, record, why)
+        report = agent_file(wt / REPORT_FILE) or ""
+        if not report.strip() or AgentReport(report).blocked:
+            return report, code, section, ""
+    elif not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
+        return report, code, "", ""
+    record["retried"] = record["retried"] or first == 1
+    for attempt in range(first, 2):
         t["review_attempt"] = str(attempt)
         review = run_review(t, report, say, record["usage"])
         if review is None:
@@ -2776,16 +2974,61 @@ def review_loop(t, report, code, say, record):
         if attempt == 1 or not review.needs_changes:
             return report, code, review.issue_section(), review.blocked_line(retried=attempt == 1)
         feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
-                              review.issue_section(), "", "Revise the work once, update .task-report.md, and stop.", ""])
+                              review.issue_section(), "", RETRY_ASK, ""])
         record["retried"] = True
-        set_stage(t, "retry")
+        retry_file(t).write_text(feedback)  # before the stage: a run resumed during the retry reads it
         shared_unlink(wt / REPORT_FILE)  # a retry that dies must not pass for the first run's report
         t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
-        save_run(t)
-        code = run_agent_process(t["agent"], feedback, wt, say, "agent retry after review", record["usage"], t)
+        set_stage(t, "retry")
+        code = run_worker(t, feedback, "retry", "agent retry after review", say, record)
         report = agent_file(wt / REPORT_FILE) or ""
         if not report.strip() or AgentReport(report).blocked:
             return report, code, review.issue_section(), ""
+
+
+def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
+    """The task's agent at stage (agent, retry); its exit code. Killed by something other than task-hub (POSIX: a
+    negative code; never Ctrl-C) or stopped by the Watchdog, it is started again in place, once (MAX_RESUMES) for
+    the whole run.
+    resumed_why: this `_run` was itself started again (relaunch) to go on with it, cut short for that reason."""
+    if resumed_why:
+        return run_resumed_worker(t, prompt, stage, label, say, record, resumed_why)
+    code = run_agent_process(t["agent"], prompt, Path(t["worktree"]), say, label, record["usage"], t)
+    # Windows: an exit code never says a signal ended it
+    if WINDOWS or code >= 0 or t.get("agent_stopped") or int(t.get("resumes") or 0) >= MAX_RESUMES:
+        return code
+    why = "silent" if t.get("agent_silenced") else f"the agent was killed ({signal_name(-code)})"
+    said = interrupted_text(why)
+    # what the killed agent started (a test run, a subagent) may still write the worktree: never two agents at once
+    if t.get("agent_group") and not stop_group(t["agent_group"], (signal.SIGKILL,)):
+        say(f"== {said} during {stage}; what it left in process group {t['agent_group']} does not stop, "
+            "so it is not resumed")
+        return code
+    say(f"== {said} during {stage}; resuming it once")
+    note_resume(t, stage, why)
+    emit(t, "resumed", stage=stage, reason=why)
+    return run_resumed_worker(t, prompt, stage, label, say, record, why)
+
+
+def run_resumed_worker(t, prompt, stage, label, say, record, why):
+    """The agent started again after it was cut short: [resume] <agent> if there is one, with # Resumed after its
+    prompt. A [resume] command that did nothing (no tool call, no report, a failing exit: it found no conversation
+    to go on with) gets one more go as [agents] <agent>, a new session, within the same resume."""
+    wt = Path(t["worktree"])
+    text = resume_prompt(prompt, stage, why)
+    code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed", record["usage"], t, resume=True)
+    if has_resume_command(t["agent"]) and code != 0 and not t.get("agent_stopped") and not t.get("agent_steps") \
+            and agent_file(wt / REPORT_FILE) is None:
+        say("== the [resume] command did nothing; starting the agent again in a new session")
+        code = run_agent_process(t["agent"], text, wt, say, f"{label}, resumed in a new session", record["usage"], t)
+    return code
+
+
+def signal_name(signum):
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
 
 
 def unverified_evidence(wt, evidence):
@@ -2896,7 +3139,8 @@ def cmd_run(a):
         save_run(t)
         # straight to the files, not through say: in the signal handler, print or log.write may be the very call
         # the signal cut into, and writing to its buffer again raises "reentrant call" instead of ending the run
-        line = f"== stopped by {name} during {t['stage']}; the next check of the board takes it from there\n"
+        line = f"== stopped with Ctrl-C during {t['stage']}; the next check of the board blocks it\n" \
+            if name == "SIGINT" else f"== stopped by {name} during {t['stage']}; the next check of the board takes it from there\n"
         for fd in (1, *([log.fileno()] if log else [])):
             with contextlib.suppress(OSError):  # its pane is gone (SIGHUP): the log goes on
                 os.write(fd, line.encode())
@@ -2918,48 +3162,73 @@ def cmd_run(a):
         run_task(t, say)
     except Interrupted as e:
         stopped(e.args[0])
+    except KeyboardInterrupt:  # Ctrl-C outside the agent (agent_process has its own): never resumed
+        if t.get("stage"):
+            stopped("SIGINT")
+        raise
 
 
 def run_task(t, say):
-    """The run of cmd_run, from the setup to the card's new Status."""
+    """The run of cmd_run, from the setup to the card's new Status; a resumed one (relaunch), from its stage."""
     wt = Path(t["worktree"])
     if sandbox_mode() != "off":
         os.chdir(DATA)  # nothing of task-hub's own (gh, herdr) runs in the folder the agent writes
+    stage, why = t.get("resume_stage") or "", t.get("interrupted") or "the run process is gone"
+    if stage:  # read once: whatever starts `_run` again next must say so again
+        t["resume_stage"] = ""
+        save_run(t)
     for name in (REPORT_FILE, REVIEW_FILE, REPLAN_FILE):
-        shared_unlink(wt / name)
+        if not (name == REPORT_FILE and stage in ("review", "finishing")):  # there, the report is the agent's
+            shared_unlink(wt / name)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
     if sandbox_mode() != "off":
         say(f"== sandbox: user {sandbox_user()} (the agent and git run as that user, see docs/sandbox.md)")
+    if stage:
+        say(f"== resumed at {stage}, once: it was cut short there ({why})")
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
               "blocked_by": "", "replan": "", "usage": []}
-    stop = run_setup(t, wt, say)
-    if stop:  # the agent never starts: nothing of this run can be trusted without its environment
-        say(f"== {stop}")
-        try:
-            take_card(t)
-            report_comment(t, blocked=stop)
-            set_status(t, BLOCKED, reason=stop)
-        except RuntimeError as e:
-            say(f"== could not report it: {e}")
-        set_stage(t, "")
-        record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": BLOCKED,
-                    "blocked_by": "setup"}, say)
-        say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
-        return
-    t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
-    set_stage(t, "agent")
-    code = run_agent_process(t["agent"], prompt_file(t).read_text(), wt, say, "agent", record["usage"], t)
-    say(f"== agent exited with code {code}")
-
+    if stage in ("", "preparing", "setup"):  # from the start: [setup] gives the same result each time it runs
+        stage = ""
+        stop = run_setup(t, wt, say)
+        if stop:  # the agent never starts: nothing of this run can be trusted without its environment
+            say(f"== {stop}")
+            try:
+                take_card(t)
+                report_comment(t, blocked=stop)
+                set_status(t, BLOCKED, reason=stop)
+            except RuntimeError as e:
+                say(f"== could not report it: {e}")
+            set_stage(t, "")
+            record_run({**record, **resume_record(t), "finished": now(), "seconds": round(time.time() - began),
+                        "status": BLOCKED, "blocked_by": "setup"}, say)
+            say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
+            return
+        t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
+        set_stage(t, "agent")
+    if stage in ("", "agent"):
+        code = run_worker(t, prompt_file(t).read_text(), "agent", "agent", say, record, why if stage else "")
+        say(f"== agent exited with code {code}")
+    else:  # the agent's exit code is gone with the run that was cut short: its report is what counts
+        code = 0
+        if stage == "review" and t.get("snap"):  # the reviewer may have changed the worktree before it was cut short
+            if release_snapshot(t, t["snap"].split()):
+                say("== the reviewer had changed files; its edits were undone")
     report = agent_file(wt / REPORT_FILE) or ""
     review, review_blocked = "", ""
     try:
-        report, code, review, review_blocked = review_loop(t, report, code, say, record)
+        if stage == "finishing":  # what review_loop gave the run that was cut short
+            kept = json.loads(finish_file(t).read_text())
+            code, review, review_blocked = kept["code"], kept["review"], kept["blocked"]
+        else:
+            resume_at = stage if stage in ("review", "retry") else ""
+            report, code, review, review_blocked = review_loop(t, report, code, say, record, resume_at, why)
+            write_atomic(finish_file(t), json.dumps({"code": code, "review": review, "blocked": review_blocked}))
         set_stage(t, "finishing")
         take_card(t)
-        status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked)
+        status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked,
+                        again=stage == "finishing")
         record.update(pr_size(t, wt))
         shared_unlink(wt / REPORT_FILE)  # only once it is safely on GitHub
         if status == BLOCKED:
@@ -2982,7 +3251,8 @@ def run_task(t, say):
         except RuntimeError:  # GitHub unreachable too: the next sync sees the dead run and blocks the card
             say(f"== the agent's report is kept in {home(wt / REPORT_FILE)}")
     set_stage(t, "")  # the pid stays: once this process is gone, `alive` knows the run has ended
-    record_run({**record, "finished": now(), "seconds": round(time.time() - began), "status": status}, say)
+    record_run({**record, **resume_record(t), "finished": now(), "seconds": round(time.time() - began),
+                "status": status}, say)
     if status == IN_REVIEW and (t.get("tab") or t.get("workspace")):  # nothing more to see here: `task log` keeps it
         say(f"== task {t['id']} is now {status}. Closing this tab; `task log {t['id']}` has the output.")
         closing = dict(t)
@@ -2993,6 +3263,12 @@ def run_task(t, say):
     say(f"== task {t['id']} is now {status}. This pane stays open; `task done {t['id']}` closes it.")
 
 
+def resume_record(t):
+    """The run's resumes, for METRICS: the stages it was resumed at, and why it was last cut short. A resumed run's
+    record has only the reviews and usage since it was resumed: the rest was in the memory of the one cut short."""
+    return {"resumed": (t.get("resumed") or "").split(), "interrupted": t.get("interrupted") or ""}
+
+
 def take_card(t):
     """The card's item and Status, from the one board read the run makes anyway: the run file has neither."""
     item = next((x for x in tasks() if x["id"] == t["id"]), None)
@@ -3001,8 +3277,10 @@ def take_card(t):
         t["status"] = item["status"]
 
 
-def finish(t, report, code, say, auto_review="", blocked_override=""):
-    """Commit and push the agent's work, open or update the PR, report on the Issue, move the card."""
+def finish(t, report, code, say, auto_review="", blocked_override="", again=False):
+    """Commit and push the agent's work, open or update the PR, report on the Issue, move the card.
+    again: the run was cut short in finish and resumed. All of it gives the same result once more, but the report:
+    it is not written again when the Issue's last report is the same (but for the line on the resume)."""
     parsed = AgentReport(report, auto_review=auto_review)
     wt = t["worktree"]
     git_shared(wt, "add", "-A", check=True)
@@ -3016,7 +3294,9 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         git_shared(wt, "push", "-q", "-u", "origin", f"HEAD:{t['branch']}", check=True)
         ahead = (branch_compare(t, base) or {}).get("ahead_by", 0) > 0
 
-    if not report.strip() and t.get("interrupted") == "silent":  # Watchdog; resuming the run is a later task
+    # the Watchdog stopped the last agent, after its one resume (run_worker); `interrupted` stays "silent" after a
+    # resume, so it would also name a resumed agent that ended on its own
+    if not report.strip() and t.get("agent_silenced"):
         # how long it was silent is in the log: a descendant may have used CPU for a while before it hung
         parsed.blocked = f"the watchdog stopped the agent: no output and no CPU used, see `task log {t['id']}`"
     elif not report.strip():
@@ -3032,8 +3312,11 @@ def finish(t, report, code, say, auto_review="", blocked_override=""):
         head = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
-    body = parsed.issue_comment(t.get("pr", "") if ahead else "")
-    comment(t, body)
+    body = parsed.issue_comment(t.get("pr", "") if ahead else "", resumed_line(t))
+    if again and RESUMED_LINE.sub("", issue(t)["report"]) == RESUMED_LINE.sub("", body):
+        say("== the report is on the Issue already")
+    else:
+        comment(t, body)
     status = BLOCKED if parsed.blocked else IN_REVIEW
     set_status(t, status, reason=parsed.blocked, digest_=digest(report=body), sha=head if status == IN_REVIEW else "")
     return status
@@ -3812,14 +4095,34 @@ def sync(started_here=False):
         before = t["status"]
         try:
             if before == IN_PROGRESS and not alive(t):
+                why = resumable(t) if t.get("started") else "no run here"
+                why = why and f"not resumed: {why}"
+                if not why:  # once (MAX_RESUMES): it goes on from its stage, and the card stays In progress
+                    with launch_lock(t["id"]) as mine:
+                        run_ = {**t, **load_run(t["id"])}
+                        # another task-hub on this machine is resuming or starting it, or the run moved on since the
+                        # board was read (it finished, or another task-hub resumed it): the next check decides
+                        if not mine or alive(run_) or any(run_.get(k) != t.get(k) for k in ("stage", "resumes", "pid")):
+                            continue
+                        why = resumable(run_)  # again, now that no one else can start it
+                        why = why and f"not resumed: {why}"
+                        if not why:
+                            try:
+                                relaunch(run_)
+                                lines.append(f"resumed: task {t['id']} at {run_['resume_stage']} "
+                                             f"({run_['interrupted']}), once")
+                                continue
+                            except (RuntimeError, OSError, ValueError) as e:  # blocked below, as a failed start
+                                why = f"could not resume it: {str(e)[:300]}"
                 # a report the run could not deliver (GitHub was unreachable) is posted now
                 kept = Path(t.get("worktree") or "/nonexistent") / REPORT_FILE
                 report = agent_file(kept) or ""
-                report_comment(t, blocked=f"the run stopped unexpectedly, see `task log {t['id']}`"
+                reason = stopped_reason(t, why) if t.get("started") else "no run here"
+                report_comment(t, blocked=f"{reason}, see `task log {t['id']}`"
                                if t.get("started") else "no run of this task on this machine",
                                report=report.strip())
                 shared_unlink(kept)
-                set_status(t, BLOCKED, reason="the run stopped unexpectedly" if t.get("started") else "no run here")
+                set_status(t, BLOCKED, reason=reason)
             elif before == IN_PROGRESS:  # alive: tell once if it runs much longer than usual
                 slow = check_slow(t)
                 if slow:
@@ -5364,10 +5667,12 @@ def cmd_done(a):
     if t["status"] == DONE:
         out(f"task: #{t['id']} already Done (no-op)")
         return
-    if t["running"]:  # whatever the Status: a replanner runs after the card is Blocked
-        fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
-             "stop the agent in its herdr workspace first, then retry")
-    left = cleanup(t)
+    # the lock: a sync may be resuming the run (its pane was closed) right now
+    with launch_lock(t["id"]) as mine:
+        if t["running"] or not mine or alive(load_run(t["id"])):  # whatever the Status: a replanner runs after Blocked
+            fail(f"task {t['id']} is still running ({t.get('stage') or 'starting'})",
+                 "stop the agent in its herdr workspace first, then retry")
+        left = cleanup(t)
     i = issue(t)
     t["link"] = i["link"]  # read anyway: closing the team's copy too costs no other read
     t["link_project"] = i["link_project"]

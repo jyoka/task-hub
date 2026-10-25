@@ -123,6 +123,23 @@ aider = aider --yes-always --message {prompt}
   レポートがなければ、タスクはブロックとして扱われます
 - reviewer として使う場合は `.task-review.md` を書けること。reviewer はそれ以外のファイルを変更してはいけません
 
+### 止まった実行の再開(`[resume]`)
+
+予期せず止まった実行(クラッシュ、kill、再起動、ペインを閉じた)は、task-hub が 1 回だけ再開します
+([operations.md の「実行中のタスクを止める」](operations.md#実行中のタスクを止める))。再開のエージェントには、
+元のプロンプトに「# Resumed」の節(`worker/PROMPT.md` の最後の部分)を足して渡します。コマンドは、`[resume]` に
+同じ名前があればそれ、なければ `[agents]` のコマンド(新しいセッション。worktree の途中の仕事から続けます)です。
+組み込みの `[resume]` はまだありません。
+
+```ini
+[resume]
+; the command that goes on with the agent's own saved conversation, when it has one
+myagent = myagent --continue {prompt}
+```
+
+`[resume]` のコマンドが手順を 1 つも出さず、レポートも書かずに 0 以外で終わったら(続ける会話が見つからなかった、など)、
+同じ再開の中で 1 回だけ `[agents]` のコマンドで起動し直します。
+
 ## 始める前の確認と、実行に渡す環境変数
 
 無人で動かすとき(launchd の `task watch` など)は、エージェントのログインが切れていても誰も気づきません。
