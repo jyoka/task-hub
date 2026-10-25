@@ -1499,6 +1499,14 @@ impl App {
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("▶ ");
         f.render_stateful_widget(list, area, &mut self.selected);
+        // today's picture at the bottom of the board, when the cards leave room for it and a blank row above
+        let inner = Block::bordered().inner(area);
+        let free = (inner.height as usize).saturating_sub(self.board.len()) as u16;
+        let art = super::art::today(now(), self.offset);
+        let rows = art.rows.len() as u16 / 2 + 1;
+        if free > rows && inner.width as usize >= art.line.width().max(art.rows[0].len()) {
+            draw_today(f, Rect::new(inner.x, inner.bottom() - rows, inner.width, rows), art);
+        }
     }
 
     fn draw_details(&mut self, f: &mut Frame, area: Rect) {
@@ -1574,6 +1582,13 @@ impl App {
         }).collect();
         f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" Events ")), area);
     }
+}
+
+/// Today's picture with its line under it, in the middle of the area.
+fn draw_today(f: &mut Frame, area: Rect, art: &super::art::Art) {
+    let mut lines = super::art::lines(art);
+    lines.push(Line::from(art.line).bold());
+    f.render_widget(Paragraph::new(lines).centered(), area);
 }
 
 /// `stty` on the terminal (Unix): its output, or None when it fails.
