@@ -135,7 +135,7 @@ flowchart TB
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
 | `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md)) | GitHub のボード、手元の状態、作業場所 |
-| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
+| `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く | worktree のファイルと `.task-report.md` だけ |
 | スキル(/task、/chief) | 会話を登録する、ボードを見張って知らせる | `task` の呼び出しだけ(人が頼んだとき) |
@@ -187,6 +187,10 @@ sequenceDiagram
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
 PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
+
+実行そのものが止まったとき(ペインを閉じた、シャットダウン、kill)は、`task _run` がエージェントとその子を止め、止まった理由を
+実行の記録(`runs/<id>.json`)に残します。次の同期がカードを Blocked にします。reviewer か replanner の途中で止まっても、
+その書き換えは次の実行が始める前に記録から戻すので、PR には入りません。
 
 ### 4.2 出来事と通知
 

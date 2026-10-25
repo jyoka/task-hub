@@ -5,7 +5,7 @@
 
 ## 1. bin/task の構成
 
-1 ファイル(約 2,900 行、Python 3.10 以上の標準ライブラリだけ)を、見出しのコメント `# ---------- ... ----------` で
+1 ファイル(約 5,400 行、Python 3.10 以上の標準ライブラリだけ)を、見出しのコメント `# ---------- ... ----------` で
 分けています。上の層は下の層だけを呼びます。
 
 ```mermaid
@@ -101,6 +101,7 @@ classDiagram
 | `updated`、`closed` | GitHub | カードを最後に変えた時刻、Issue が閉じているか |
 | `blockers`、`waits_for` | GitHub + 計算 | Blocked by のリンク、まだ始められない理由 |
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
+| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行を止めたシグナル。5 章 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
 | `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
 | `running` | 計算(`alive`) | 実行のプロセスが生きているか |
@@ -120,7 +121,7 @@ flowchart LR
         run2["task _run 13"]
     end
     subgraph children["_run の子"]
-        a1["エージェントの CLI<br/>worker、reviewer、replanner を順に"]
+        a1["エージェントの CLI<br/>worker、reviewer、replanner を順に、<br/>それぞれ自分のプロセスグループで"]
     end
     watch -- "launch" --> run1
     cmds -- "launch(task、task start)" --> run2
@@ -138,6 +139,19 @@ flowchart LR
   それでも残っていれば自分で消して開始の失敗にします。先に消した方が決まるので、あきらめたあとに実行が遅れて始まることはありません。
   ランチャーがすでに消えていたら(直前に始まった)、失敗にしません
 - `task _run` は自分の pid を記録します。同期は `alive` でプロセスを確かめ、消えていてカードが In progress なら Blocked にします
+- エージェントは自分のプロセスグループで動きます(`AGENT_GROUP`。POSIX は `start_new_session`、Windows は
+  `CREATE_NEW_PROCESS_GROUP`)。ペインの Ctrl-C と、閉じたペインの SIGHUP は `task _run` にだけ届き、`task _run` がグループごと
+  止めます(`stop_agent`: SIGTERM、`AGENT_STOP_SECONDS` の 10 秒待って SIGKILL。Windows は `taskkill /T /F`)。
+  `[sandbox] mode = user` では、グループのうち専用ユーザーのプロセスへは `as_agent` の `kill` でも送ります。
+  `task _run` は起動したエージェントの pid と開始時刻を `agent_pid`、`agent_started` に書き、終わったら空に戻します。
+  エージェントには制御端末がありません(`/dev/tty` に問いかけるコマンドは失敗します。stdin は今までどおり空です)
+- `task _run` が SIGHUP か SIGTERM を受けたら(ペインを閉じた、シャットダウン、`kill`)、`interrupted` にシグナルの名前を
+  書いて、その場で終わります。エージェントが動いていれば、先にそのグループを止めます(`Interrupted`)。ほかの間(`[setup]`、
+  git、GitHub)は待たずに終わり、動いている git は止めません。push もカードの移動もしないので、In progress のカードは
+  そのままで、次の同期が止まった実行として扱います。終わったあと(In review でタブを閉じるとき)の SIGHUP は記録しません。
+  シグナルを受けた中では `say` を使わず、「stopped by」の 1 行を `os.write` で stdout とログに直接書きます
+  (シグナルが `print` の途中に届くと、同じバッファへの書き込みが「reentrant call」で失敗し、記録せずに終わるため)。
+  Ctrl-C は今までどおり、途中までを push して Blocked にします
 - herdr のタブで動かすときは、環境変数を `HOME`、`PATH`、`TASK_*`、`GIT_AUTHOR_*`、`GIT_COMMITTER_*`、`[runner] pass_env` だけに絞ります
 
 ## 3. コマンド
@@ -219,7 +233,7 @@ sequenceDiagram
     participant GH as GitHub
     participant H as herdr
     L->>L: check_sandbox([sandbox])、check_ready(エージェントの準備)
-    L->>G: ensure_clone、ensure_worktree(task/<id>)
+    L->>G: ensure_clone、ensure_worktree(task/<id>。残った snap があれば restore で戻す)
     L->>L: copy_env_files([env])
     L->>GH: issue(本文、ラベル、前回のレポート)
     L->>L: write_rules(Goal の Rules → .claude/settings.local.json)
@@ -241,7 +255,7 @@ flowchart TB
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
-    review -- "あり" --> rv["run_review<br/>snapshot → reviewer → restore"]
+    review -- "あり" --> rv["run_review<br/>snapshot(snap に記録)→ reviewer → restore"]
     rv -- "pass" --> finish
     rv -- "needs changes(1 回目)" --> retry["retry<br/>差し戻しつきで agent"]
     retry --> rv
@@ -432,7 +446,7 @@ stateDiagram-v2
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
@@ -542,7 +556,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
-| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
@@ -604,6 +618,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
 | `task intake` のボタンの失敗(GitHub)、断った(古いコミット、閉じた PR、キューがオフなど) | 1 行記録し、ntfy に「refused」を理由つきで返す。トークンは使ったことにしないので、理由を直せば同じボタンをまた押せる。合わないトークンは記録だけで返事なし |
 | エージェントの異常終了 | レポートがなければ Blocked。途中までの変更は push する |
+| `task _run` が SIGHUP、SIGTERM を受けた | エージェントが動いていればグループを止め、`interrupted` を書いて終わる。カードは In progress のままで、次の同期が止まった実行として Blocked にする |
+| reviewer か replanner の途中で `task _run` が落ちた(kill -9、クラッシュ) | worktree に書き換えが残る。記録の `snap` が残っているので、次の `launch` が `ensure_worktree` で `restore` してから始める |
 | トリガーの GitHub の失敗 | `trigger_errors` に出し、ほかのリポジトリとトリガーは続ける。次は 5 分後 |
 | Project の id が古い | 書き込みが失敗したら `forget_board` で捨て、次は読み直す |
 | マージキューの段の失敗(GitHub、git) | `github_errors` に出し、キューの同じ段を次の確認でやり直す。解けない競合、落ちたチェック、時間切れ、マージできない `mergeStateStatus`、失敗した push はカードを Blocked(`merge queue: ...`)にしてキューから外す。push が失敗したマージコミットは worktree に残し、`reset --hard` で捨てない。入れ直すと、push するかを `origin/<head>` と比べて決めるので、残したコミットが push される |
@@ -614,7 +630,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 ## 9. 守る約束(テストで確かめているもの)
 
 1. エージェントが git と GitHub を操作しなくても、PR の形式はコードで決まる
-2. reviewer と replanner の書き換えは結果に残らない
+2. reviewer と replanner の書き換えは結果に残らない。その途中で `task _run` が落ちても、次の実行が始める前に戻す
 3. task-hub が動かす Status の遷移は `StatusLifecycle.transitions` の表と、design.md の図と一致する
 4. 生きている実行のあるタスクで、2 つ目の実行は始まらない。2 つの task-hub が同じカードを同時に始めても、実行は 1 つで、カードは Blocked にならない
 5. 変更の前に読み始めたボードは、変更のあとに表示されない
@@ -645,7 +661,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `tests/test_task.py`: `bin/task` を別プロセスで動かすブラックボックスのテスト。GitHub は 1 つの JSON ファイルを
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
   偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
-  bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます
+  bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます。`MODE:slowtree` は子のプロセスを 1 つ持って待ち続け
+  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は書き換えてから待ち続けます(約束 2 のテスト)
 - `tests/test_install.py`: インストーラ、`doctor`、アンインストール
 - `tests/test_windows.py`: Windows だけ(GitHub Actions の windows-latest)。`windows/install.ps1` の段階と
   `windows/doctor.ps1`(診断。ユーザーフォルダーの下のファイルを何も変えないことも確かめる)は、
