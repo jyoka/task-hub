@@ -16,6 +16,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -32,6 +33,7 @@ import uuid
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
+DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
 KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
 KIRO_WATCH = BIN.parent.parent / "kiro" / "task-events-watch"
 KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.workflow.json"
@@ -4859,6 +4861,83 @@ class TaskTest(unittest.TestCase):
                 self.assertIn("the run stopped unexpectedly; not resumed: ", self.comments(tid)[-1])
                 self.assertIn(why, self.comments(tid)[-1])
                 self.assertEqual(len(self.agent_calls()), calls)
+
+    # --- B: the Pi Durable runner (durable/), with pi-ai's faux provider in place of the model ---
+
+    def use_durable(self, sleep="0"):
+        """[agents] durable and [resume] durable: one command, the runner's own test agent (durable/test/faux-agent.ts:
+        the runner as built, with a faux model). Skipped unless durable/ is installed and built."""
+        node = shutil.which("node")
+        if not node or not (DURABLE / "node_modules" / "@earendil-works" / "pi-durable").is_dir() \
+                or not (DURABLE / "dist" / "runner.js").is_file():
+            self.skipTest("durable/ is not installed: cd durable && npm ci --ignore-scripts && npm run build")
+        version = subprocess.run([node, "--version"], capture_output=True, text=True).stdout.strip().lstrip("v")
+        if tuple(map(int, version.split(".")[:2])) < (22, 19):
+            self.skipTest(f"Pi Durable needs Node 22.19 or later, not {version}")
+        command = (f"{shlex.quote(node)} --disable-warning=ExperimentalWarning {shlex.quote(str(DURABLE / 'test' / 'faux-agent.ts'))}"
+                   " --session {session} {prompt}")
+        self.write_config(extra=f"durable = {command}\n\n[resume]\ndurable = {command}\n")
+        self.env["FAUX_SLEEP"] = sleep
+
+    def durable_card(self):
+        tid = self.new("ok", "Add hello", "jyoka/app", "--agent", "durable")
+        self.task("start", tid)
+        return tid
+
+    def assert_durable_went_on(self, tid, session):
+        """In review, from the conversation the cut-short run left: the same session, its bash call given to the model as
+        interrupted (not run again), one user input (the prompt not sent again), and .task-durable/ never pushed."""
+        self.assertEqual(self.wait(tid), "In review")
+        log = self.task("log", tid, "--full")
+        self.assertIn("== agent, resumed: durable ([resume])", log)
+        self.assertIn(f"durable: resuming session {session} from .task-durable/{session}.sqlite", log)
+        self.assertIn("which a command of the run cut short left running", log)
+        self.assertEqual(log.count("· bash: echo started"), 1)
+        self.assertIn("bash: interrupted. user inputs: 1.", self.comments(tid)[-1])
+        files = self.origin_files(f"task/{tid}")
+        self.assertIn(".tool-started", files)
+        self.assertNotIn(".task-durable", files)
+        self.assertNotIn("slow-done.txt", files)  # the cut-short command was stopped, not left to finish
+        self.assertEqual(self.metrics(1)[-1]["resumed"], ["agent"])
+
+    def test_durable_runner_takes_a_card_to_in_review(self):
+        self.use_durable()
+        tid = self.durable_card()
+        self.assertEqual(self.wait(tid), "In review")
+        log = self.task("log", tid, "--full")
+        self.assertIn("· bash: echo started > .tool-started && sleep 0", log)
+        self.assertIn(f"durable: session {self.run_state(tid)['session']}, faux/faux-1, thinking medium", log)
+        self.assertIn("bash: finished. user inputs: 1.", self.comments(tid)[-1])
+        self.assertNotIn(".task-durable", self.origin_files(f"task/{tid}"))
+
+    def test_durable_runner_killed_with_its_group_goes_on_in_place(self):
+        """durable-runs.md K1: the agent's process group killed (kill -9), `_run` alive: it starts [resume] durable at once
+        with the same {session}, and the runner goes on from its SQLite."""
+        self.use_durable(sleep="60")
+        tid = self.durable_card()
+        self.wait_for(lambda: self.run_state(tid).get("worktree")
+                      and (Path(self.run_state(tid)["worktree"]) / ".tool-started").exists())
+        state = self.run_state(tid)
+        os.killpg(int(state["agent_pid"]), signal.SIGKILL)
+        self.assert_durable_went_on(tid, state["session"])
+        self.assertEqual(self.run_state(tid)["pid"], state["pid"])  # the same run
+        self.assertIn("== the agent was killed (SIGKILL) during agent; resuming it once", self.task("log", tid, "--full"))
+
+    def test_durable_runner_killed_with_its_run_goes_on_after_relaunch(self):
+        """durable-runs.md K2: `_run` and the agent killed (kill -9): the next check of the board starts the run again,
+        and the runner, given the same {session}, goes on from its SQLite."""
+        self.use_durable(sleep="60")
+        tid = self.durable_card()
+        self.wait_for(lambda: self.run_state(tid).get("worktree")
+                      and (Path(self.run_state(tid)["worktree"]) / ".tool-started").exists())
+        state = self.run_state(tid)
+        run, agent = int(state["pid"]), int(state["agent_pid"])
+        os.kill(run, signal.SIGKILL)
+        os.killpg(agent, signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run) and process_gone(agent))
+        session = state["session"]
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+        self.assert_durable_went_on(tid, session)
 
     def test_ctrl_c_outside_the_agent_is_never_resumed(self):
         self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")

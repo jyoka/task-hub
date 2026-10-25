@@ -218,7 +218,8 @@ sequenceDiagram
 実行役の決まり:
 
 - 置き場所はリポジトリの `durable/`(`pi/`、`kiro/board-extension/` と同じくコアの外。`rust/` と同じく実験)。
-  `package.json` で `@earendil-works/pi-durable`、`@earendil-works/pi-ai`、`@earendil-works/chord` の版を固定する
+  `package.json` で `@earendil-works/pi-durable`、`@earendil-works/pi-ai`、`@earendil-works/chord`(と認証の
+  `@earendil-works/pi-coding-agent`)の版を固定する
   (README の冒頭が「The API changes without notice between releases」のため)。Node は 22.19.0 以上(pi-durable の
   `engines`。手元は 23.11.0)
 - 登録: `[agents] durable = node <clone>/durable/dist/cli.js --session {session} {prompt}`、`[resume] durable` も同じ。
@@ -233,6 +234,10 @@ sequenceDiagram
   `.task-report.md` がなければ「レポートを書いて」を 1 回送る
 - ツールは `@earendil-works/pi-durable/tools` の `CodingTools`(`read`、`write`、`edit`、`bash`)、環境は worktree を cwd に
   した `NodeExecutionEnv`
+- (作って分かったこと)`NodeExecutionEnv` は bash のコマンドを自分のプロセスグループで動かす(`detached`)。エージェントの
+  グループを kill -9 しても(K1、K2)コマンドは残り、続きの実行の横で worktree を書き続ける。実行役はシェルを
+  `durable/scripts/group-shell` にして、コマンドが動いている間そのグループを `.task-durable/<session>.groups/` に残し、同じ `{session}` の次の起動が
+  続ける前にそれを止める(グループの先頭がまだその `group-shell` のときだけ。古い番号が別のプロセスに渡っていても止めない)。pi 1.4.0 の `bash` も同じ(lld.md 7 章)で、A と C には同じ手当てがまだない
 - 出力は手順ごとの短いテキストの行(`· bash: npm test` の形)と最後の答え。task-hub の `step_format` は変えず、
   `Steps` がそのままログに書く
 - 終了コード: 0 は答えた、1 はモデルの失敗、2 はロックが取れない、3 は parked(`restart_limit`)。parked のときは
@@ -250,8 +255,8 @@ B が pi のログイン(`~/.pi/agent/auth.json` の `openai-codex`)を使える
   README では「OpenAI Codex (legacy)」で、ChatGPT の Plus か Pro が要る
 - pi CLI の `auth.json` の読み書きは `@earendil-works/pi-coding-agent` 1.4.0 の `core/auth-storage.ts`。
   `AuthStorage`(`proper-lockfile` で auth.json をロックして読み書き)と `ReadOnlyAuthStorage` があるが、
-  パッケージの入口(`src/index.ts`)から出しているのは `readStoredCredential` だけ。置き場所は `getAgentDir()` の
-  `~/.pi/agent/auth.json`(`PI_CODING_AGENT_DIR` で変えられる)
+  パッケージの入口(`src/index.ts`)から出しているのは `readStoredCredential` だけ(→ spike で違うと分かった。下の「結果と決定」)。
+  置き場所は `getAgentDir()` の `~/.pi/agent/auth.json`(`PI_CODING_AGENT_DIR` で変えられる)
 
 spike の手順(`durable/spike/auth.ts`。auth.json の中身は表示しない、コピーしない、ログに出さない):
 
@@ -269,6 +274,23 @@ spike の手順(`durable/spike/auth.ts`。auth.json の中身は表示しない�
 
 `AuthStorage` の中身を写して書き戻す案は採らない。入口から出ていない内部のコードに頼り、pi CLI と同じファイルを
 2 つの実装で書くことになるため。
+
+結果と決定(2026-10-26、タスク 2 の spike と、利用者の代わりに監督役が決めたこと。タスク 7 で書き足した):
+
+- 手順 1 は通った(`openai-codex/gpt-6-luna` から返答があり、`modify` は呼ばれなかった)。偽の値の切れたトークンでは、
+  読むだけの store が `modify` を断り、すぐ `model_error`(`ModelsError` の code `auth`)で終わった。pi-ai は残りが 5 分を
+  切ったときだけ `modify` で更新する
+- 上の「入口から出しているのは `readStoredCredential` だけ」は事実と違った。pi-coding-agent 1.4.0 の入口は
+  `ModelRuntime` も出している。`credentials` を渡さない `ModelRuntime.create()` は、pi CLI と同じ `AuthStorage`
+  (`proper-lockfile` のロック)で auth.json を読み書きする
+- 決めたのは **(a) 読むだけ**。pi のログインを書き換えないので、pi CLI の更新やロックと衝突せず、切れたときはすぐ理由つきで
+  分かるため。`ModelRuntime` は今は採らない。公開の入口ではあるが、自分で更新する pi CLI と、B に固定した版の
+  pi-coding-agent の 2 つが同じファイルを書くことになるため。タスク 8 の実験でトークン切れの失敗が目立ったら見直す
+- 実行役(`durable/src/auth.ts`)は、始める前に `getAuth` を呼び、ログインがない、または code が `auth` か `oauth` なら理由つきで
+  1 で終わる。auth.json の場所は `--auth` で明示して受け取れる(既定は `PI_CODING_AGENT_DIR` か `~/.pi/agent`。タスク 8 は
+  使い捨ての HOME で動かすため)。pi は auth.json をその場で書き換える(rename でない)ので、読めなかったときは 1 回だけ読み直す
+- `@earendil-works/pi-coding-agent`(`readStoredCredential`)も版を固定する(pi-ai の README で `openai-codex` は legacy とされ、
+  後の版で消える恐れがある)
 
 ### Status と段階
 

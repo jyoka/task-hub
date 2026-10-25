@@ -158,6 +158,8 @@ myagent = myagent --continue {prompt}
 pi も claude も、会話をそれぞれの置き場所(pi は `~/.pi/agent/sessions/`、claude は `~/.claude/projects/`)に実行ごとに
 残します。task-hub はそれを消しません。
 
+実験として、Pi Durable で作った実行役(`durable/`)も `[agents] durable` と `[resume] durable` に同じコマンドを書いて使えます。会話を worktree の `.task-durable/` に残し、止まったところから続けます。入れ方、実験版であること、認証は [durable/README.md](../durable/README.md) にあります。
+
 ## 始める前の確認と、実行に渡す環境変数
 
 無人で動かすとき(launchd の `task watch` など)は、エージェントのログインが切れていても誰も気づきません。
