@@ -87,8 +87,8 @@ stateDiagram-v2
         Setup --> Agent: [setup] 成功 / なし
         Agent --> Review: レポートあり ∧ Blocked なし ∧ reviewer あり
         Agent --> Finishing: それ以外
-        Review --> Finishing: pass / 2 回目も不合格
-        Review --> Retry: needs changes (1 回目)
+        Review --> Finishing: pass / minor だけ / 止める条件に当たった
+        Review --> Retry: needs changes ∧ 回数が残っている ∧ 止める条件なし
         Retry --> Review: 再実行がレポートを書いた
         Retry --> Finishing: レポートなし / Blocked
         Finishing --> [*]: commit、push、PR、Issue へのコメント
@@ -100,6 +100,9 @@ stateDiagram-v2
     Blocked --> Replanning: エージェント自身の Blocked ∧ replanner あり
     Replanning --> Blocked: Issue にコメント
 ```
+
+この図のうち `Review` から出る 2 つの遷移だけは、0.6.0 のあとで差し戻しの回数を設定できるようにしたときに直しました。
+回数と止める条件は [task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し) にあります。
 
 ### 図にして分かったこと
 

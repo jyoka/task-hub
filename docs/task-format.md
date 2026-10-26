@@ -255,7 +255,7 @@ reviewer は指摘を 2 つに分けます([worker/REVIEW.md](../worker/REVIEW.m
 
 blocking がなく minor だけなら、レビューは通過です。判定が `needs changes` でも、`Please fix` が空で `Known issues`
 だけなら通過として扱います。カードは In review に進み、minor の指摘は PR の本文と Issue のコメントの
-「Known issues」に残ります。
+「Known issues」に残ります。[オートパイロット](autopilot.md)の対象なら、この PR もマージキューに入ります。
 
 `needs changes` で差し戻す回数は `[runner] review_retries` で決めます。既定は 2 回、0 にすると差し戻しません。
 次のどれかに当たると、回数が残っていても差し戻しをやめて Blocked にします。

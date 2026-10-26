@@ -43,7 +43,7 @@ flowchart LR
 ## Features
 
 - **1 task = 1 branch = 1 worktree = 1 PR.** Up to 5 tasks run at the same time.
-- **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
+- **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back if needed (2 times at most by default).
 - **Continue after a stop.** A run that stops unexpectedly (a crash, a restart, a closed pane) is resumed once, from where it stopped, after the commands its agent left running (a long test) are stopped (pi and claude); Ctrl-C stops it for good. For a Blocked task, task-hub sorts out why it stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
 - **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used.
