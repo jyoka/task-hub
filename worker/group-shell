@@ -1,0 +1,48 @@
+#!/bin/sh
+# What a task's agent runs its tool commands through, while task-hub runs it (agent_process, lld.md 7):
+#   pi's bash tool, as its shell (pi/task-groups.ts):      group-shell -c <command>, run by $TASK_HUB_SHELL
+#     (pi's own shellPath setting), else /bin/bash
+#   Claude Code's Bash tool, as CLAUDE_CODE_SHELL_PREFIX:  group-shell <command>, run by the shell Claude Code picks
+#     ($CLAUDE_CODE_SHELL, else $SHELL, when bash or zsh; else zsh, else bash)
+# Both CLIs start each command in a process group of its own, which stopping the agent's group does not reach, so a
+# long test cut short with its agent ran on beside the resumed one. Before the command runs, a file named after its
+# group goes into the folder $TASK_HUB_GROUPS (runs/<id>.groups), holding the start time of the group's leader
+# (ps lstart): before task-hub starts an agent of the task again, it stops the groups whose leader still is the one
+# noted (stop_left_commands), never one whose id came back to another process.
+# The command then replaces this shell (exec): signals, stdin and the exit code are its own, as without task-hub.
+# So the note outlives the command; a leader that is gone tells such a note apart.
+# Noting never keeps a command from running: when it fails, the command runs all the same.
+is_shell() {
+    case $1 in
+        *bash* | *zsh*) [ -x "$1" ] ;;
+        *) false ;;
+    esac
+}
+if [ "$1" = -c ]; then
+    shell=${TASK_HUB_SHELL:-/bin/bash}
+else
+    if is_shell "$CLAUDE_CODE_SHELL"; then
+        shell=$CLAUDE_CODE_SHELL
+    elif is_shell "$SHELL"; then
+        shell=$SHELL
+    elif [ -x /bin/zsh ]; then
+        shell=/bin/zsh
+    else
+        shell=/bin/bash
+    fi
+    set -- -c "$@"
+fi
+[ -x "$shell" ] || shell=$(command -v bash || echo sh)
+groups=$TASK_HUB_GROUPS
+pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+case $pgid in '' | *[!0-9]*) groups= ;; esac
+if [ -n "$groups" ]; then
+    note=$groups/$pgid
+    started=$(LC_ALL=C ps -o lstart= -p "$pgid" 2>/dev/null)
+    # noted already with this leader: another command of the same group noted it
+    if [ -n "$started" ] && [ "$(cat "$note" 2>/dev/null)" != "$started" ]; then
+        { mkdir -p "$groups" && printf '%s\n' "$started" > "$note.$$" && mv -f "$note.$$" "$note"; } 2>/dev/null ||
+            rm -f "$note.$$" 2>/dev/null
+    fi
+fi
+exec "$shell" "$@"

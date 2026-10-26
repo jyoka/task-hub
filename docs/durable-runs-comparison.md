@@ -45,13 +45,11 @@
 
 A を勧めるのは、2 と 3 の B の利点が A にも移せるか、小さいと見るためです。どちらも確かめていない前提に頼っています。
 
-- **(a) B の止め方は A にも足せる(推測)。** B の止め方は、pi-durable の `NodeExecutionEnv` の `shellPath` に
-  `group-shell` を差し込んで成り立っています(`durable/src/runner.ts`)。pi 1.4.0 の CLI にも `settings.json` の
-  `shellPath` の設定があり、`bash` のツールがそれを使います(pi-coding-agent の `settings-manager.js`、`tools/bash.js`)。
-  このため A でも同じ差し込みができると推測します。ただし、次のことは確かめていません
-  - task-hub から pi の `shellPath` を、利用者の設定を変えずに渡せるか
-  - claude の CLI に同じ差し込み口があるか
-  - 起動するときに pid を記録する作り(「後のタスクの案」)では、あとから生まれるコマンドのグループは記録できない。差し込み口がないエージェントでは、別の作りが要る
+- **(a) B の止め方は A にも足せる(タスク 238 で確かめた)。** B の止め方は、pi-durable の `NodeExecutionEnv` の `shellPath` に
+  `group-shell` を差し込んで成り立っています(`durable/src/runner.ts`)。A でも、pi は拡張(`-e pi/task-groups.ts`)で、
+  claude は環境変数 `CLAUDE_CODE_SHELL_PREFIX` で、利用者の設定ファイルを変えずに同じ差し込みができました。
+  `bin/task` は再開のエージェントを起動する前に、前の起動のコマンドのグループを止めます。差し込み口のない codex と kiro は
+  今までどおりです(「A でツールのコマンドを止める(タスク 238)」)
 - **(b) A の増えたトークンは、上限への響きが小さい(不明)。** A の増えた分の多くはキャッシュから読んだ入力です
   (A の 2.0M のうち 1.7M)。ただし、キャッシュから読んだトークンが ChatGPT のサブスクリプションの上限にどう数えられるかは
   不明です(「確かめていないこと、限界」)。このため、3 のトークンの差を打ち消す根拠にはなりません
@@ -71,6 +69,9 @@ A を推す根拠で確かなのは、4 の保守の差だけです。試行の�
 
 - **A(条件つき)**: 保守の軽さを取る。(a) を確かめるタスクを先に入れ、だめなら B に切り替える
 - **B**: 決めたこと 10 の順のとおり。2 と 3 で先に立ち、Goal を終えなかった 2 回は実験台の影響の恐れがあるとみる
+
+**決まったこと(2026-10-26、利用者の判断)**: A(条件つき)。条件の (a) はタスク 238 で確かめ、pi と claude で入れました
+(「A でツールのコマンドを止める(タスク 238)」)。
 
 ## 条件
 
@@ -252,6 +253,161 @@ worktree の外に書く長いコマンドが 2 つ同時に動くと、結果�
 
 どの方式も、`bin/task` にエージェントの名前で分ける処理はありません。B は再開でも同じコマンドで、自分の SQLite で判断します。
 
+## A でツールのコマンドを止める(タスク 238)
+
+本採用を A(条件つき)に決めたあと(2026-10-26、利用者の判断)、条件の (a) を確かめて入れました。
+
+**結論: (a) は成り立ちます。** pi 1.4.0 も Claude Code 2.1.310 も、利用者の `~/.pi` と `~/.claude` の設定ファイルを変えずに、
+ツールのコマンドを task-hub の `worker/group-shell` に通せました。`group-shell` はコマンドのプロセスグループと、その先頭の開始時刻を
+`runs/<id>.groups/` に記録してから、コマンドに置き換わります(`exec`)。`bin/task` はエージェントを起動する前に毎回、記録のうち
+先頭が記録と同じ開始時刻でまだ生きているグループを止めます(`stop_left_commands`)。再開のエージェントもここを通るので、K1、K2、K3 のどれでも、再開の前に前の起動のコマンドが止まります。
+codex と kiro には差し込み口が見つからず、今までどおりです。
+
+| 問い | 答え | 使った差し込み口 |
+|---|---|---|
+| 1. pi の `bash` の `shellPath` を、`~/.pi` を変えずに渡せるか | 渡せる | 拡張 `pi/task-groups.ts`。組み込みの `[agents] pi` が `-e` で読む |
+| 2. claude の CLI に同じ差し込み口があるか | ある | 環境変数 `CLAUDE_CODE_SHELL_PREFIX`。task-hub がエージェントに渡す |
+| 3. 差し込み口がないエージェントでどうするか | 止められない。今までどおり(下の理由)。案は 1 つある | なし |
+
+### 1. pi
+
+pi 1.4.0(`~/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist`)で読んだところです。
+
+- `bash` のツールは、コマンドを自分のプロセスグループで動かす(`core/tools/bash.js:63-65` の `spawn(shellConfig.shell, [...args, command], { detached: process.platform !== "win32" })`)
+- シェルは設定の `shellPath`(`core/settings-manager.js:760-762` の `getShellPath`)。設定はグローバルの `~/.pi/agent/settings.json` と
+  プロジェクトの `<cwd>/.pi/settings.json` を合わせたもの(同 123-124 行)。`core/agent-session.js:2966`、`2974` が `bash` のツールに渡す。
+  `utils/shell.js:17-18` で、`shellPath` は `<shellPath> -c <コマンド>` の形で呼ばれる
+- 差し込み口を順に見た結果
+  - 環境変数: なし(`docs/environment-variables.md`)。`PI_CODING_AGENT_DIR` は設定のフォルダごと替わり、ログイン(`auth.json`)と会話の置き場所も変わるので使えない
+  - CLI のフラグ: `--settings` のようなものはない(`pi --help`)
+  - プロジェクトの設定: worktree に `.pi/settings.json` を置くことになり、PR に入るおそれがあるうえ、pi の信頼(trust)が要る
+  - 拡張: 使える。`pi --help` に「`--no-extensions` ... (explicit -e paths still work)」とあり、`examples/extensions/tool-override.ts` に
+    「Extensions can register tools with the same name as built-in tools to replace them」とある。`createBashToolDefinition(cwd, { shellPath })` で作った `bash` を
+    `pi.registerTool` で登録すると、組み込みの `bash` と置き換わる
+- `pi/task-groups.ts` は `TASK_HUB_GROUPS` があるときだけ、`session_start` で `bash` を置き換えます。読み込みの最中に登録しないのは、
+  ほかの拡張も `bash` を登録していると、pi が `Tool "bash" conflicts with ...` で起動をやめるためです(`core/resource-loader.js:974-991` の
+  `detectExtensionConflicts`、`main.js:750` の `process.exit(1)`)。`session_start` では、ほかの拡張の `bash` があれば(`pi.getAllTools()` の
+  `sourceInfo.path` が `builtin:` でない)何もしません。設定は `pi.getSettings()` で pi と同じものを読み(プロジェクトの設定は pi が信頼したときだけ)、
+  `shellPath` は `group-shell` の中で動かすシェルとして、`shellCommandPrefix` はそのまま渡します。書き込みはしません
+- 試したもの: ほかに `bash` を置き換える拡張(pi の `examples/extensions/bash-spawn-hook.ts` と同じ形)を `-e` で一緒に読ませても、pi は起動し、
+  コマンドはその拡張の `bash` で動き、記録はありませんでした
+
+試したこと(本物の pi 1.4.0、偽のモデル。`PI_CODING_AGENT_DIR` を使い捨てのフォルダにし、`~/.pi` の設定と会話は使っていない)。
+偽のモデルは OpenAI 互換の小さなサーバーで、1 回目に `bash` で 40 秒の「長いテスト」を頼みます。動いている間に pi のグループを kill -9 しました。
+
+```text
+# -e pi/task-groups.ts あり(group-shell は記録してから /bin/bash に置き換わる)
+cmd pid 57543 pgid 57543
+notes: 57543 Mon Oct 26 17:01:56 2026
+group 57543:
+57543 57543 Mon Oct 26 17:01:56 2026     /bin/bash -c echo "cmd pid $$ ..." > cmd.txt; sleep 40; ...
+57555 57543 Mon Oct 26 17:01:56 2026     sleep 40
+after kill -9 of pi's group, left in group 57543:
+57543     1 57543 /bin/bash -c echo "cmd pid $$ ..." ...      <- 親は launchd(1)。記録は残る
+# -e なし
+group 29831:
+29831 29831 /bin/bash -c echo "cmd pid $$ ..." > cmd.txt; sleep 40; ...
+after kill -9 of pi's group, left in group 29831:
+29831     1 29831 /bin/bash -c ...                            <- 残るが、記録はない
+```
+
+会話のファイルに残るツールの呼び出しは、元のコマンドのままでした(`"toolName":"bash","args":{"command":"echo ...`)。モデルとログからは、
+`group-shell` は見えません。
+
+### 2. claude
+
+Claude Code 2.1.310(`~/.local/share/claude/versions/2.1.310`、ネイティブのバイナリ)を `strings` で読んだところです。
+
+- `Bash` のコマンドも自分のプロセスグループで動く(`{type:"bash",shellPath:e,detached:!0,...}`)
+- 環境変数 `CLAUDE_CODE_SHELL_PREFIX` があると、コマンドの文字列全体を包む(`gt=i.CLAUDE_CODE_SHELL_PREFIX;if(gt)bt=ime(gt,bt)`。
+  `ime` は `<prefix をクォート> <コマンドをクォート>` を作る。prefix に ` -` があると、そこで切ってフラグとして扱う)。包んだ文字列を、
+  選んだシェル(`$SHELL` が bash か zsh ならそれ)の `-c` で動かす
+- ほかの差し込み口: `CLAUDE_CODE_SHELL`(シェルそのもの。パスに `bash` か `zsh` を含み、`--version` が通るものだけ)、
+  `--settings` の PreToolUse の hook(コマンドの書き換え)。`CLAUDE_CODE_SHELL_PREFIX` がいちばん小さく、利用者のシェルも変えないので、これを使う
+- `group-shell` は引数が `-c` で始まらなければ prefix の形とみて、Claude Code と同じ順に選んだシェル(`CLAUDE_CODE_SHELL`、`$SHELL` の
+  bash か zsh、`/bin/zsh`、`/bin/bash`)の `-c` に置き換わる
+- `CLAUDE_CODE_SHELL_PREFIX` は hook と stdio の MCP サーバーの起動も包みます(バイナリで読んだ。動きは確かめていない)。`group-shell` は
+  記録したらそのコマンドに置き換わる(`exec`)ので、シグナル、標準入力、終了コードはそのまま届きます。エージェントのグループで動く
+  hook や MCP サーバーの記録は、先頭が前のエージェント(止まっている)なので、止めません
+- `~/.claude/settings.json` の `env` で利用者が自分の `CLAUDE_CODE_SHELL_PREFIX` を決めていると、そちらが勝ち、記録しません(task-hub は気づかない)
+
+試したこと(本物の claude、偽の Anthropic API。`CLAUDE_CONFIG_DIR` を使い捨てのフォルダにし、`--bare` で hook、プラグイン、キーチェーンを読まない):
+
+```text
+# CLAUDE_CODE_SHELL_PREFIX=.../worker/group-shell あり(group-shell は記録してから /bin/zsh に置き換わる)
+cmd pid 57647 pgid 57647
+notes: 57647 Mon Oct 26 17:02:00 2026
+group 57647:
+57647 57647 /bin/zsh -c source .../shell-snapshots/snapshot-zsh-....sh 2>/dev/null || true && { shopt -u extglob || setopt ...
+57659 57647 sleep 40
+after kill -9 of claude's group, left in group 57647:      <- 残るが、記録がある
+# なし
+group 30286:
+30286 30286 /bin/zsh -c source .../snapshot-zsh-....sh ...
+after kill -9 of claude's group, left in group 30286:      <- 残り、記録はない
+```
+
+### task-hub を通して確かめたこと
+
+テストの偽の GitHub(`tests/test_task.py` の `TaskTest`)と `bin/task` で、エージェントだけを本物の pi 1.4.0 と claude にして
+(偽のモデル)、長いテストの途中で `task _run` とエージェントを kill -9 し(K2)、`task` で再開させました。リポジトリには入れていない、一回きりのスクリプトです。
+
+```text
+# pi
+long test pid 57159 pgid 57159 agent group 57157
+notes ['57159']
+after kill -9 of _run and pi: long test gone? False
+resumed: task 1 at agent (the run process is gone), once
+status Blocked | long test gone? True | finished? False
+== resumed at agent, once: it was cut short there (the run process is gone)
+== agent, resumed: pi ([resume])
+== stopped process group 57159: a command an earlier agent left running
+# claude(同じ形)
+== agent, resumed: claude-test ([resume])
+== stopped process group 57413: a command an earlier agent left running
+```
+
+Blocked は、偽のモデルがレポートを書かないためです。長いテストは再開のエージェントの前に止まり、最後まで走りませんでした(`finished? False`)。
+CI で動くテストは、偽のエージェントで同じことを確かめます(`test_a_long_test_left_by_an_agent_killed_*`、
+`test_a_noted_group_whose_id_went_to_another_process_is_not_stopped`、`test_group_shell_runs_the_command_as_the_agents_shell_would_and_notes_its_group`)。
+CI には pi がないので、`pi/task-groups.ts` を読むテストはありません。偽のエージェントは、Claude Code と同じく
+`CLAUDE_CODE_SHELL_PREFIX` を通して、または pi と同じく `group-shell -c` で、自分のプロセスグループで長いテストを始めます。
+
+### 3. 差し込み口がないエージェント
+
+codex(0.162.1)と kiro-cli(2.28.0)には、ツールのシェルを差し替える口を見つけられませんでした(codex は `-c` で設定を
+上書きでき、バイナリに `shell_zsh_path` という語があるが、使えるかは確かめていない。kiro は調べていない)。どちらも会話の ID を
+渡せないので、再開はいつも C です。差し込み口なしで、あとから生まれたグループを見つける方法を考えましたが、どれも使えません。
+
+| 方法 | だめな理由 |
+|---|---|
+| 起動のときに pid を記録する | エージェントの pid は分かるが、あとから生まれるコマンドのグループは分からない |
+| 環境変数の印(`TASK_HUB_RUN=<id>`)を子に継がせ、あとで探す | macOS では、ほかのプロセスの環境変数を読めない。同じユーザーの `sleep` に印を付けて `ps -wwE -p <pid>` で見ても出ず、`sysctl` の `KERN_PROCARGS2` でも、自分のプロセスでは印が見えたが、ほかのプロセスでは見えなかった(Linux は `/proc/<pid>/environ` で読める) |
+| 親子(ppid)をたどる | エージェントが kill -9 されると、コマンドの親は launchd(1)に替わる(上の出力の `ppid 1`)。たどれない |
+| worktree を cwd にするプロセスを止める(`lsof`) | 人が worktree で開いたシェルやエディタも止めてしまう |
+
+残る案は、`task _run` がエージェントの動いている間、数秒ごとに子孫(ppid をたどった先)のプロセスグループを同じフォルダに書くことです。
+watchdog がすでに子孫をたどっています(`agent_descendants`)。数秒より長いコマンドは拾え、長いテストには足ります。
+ただし、`ps` を動かし続ける費用と、間に合わない短いコマンドがあるので、このタスクでは入れていません(「後のタスクの案」)。
+
+### 変わったもの、変わらないもの
+
+- `bin/task`: `command_groups_env`(エージェントに渡す 3 つの環境変数)、`stop_left_commands`(起動の前に止める)、
+  組み込みの `[agents] pi` に `-e <clone>/pi/task-groups.ts`。`cleanup` は残ったグループを止めてから `runs/<id>.groups/` を消す
+- 記録はコマンドが終わっても残ります(`exec` のため)。1 回のエージェントの起動で動かしたコマンドの数だけファイルが増え、次の起動と `cleanup` で消えます
+- 止めるのは、次のエージェントを起動するときと `cleanup` のときだけです。再開も止まって Blocked になったときは、人が Ready に戻すか片付けるまで、
+  残ったコマンドは動き続けます(今までと同じ)
+- 自分で書いた `[agents] pi` には `-e` を足す必要があります([agents.md](agents.md#落ちたエージェントのコマンドを止める))。
+  比べた実験のスクリプト(`tests/durable_bench.py`)の A と C は `-e` を付けていないので、動かし直すと前と同じ作りを測ります
+- `runs/<id>.json` の形は変えていません。新しい `runs/<id>.groups/` は task-rs が読まないフォルダです。task-rs は `runs/` の
+  更新時刻を見て画面を描き直すだけなので、読めなくなるものはありません(`rust/src/tui.rs` の `mtime(&state("runs"))`)
+- `durable/`(B)は消していません
+- Windows と `[sandbox] mode = user` では記録せず、今までどおりです。`[sandbox] mode = user` はエージェントが別のユーザーで動き、
+  task-hub の `runs/` に書けず、task-hub の clone も読めないためです。このとき組み込みの pi のコマンドから `-e` を外します
+  (Linux だけの機能で、ここでは確かめていない。外すことだけテストで確かめた)
+- pi を動かすと、`~/.pi/agent/install` のフォルダの更新時刻が変わりました(実験のときと同じ。中のファイル、`settings.json`、
+  `auth.json`、`sessions` は変わっていない)。`~/.claude.json` と `~/.claude/settings.json` の更新時刻も変わっていません
+
 ## 確かめていないこと、限界
 
 - 試行の数が少なく(1 つのマスに 2 回)、課題も 1 つで短いです。長い課題や、ほかのモデル、claude での比べはしていません
@@ -295,11 +451,9 @@ python3 tests/durable_bench.py --out "$TMPDIR/durable-bench/t2-serial.jsonl" --r
 
 本採用を決めたあとに、人が登録します。
 
-- **A と C で、前の起動のツールのコマンドを止める。** B の `group-shell` と同じことを task-hub 側で行う。pi なら、
-  `bash` のツールの `shellPath` に `group-shell` のようなものを差し込み、再開の前に残ったグループを止める案がある
-  (使えるかは確かめていない。「本採用の案」の (a))。起動するときに pid を記録するだけでは、あとから生まれる
-  コマンドのグループは拾えない。長いテストが同時に 2 つ動くのを、モデルの判断ではなく仕組みで防ぐため。
-  A の案はこれが確かめられることが条件
+- ~~**A と C で、前の起動のツールのコマンドを止める。**~~ タスク 238 で入れた(pi と claude)。「A でツールのコマンドを止める(タスク 238)」
+- **差し込み口のないエージェント(codex、kiro)でも、前の起動のツールのコマンドを止める。** 案は「A でツールのコマンドを止める(タスク 238)」の 3。
+  codex と kiro は会話の ID を渡せないので、再開はいつも C です
 - **A の再開のプロンプトを短くする。** 会話が残っているときは、元のプロンプト全体ではなく「# Resumed」の節だけを送る。
   会話のファイルが消えていたときの扱い(設計メモ「失敗したとき」)を先に確かめる
 - **B を採らないなら、`durable/` を消すか、`rust/` のように実験として残すかを決める**(決めたこと 6)。消すなら、

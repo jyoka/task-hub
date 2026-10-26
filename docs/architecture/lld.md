@@ -152,6 +152,19 @@ flowchart LR
   `[sandbox] mode = user` では、グループのうち専用ユーザーのプロセスへは `as_agent` の `kill` でも送ります。
   `task _run` は起動したエージェントの pid と開始時刻を `agent_pid`、`agent_started` に書き、終わったら空に戻します。
   エージェントには制御端末がありません(`/dev/tty` に問いかけるコマンドは失敗します。stdin は今までどおり空です)
+- pi と Claude Code は、ツールのコマンド(長いテストなど)をさらに自分のプロセスグループで動かします(7 章)。エージェントの
+  グループを止めても届かず、落ちたエージェントのコマンドが、再開したエージェントの横で最後まで動いていました。そこで
+  `agent_process` はエージェントに `TASK_HUB_GROUPS`(`runs/<id>.groups`)と、`TASK_HUB_GROUP_SHELL` と
+  `CLAUDE_CODE_SHELL_PREFIX`(どちらも `worker/group-shell`。後者は利用者が自分で決めていないときだけ)を渡します
+  (`command_groups_env`)。pi は組み込みの `[agents] pi` の `-e pi/task-groups.ts` で、Claude Code は
+  `CLAUDE_CODE_SHELL_PREFIX` で、コマンドを `group-shell` を通して動かします。`group-shell` はそのグループの番号と先頭の
+  開始時刻をフォルダに置いてから、コマンドに置き換わります(`exec`。記録はコマンドが終わっても残る)。`agent_process` は
+  エージェントを起動する前に毎回 `stop_left_commands` で、記録のうち先頭がまだ同じ開始時刻で生きているグループを止め
+  (`ps -A` を 1 回。SIGTERM、`AGENT_STOP_SECONDS` 待って SIGKILL)、フォルダを消します。止まらなければエージェントを起動しません(`agent cannot run`)。
+  K1(エージェントだけが落ちた)も、K2 と K3(`relaunch`)も、再開のエージェントを起動するこの 1 か所を通ります。
+  `cleanup` も、worktree を消す前に同じように止めます。差し込み口のないエージェント(codex、kiro)、Windows、
+  `[sandbox] mode = user`(組み込みの pi のコマンドから `-e` を外す)では何も記録せず、今までどおりです
+  ([durable-runs-comparison.md](../durable-runs-comparison.md) の「A でツールのコマンドを止める」)
 - `agent_process` はエージェントの出力を別のスレッドで読み、`task _run` の側で watchdog(`Watchdog`)を動かします。
   出力が `SILENT_SECONDS`(45 分)なく、かつエージェントの子孫(ppid をたどった先と、グループに残ったもの。エージェント自身と、
   `[sandbox] mode = user` の `sudo` は除く)が前の確認から CPU を使っていない(`ps -o time` の値もプロセスの顔ぶれも同じ)ときだけ、
@@ -501,6 +514,7 @@ stateDiagram-v2
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
+| `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
@@ -671,7 +685,11 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   使った量は、記録の assistant のメッセージの `usage`(`input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`、
   `totalTokens`、`cost`)と `model`、`provider`。`agent_usage` はまだ読まない。
 - pi 1.4.0 の `bash` ツールのコマンドは自分のプロセスグループで動く。エージェントのグループを止めても(`stop_group`、
-  `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。
+  `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。Claude Code 2.1.310 の
+  `Bash` も同じ(`detached: true`、本物で確かめた)。task-hub は pi の `bash` を `pi/task-groups.ts`(同じ名前のツールで
+  置き換え、`shellPath` を `worker/group-shell` にする。`session_start` で登録し、ほかの拡張の `bash` があれば何もしない。
+  pi の設定は `pi.getSettings()` で読むだけ)で、Claude Code の `Bash` を
+  `CLAUDE_CODE_SHELL_PREFIX`(コマンドの文字列を `<prefix> '<コマンド>'` の形で渡す)で、`group-shell` に通す(2 章)。
 - B の実行役(`durable/`)は `step_format` が None(`Steps` そのもの)で、自分で `· <名前>: <入力の 1 つ>` と文の 1 行、
   最後の答えの全文をテキストで出す。Pi Durable 1.4.0 の `NodeExecutionEnv` も bash のコマンドを自分のプロセスグループで
   動かす(`detached`)ので、実行役はシェルを `durable/scripts/group-shell` にして、そのグループを `.task-durable/<session>.groups`
@@ -749,7 +767,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     のカード、前に動いたカード、閉じた Issue、人がキューから外した PR、レビューのあとに変わった PR、draft、Blocked のカードは
     動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
     `[autopilot]` がなければ何も変わらない
-17. 予期せず止まった実行は 1 回だけ自動で再開し、2 回目は Blocked にする。Ctrl-C で止めた実行は再開しない。同じ worktree で 2 つのエージェントは動かない
+17. 予期せず止まった実行は 1 回だけ自動で再開し、2 回目は Blocked にする。Ctrl-C で止めた実行は再開しない。同じ worktree で 2 つのエージェントは動かない。
+    落ちたエージェントが `group-shell` を通して動かしていたツールのコマンドは、次のエージェントを起動する前に止まる。
+    番号が別のプロセスに渡ったグループは止めない
 18. 再開しても、reviewer と replanner の書き換えは結果に残らず、Issue のレポートは 1 つ
 
 ## 10. テストの仕組み
@@ -763,7 +783,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   `MODE:silentonce` は「# Resumed」のプロンプトでは `ok` と同じに終わります(watchdog のテスト)。
   再開のテスト(約束 17、18)は、`task _run` とエージェントを外から kill します。`MODE:slow` と `MODE:slowtree` は
   「# Resumed」のプロンプトでは `ok` と同じに終わり、`MODE:frozen` は再開でも待ち続け、`MODE:retryhang` は差し戻しの
-  あとで待ち続けます。偽物の `gh` の `hang_status` は、カードをその Status に動かす呼び出しで 1 回だけ止まります(`finishing` の再開のテスト)
+  あとで待ち続けます。偽物の `gh` の `hang_status` は、カードをその Status に動かす呼び出しで 1 回だけ止まります(`finishing` の再開のテスト)。
+  `MODE:longtest` は、Claude Code と同じく `CLAUDE_CODE_SHELL_PREFIX` を通して(`PISHELL` なら pi と同じく `group-shell -c` で)、
+  自分のプロセスグループで 60 秒の長いテストを始めて待ち続け、再開ではその長いテストが残っているかを書いてから `ok` と同じに終わります(約束 17)
 - `tests/test_task.py` の `test_durable_runner_*`: B の実行役を `[agents] durable` と `[resume] durable` で動かす。モデルは
   pi-ai の faux provider(`durable/test/faux-agent.ts`。会話の記録だけから答えるので、kill -9 のあとの起動も同じに続く)。
   K1(エージェントのグループだけ)と K2(`task _run` ごと)で kill -9 して、In review まで続くことを確かめる。`durable/` を

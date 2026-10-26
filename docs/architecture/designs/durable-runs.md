@@ -237,7 +237,9 @@ sequenceDiagram
 - (作って分かったこと)`NodeExecutionEnv` は bash のコマンドを自分のプロセスグループで動かす(`detached`)。エージェントの
   グループを kill -9 しても(K1、K2)コマンドは残り、続きの実行の横で worktree を書き続ける。実行役はシェルを
   `durable/scripts/group-shell` にして、コマンドが動いている間そのグループを `.task-durable/<session>.groups/` に残し、同じ `{session}` の次の起動が
-  続ける前にそれを止める(グループの先頭がまだその `group-shell` のときだけ。古い番号が別のプロセスに渡っていても止めない)。pi 1.4.0 の `bash` も同じ(lld.md 7 章)で、A と C には同じ手当てがまだない
+  続ける前にそれを止める(グループの先頭がまだその `group-shell` のときだけ。古い番号が別のプロセスに渡っていても止めない)。pi 1.4.0 の `bash` と Claude Code の `Bash` も同じ(lld.md 7 章)。A と C には、タスク 238 で同じ手当てを入れた
+  (`worker/group-shell`、pi は `-e pi/task-groups.ts`、claude は `CLAUDE_CODE_SHELL_PREFIX`。codex と kiro にはない。
+  [durable-runs-comparison.md](../../durable-runs-comparison.md) の「A でツールのコマンドを止める(タスク 238)」)
 - 出力は手順ごとの短いテキストの行(`· bash: npm test` の形)と最後の答え。task-hub の `step_format` は変えず、
   `Steps` がそのままログに書く
 - 終了コード: 0 は答えた、1 はモデルの失敗、2 はロックが取れない、3 は parked(`restart_limit`)。parked のときは
