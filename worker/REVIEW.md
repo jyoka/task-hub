@@ -3,7 +3,9 @@
 `task` sends the part between the first and the second line to the review agent after the implementation
 agent finishes, followed by the task (with its Goal), the agent's report, and the diff of the whole pull request.
 When the run was given people's comments on the Issue and the pull request (worker/PROMPT.md), the part
-below the second line and those comments come right after the Goal.
+between the second and the third line and those comments come right after the Goal.
+When an earlier review of the same run sent the work back, the part below the third line and the findings it
+was sent back with come after that.
 The review agent runs in the same worktree and must not edit files.
 
 ---
@@ -66,6 +68,18 @@ Report only findings you can back with a location and a concrete scenario ("inpu
 Z"). Leave out style preferences that neither the Goal nor the repository's rules ask for. A finding
 you cannot make concrete is not a finding.
 
+Sort each finding as blocking or minor:
+
+- **Blocking** (`Please fix`): an acceptance criterion is not met, or the change breaks something a user
+  or the repository's rules depend on. The work is sent back for these.
+- **Minor** (`Known issues`): real, but the pull request can be merged without it: an edge case outside
+  the Goal, a missing test of a case that works, a follow-up worth a task of its own. These go into the
+  pull request as known issues and do not stop it.
+
+Do not make a finding blocking because the Goal's wording could be read more strictly than the change
+does, when the change meets its plain meaning; and do not block on what a rule in the Goal or a comment
+says is only a guide.
+
 ## `.task-review.md`
 
 Use exactly these headings. The verdict line is one word or phrase: `pass`, `needs changes`, or `blocked`.
@@ -81,7 +95,14 @@ Acceptance criteria, one line each: met / not met, and the evidence.
 Commands you ran and their results. Residual risk, if any.
 ```
 
-Use `pass` only when every acceptance criterion is met and you found nothing concrete that breaks.
+Use `pass` only when every acceptance criterion is met and you found nothing blocking. Minor findings,
+if any, go under `## Known issues` after the Review, one list item each:
+
+```markdown
+## Known issues
+
+- The location, what goes wrong (input and result), and why it can wait.
+```
 
 If the implementation needs one more automated pass before a human reviews it:
 
@@ -96,7 +117,8 @@ One line: the most important reason it is not ready. Then the acceptance criteri
 
 ## Please fix
 
-Most serious first. For each: the location, what goes wrong (input and result), and the change to make.
+- Most serious first, one list item each: the location, what goes wrong (input and result), and the
+  change to make. Only blocking findings; minor ones go under `## Known issues`, as above.
 ```
 
 If you cannot review because information, access, or a decision only the human has is missing:
@@ -121,3 +143,12 @@ given these comments, oldest first, as instructions added to the Goal. It was to
 criteria too: for each comment, say met or not met and the evidence. A comment the report does not answer,
 a change the report claims but the diff does not have, or a reason for not acting that does not hold up,
 is a finding.
+
+---
+
+## Findings the work was sent back with
+
+An earlier review of this run said `needs changes`, and the agent was sent back to fix the findings below.
+Check each of them again. One that is fixed, leave out. One that is still there, list again under
+`Please fix` with the same words, starting with `(again)`: task-hub stops sending the work back when a
+finding comes back, and leaves it to the human. Do not repeat a finding in other words to avoid that.

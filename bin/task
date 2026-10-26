@@ -45,6 +45,7 @@ from urllib.parse import quote, urlencode
 
 VERSION = "0.14.0"
 PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
+REVIEW_RETRIES = 2  # [runner] review_retries by default: how many times the reviewer may send the work back
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
@@ -146,7 +147,8 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
 # link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
 # agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
 # stopped. head: HEAD before the agent's launch. snap: `<tree> <HEAD>` while a reviewer or replanner runs, so a run
-# that dies before restore leaves the next launch something to restore. review_attempt: 0 or 1, the review running.
+# that dies before restore leaves the next launch something to restore. review_attempt: which review is running
+# (0 to [runner] review_retries), and during a retry that retry's number (review_loop).
 # interrupted: why the run or its agent last stopped (SIGHUP, SIGTERM, SIGINT, "the agent was killed (SIGKILL)",
 # "silent" when the Watchdog stopped the agent, "the run process is gone"). resumes: how often this run was resumed
 # (MAX_RESUMES), resumed: the stages it was resumed at, space-separated. resume_stage: where relaunch tells the next
@@ -296,13 +298,17 @@ STATUSES = StatusLifecycle.all
 
 
 class ReviewResult:
-    """Automated review verdict and feedback."""
+    """Automated review verdict and feedback. Please fix holds the blocking findings, Known issues the minor ones: a
+    review with only minor ones passes, and they go into the PR as known issues."""
     def __init__(self, markdown=""):
         self.markdown = markdown or ""
         # models often decorate the word: **Pass**, `pass`, Pass.
         self.verdict = (section(self.markdown, "Verdict").splitlines() or [""])[0].strip(" *`_.").lower()
         self.review = section(self.markdown, "Review")
         self.fix = section(self.markdown, "Please fix")
+        self.minor = section(self.markdown, "Known issues")
+        if self.verdict == "needs changes" and not self.fix and self.minor:  # nothing blocking: what it lists can wait
+            self.verdict = "pass"
 
     @property
     def passed(self):
@@ -312,18 +318,68 @@ class ReviewResult:
     def needs_changes(self):
         return self.verdict == "needs changes"
 
-    def blocked_line(self, retried=False):
-        """One line for the card's Blocked reason: what happened and the reviewer's own first line."""
+    @property
+    def findings(self):
+        """The blocking findings, one per top-level list item of Please fix (the whole section when it has no list)."""
+        items = []
+        for line in self.fix.splitlines():
+            if re.match(r"([-*+]|\d+[.)])\s+", line):
+                items.append(line)
+            elif items and line.strip():
+                items[-1] += "\n" + line
+            elif line.strip():
+                items.append(line)
+        return [i.strip() for i in items]
+
+    def repeated(self, sent):
+        """The findings that were already sent back once: marked (again), as worker/REVIEW.md asks, or word for word."""
+        earlier = {finding_key(f) for f in sent}
+        return [f for f in self.findings if AGAIN.match(finding_text(f)) or finding_key(f) in earlier]
+
+    def blocked_line(self, stop=""):
+        """One line for the card's Blocked reason: what happened (stop: why sending back stopped) and the reviewer's
+        own first line."""
         first = ((self.review or self.fix).splitlines() or ["no details"])[0]
-        head = "automated review did not pass after one retry" if retried \
-            else f"automated review: {self.verdict or 'no verdict'}"
-        return f"{head}: {first}"
+        return f"{stop or 'automated review: ' + (self.verdict or 'no verdict')}: {first}"
 
     def issue_section(self):
         verdict = self.verdict or "missing verdict"
         body = self.review or self.markdown.strip() or "reviewer produced no details"
         body += f"\n\n### Please fix\n\n{self.fix}" * bool(self.fix)
+        body += f"\n\n### Known issues\n\nMinor findings, left for later: they did not stop the review.\n\n" \
+                f"{self.minor}" * bool(self.minor)
         return f"## Automated review\n\nVerdict: {verdict}\n\n{body}"
+
+    def suggested_instructions(self, stop, sent):
+        """The draft of the next run's instructions, for the human to check before moving the card to Ready again."""
+        repeated = self.repeated(sent)
+        again = " (it came back after a retry)"
+        items = "\n".join(f"{n}. {AGAIN.sub('', finding_text(f), 1)}" + again * (f in repeated)
+                          for n, f in enumerate(self.findings, 1))
+        return "\n\n".join([
+            "## Suggested instructions",
+            "A draft for the next run, made from the automated review above. Check it, then move the card to Ready: "
+            "the next run reads this report, these instructions included. To change them, edit this comment or add "
+            "one of your own.",
+            f"The automated review stopped sending the work back: {stop}.",
+            "Fix these findings of the automated review, then check every acceptance criterion again:",
+            items or self.fix,
+            "Fix the cause, not only the cases the review names: where the review proposes a change, take it as a "
+            "hint, and add a test for each case it names. A finding you think is wrong: leave the code as it is and "
+            "say why in your report. The Known issues can wait."])
+
+
+AGAIN = re.compile(r"\(again\)\s*", re.I)
+
+
+def finding_text(finding):
+    return re.sub(r"^([-*+]|\d+[.)])\s+", "", finding.strip())
+
+
+def finding_key(finding):
+    """A finding as review_loop compares it with the ones sent back: without its list mark, (again), markdown
+    decoration, case and spacing."""
+    return " ".join(re.sub(r"[*`_]", "", AGAIN.sub("", finding_text(finding), 1)).lower().split())
 
 
 class AgentReport:
@@ -423,7 +479,7 @@ def digest_lines(d, skip=()):
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
-                            "parallel": str(PARALLEL)},
+                            "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES)},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
@@ -536,6 +592,15 @@ def parallel():
     if not re.fullmatch(r"\d+", value) or int(value) < 1:
         fail(f"[runner] parallel must be a whole number, 1 or more; got {value!r}",
              f"set  [runner]  parallel = <number>  in {home(CONFIG)} (default {PARALLEL}; 1 or 2 on a slow PC)")
+    return int(value)
+
+
+def review_retries():
+    """[runner] review_retries: how many times a "needs changes" review sends the work back to the agent (0: never)."""
+    value = config()["runner"].get("review_retries", "").strip() or str(REVIEW_RETRIES)
+    if not re.fullmatch(r"\d+", value):
+        raise RuntimeError(f"[runner] review_retries in {home(CONFIG)} must be a whole number, 0 or more; "
+                           f"got {value!r}")
     return int(value)
 
 
@@ -1837,6 +1902,8 @@ def launch(t):
         name = helper_agent(t, key)
         if name and not config().has_option("agents", name):
             raise RuntimeError(f'unknown {key} "{name}" in the config')
+    if helper_agent(t, "reviewer"):
+        review_retries()
     check_sandbox()
     for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
         if name:  # before the worktree and before any credit is spent
@@ -1864,7 +1931,8 @@ def launch(t):
         comments_file(t).write_text(comments + "\n")
     else:
         comments_file(t).unlink(missing_ok=True)
-    for f in (retry_file(t), finish_file(t)):  # the last run's: a resume reads them only from this run
+    # the last run's: a resume reads them only from this run
+    for f in (retry_file(t), review_state_file(t), finish_file(t)):
         f.unlink(missing_ok=True)
     start_run(t, IN_PROGRESS)
 
@@ -2073,6 +2141,12 @@ def retry_file(t):
     return DATA / "prompts" / f"{t['id']}-retry.md"
 
 
+def review_state_file(t):
+    """What review_loop knows of its earlier rounds (the findings it sent back, the size of each retry's change), for a
+    run resumed during review or retry."""
+    return DATA / "prompts" / f"{t['id']}-review.json"
+
+
 def finish_file(t):
     """What finish is given besides the report (review_loop's outcome, the agent's exit code), for a run resumed
     during finishing: it was only in the memory of the run that stopped."""
@@ -2103,6 +2177,9 @@ def build_prompt(t, i, comments=""):
     if i["report"]:
         lines += ["", "# Earlier run", "", "An earlier run of this task stopped. Its report:", "",
                   i["report"].replace(REPORT_MARK, "").strip()]
+        if section(i["report"], "Suggested instructions"):
+            lines += ["", "Its Suggested instructions were there for the human to check before moving the card to "
+                          "Ready again: follow them, unless the Goal or a comment since says otherwise."]
     answered = [r for r in i["replans"] if "\nDecision: answered\n" in r]
     if answered:
         lines += ["", "# Replanner notes", "",
@@ -3001,8 +3078,9 @@ def shown_path(path, wt):
     return path
 
 
-def build_review_prompt(t, report, diff):
-    instructions, about_comments, _ = instruction_parts(WORKER_REVIEW)
+def build_review_prompt(t, report, diff, sent=()):
+    """sent: the findings earlier reviews of this run sent the agent back with."""
+    instructions, about_comments, about_sent = instruction_parts(WORKER_REVIEW)
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
@@ -3010,12 +3088,14 @@ def build_review_prompt(t, report, diff):
     return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
                       f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
                       issue(t)["body"].strip(), *(["", about_comments, "", comments] if comments else []),
+                      *(["", about_sent, "", *sent] if sent else []),
                       "", "# Agent report", "",
                       report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
 
 
-def run_review(t, report, say, usage=None):
-    """The reviewer's verdict on the whole PR, or None when no reviewer is set or there is nothing to review."""
+def run_review(t, report, say, usage=None, sent=()):
+    """The reviewer's verdict on the whole PR, or None when no reviewer is set or there is nothing to review.
+    sent: the findings earlier reviews of this run sent the agent back with."""
     reviewer = helper_agent(t, "reviewer")  # "agent": the task's own agent, in a fresh context
     if not reviewer:
         return None
@@ -3030,7 +3110,7 @@ def run_review(t, report, say, usage=None):
     shared_unlink(wt / REVIEW_FILE)
     set_stage(t, "review")
     snap = hold_snapshot(t)
-    code = run_agent_process(reviewer, build_review_prompt(t, report, diff), wt, say, "reviewer", usage, t)
+    code = run_agent_process(reviewer, build_review_prompt(t, report, diff, sent), wt, say, "reviewer", usage, t)
     if release_snapshot(t, snap):
         return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
                             "Reviewers must only inspect the worktree.")
@@ -3044,48 +3124,110 @@ RETRY_ASK = "Revise the work once, update .task-report.md, and stop."
 
 
 def review_loop(t, report, code, say, record, resume_at="", why=""):
-    """Review before the PR; one automated retry on "needs changes". Returns (report, code, review section, blocked).
+    """Review before the PR; on "needs changes", send the work back to the agent, up to [runner] review_retries times.
+    Returns (report, code, review section, blocked).
 
-    Each verdict goes into record["reviews"], and record["retried"] says whether the agent was sent back.
-    Each launch is measured into record["usage"].
+    Sending back stops early when it is not getting anywhere (review_stop): a finding comes back after the retry it
+    was sent back with, or the retries' changes are not getting smaller. A review that stops it blocks the card, and
+    its section ends with Suggested instructions for the next run.
+    Each verdict goes into record["reviews"], record["retries"] counts the retries (record["retried"]: any), and
+    record["review_stop"] says why the last "needs changes" was not sent back. Each launch is measured into
+    record["usage"].
     resume_at, why: a resumed run (relaunch) goes on from its review ("review": review_attempt says which) or from
-    its retry ("retry", with the retry's prompt as it was saved, then the second review), cut short for why.
+    its retry ("retry", with the retry's prompt as it was saved, then the next review), cut short for why.
     """
     wt = Path(t["worktree"])
-    first = int(t.get("review_attempt") or 0) if resume_at == "review" else 1 if resume_at == "retry" else 0
+    attempt = int(t.get("review_attempt") or 0) if resume_at in ("review", "retry") else 0
+    state = {"sent": [], "sizes": [], "tree": ""}
+    if attempt and review_state_file(t).exists():
+        state.update(json.loads(review_state_file(t).read_text()))
+    record["retries"], record["retried"] = attempt, attempt > 0
     if resume_at == "retry":
         feedback = retry_file(t).read_text()
         section = feedback.rpartition("\n# Automated review feedback\n\n")[2].rpartition(f"\n\n{RETRY_ASK}")[0]
-        record["retried"] = True
-        code = run_worker(t, feedback, "retry", "agent retry after review", say, record, why)
-        report = agent_file(wt / REPORT_FILE) or ""
+        code, report = review_retry(t, feedback, state, say, record, why)
         if not report.strip() or AgentReport(report).blocked:
             return report, code, section, ""
     elif not report.strip() or AgentReport(report).blocked:  # finish() blocks these anyway
         return report, code, "", ""
-    record["retried"] = record["retried"] or first == 1
-    for attempt in range(first, 2):
+    while True:
         t["review_attempt"] = str(attempt)
-        review = run_review(t, report, say, record["usage"])
+        review = run_review(t, report, say, record["usage"], state["sent"])
         if review is None:
             return report, code, "", ""
         say(f"== reviewer verdict: {review.verdict or 'missing'}")
         record["reviews"].append(review.verdict or "missing")
         if review.passed:
             return report, code, review.issue_section(), ""
-        if attempt == 1 or not review.needs_changes:
-            return report, code, review.issue_section(), review.blocked_line(retried=attempt == 1)
+        if not review.needs_changes:
+            return report, code, review.issue_section(), review.blocked_line()
+        stop, record["review_stop"] = review_stop(review, state, attempt)
+        if stop:
+            say(f"== {stop}")
+            return (report, code, review.issue_section() + "\n\n" + review.suggested_instructions(stop, state["sent"]),
+                    review.blocked_line(stop))
         feedback = "\n".join([prompt_file(t).read_text(), "", "# Automated review feedback", "",
                               review.issue_section(), "", RETRY_ASK, ""])
-        record["retried"] = True
+        attempt += 1
+        record["retries"], record["retried"] = attempt, True
         retry_file(t).write_text(feedback)  # before the stage: a run resumed during the retry reads it
         shared_unlink(wt / REPORT_FILE)  # a retry that dies must not pass for the first run's report
         t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
+        state = {"sent": state["sent"] + review.findings, "sizes": state["sizes"], "tree": staged_tree(wt)}
+        write_atomic(review_state_file(t), json.dumps(state))
+        t["review_attempt"] = str(attempt)  # the retry's number, then the next review's
         set_stage(t, "retry")
-        code = run_worker(t, feedback, "retry", "agent retry after review", say, record)
-        report = agent_file(wt / REPORT_FILE) or ""
+        code, report = review_retry(t, feedback, state, say, record)
         if not report.strip() or AgentReport(report).blocked:
             return report, code, review.issue_section(), ""
+
+
+def review_retry(t, feedback, state, say, record, why=""):
+    """The agent's retry after a "needs changes" review: (its exit code, its report). The size of its change (the
+    lines it added and removed since state["tree"], the worktree before it) goes into state, for review_stop."""
+    wt = Path(t["worktree"])
+    code = run_worker(t, feedback, "retry", "agent retry after review", say, record, why)
+    if state["tree"]:  # none: a run resumed in a retry it started before task-hub kept the tree
+        state["sizes"].append(changed_lines(wt, state["tree"]))
+        write_atomic(review_state_file(t), json.dumps(state))
+    return code, agent_file(wt / REPORT_FILE) or ""
+
+
+def review_stop(review, state, retries):
+    """Why a "needs changes" review is not sent back again ("" to send it back), and the word for record["review_stop"]:
+    the limit ([runner] review_retries) is reached, or the retries are not getting anywhere: a finding came back after
+    the retry it was sent back with, the last retry changed nothing, or it changed as much as the one before it or
+    more (the change is not converging)."""
+    limit, sizes, done = review_retries(), state["sizes"], f"after {plural(retries, 'retry', 'retries')}"
+    if retries and review.repeated(state["sent"]):
+        return f"automated review stopped {done}: a finding came back after the retry it was sent back with", "repeated"
+    if retries and sizes and sizes[-1] == 0:
+        return f"automated review stopped {done}: the last retry changed no files", "no change"
+    if len(sizes) > 1 and sizes[-1] >= sizes[-2]:
+        return (f"automated review stopped {done}: the retries' changes are not getting smaller "
+                f"({' then '.join(map(str, sizes[-2:]))} changed lines)", "not converging")
+    if retries >= limit:
+        return (f"automated review did not pass {done}" if limit else
+                "automated review: needs changes ([runner] review_retries = 0: it is never sent back)"), "limit"
+    return "", ""
+
+
+def plural(n, one, many):
+    return f"{'one' if n == 1 else n} {one if n == 1 else many}"
+
+
+def staged_tree(wt):
+    """The worktree as git would commit it now: a tree object, to measure what the next agent changes in it."""
+    git_shared(wt, "add", "-A", check=True)
+    return git_shared(wt, "write-tree", check=True).stdout.strip()
+
+
+def changed_lines(wt, tree):
+    """Lines added and removed in the worktree since tree (staged_tree); a binary file counts as one."""
+    git_shared(wt, "add", "-A", check=True)
+    numstat = git_shared(wt, "diff", "--cached", "--numstat", tree, "--").stdout
+    return sum(int(a) + int(r) if a.isdigit() and r.isdigit() else 1
+               for a, r, *_ in (line.split("\t") for line in numstat.splitlines() if line.count("\t") >= 2))
 
 
 def run_worker(t, prompt, stage, label, say, record, resumed_why=""):
@@ -3303,7 +3445,7 @@ def run_task(t, say):
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
-              "blocked_by": "", "replan": "", "usage": []}
+              "retries": 0, "review_stop": "", "blocked_by": "", "replan": "", "usage": []}
     if stage in ("", "preparing", "setup"):  # from the start: [setup] gives the same result each time it runs
         stage = ""
         stop = run_setup(t, wt, say)
@@ -4299,7 +4441,8 @@ def sync(started_here=False):
             except (RuntimeError, OSError, ValueError) as e:
                 record_run({"id": t["id"], "title": t["title"], "repo": t.get("repo", ""),
                             "agent": t.get("agent", ""), "started": now(), "finished": now(), "seconds": 0,
-                            "status": BLOCKED, "blocked_by": "start", "reviews": [], "retried": False, "replan": ""})
+                            "status": BLOCKED, "blocked_by": "start", "reviews": [], "retried": False, "retries": 0,
+                            "review_stop": "", "replan": ""})
                 report_comment(t, blocked=f"could not start: {str(e)[:300]}")
                 set_status(t, BLOCKED, reason=f"could not start: {str(e)[:300]}")
                 lines.append(f"error: task {t['id']} could not start: {e}")
@@ -5637,9 +5780,11 @@ def cmd_stats(_):
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
-        f"reviews: {len(reviewed)} reviewed runs, {len(retried)} sent back once, "
-        f"{sum(r['reviews'][-1] == 'pass' for r in retried)} of those passed after the retry",
+        f"reviews: {len(reviewed)} reviewed runs, {len(retried)} sent back "
+        f"({plural(sum(r.get('retries') or 1 for r in retried), 'retry', 'retries')} in all), "
+        f"{sum(r['reviews'][-1] == 'pass' for r in retried)} of those passed after being sent back",
         *(counts("first_verdicts", "verdict", [r["reviews"][0] for r in reviewed]) if reviewed else []),
+        *counts("review_stops", "why", [r["review_stop"] for r in reviewed if r.get("review_stop")]),
         *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
         slow,

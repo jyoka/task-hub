@@ -187,6 +187,11 @@ sequenceDiagram
 `[merge] queue = on` のときは、最後の「あなたが PR をマージする」が「`task merge` でキューに入れる」になります。
 その先は 4.5 のとおり task-hub がマージします。
 
+reviewer が `needs changes` と判定すると、実装エージェントに差し戻し、もう一度レビューします(`[runner] review_retries`
+回まで。既定 2)。差し戻した指摘がまた出たときや、差し戻しの変更が小さくならないときは、回数が残っていても止めて
+Blocked にし、次の実行への修正指示の下書きを Issue に書きます。minor の指摘だけなら In review に進み、PR に
+「Known issues」として残します([task-format.md](../task-format.md#自動レビューの差し戻し)、決定事項 32)。
+
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
 PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。
@@ -313,7 +318,7 @@ flowchart LR
 - 出来事の本文(Issue の文章など)は、会話のエージェントにとってデータです。指示として扱いません
 - ボードを書き換えるのは task-hub とあなただけです
 - マージキューに入るのは、あなたが承認した PR(`task merge`、wait for merge の列)と、`[autopilot]` に書いたリポジトリで
-  自動レビューが `pass` の PR だけです。競合を解くエージェントもファイルを直すだけで、マージコミット、push、マージは
+  自動レビューが `pass`(指摘が minor の `Known issues` だけのものを含む)の PR だけです。競合を解くエージェントもファイルを直すだけで、マージコミット、push、マージは
   task-hub が行います。`[autopilot]` のリポジトリにチェックもブランチの保護もなければ、マージを止めるのはレビューの判定だけです
 - 共有先のつなぎ先は、今ログインしているアカウント自身が書いたコメントだけを信頼します。共有時に選んだ Project も保存します
 - `task intake` の ntfy のトピックは、名前を知っていれば誰でも書けます。合言葉(`[intake] secret`)が先頭にない文は

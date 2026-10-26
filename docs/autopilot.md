@@ -8,6 +8,11 @@
 | Backlog のカードを Ready に移す | 待ち先(Blocked by)がすべて終わったら、`task watch` が Ready に移し、同じ確認で始める |
 | PR をマージする | 実行が In review で終わり、自動レビュー(reviewer)の判定が `pass` なら、マージキューに入れる。キューが base に追いつかせ、チェックを待ってマージする |
 
+指摘が minor(`Known issues`)だけのレビューも `pass` に数えます。reviewer の判定が `needs changes` でも、
+`Please fix` が空で `Known issues` だけなら `pass` として記録し、マージします。minor の指摘は PR の本文の
+「Known issues」に残るので、マージのあとで読みます
+([task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し))。
+
 Blocked になったカード、自動レビューが通らなかったカード、PR のない調べもの(research)のカード、一度でも
 Backlog から出たカードは、今までどおりあなたを待ちます。あなたは通知と `task events`、毎朝のまとめで、あとから何が起きたかを読みます。
 
@@ -23,7 +28,7 @@ repos = jyoka/aica            ; カンマ区切り。owner/name。大文字と�
 queue = on                    ; 必須。マージはマージキューを通す
 
 [runner]
-reviewer = agent              ; 必須。自動レビューが pass のものだけをマージする
+reviewer = agent              ; 必須。自動レビューが pass(minor だけを含む)のものだけをマージする
 ```
 
 - `repos` を書いたのに `[merge] queue = on` か `[runner] reviewer` がないと、`task` と `task watch` は何もせずに
@@ -42,7 +47,7 @@ Ready に移ります(待ち先のあるものは、待ち先が終わってか�
 | する事 | 条件 | 1 回の決め方 |
 |---|---|---|
 | Ready に移す | Backlog にある、Issue が開いている、Target repo が `repos` にある、待ち先がない、動いていない、Goal に `Autopilot: off` の行がない | 一度も Backlog から出ていない(このマシンに実行の記録がなく、`events.jsonl` に Backlog 以外の Status の出来事がない) |
-| マージキューに入れる | In review にある、Target repo が `repos` にある、カードの最後の Status の出来事がその In review で、判定が `pass`、PR がある、動いていない(競合を解く実行も)、Goal に `Autopilot: off` の行がない。PR がその実行の PR で、draft でなく、開いていて、先頭のコミットが実行の push したもののまま | その In review のあとに `queued` も `autopilot`(`merge`、`skip`)もない |
+| マージキューに入れる | In review にある、Target repo が `repos` にある、カードの最後の Status の出来事がその In review で、判定が `pass`(minor だけのレビューを含む)、PR がある、動いていない(競合を解く実行も)、Goal に `Autopilot: off` の行がない。PR がその実行の PR で、draft でなく、開いていて、先頭のコミットが実行の push したもののまま | その In review のあとに `queued` も `autopilot`(`merge`、`skip`)もない |
 
 - Ready にするのは、一度も Backlog から出ていないカードだけです。前に動いたカード、あなたが `task start` したカード、
   Backlog に戻したカードは動かしません(止めておきたいカードは Backlog に戻します)

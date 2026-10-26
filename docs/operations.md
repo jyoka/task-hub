@@ -40,7 +40,7 @@
   `== kiro ended with an error: ...`、`== claude ended with ...` の行に出ます。
 - **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
   `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
-  `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です
+  `review`、`retry`(差し戻しを受けた実装エージェント)、`finishing`(push、PR、コメント)、`replanning` です
   (詳しくは [design.md](design.md) の「In progress の段階」)。`Blocked › replanning` は、カードはもう Blocked でも
   replanner がまだ動いているという意味です。段階は手元の `runs/<番号>.json` の `stage` にだけあり、GitHub のボードと
   `events.jsonl` には出ません。実行が終わると何も付かなくなります。
@@ -458,7 +458,9 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 ## 実行の結果を集計する
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
-件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定、
+件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、差し戻しをやめた理由(`review_stops`。
+`limit`、`repeated`、`no change`、`not converging`。[task-format.md](task-format.md#自動レビューの差し戻し))、
+Blocked の理由、replanner の判定、
 `slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
@@ -466,7 +468,7 @@ Blocked の理由は次のどれかです。
 | 理由 | 意味 |
 |---|---|
 | `agent` | エージェント自身が `## Blocked` を書いた |
-| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻し後も `needs changes` など) |
+| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻しをやめたあとも `needs changes` など) |
 | `no report` | エージェントがレポートを書かずに終わった |
 | `no changes` | レポートはあるが、ファイルを変えなかった |
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
@@ -534,6 +536,8 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
 | `the watchdog stopped the agent: no output and no CPU used` | エージェントが 45 分以上黙っていて、その子孫も CPU を使っていませんでした(下の「黙って止まったコマンド」)。`task log <番号>` の `== watchdog:` の行の前を読みます |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
+| `automated review did not pass after ...`、`automated review stopped after ...: <止まった条件>` | 自動レビューの `needs changes` が、差し戻しのあとも残りました([task-format.md](task-format.md#自動レビューの差し戻し))。Issue のレポートの最後の `## Suggested instructions` を読み、よければそのまま Ready に戻します。指摘が誤りなら、そのコメントを直すか、理由をコメントに書いてから戻します |
+| `automated review: blocked: ...` | reviewer が、人にしか出せない情報が要ると判断しました。求められたものを Issue に書いてから Ready に戻します |
 | `the run stopped unexpectedly again, after resuming once at <段階>` | `task _run` プロセスが予期せず止まり(クラッシュ、kill、Mac の再起動、herdr のペインを閉じた)、task-hub が 1 回だけ再開しましたが、再開した実行もまた止まりました。`task log <番号>` で止まったところを見てから Ready に戻します |
 | `the run stopped unexpectedly; not resumed: <わけ>` | `task _run` プロセスが止まりましたが、再開しませんでした。わけは、Ctrl-C で止めた(`it was stopped with Ctrl-C`)、worktree が消えた、worktree で誰かがコミットした(`HEAD moved`)、続けるのに要る記録やプロンプトがない、などです。直してから Ready に戻します |
 | `the run stopped unexpectedly; could not resume it: <わけ>` | 再開しようとしましたが、起動できませんでした(残ったエージェントが止まらない、herdr のタブが開かない、など)。わけを直してから Ready に戻します |
