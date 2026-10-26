@@ -130,7 +130,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
+`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
 `merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
@@ -197,7 +197,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow, update, conflict, autopilot   ; 既定。列の名前か replan、slow、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget   ; 既定。列の名前か replan、slow、over budget、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
 ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
 ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
@@ -205,6 +205,9 @@ ntfy_token = tk_...                ; 任意。アクセス制御のあるトピ�
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
 システム設定の「通知」で、herdr または「スクリプトエディタ」(osascript の通知はこの名前で出ます)が許可されて
 いるか確かめます。
+
+Blocked や In review を席にいないときにも知るための方法(ntfy、GitHub の通知メールなど)を比べた結果は
+[notifications.md](notifications.md) にあります。
 
 #### スマートフォンに届ける(ntfy)
 
@@ -471,6 +474,7 @@ Blocked の理由は次のどれかです。
 | `no changes` | レポートはあるが、ファイルを変えなかった |
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
 | `setup` | `[setup]` の準備が失敗した、または git が無視しないファイルを残した |
+| `balance` | Goal の `paid api:` の残高が足りなかった、または `[balance]` の確認が失敗した([予算と残高](#予算と残高)) |
 | `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
 
 ### エージェントの使用量
@@ -478,23 +482,75 @@ Blocked の理由は次のどれかです。
 実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
 `reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入ります。エージェントの CLI の記録を読めたときだけ、
 Claude Code なら `calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、
-`output`(トークン数)、`subagent_calls`、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
-が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェントでは秒数だけです。
+`output`(トークン数)、`subagent_calls`、`models` が、pi なら `calls`、`input`、`cache_creation`、`cache_read`、`output`、
+`cost`(USD。pi がモデルの価格から計算した値)、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
+が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェント(codex など)では秒数だけです。
 読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
 
 ```
 == agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+== agent used 12 calls, 410k tokens (9.8k out), $0.4210, models gpt-5.5
 == agent used 64 calls, 19.21 credits, models auto
 ```
+
+pi の記録は `~/.pi/agent/sessions/` のセッションのファイルです(`PI_CODING_AGENT_SESSION_DIR` か `PI_CODING_AGENT_DIR` が
+あればそちら。pi の `settings.json` の `sessionDir` は読みません)。最初の行の `cwd` がその worktree のファイルだけを開き、
+時刻がその起動の間の、使用量のある行(assistant の返事、圧縮の要約、キャッシュの温め)を 1 回の呼び出しとして数えます。
+pi は再開(`--session-id`)で同じファイルに書き足すので、前の起動の行は時刻で外れます。ChatGPT のアカウントで動かす
+`openai-codex` でも pi は価格から `cost` を出します。実際の請求とは違うことがあります。
 
 `task stats` の `tokens:` の行は、トークン数を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
 cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
 出します。Kiro の実行はトークン 0 としては数えず、`credits:` の行に、クレジットを測れた実行の数と 1 実行あたりの
-クレジットの中央値を出します。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
+クレジットの中央値を出します。`cost:` の行は、費用を測れた実行(今は pi だけ)の数と、1 実行あたりの費用の中央値です。
+`over budget:` の行は、出来事 `over budget` の数です。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
 `heaviest` はトークン数の多い 3 実行です。
-起動の間にその worktree で動いた Claude Code の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
-起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
-この数字を見て決めます。
+起動の間にその worktree で動いた Claude Code と pi の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
+起動したものも、あなたが同じ worktree で `claude` を開いたものも)。予算を超えたときは出来事を出すだけです(下記)。
+止めるかどうかは、この数字と `over budget` の数を見て決めます。
+
+### 予算と残高
+
+**予算**: エージェントを起動し終えるたびに、その実行のここまでの使用量(`usage` の合計)を予算と比べます。
+再開した実行では、再開のあとの分だけです(`metrics.jsonl` の `usage` と同じ。前の分は落ちた `task _run` のメモリにありました)。超えた
+ものがあれば、出来事 `over budget` を出して通知します。測るものは 4 つで、出来事は測るものごとに実行 1 回につき 1 回です。
+今は知らせるだけで、実行は止めません。
+
+| 測るもの | 予算(Goal に `Budget` がないとき) |
+|---|---|
+| 時間(起動ごとの `seconds` の合計) | そのエージェントの終わった実行の中央値の 10 倍、最低 1 時間。実績が 10 件未満なら 3 時間 |
+| トークン(Claude Code、pi) | 中央値の 5 倍、最低 200 万。実績が 10 件未満なら 2000 万 |
+| 費用(USD、pi) | 中央値の 5 倍、最低 $1。実績が 10 件未満なら $10 |
+| クレジット(Kiro) | 中央値の 5 倍、最低 5。実績が 10 件未満なら 20 |
+
+- 実績は `metrics.jsonl` の、同じエージェント(カードの Agent)の実行です。エージェントが動かなかった実行
+  (`blocked_by` が `start`、`setup`、`balance`)は数えません
+- カードごとの予算は Goal の `Budget` の見出しに書きます([task-format.md](task-format.md#budget-予算と有料-api))。
+  書いたものだけが上の表の代わりになります
+- 値はコードの定数です。設定はありません(`slow` と同じ理由です。決定事項 19)
+- 確かめるのは起動が終わったときです。1 回の起動が長いと、出来事はその起動が終わるまで出ません。
+  長さは `slow` が実行中に知らせます
+- `reason` は `used 25.1M tokens, over 20.0M tokens (5 x the median of 30 runs of claude)` のような 1 行です
+
+**残高**: Goal の `Budget` に `paid api: openai` と書いたカードは、`[setup]` のあと、エージェントを起動する前に、
+`[balance]` のその名前のコマンドで残高を確かめます。
+
+```ini
+[balance]
+openai = python3 scripts/check_openai_balance.py   ; 例。worktree で動く。0 で終われば足りている
+```
+
+- コマンドは worktree で、`[setup]` と同じように動きます(`sh -c`、Windows は PowerShell。`[sandbox]` ではエージェントの
+  ユーザー)。リポジトリの `.env`(`[env]` で写したもの)も読めます
+- 0 で終われば足りています。0 以外なら、エージェントを起動せずに Blocked にします。理由には、コマンドの出力の
+  最後の行が入ります(`not enough balance on openai ([balance] openai exited 3: ...); add credit, then move the card to Ready again`)
+- 60 秒で終わらなければ止めて、Blocked にします
+- `[balance]` にその名前がないと、開始の前に Blocked にします(`could not start: ...`)
+- 再開した実行では、もう一度は確かめません(確かめるのは最初から始めるときだけです)
+
+OpenAI には API キーで残高を読む公式の API が見当たりません(2026-10-26 に調べた範囲)。確かめ方は
+リポジトリごとに決めます。たとえば、いちばん安いモデルに 1 トークンだけの要求を送り、429 の
+`insufficient_quota` が返れば 0 以外で終わるスクリプトです。わずかに費用がかかります。
 
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。

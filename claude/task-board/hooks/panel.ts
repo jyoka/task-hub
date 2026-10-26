@@ -95,8 +95,9 @@ export const readEvents = (text: string): Record<string, Seen> => {
 }
 
 // bin/task slow_threshold(agent): the usual time is the median (the upper one of an even count) of the agent's
-// finished runs in metrics.jsonl, leaving out runs where the agent never ran (blocked_by start or setup), once there
-// are SLOW_MIN_RUNS; a run counts as slow past max(SLOW_TIMES x usual, SLOW_FLOOR), or SLOW_DEFAULT with no usual.
+// finished runs in metrics.jsonl, leaving out runs where the agent never ran (blocked_by start, setup or balance),
+// once there are SLOW_MIN_RUNS; a run counts as slow past max(SLOW_TIMES x usual, SLOW_FLOOR), or SLOW_DEFAULT
+// with no usual.
 export const SLOW_TIMES = 3
 export const SLOW_FLOOR = 15 * 60
 export const SLOW_DEFAULT = 30 * 60
@@ -104,7 +105,7 @@ export const SLOW_MIN_RUNS = 3
 export type Threshold = { limit: number; usual: number | null }
 export const slowThreshold = (metrics: string, agent: string): Threshold => {
   const seconds = jsonLines(metrics)
-    .filter(r => r.agent === agent && r.blocked_by !== 'start' && r.blocked_by !== 'setup')
+    .filter(r => r.agent === agent && !['start', 'setup', 'balance'].includes(String(r.blocked_by)))
     .map(r => typeof r.seconds === 'number' && Number.isFinite(r.seconds) ? r.seconds : 0)
     .sort((x, y) => x - y)
   const usual = seconds.length >= SLOW_MIN_RUNS ? seconds[Math.floor(seconds.length / 2)] ?? null : null
