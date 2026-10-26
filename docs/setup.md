@@ -155,7 +155,7 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
 
    ```ini
    [notify]
-   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update, conflict, autopilot。空にすると通知しない
+   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget。空にすると通知しない
    ```
 
    IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの

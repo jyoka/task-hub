@@ -71,14 +71,25 @@ MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for t
 WATCH_SECONDS = 60
 # [notify] events: which events show a notification; empty = none. "update": a new task-hub release (`task watch`);
 # "conflict": an In review PR that conflicts with its base now ([merge] queue = on);
-# "autopilot": a card [autopilot] moved to Ready or queued for merge in the human's place
-NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict, autopilot"
+# "autopilot": a card [autopilot] moved to Ready or queued for merge in the human's place;
+# "over budget": a run used more than its budget (over_budget)
+NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget"
 # a line of the Goal that keeps [autopilot] off this one card, both its start and its merge (a note, a PRD, a step
 # only a human can do). Also as a list item, in emphasis or code, with a period: a miss would start the card
 AUTOPILOT_OFF = re.compile(r"(?im)^[ \t]*(?:[-*+][ \t]+)?[*_`]*autopilot[*_`]*:[*_`]*[ \t]*[*_`]*off[*_`]*\.?[*_`]*[ \t]*$")
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
+# a run is "over budget" once what its launches used passes the Goal's Budget; without one, BUDGET_TIMES the median
+# of its agent's finished runs, at least BUDGET_FLOOR; with fewer than BUDGET_MIN_RUNS of them, BUDGET_DEFAULT.
+# Per measure: seconds, tokens (Claude Code, pi), cost in USD (pi) and credits (Kiro). Only an event, for now
+BUDGET_TIMES = {"seconds": 10, "tokens": 5, "cost": 5, "credits": 5}
+BUDGET_FLOOR = {"seconds": 3600, "tokens": 2_000_000, "cost": 1.0, "credits": 5.0}
+BUDGET_DEFAULT = {"seconds": 3 * 3600, "tokens": 20_000_000, "cost": 10.0, "credits": 20.0}
+BUDGET_MIN_RUNS = 10
+AGENT_NEVER_RAN = ("start", "setup", "balance")  # a run's blocked_by when its agent never started: no usual time
+# how long one [balance] check may take before the run is Blocked without starting the agent
+BALANCE_SECONDS = int(os.environ.get("TASK_BALANCE_SECONDS") or 60)  # tests: a hanging check fails in a second
 # how long a herdr pane gets to begin the run, twice (the second time after one more Enter)
 HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # tests: a dead pane fails in seconds
 CLAUDE_P = ("env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
@@ -142,7 +153,8 @@ TRIGGER_SECONDS = float(os.environ.get("TASK_TRIGGER_SECONDS") or 300)  # `task 
 INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record of the copies it owns
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage", "link", "link_project", "agent_pid", "agent_started", "head", "snap", "review_attempt",
-            "interrupted", "resumes", "resumed", "resume_stage", "resumed_at", "session", "session_role"]
+            "interrupted", "resumes", "resumed", "resume_stage", "resumed_at", "session", "session_role", "budget",
+            "paid_api", "over_budget"]
 # stage: where the run is (docs/design.md); never on GitHub or in EVENTS.
 # link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
 # agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
@@ -154,9 +166,11 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
 # (MAX_RESUMES), resumed: the stages it was resumed at, space-separated. resume_stage: where relaunch tells the next
 # `_run` to go on from (it reads and empties it), resumed_at: when relaunch started it again. session: the {session}
 # of the task's agent's last launch, session_role: that launch's stage (agent, retry), so a resume there goes on with
-# its conversation. launch empties them all (RUN_FRESH)
+# its conversation. launch empties them all (RUN_FRESH).
+# budget: the Goal's Budget limits as launch read them ({"tokens": 3000000, ...}), paid_api: the paid APIs it names,
+# space-separated (check_balance). over_budget: the measures this run has had an `over budget` event for
 RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted", "resumes", "resumed",
-             "resume_stage", "resumed_at", "session", "session_role")
+             "resume_stage", "resumed_at", "session", "session_role", "over_budget")
 MAX_RESUMES = 1  # a run that stops unexpectedly is resumed this often, then Blocked (decision 7); no setting
 RESUME_STAGES = ("preparing", "setup", "agent", "review", "retry", "finishing")  # the stages a run can go on from
 GH = os.environ.get("TASK_GH", "gh")
@@ -1509,7 +1523,7 @@ def slow_threshold(agent):
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if r.get("agent") == agent and r.get("blocked_by") not in ("start", "setup"):  # the agent never ran
+        if r.get("agent") == agent and r.get("blocked_by") not in AGENT_NEVER_RAN:
             seconds.append(r.get("seconds") or 0)
     usual = median(seconds) if len(seconds) >= SLOW_MIN_RUNS else None
     limit = SLOW_DEFAULT if usual is None else max(SLOW_TIMES * usual, SLOW_FLOOR)
@@ -1784,6 +1798,136 @@ def write_rules(t, wt, body):
     shared_write(target, json.dumps({"permissions": rules}, indent=2) + "\n")
 
 
+# one limit of the Goal's Budget: `2h`, `90m`, `3M tokens`, `$5`, `30 credits`; a bare `M` is millions, not minutes,
+# so `3M` does not read and fails
+BUDGET_ITEM = re.compile(r"(?i)^(?:\$\s*(?P<cost>\d+(?:\.\d+)?)|(?P<time>\d+(?:\.\d+)?)\s*(?P<unit>h|hours?|(?-i:m)|min|minutes?|s|sec|seconds?)"
+                         r"|(?P<tokens>\d+(?:\.\d+)?)\s*(?P<scale>[km]?)\s*tokens?|(?P<credits>\d+(?:\.\d+)?)\s*credits?)$")
+# `paid api: openai`, also `**paid api**: openai`, `paid apis:` or `有料 API：openai`; any other line naming a paid API
+# fails, as a miss would start the agent without a balance check
+PAID_API = re.compile(r"(?i)[*_`]*(?:paid[ _-]?apis?|有料\s*api)[*_`]*\s*[:：][*_`]*\s*(.*)")
+PAID_API_WORDS = re.compile(r"(?i)paid[ _-]?apis?|有料\s*api")
+# the Budget heading: `Budget` or `予算`, with an optional colon and a note in brackets (`## Budget (予算)`)
+BUDGET_HEADING = re.compile(r"(?i)(?:budget|予算)[*_`]*\s*[:：]?\s*(?:[(（][^)）]*[)）])?")
+# a line under Budget that looks meant as a limit (`tokens: 3M`, `2h まで`, `$5`, `500円`, `300万トークン`): if it does not read, it fails
+BUDGET_HINT = re.compile(r"(?i)[$¥￥]\s*\d|\d\s*[万千百億]?\s*(?:k|tokens?|credits?|h|hours?|m|min|minutes?|s|sec|seconds?|トークン|クレジット"
+                         r"|時間|分|秒|ドル|円)(?![a-z])|(?:tokens?|credits?|cost|time|トークン|クレジット|時間|費用)\s*[:：]\s*\d")
+LIST_COMMA = re.compile(r"[,、，]")
+
+
+def goal_budget(body):
+    """The Goal's "Budget" heading as (limits, paid APIs): a line like `2h, 3M tokens, $5, 30 credits` gives the run's
+    limits in place of the usual ones (over_budget), and `paid api: openai` names what must have a balance before
+    the agent starts ([balance], check_balance). The heading may be `予算`, and the words `有料 API`. Lines with none
+    of these are prose, left to the agent; a line with one of them, or with a number and a unit (BUDGET_HINT), that
+    does not read fails, as a Rules line does: a mistyped limit would quietly be no limit, and so does a line naming a
+    paid API, or a heading starting with Budget, that does not read. A `paid api:` line under any other heading fails
+    too, as it would start the agent unchecked. Lines in a code block are neither headings nor limits."""
+    limits, paid, inside, fenced = {}, [], False, False
+    for line in body.splitlines():
+        if re.match(r"\s*(```|~~~)", line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if re.match(r"\s*#+\s", line):  # a heading; `#12` (an Issue) or `#tag` is text
+            title = line.strip().lstrip("#").strip().lstrip("*_`")
+            inside = bool(BUDGET_HEADING.fullmatch(title))
+            if not inside and title.lower().startswith(("budget", "予算")):
+                raise RuntimeError(f"the Goal has the heading {line.strip()!r}; write the Budget heading as `## Budget` "
+                                   "or `## 予算`, with the limits on the lines under it (docs/task-format.md)")
+            continue
+        text = re.sub(r"^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?", "", line).strip().strip("*_`").strip()
+        if not text:
+            continue
+        if not inside:
+            if PAID_API.fullmatch(text):
+                raise RuntimeError(f"the Goal has {text!r} outside the Budget heading; put the paid APIs under "
+                                   "`## Budget` (docs/task-format.md)")
+            continue
+        if m := PAID_API.fullmatch(text):
+            names = [n.strip().strip("*_`").strip().lower() for n in LIST_COMMA.split(m[1])]
+            names = [n for n in names if n]
+            if not names or any(not re.fullmatch(r"[\w.-]+", n) for n in names):
+                raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs as names, like "
+                                   "`paid api: openai, anthropic` (docs/task-format.md)")
+            paid += [n for n in names if n not in paid]
+            continue
+        if PAID_API_WORDS.search(text):
+            raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs on their own line, like "
+                               "`paid api: openai, anthropic` (docs/task-format.md)")
+        items = [i.strip().strip("*_`").strip() for i in LIST_COMMA.split(text)]
+        found = [BUDGET_ITEM.fullmatch(i) for i in items]
+        # prose, for the agent; one in ASCII starting with a number or $, or with a number and a unit, was meant as
+        # limits (`3M tokns`, `2 hrs`, `tokens: 3M`, `2h まで`)
+        if not any(found) and not re.fullmatch(r"[\d$][\x20-\x7e]*", text) and not BUDGET_HINT.search(text):
+            continue
+        if not all(found):
+            raise RuntimeError(f"the Goal's Budget has {text!r}; each limit is like 2h, 90m, 3M tokens, $5 "
+                               "or 30 credits, separated by commas (docs/task-format.md)")
+        for m in found:
+            if m["cost"]:
+                limits["cost"] = float(m["cost"])
+            elif m["time"]:
+                limits["seconds"] = round(float(m["time"]) * {"h": 3600, "m": 60, "s": 1}[m["unit"][0].lower()])
+            elif m["tokens"]:
+                limits["tokens"] = round(float(m["tokens"]) * {"": 1, "k": 1e3, "m": 1e6}[m["scale"].lower()])
+            else:
+                limits["credits"] = float(m["credits"])
+    return limits, paid
+
+
+def balance_command(name):
+    """The [balance] command that tells whether the paid API `name` has enough balance (exit 0), or ""."""
+    c = config()
+    return (c.get("balance", name, fallback="") if c.has_section("balance") else "").strip()
+
+
+def shell_command(cmd):
+    """cmd as the shell runs it, ending at the first failing command. Windows has no sh: PowerShell, stopping at
+    a failing cmdlet, ending with the last program's exit code."""
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $ErrorActionPreference = 'Stop'\n" + cmd
+            + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"] if WINDOWS else ["sh", "-c", "set -e\n" + cmd]
+
+
+def check_balance(t, wt, say):
+    """Run the [balance] command of each paid API the Goal's Budget names, in the worktree, before the agent.
+    Returns why the run cannot start (a check that failed, timed out, or is not there), or "".
+    Exit 0 means enough; anything else, not enough, and its last line of output says why."""
+    for name in (t.get("paid_api") or "").split():
+        cmd = balance_command(name)
+        if not cmd:  # launch checks it too: the config may have changed since
+            return f"the Goal's Budget names the paid API {name}, but [balance] has no {name} command to check it"
+        say(f"== balance: {name}: {cmd}")
+        # with [sandbox] on, as the agent's user, like [setup]: it reads the repository's own files (.env)
+        proc = subprocess.Popen(as_agent(shell_command(cmd), wt, pass_env()), cwd=wt, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                                **AGENT_GROUP)
+        t["agent_running"] = True  # never saved: a Ctrl-C or SIGHUP now raises Interrupted, so the check is stopped
+        output = None
+        try:
+            output, _ = proc.communicate(timeout=BALANCE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            t["agent_running"] = False
+            if proc.poll() is None:  # its whole group, as an agent's (sudo's with [sandbox]): a curl it started too
+                stop_agent(proc)
+        if output is None:
+            with contextlib.suppress(subprocess.TimeoutExpired, ValueError):
+                proc.communicate(timeout=AGENT_STOP_SECONDS)
+            return f"the [balance] {name} check did not finish in {BALANCE_SECONDS} seconds; the agent was not started"
+        lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+        for line in lines:
+            say(line)
+        if proc.returncode != 0:
+            said = clip(lines[-1], 300) if lines else "no output"
+            return (f"not enough balance on {name} ([balance] {name} exited {proc.returncode}: {said}); "
+                    "add credit, then move the card to Ready again")
+        say(f"== balance: {name}: enough")
+    return ""
+
+
 def setup_command(repo):
     """The [setup] command for this repo's worktrees (for example creating its virtualenv), or ""."""
     c = config()
@@ -1803,12 +1947,8 @@ def run_setup(t, wt, say):
     say(f"== setup: {cmd}")
     before = set(git_shared(wt, "ls-files", "--others", "--exclude-standard").stdout.split("\n"))
     changed_before = set(git_shared(wt, "diff", "--name-only", "HEAD").stdout.split("\n"))
-    # Windows has no sh: PowerShell, stopping at a failing cmdlet, ending with the last program's exit code
-    shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-             "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $ErrorActionPreference = 'Stop'\n" + cmd
-             + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"] if WINDOWS else ["sh", "-c", "set -e\n" + cmd]
     # with [sandbox] on, as the agent's user: it runs on files an earlier run's agent may have rewritten
-    proc = subprocess.Popen(as_agent(shell, wt, pass_env()), cwd=wt, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(as_agent(shell_command(cmd), wt, pass_env()), cwd=wt, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     for line in proc.stdout:
         say(line.rstrip("\n"))
@@ -1921,6 +2061,12 @@ def launch(t):
     comments = comments_text(human_comments({**t, "pr": earlier.get("pr", "")}, since)) if since else ""
     t["research"] = "yes" if i["research"] else ""
     write_rules(t, wt, i["body"])
+    limits, paid = goal_budget(i["body"])
+    for name in paid:  # found now, not after [setup]: the human adds the check, or takes the API out of the Goal
+        if not balance_command(name):
+            raise RuntimeError(f"the Goal's Budget names the paid API {name}, but [balance] has no {name} command "
+                               "to check its balance (docs/operations.md)")
+    t["budget"], t["paid_api"] = limits or "", " ".join(paid)
     t["link"] = i["link"]
     t["link_project"] = i["link_project"]
     # the Goal as it is now (an answer added before Ready again too), whatever the team changed in the copy
@@ -2303,17 +2449,20 @@ def agent_usage(wt, began, ended):
     """What the agent CLIs' own records say one launch in `wt` used, or None when there are none.
 
     Read from outside, never asked of the agent. Every reader is tried on every launch, whatever the agent's name:
-    Claude Code's transcripts (tokens) and kiro-cli's two session stores (credits); other agents simply have none.
+    Claude Code's transcripts (tokens), pi's sessions (tokens and cost) and kiro-cli's two session stores (credits);
+    other agents simply have none.
     A record counts if its directory is the worktree and its time falls within the launch: the agent, the reviewer,
     and the replanner run one after another in the same worktree, so the time tells them apart.
     """
     dirs = {str(wt), os.path.realpath(wt)}  # the agent may see the real path (/private/var on macOS)
     used = {}
-    for found in (read(dirs, began, ended) for read in (claude_usage, kiro_db_usage, kiro_session_usage)):
+    for found in (read(dirs, began, ended) for read in (claude_usage, pi_usage, kiro_db_usage, kiro_session_usage)):
         for k, v in (found or {}).items():
             used[k] = sorted(set(used.get(k, [])) | set(v)) if k == "models" else used.get(k, 0) + v
     if "credits" in used:
         used["credits"] = round(used["credits"], 2)  # Kiro meters to the second decimal point
+    if "cost" in used:
+        used["cost"] = round(used["cost"], 6)  # USD, as pi works it out from the model's prices
     return used or None
 
 
@@ -2346,6 +2495,71 @@ def claude_usage(dirs, began, ended):
     used = {k: sum(c[k] for c in calls.values()) for k in USAGE_KEYS}
     return {"calls": len(calls), **used, "subagent_calls": sum(c["subagent"] for c in calls.values()),
             "models": sorted({c["model"] for c in calls.values() if c["model"]})}
+
+
+def pi_sessions():
+    """Where pi keeps its sessions: one JSON line per entry, the first one the session's header with its cwd
+    (pi 1.4.0's docs/session-format.md). Its own settings.json sessionDir is not read: set the variable instead."""
+    if base := os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
+        return Path(base).expanduser()
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent").expanduser() / "sessions"
+
+
+# pi's usage field -> ours; its cost is in USD, under cost.total
+PI_USAGE_KEYS = {"input": "input", "cache_creation": "cacheWrite", "cache_read": "cacheRead", "output": "output"}
+
+
+def pi_usage(dirs, began, ended):
+    """pi's calls in the worktree during the launch: its assistant messages and its other entries with a usage
+    (compaction, branch summaries, cache warming), each one call. Checked on pi 1.4.0's `-p --mode json`.
+
+    A session counts when its header's cwd is the worktree; `--session-id` goes on with the same file on a resume,
+    so the entry's own time tells this launch's calls from the earlier ones. Files not written since the launch
+    began are never opened.
+    """
+    calls = {k: 0 for k in PI_USAGE_KEYS} | {"calls": 0, "cost": 0.0}
+    models = set()
+    for path in pi_sessions().glob("*/*.jsonl"):
+        try:
+            if path.stat().st_mtime < began:
+                continue
+            with open(path, errors="replace") as f:
+                header = json.loads(f.readline())
+                cwd = (header.get("cwd") or "") if header.get("type") == "session" else ""
+                if not any(cwd == w or cwd.startswith(w.rstrip("/") + "/") for w in dirs):
+                    continue
+                for line in f:
+                    found = pi_call(line, began, ended)
+                    if found:
+                        call, model = found
+                        for k in calls:
+                            calls[k] += call[k]
+                        models |= {model} if model else set()
+        except (OSError, ValueError, AttributeError):  # gone, unreadable, or a header of another format
+            continue
+    if not calls["calls"]:
+        return None
+    return {**calls, "models": sorted(models)}
+
+
+def pi_call(line, began, ended):
+    """(call, model) for one entry of a pi session with a usage, written between began and ended, else None."""
+    try:
+        d = json.loads(line)
+        m = d.get("message") if d.get("type") == "message" else None
+        if m is not None and m.get("role") != "assistant":
+            return None
+        u = (m or d).get("usage")
+        if not isinstance(u, dict) or not began <= epoch(d["timestamp"]) <= ended:
+            return None
+        call = {k: int(u.get(v) or 0) for k, v in PI_USAGE_KEYS.items()}
+        cost = u.get("cost")
+        total = float((cost.get("total") if isinstance(cost, dict) else 0) or 0)
+        call.update(calls=1, cost=total if total == total and abs(total) != float("inf") else 0.0)  # not NaN
+        model = (m or d).get("model")
+        return call, model if isinstance(model, str) else ""
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError):  # a broken line or a changed format
+        return None
 
 
 def kiro_db():
@@ -2463,12 +2677,78 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=
             entry.update(used)
             said = [f"{used['calls']} calls"]
             if "output" in used:
-                said += [f"{short(tokens(used))} tokens ({short(used['output'])} out)", f"{used['subagent_calls']} subagent calls"]
+                said.append(f"{short(tokens(used))} tokens ({short(used['output'])} out)")
+            if "subagent_calls" in used:
+                said.append(f"{used['subagent_calls']} subagent calls")
+            if "cost" in used:
+                said.append(f"${used['cost']:.4f}")
             if "credits" in used:
                 said.append(f"{used['credits']:.2f} credits")
             say(f"== {label} used {', '.join(said)}, models {', '.join(used['models']) or 'unknown'}")
         usage.append(entry)
+        if t is not None:
+            try:
+                over_budget(t, usage, say)
+            except Exception as e:  # like the measuring itself: the budget must never cost the run, for now
+                say(f"== could not check the budget: {e}")
     return code
+
+
+def run_used(usage):
+    """What a run's launches used so far, per budget measure; a measure no launch has a record of is left out."""
+    used = {"seconds": sum(u.get("seconds") or 0 for u in usage)}
+    if any("output" in u for u in usage):
+        used["tokens"] = sum(tokens(u) for u in usage if "output" in u)
+    for k in ("cost", "credits"):
+        if any(k in u for u in usage):
+            used[k] = round(sum(u.get(k) or 0 for u in usage), 6)
+    return used
+
+
+def budget_limits(agent, goal=None):
+    """The run's limit for each budget measure, with where it comes from: the Goal's Budget, else BUDGET_TIMES the
+    median of the agent's finished runs (at least BUDGET_FLOOR), else BUDGET_DEFAULT."""
+    totals = {k: [] for k in BUDGET_TIMES}
+    for line in (METRICS.read_text(errors="replace").splitlines() if METRICS.exists() else []):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r, dict) and r.get("agent") == agent and r.get("blocked_by") not in AGENT_NEVER_RAN:
+            for k, v in run_used(r.get("usage") or [{"seconds": r.get("seconds") or 0}]).items():
+                totals[k].append(v)
+    limits = {}
+    for k, values in totals.items():
+        if k in (goal or {}):
+            limits[k] = (goal[k], "the Goal's Budget")
+        elif len(values) >= BUDGET_MIN_RUNS:
+            limits[k] = (max(BUDGET_TIMES[k] * median(values), BUDGET_FLOOR[k]),
+                         f"{BUDGET_TIMES[k]} x the median of {len(values)} runs of {agent}")
+        else:
+            limits[k] = (BUDGET_DEFAULT[k], f"the default, under {BUDGET_MIN_RUNS} runs of {agent} measured")
+    return limits
+
+
+def budget_text(k, n):
+    return {"seconds": lambda: f"{n / 3600:.1f}h" if n >= 3600 else f"{round(n / 60)}m",
+            "tokens": lambda: f"{short(round(n))} tokens", "cost": lambda: f"${n:.2f}",
+            "credits": lambda: f"{n:.2f} credits"}[k]()
+
+
+def over_budget(t, usage, say):
+    """An `over budget` event for each measure the run just went past its limit in, once per measure and run.
+    Only the event, for now: the run goes on (docs/design.md, decision 18)."""
+    told = (t.get("over_budget") or "").split()
+    limits = budget_limits(t.get("agent") or "", t.get("budget") or None)
+    over = [(k, n) for k, n in run_used(usage).items() if k not in told and n > limits[k][0]]
+    if not over:
+        return
+    reason = "; ".join(f"used {budget_text(k, n)}, over {budget_text(k, limits[k][0])} ({limits[k][1]})"
+                       for k, n in over)
+    say(f"== over budget: {reason}")
+    t["over_budget"] = " ".join(told + [k for k, _ in over])
+    save_run(t)
+    emit(t, "over budget", reason=reason)
 
 
 def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
@@ -3448,8 +3728,12 @@ def run_task(t, say):
               "retries": 0, "review_stop": "", "blocked_by": "", "replan": "", "usage": []}
     if stage in ("", "preparing", "setup"):  # from the start: [setup] gives the same result each time it runs
         stage = ""
-        stop = run_setup(t, wt, say)
-        if stop:  # the agent never starts: nothing of this run can be trusted without its environment
+        stop, by = run_setup(t, wt, say), "setup"
+        if not stop:  # after [setup]: a check may use what it installs
+            stop, by = check_balance(t, wt, say), "balance"
+        # the agent never starts: nothing of this run can be trusted without its environment, and a paid API without
+        # balance only fails halfway through (a 429), after the agent spent its own tokens
+        if stop:
             say(f"== {stop}")
             try:
                 take_card(t)
@@ -3459,7 +3743,7 @@ def run_task(t, say):
                 say(f"== could not report it: {e}")
             set_stage(t, "")
             record_run({**record, **resume_record(t), "finished": now(), "seconds": round(time.time() - began),
-                        "status": BLOCKED, "blocked_by": "setup"}, say)
+                        "status": BLOCKED, "blocked_by": by}, say)
             say(f"== task {t['id']} is now {BLOCKED}. This pane stays open; `task done {t['id']}` closes it.")
             return
         t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
@@ -5737,8 +6021,10 @@ def cmd_stats(_):
         except json.JSONDecodeError:
             continue
     slow = f"slow: {len(events_named('slow'))} run(s) got a `slow` event (ran much longer than usual for their agent)"
+    budget = f"over budget: {len(events_named('over budget'))} `over budget` event(s) (a run used more than its " \
+             "Goal's Budget, or than usual for its agent; one event per measure and run)"
     if not runs:  # the first run can be slow before any run has finished
-        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow)
+        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow, budget)
         return
 
     def counts(name, key, values):
@@ -5767,6 +6053,8 @@ def cmd_stats(_):
                 for r in runs if any("output" in u for u in r.get("usage") or [])]
     credited = [round(sum(u["credits"] for u in r["usage"] if "credits" in u), 2)
                 for r in runs if any("credits" in u for u in r.get("usage") or [])]
+    costed = [round(sum(u["cost"] for u in r["usage"] if "cost" in u), 4)
+              for r in runs if any("cost" in u for u in r.get("usage") or [])]
     by_role = {}
     for u in (u for r in runs for u in r.get("usage") or []):
         by_role.setdefault(u.get("role") or "?", []).append(u)
@@ -5776,7 +6064,7 @@ def cmd_stats(_):
              for role, us in sorted(by_role.items(), key=lambda kv: -len(kv[1]))]
     heaviest = sorted(measured, key=lambda r: -r["tokens"])[:3]
     unmeasured = f"{len(runs) - len(measured)} runs without usage in tokens: recorded before it was, or by an " \
-                 f"agent whose records have none (only Claude Code's have them; Kiro's have credits)"
+                 f"agent whose records have none (Claude Code's and pi's have them; Kiro's have credits)"
     out(f"stats: {len(runs)} runs since {runs[0]['started'][:10]} ({home(METRICS)})",
         *counts("outcomes", "status", [r["status"] for r in runs]),
         *table("agents", agents, ["agent", "runs", "in_review", "median_seconds"]),
@@ -5788,6 +6076,7 @@ def cmd_stats(_):
         *counts("blocked_by", "reason", [r["blocked_by"] for r in runs if r["status"] == BLOCKED]),
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
         slow,
+        budget,
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
            *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
@@ -5796,6 +6085,8 @@ def cmd_stats(_):
            f"calls per run" if measured else "") + (f" ({unmeasured})" if len(runs) > len(measured) else ""),
         *([f"credits: {len(credited)} of {len(runs)} runs measured, median {median(credited):.2f} credits per run"]
           if credited else []),
+        *([f"cost: {len(costed)} of {len(runs)} runs measured, median ${median(costed):.4f} per run (as pi "
+           "works it out from the model's prices)"] if costed else []),
         *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
         *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
 

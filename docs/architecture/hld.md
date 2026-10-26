@@ -173,6 +173,7 @@ sequenceDiagram
     Task->>Task: 待ち先と枠を確かめる
     Task->>GH: In progress にする
     Task->>Run: 起動(herdr のタブ、またはバックグラウンド)
+    Run->>Run: [setup]、Goal の paid api があれば [balance] で残高を確かめる(足りなければ Blocked)
     Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
     Run->>Agent: reviewer(新しいコンテキスト)
@@ -210,7 +211,7 @@ replanner の途中で止まっても、その書き換えは記録から戻し�
 
 ```mermaid
 flowchart LR
-    setstatus["set_status、emit<br/>(Status の変化、replan、slow)"] --> events[("events.jsonl")]
+    setstatus["set_status、emit<br/>(Status の変化、replan、slow、over budget)"] --> events[("events.jsonl")]
     setstatus --> note["通知<br/>herdr、osascript、トースト"]
     events --> chief["/chief<br/>task events --next"]
     events --> kwf["Kiro の workflow<br/>task-events-watch"]
@@ -219,9 +220,15 @@ flowchart LR
     events --> mod["mod と Kiro の拡張<br/>経過、判定、PR"]
     metrics[("metrics.jsonl")] --> stats["task stats"]
     metrics --> mod
+    metrics --> budget["over_budget<br/>(起動が終わるたび)"]
+    records[("エージェントの CLI の記録<br/>~/.claude、~/.pi、kiro-cli")] --> budget
+    budget --> setstatus
 ```
 
 通知は LLM を使いません。会話のエージェントを起こすのは、出来事が書かれたときだけです。
+エージェントの起動が終わるたびに、その CLI の記録から使用量を読み(Claude Code と pi はトークン、pi は費用、Kiro は
+クレジット)、予算を超えていれば `over budget` を出します。席にいない人へ知らせる方法の比較は
+[notifications.md](../notifications.md) にあります。
 
 ### 4.3 トリガー
 

@@ -423,6 +423,8 @@ if "USAGE" in prompt:  # this agent leaves records the way Claude Code does
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "agent"], check=True)
 for form in re.findall(r"\bKIRO(V1|V2|BAD)\b", prompt)[:1]:  # ... or the way kiro-cli does
     subprocess.run([os.environ["TASK_TEST_KIRO"], form], check=True)
+if "PIRECORDS" in prompt:  # ... or the way pi does
+    subprocess.run([os.environ["TASK_TEST_PI"]], check=True)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
@@ -849,6 +851,49 @@ if form in ("V2", "BAD"):
         session("old", cwd, [turn(iso(now - 3600), [100], 50)], "old-model", at=now - 3600)
 '''
 
+FAKE_PI = r'''#!/usr/bin/env python3
+# What pi 1.4.0 (`-p --mode json --session-id`) leaves in ~/.pi/agent/sessions during one launch, in the shapes of
+# its docs/session-format.md and of real sessions, plus what task-hub must not count: an earlier launch of the same
+# session (a resume goes on in the same file), another directory, entries without usage, a broken line.
+import datetime, json, os, time
+from pathlib import Path
+cwd, now = os.getcwd(), time.time()
+root = Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi/agent") / "sessions"
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def usage(i, o, read=0, write=0, cost=0.0):
+    return {"input": i, "output": o, "cacheRead": read, "cacheWrite": write, "reasoning": 3,
+            "totalTokens": i + o + read + write,
+            "cost": {"input": cost / 2, "output": cost / 2, "cacheRead": 0, "cacheWrite": 0, "total": cost}}
+def assistant(at, u, model="gpt-5.5"):
+    return {"type": "message", "id": "a", "parentId": "p", "timestamp": iso(at), "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "done"}], "api": "openai-codex-responses",
+        "provider": "openai-codex", "model": model, "usage": u, "stopReason": "stop", "timestamp": int(at * 1000)}}
+def session(name, where, entries):
+    folder = root / ("--" + where.strip("/").replace("/", "-") + "--")
+    folder.mkdir(parents=True, exist_ok=True)
+    head = {"type": "session", "version": 3, "id": name, "timestamp": iso(now - 3600), "cwd": where}
+    (folder / f"{name}.jsonl").write_text("\n".join(e if isinstance(e, str) else json.dumps(e)
+                                                     for e in [head, *entries]) + "\n")
+session("this", cwd, [
+    assistant(now - 3600, usage(1000, 1000, cost=9.0), "old-model"),  # the launch before a resume
+    {"type": "model_change", "id": "m", "parentId": None, "timestamp": iso(now), "provider": "openai-codex",
+     "modelId": "gpt-5.5"},
+    {"type": "message", "id": "u", "parentId": "a", "timestamp": iso(now),
+     "message": {"role": "user", "content": "go", "timestamp": int(now * 1000), "usage": usage(7, 7)}},
+    assistant(now, usage(100, 20, 300, 40, 0.0125)),
+    {"type": "message", "id": "t", "parentId": "a", "timestamp": iso(now), "message": {
+        "role": "toolResult", "toolCallId": "c", "toolName": "bash", "content": [], "isError": False}},
+    assistant(now, usage(200, 30, 600, 0, 0.0175)),
+    {"type": "usage", "id": "w", "parentId": "a", "timestamp": iso(now), "kind": "cache_warm",
+     "provider": "openai-codex", "model": "gpt-5.5-mini", "usage": usage(0, 0, 50, 0, 0.001)},
+    {"type": "message", "id": "x", "timestamp": iso(now), "message": "a format we do not know"},
+    '{"type": "message", "timestamp": "' + iso(now) + '", "mess',  # cut off mid-line
+])
+session("elsewhere", "/somewhere/else", [assistant(now, usage(5000, 5000, cost=5.0), "other-model")])
+(root / "--odd--").mkdir(parents=True, exist_ok=True)
+(root / "--odd--" / "garbage.jsonl").write_bytes(b"\xff\xfe" + cwd.encode() + b"\x00\n")
+'''
+
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 # Claude Code's print mode, in the shapes seen from claude 2.1.296: only the final result as text, or with
 # --output-format stream-json --verbose one JSON line per step. WAIT in the goal holds it before it finishes, until
@@ -1105,7 +1150,7 @@ class TaskTest(unittest.TestCase):
         self.calls = root / "agent-calls.txt"
         self.review_calls = root / "review-calls.txt"
         for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER),
-                          ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO)):
+                          ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO), ("pi", FAKE_PI)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
@@ -1114,6 +1159,7 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"), "TASK_TEST_KIRO": str(root / "kiro"),
+                    "TASK_TEST_PI": str(root / "pi"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
                     "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
                     "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl"),
@@ -1130,6 +1176,8 @@ class TaskTest(unittest.TestCase):
         (fakebin / "launchctl").chmod(0o755)
         self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
+        self.env.pop("PI_CODING_AGENT_DIR", None)  # ... and pi's sessions
+        self.env.pop("PI_CODING_AGENT_SESSION_DIR", None)
         for name in ("CLAUDE_CODE_SHELL_PREFIX", "TASK_HUB_GROUPS", "TASK_HUB_GROUP_SHELL", "TASK_HUB_SHELL"):
             self.env.pop(name, None)  # set when a task-hub agent runs these tests: bin/task sets its own from here
         self.write_config()
@@ -3978,6 +4026,166 @@ class TaskTest(unittest.TestCase):
                 db.close()
             task.kiro_db().unlink()  # and no database at all
             self.assertIsNone(task.agent_usage(wt, began, time.time()))
+
+    def new_with_goal(self, goal, *extra):
+        out = self.task("new", "--title", "Add hello", "--repo", "jyoka/app", "--goal", goal, *extra)
+        return re.search(r"id: (\d+)", out).group(1)
+
+    def test_each_launch_records_the_tokens_and_cost_pi_says_it_used(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok PIRECORDS")  # the agent's name is "fake": the records are read whatever it is
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        agent, reviewer = self.metrics(1)[0]["usage"]
+        # neither the launch before, nor another directory, nor a user's line, nor a format we do not know
+        self.assertEqual({k: v for k, v in agent.items() if k not in ("role", "agent", "seconds")},
+                         {"calls": 3, "input": 300, "cache_creation": 40, "cache_read": 950, "output": 50,
+                          "cost": 0.031, "models": ["gpt-5.5", "gpt-5.5-mini"]})
+        # the reviewer ran next in the same worktree and left nothing: the agent's records are not its own
+        self.assertEqual(set(reviewer), {"role", "agent", "seconds"})
+        self.assertIn("== agent used 3 calls, 1.3k tokens (50 out), $0.0310, models gpt-5.5, gpt-5.5-mini",
+                      self.task("log", tid, "--full"))
+        stats = self.task("stats")
+        self.assertIn("tokens: 1 of 1 runs measured", stats)
+        self.assertIn("cost: 1 of 1 runs measured, median $0.0310 per run", stats)
+
+    def test_pi_sessions_are_read_from_pi_coding_agent_dir_when_set(self):
+        self.env["PI_CODING_AGENT_DIR"] = str(self.root / "pi-config")
+        tid = self.new("ok PIRECORDS")
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertEqual(self.metrics(1)[0]["usage"][0]["cost"], 0.031)
+        self.assertFalse((self.root / ".pi").exists())
+
+    def test_a_run_past_the_goals_budget_gets_one_over_budget_event_and_goes_on(self):
+        self.write_config(reviewer=True)
+        tid = self.new_with_goal("Say hello. MODE:ok PIRECORDS\n\n## Budget\n\n- 2h, $0.01, 900 tokens\n"
+                                 "- Over these, the card is only noted for now.\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")  # only the event, for now: the run goes on
+        self.metrics(1)
+        [over] = [e for e in self.events_of(tid) if e["event"] == "over budget"]  # the reviewer adds no new one
+        self.assertEqual(over["reason"], "used 1.3k tokens, over 900 tokens (the Goal's Budget); "
+                                         "used $0.03, over $0.01 (the Goal's Budget)")
+        self.assertIn("== over budget: used 1.3k tokens", self.task("log", tid, "--full"))
+        notes = [json.loads(line) for line in (self.root / "notifications.jsonl").read_text().splitlines()]
+        self.assertTrue(any("over budget" in json.dumps(n) for n in notes), notes)  # in [notify] events by default
+        self.assertIn("over budget: 1 `over budget` event(s)", self.task("stats"))
+
+    def test_a_run_within_its_budget_gets_no_event(self):
+        tid = self.new_with_goal("Say hello. MODE:ok PIRECORDS\n\n### Budget\n\n- 2h, $1, 3M tokens, 30 credits\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.metrics(1)
+        self.assertEqual([e for e in self.events_of(tid) if e["event"] == "over budget"], [])
+
+    def test_the_usual_budget_is_a_multiple_of_the_agents_median_run(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        metrics = self.root / "metrics.jsonl"
+        run = lambda seconds, tok, by="": json.dumps({"agent": "pi", "blocked_by": by, "seconds": seconds, "usage": [
+            {"role": "agent", "seconds": seconds, "input": tok, "output": 0, "cost": 0.5}]})
+        with unittest.mock.patch.object(task, "METRICS", metrics):
+            metrics.write_text("\n".join(run(300, 1_000_000) for _ in range(9)) + "\n")
+            self.assertEqual(task.budget_limits("pi")["tokens"], (20_000_000, "the default, under 10 runs of pi measured"))
+            # a run whose agent never started (the balance check stopped it) is no usual run
+            metrics.write_text(metrics.read_text() + run(0, 0, "balance") + "\n")
+            self.assertEqual(task.budget_limits("pi")["seconds"][0], 3 * 3600)
+            metrics.write_text(metrics.read_text() + run(1200, 3_000_000) + "\n" + "not json\n")
+            limits = task.budget_limits("pi", {"cost": 0.2})
+            self.assertEqual(limits["tokens"], (5_000_000, "5 x the median of 10 runs of pi"))
+            self.assertEqual(limits["seconds"], (3600, "10 x the median of 10 runs of pi"))  # at least an hour
+            self.assertEqual(limits["cost"], (0.2, "the Goal's Budget"))
+            self.assertEqual(limits["credits"][0], 20.0)  # no run of pi has credits
+
+    def test_the_goals_budget_reads_limits_and_paid_apis_and_leaves_prose_to_the_agent(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        body = ("## Goal\n\nSay hello. #12 first.\n- 9h\n\n### Budget:\n\n10/26 に決めた予算です。\n"
+                "- `2h`, **$5**\n1. 500k tokens, 3 credits\n> 90m\n```sh\n# a comment, not a heading\n```\n"
+                "- paid api: OpenAI, `anthropic`\n\n## Notes\n\n- 1M tokens\n")
+        self.assertEqual(task.goal_budget(body), ({"seconds": 5400, "cost": 5.0, "tokens": 500_000, "credits": 3.0},
+                                                  ["openai", "anthropic"]))
+        for line in ("- **paid api**: openai", "- __paid api__: openai", "- paid apis: openai", "- *Paid API:* openai",
+                     "- `paid-api`: **openai**", "* PAID_API : openai", "- 有料 API: openai", "- 有料API：OpenAI"):
+            self.assertEqual(task.goal_budget(f"## Budget\n{line}\n"), ({}, ["openai"]), line)
+        self.assertEqual(task.goal_budget("## Budget\n- 有料 API: openai、anthropic\n- 2h、$5\n"),
+                         ({"seconds": 7200, "cost": 5.0}, ["openai", "anthropic"]))
+        for heading in ("## Budget (予算)", "### **Budget**:", "## Budget（予算）", "## 予算", "### 予算："):
+            self.assertEqual(task.goal_budget(f"{heading}\n- 2h\n- paid api: openai\n"), ({"seconds": 7200}, ["openai"]),
+                             heading)
+        self.assertEqual(task.goal_budget("## Budget\n- 90m, 2H, 3M tokens\n"), ({"seconds": 7200, "tokens": 3_000_000}, []))
+        self.assertEqual(task.goal_budget("## Over budget\n- 2h\n- 有料 API を使うときは先に残高を見る\n"), ({}, []))
+        # a paid API that does not read would start the agent unchecked, and a Budget heading that does not read would
+        # drop its lines: both fail the start, as a mistyped limit does; so does a line meant as a limit that does not
+        # read, and a paid API under another heading
+        for text in ("## Budget\n- 3M tokns", "## Budget\n- 2 hrs", "## Budget\n- 2h, soon", "## Budget\n- paid api: open ai",
+                     "## Budget\n- paid api openai", "## Budget\n- Paid API - openai", "## Budget\nwe use the paid API of openai",
+                     "## Budget\n- paid apis = openai", "## Budget and limits\n- paid api: openai", "## Budget: 2h",
+                     "## Budget\n- 有料 API は openai", "## 予算と上限\n- 2h", "## Over budget\n- paid api: openai",
+                     "## Notes\n- 有料 API: openai", "## Budget\n- tokens: 3M", "## Budget\n- 時間: 2h、トークン: 3M",
+                     "## Budget\n- 2h まで", "## Budget\n- Cost: $5", "## Budget\n- 500円まで",
+                     "## Budget\n- 300万トークン", "## 予算\n- 300万トークンまで", "## 予算\n- 1万円", "## Budget\n- 3M",
+                     "## Budget\n- 2h, 3M", "## Budget\n- 3 M"):
+            with self.assertRaises(RuntimeError, msg=text):
+                task.goal_budget(f"{text}\n")
+
+    def test_a_budget_line_that_does_not_read_blocks_the_start(self):
+        for goal, said in (("## Budget\n\n- 3M tokns, $5\n", "each limit is like"),
+                           ("## Budget\n\npaid api:\n", "write the paid APIs as names"),
+                           ("## Budget\n\n- Paid API - openai\n", "write the paid APIs on their own line"),
+                           ("## Budget and limits\n\n- paid api: openai\n", "write the Budget heading as"),
+                           ("## 予算\n\n- 有料 API は openai\n", "write the paid APIs on their own line"),
+                           ("## Notes\n\n- 有料 API: openai\n", "outside the Budget heading"),
+                           ("## Budget\n\n- 2h まで\n", "each limit is like"),
+                           ("## Budget\n\n- 2h, 3M\n", "each limit is like")):
+            tid = self.new_with_goal(f"Say hello. MODE:ok\n\n{goal}")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked")
+            self.assertIn(said, self.events_of(tid)[-1]["reason"])
+        self.assertFalse(self.calls.exists())  # no agent ran
+
+    def test_a_paid_api_without_enough_balance_blocks_the_card_before_the_agent(self):
+        self.write_config("[balance]\nopenai = echo checking; echo 'insufficient_quota: $0.00 left' >&2; exit 3\n")
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: OpenAI\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertFalse(self.calls.exists())  # the agent never started
+        reason = self.events_of(tid)[-1]["reason"]
+        self.assertEqual(reason, "not enough balance on openai ([balance] openai exited 3: insufficient_quota: "
+                                 "$0.00 left); add credit, then move the card to Ready again")
+        self.assertIn(reason, self.comments(tid)[-1])
+        [record] = self.metrics(1)
+        self.assertEqual((record["status"], record["blocked_by"]), ("Blocked", "balance"))
+        log = self.task("log", tid, "--full")
+        self.assertIn("== balance: openai: echo checking", log)
+        self.assertIn("\nchecking\n", log)
+
+    def test_a_paid_api_with_enough_balance_runs_as_usual(self):
+        self.write_config("[balance]\nopenai = test -e .git && test -e README.md\n")
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("== balance: openai: enough", self.task("log", tid, "--full"))  # checked in the worktree
+
+    def test_a_paid_api_without_a_balance_check_blocks_the_start(self):
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai, anthropic\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("[balance] has no openai command", self.events_of(tid)[-1]["reason"])
+        self.assertFalse(self.calls.exists())
+
+    def test_a_balance_check_that_hangs_is_stopped_and_blocks_the_card(self):
+        self.write_config("[balance]\nopenai = sleep 120 & sleep 120\n")
+        self.env["TASK_BALANCE_SECONDS"] = "1"
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.events_of(tid)[-1]["reason"],
+                         "the [balance] openai check did not finish in 1 seconds; the agent was not started")
+        self.assertFalse(self.calls.exists())
 
     def test_stats_shows_tokens_per_run_role_and_the_heaviest_runs(self):
         base = {"repo": "jyoka/app", "agent": "fake", "started": "2026-09-01T00:00:00Z", "status": "In review",

@@ -15,7 +15,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、run_replan、finish、upsert_pr"]
-    start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、run_setup、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage"]
+    start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
@@ -275,6 +275,7 @@ sequenceDiagram
     L->>L: copy_env_files([env])
     L->>GH: issue(本文、ラベル、前回のレポート)
     L->>L: write_rules(Goal の Rules → .claude/settings.local.json)
+    L->>L: goal_budget(Goal の Budget → budget、paid_api。paid api の [balance] がなければ開始の失敗)
     L->>GH: human_comments(再実行のときだけ。REST)
     L->>L: build_prompt → prompts/<id>.md、prompts/<id>-comments.md
     Note over L,H: ここから start_run(relaunch も同じ)
@@ -294,7 +295,9 @@ flowchart TB
     start -- "retry(prompts/&lt;id&gt;-retry.md)" --> retry
     start -- "finishing(prompts/&lt;id&gt;-finish.json)" --> finish
     setup{"[setup] あり?"} -- "失敗" --> blockedS["Blocked<br/>(エージェントは動かない)"]
-    setup -- "成功、またはなし" --> agent["agent<br/>run_worker"]
+    setup -- "成功、またはなし" --> balance{"Goal の paid api?<br/>check_balance"}
+    balance -- "足りない、失敗、60 秒で終わらない" --> blockedS
+    balance -- "足りる、またはなし" --> agent["agent<br/>run_worker"]
     agent -- "外から kill された、watchdog が止めた(1 回だけ)" --> agent
     agent --> report{"レポートあり、<br/>Blocked でない?"}
     report -- "いいえ" --> finish
@@ -311,6 +314,11 @@ flowchart TB
     finish -- "エージェント自身の Blocked" --> replan["run_replan<br/>仕分けてコメント、replan の出来事"]
     finish -- "ほかの Blocked" --> stay["タブを残す"]
 ```
+
+エージェントを起動し終えるたびに、`run_agent_process` が使用量を読み(`agent_usage`)、`over_budget` がその実行の
+ここまでの合計を予算(Goal の `Budget`、なければ `metrics.jsonl` の同じエージェントの中央値の倍数、`BUDGET_*`)と比べます。
+超えた測るものごとに 1 回だけ、出来事 `over budget` を出します(どれを出したかは `runs/<id>.json` の `over_budget`)。
+実行は止めません。
 
 再開(`resume_stage` が空でない、または、その場の再開)のエージェントには、元のプロンプト全体に「# Resumed」の節
 (`worker/PROMPT.md` の 3 つ目の部分と `It stopped during: <段階> (<理由>)`)を足して渡します(`resume_prompt`)。
@@ -516,8 +524,8 @@ stateDiagram-v2
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
@@ -525,7 +533,7 @@ stateDiagram-v2
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
-| `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold` | JSON Lines |
+| `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold`、`budget_limits` | JSON Lines |
 | `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list`、Kiro の拡張(Goal のタブ。`items[].content.body`) | `{key, fetched_at, items}` |
 | `state/board-cache.stale` | `gh()`(ボードを変える呼び出しのあと) | `cached_items` | UNIX 時刻 |
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
@@ -563,6 +571,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ```
 
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
+予算を超えた `over budget`(`reason` に何がどの予算を超えたか)、
 再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
 マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict`、オートパイロットの `autopilot`
 (`action` は `ready` か `merge`)のどれかです。`conflict` と
@@ -573,7 +582,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
-`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`、
+`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`blocked_by`(`balance` は残高の確認で止めた実行)、
+`replan`、`usage`(起動ごとのトークン、呼び出し、費用(pi の `cost`)、クレジット、モデル)、`files`、`added`、`removed`、
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
 起動は、`usage` に `agent, resumed` のような役で入ります。
@@ -647,6 +657,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
 | B の実行役のモデル(`durable/`、既定は `openai-codex/gpt-6-luna`、thinking `medium`) | pi-ai の `openai-codex` provider。pi の `auth.json` を読むだけ(`CredentialStore` の `modify` を断るので、切れかけたトークンは更新せず理由つきで 1 で終わる) | ChatGPT のサブスクリプション。再開では元のプロンプトを送り直さず、SQLite の会話から続ける | エージェントのターンごと |
 | `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
+| `[balance]` のコマンド(Goal に `paid api:` があるときだけ) | 子プロセス(`sh -c`、自分のプロセスグループ。`[sandbox]` では `as_agent`)。60 秒で終わらなければグループごと止める | API 側(確かめ方による) | 最初から始める実行ごと、名前ごとに 1 回 |
 | 通知(herdr、`osascript`、PowerShell のトースト、`notify-send`) | 切り離した子プロセス(待たない) | - | `notify`、`[notify] events` に入っている出来事ごと |
 | ntfy の購読(`task intake`) | `urllib` で `GET <サーバー>/<[intake] topic>/json?since=...` を開いたまま、1 行ずつ読む(トークンは `[notify] ntfy_token`。120 秒何も来なければ切ってつなぎ直す。失敗のあとは 5 秒から倍にして 300 秒まで待つ) | ntfy 側。GitHub は文ごとに `task new` と同じ | 常駐のあいだずっと |
 | ntfy への送信(`[notify] ntfy` があるときだけ) | 切り離した `python -I -c NTFY_POST` が `urllib` で JSON を POST(`ntfy_post` が作る。10 秒で切る)。`finish` が push した In review の出来事には `sha` が付き、`task intake` を設定していれば `review_actions` が `actions`(ntfy のボタン)を足す | ntfy 側(ntfy.sh は無料の範囲で回数の上限あり) | 上と同じ出来事ごと、このマシンの通知に加えて |
@@ -690,7 +701,8 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   `~/.pi/agent/sessions/--<cwd の / を - にしたもの>--/<時刻>_<id>.jsonl`。kill -9 で終わっていないツールの呼び出しは、
   結果のないまま記録に残り、次の起動で pi-ai が `No result provided`(`isError`)の結果を補ってモデルに送る。
   使った量は、記録の assistant のメッセージの `usage`(`input`、`output`、`cacheRead`、`cacheWrite`、`reasoning`、
-  `totalTokens`、`cost`)と `model`、`provider`。`agent_usage` はまだ読まない。
+  `totalTokens`、`cost`)と `model`、`provider`。`agent_usage` の `pi_usage` が読む(見出しの `cwd`、行の `timestamp`。
+  `type: usage` の行と、圧縮の要約の `usage` も数える。ディレクトリ名の規則には頼らない)。
 - pi 1.4.0 の `bash` ツールのコマンドは自分のプロセスグループで動く。エージェントのグループを止めても(`stop_group`、
   `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。Claude Code 2.1.310 の
   `Bash` も同じ(`detached: true`、本物で確かめた)。task-hub は pi の `bash` を `pi/task-groups.ts`(同じ名前のツールで
@@ -724,7 +736,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 |---|---|
 | GitHub の失敗(同期の中) | その回の `github_errors` に出し、次の回にまた試す。watch は止めない |
 | GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする(段階が空なので再開しない) |
-| 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、もここ(エージェントは起動しない) |
+| 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、Goal の Budget に読めない行(`paid api` か `有料 API` を含む行、数字と単位を含む行、`Budget` か `予算` で始まる見出し、Budget の外の `paid api:` の行を含む)がある、`paid api:` の `[balance]` がない、もここ(エージェントは起動しない) |
+| 残高が足りない(`[balance]` が 0 以外、60 秒で終わらない) | エージェントを起動せずに Blocked(`blocked_by: balance`)。理由はコマンドの出力の最後の行。replanner は動かさない |
+| 予算の確認の失敗(`over_budget` の例外) | ログに 1 行出して無視する(実行を止めない) |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
 | `task intake` の購読の失敗(サーバーが落ちた、トークンが違う、切れた) | 1 行記録して、待ってからつなぎ直す。`since` があるので、その間に来た文も取りこぼさない(ntfy が持っている間) |
 | `task intake` の登録の失敗(GitHub) | 1 行記録し、ntfy に「not registered」を返す。その文はもう試さない(同じカードを 2 枚作らないため) |
