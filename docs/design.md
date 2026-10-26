@@ -117,7 +117,8 @@
    (人が書いた本文で `Closes` がない PR は数えません)。
 11. **PR の前に、別のコンテキストでレビューします(0.6)。** `[runner] reviewer` を設定すると、実装エージェントのあとに
    reviewer が Goal と PR 全体の差分(`add -A` 後にベースからの分岐点と比較)を読み、`pass` / `needs changes` /
-   `blocked` を `.task-review.md` に書きます。`needs changes` なら 1 回だけ実装エージェントに差し戻します。
+   `blocked` を `.task-review.md` に書きます。`needs changes` なら実装エージェントに差し戻します(回数と止め方は
+   決定事項 32)。
    `reviewer = agent` はタスクと同じエージェントを新しいコンテキストで使います。見逃しの多く(自分の判断の正当化、
    確認の手抜き)は新しいコンテキストで防げ、ベンダーを変える必要はないためです。判定の読み取り、reviewer の
    書き換えの取り消しはコードで行います。マージの判断は人に残します。
@@ -153,7 +154,8 @@
    ほかのスキルには [issue-tracker.md](issue-tracker.md) で `task new --blocked-by` から登録させ、入口によらず
    同じデータになるようにします。
 18. **エージェントの使用量は、エージェントの CLI が手元に残す記録を外から読みます。予算を超えたら知らせるだけで、止めません(0.6、予算はタスク 251)。**
-   task-hub が抑えているのは 1 回の実行で起動する回数(実装は最大 2、reviewer は最大 2、replanner は 1)だけで、
+   task-hub が抑えているのは 1 回の実行で起動する回数(実装と reviewer は最大で `1 + [runner] review_retries`、既定で 3。
+   replanner は 1)だけで、
    1 回の起動の大きさ(トークン数、API 呼び出しの数、内側のサブエージェント、使ったモデル)は見えていませんでした。
    止める前にまず測ります。エージェントに自己申告させないのは、数え間違いも省略もありうるうえ、指示を増やすだけだからです。
    起動ごとに、Claude Code の記録(`~/.claude/projects/**/*.jsonl`、`CLAUDE_CONFIG_DIR` があればその下)のうち、
@@ -388,6 +390,19 @@
     `--resume`)は既定の `[resume]` を持ち、`[agents]` が組み込みのままのときだけ使います。Pi Durable の実行役(B)は
     別のタスクで足し、どちらを本採用するかは比べてから人が決めます
     ([architecture/designs/durable-runs.md](architecture/designs/durable-runs.md))。
+32. **自動レビューの差し戻しは回数を設定でき、進まなくなったら早めに止め、止めたら次の指示の下書きを残します(タスク 249)。**
+    差し戻しが 1 回だけだった頃、jyoka/tasks の #129〜#248 で Blocked を経験した 33 枚のうち 27 枚の理由が
+    `automated review did not pass` でした。調べると、指摘の約 9 割は本物で(lessons.md の第 10 項)、
+    1 回では直りきらないものが多かったため、回数を `[runner] review_retries`(既定 2)にしました。
+    一方、#130、#211、#229、#242 のように、直すたびに同じ所に別の穴が出て、差し戻しても終わらない形もありました。
+    そこで回数とは別に、差し戻した指摘がまた出たとき、最後の差し戻しが何も変えなかったとき、差し戻しの変更が前より
+    小さくならないときに止めます。「また出た」は reviewer の `(again)` の印と、文の一致で数えます。言い換えを
+    似ているかで比べないのは、同じ所への別の指摘を、同じ指摘と取り違えるからです。
+    指摘は blocking と minor に分け、minor だけなら In review に進めて PR に「Known issues」として残します。
+    止めたときは、最後の blocking の指摘から次の実行への修正指示の下書き(`## Suggested instructions`)を
+    コードで組み立て、Issue のレポートに書きます。LLM を使わないので費用は増えません。人は確かめて Ready に戻すだけです。
+    下書きには「レビューの直し方は手がかりとして扱い、原因を直す」と書きます。#242 で、レビューの直し方を
+    そのまま指示に写したら、それが次の後退を生んだためです。
 ### 1 タスクあたりの時間とトークンの上限(第 1 段階まで実装)
 
 決定事項 18 と 19 のとおり、上限は `task stats` の実績を見てから決めます。2026-10-17 に次の形を提案し、
@@ -471,7 +486,7 @@ In progress の中には段階があります(0.6)。ステートチャートの
 | `setup` | `[setup]`(設定があるときだけ) | `run_setup` |
 | `agent` | 実装エージェント | `cmd_run` |
 | `review` | reviewer(設定があるときだけ。差し戻しのあとにもう一度) | `run_review` |
-| `retry` | 差し戻しを受けた実装エージェント(1 回まで) | `review_loop` |
+| `retry` | 差し戻しを受けた実装エージェント(`[runner] review_retries` 回まで。既定 2) | `review_loop` |
 | `finishing` | commit、push、PR、Issue へのコメント、カードを動かす | `cmd_run` |
 | `replanning` | エージェント自身の Blocked を replanner が仕分ける(カードはもう Blocked) | `run_replan` |
 | `conflict-fix` | マージキュー(または `[merge] prefix`)の競合の解消。カードは In review か wait for merge のまま(`task _fix`) | `launch_fix` |
@@ -485,7 +500,7 @@ stateDiagram-v2
         setup --> agent
         agent --> review: reviewer あり
         agent --> finishing
-        review --> retry: needs changes(1 回目)
+        review --> retry: needs changes(回数が残り、止まる条件に当たらない)
         retry --> review
         review --> finishing
         state "中断(_run かエージェントが止まった)" as cut

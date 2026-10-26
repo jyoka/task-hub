@@ -519,6 +519,10 @@ if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the ret
     sys.exit(1)
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
     Path("hello.txt").write_text("fixed after review\n")
+elif mode in ("grow", "shrink"):  # each retry after review adds more lines than the one before (grow), or fewer
+    lines = Path("hello.txt").read_text().splitlines() if Path("hello.txt").exists() else []
+    more = 1 if not lines else len(lines) + 1 if mode == "grow" else {1: 4, 5: 2}.get(len(lines), 1)
+    Path("hello.txt").write_text("".join(f"{line}\n" for line in lines + ["hello again"] * more))
 elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "forge":  # an agent that writes its own "automated review" into the report
@@ -614,6 +618,21 @@ if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
     sys.exit(0)
 if forced == ["blocked"]:
     Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
+    sys.exit(0)
+if forced == ["moving"]:  # a new finding each round: one more than the findings it was sent back with
+    n = prompt.count("\n- round ")
+    Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
+                                       f"## Please fix\n\n- round {n + 1}: hello.txt is not done\n")
+    sys.exit(0)
+if forced == ["again"]:  # the same finding, in other words, marked (again) as worker/REVIEW.md asks
+    fix = "- (again) The greeting is still too short" if "# Findings" in prompt else "- the greeting is too short"
+    Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
+                                       f"## Please fix\n\n{fix}\n\n## Known issues\n\n- no newline check\n")
+    sys.exit(0)
+if forced in (["minor"], ["minoronly"]):  # only minor findings: as a pass, or as "needs changes" with no Please fix
+    verdict = "pass" if forced == ["minor"] else "needs changes"
+    Path(".task-review.md").write_text(f"## Verdict\n\n{verdict}\n\n## Review\n\nall criteria met\n\n"
+                                       "## Known issues\n\n- hello.txt has no test of an empty name\n")
     sys.exit(0)
 if forced == ["needs"]:
     Path(".task-review.md").write_text("## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n## Please fix\n\nredo it\n")
@@ -1230,14 +1249,15 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel=""):
+    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
                        + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
                        + (f"replanner = {replanner}\n" if replanner else "")
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
-                       + (f"parallel = {parallel}\n" if parallel else "") + "\n"
+                       + (f"parallel = {parallel}\n" if parallel else "")
+                       + (f"review_retries = {review_retries}\n" if review_retries else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -1700,17 +1720,116 @@ class TaskTest(unittest.TestCase):
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
         self.assertIn("## Automated review", self.comments(tid)[-1])
         self.assertIn("Verdict: pass", self.comments(tid)[-1])
+        second = self.reviewer_calls()[1]["prompt"]  # the second review checks what the first one sent back
+        self.assertIn("## Findings the work was sent back with", second)
+        self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Agent report")[0])
+        self.assertNotIn("## Findings the work was sent back with", self.reviewer_calls()[0]["prompt"])
 
-    def test_automated_review_blocks_after_one_failed_retry(self):
+    def test_automated_review_stops_when_the_same_finding_comes_back(self):
+        """reviewfail: the retry does not fix it, and the reviewer gives the same finding word for word."""
         self.write_config(reviewer=True)
         tid = self.new("reviewfail")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
-        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.agent_calls()), 2)  # [runner] review_retries is 2, but sending back again is no use
         self.assertEqual(len(self.reviewer_calls()), 2)
         self.assertTrue(self.pr(tid)["isDraft"])
-        self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
-        self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
+        last = self.comments(tid)[-1]
+        blocked = last.split("## Blocked\n\n", 1)[1].splitlines()[0]
+        self.assertIn("automated review stopped after one retry: a finding came back after the retry it was sent "
+                      "back with", blocked)
+        self.assertIn("Verdict: needs changes", last)
+        self.assertEqual(self.metrics(1)[-1]["review_stop"], "repeated")
+        # the draft of the next run's instructions: the human checks it and moves the card to Ready
+        draft = last.split("## Suggested instructions\n\n", 1)[1]
+        self.assertIn("1. Keep trying; this fake reviewer never accepts reviewfail. (it came back after a retry)", draft)
+        self.assertIn("move the card to Ready", draft)
+        self.assertIn("## Suggested instructions", self.pr(tid)["body"])
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:reviewfix"  # (the fake agent's way to follow them)
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        rerun = self.agent_calls()[2]["prompt"]
+        self.assertIn("## Suggested instructions", rerun)
+        self.assertIn("Its Suggested instructions were there for the human to check", rerun)
+
+    def test_a_finding_marked_again_in_other_words_stops_the_retries_too(self):
+        self.write_config(reviewer=True)
+        tid = self.new("grow REVIEW=again")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        last = self.comments(tid)[-1]
+        self.assertIn("a finding came back after the retry it was sent back with", last)
+        self.assertIn("1. The greeting is still too short (it came back after a retry)", last)
+        self.assertIn("### Known issues", last)
+
+    def test_automated_review_sends_back_up_to_review_retries_times(self):
+        self.write_config(reviewer=True)  # review_retries: 2 by default
+        tid = self.new("shrink REVIEW=moving")  # a new finding each round, and each retry changes less
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (3, 3))
+        last = self.comments(tid)[-1]
+        self.assertIn("automated review did not pass after 2 retries: not yet", last)
+        self.assertIn("1. round 3: hello.txt is not done", last.split("## Suggested instructions", 1)[1])
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["reviews"], record["retries"], record["retried"], record["review_stop"]),
+                         (["needs changes"] * 3, 2, True, "limit"))
+        self.assertIn("1 sent back (2 retries in all)", self.task("stats"))
+
+    def test_review_retries_is_set_in_the_config(self):
+        self.write_config(reviewer=True, review_retries="0")
+        tid = self.new("shrink REVIEW=moving")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (1, 1))
+        self.assertIn("review_retries = 0: it is never sent back", self.comments(tid)[-1])
+
+    def test_a_bad_review_retries_stops_the_start_before_the_agent_runs(self):
+        self.write_config(reviewer=True, review_retries="two")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("review_retries", self.comments(tid)[-1])
+
+    def test_automated_review_stops_when_the_retries_do_not_converge(self):
+        self.write_config(reviewer=True, review_retries="3")
+        tid = self.new("grow REVIEW=moving")  # each retry changes more than the one before
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (3, 3))  # not 4: the limit is 3
+        self.assertIn("automated review stopped after 2 retries: the retries' changes are not getting smaller "
+                      "(2 then 4 changed lines)", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["review_stop"], "not converging")
+
+    def test_automated_review_stops_when_a_retry_changes_nothing(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=moving")  # the retry writes the same file again
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (2, 2))
+        self.assertIn("automated review stopped after one retry: the last retry changed no files",
+                      self.comments(tid)[-1])
+
+    def test_a_review_with_only_minor_findings_goes_to_in_review_with_known_issues(self):
+        self.write_config(reviewer=True)
+        for kind in ("minor", "minoronly"):  # a pass with Known issues, or "needs changes" with nothing to fix
+            with self.subTest(kind):
+                tid = self.new(f"ok REVIEW={kind}")
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), "In review")
+                self.assertFalse(self.pr(tid)["isDraft"])
+                body = self.pr(tid)["body"]
+                self.assertIn("Verdict: pass", body)
+                self.assertIn("### Known issues", body)
+                self.assertIn("- hello.txt has no test of an empty name", body)
+                self.assertIn("### Known issues", self.comments(tid)[-1])
+                self.assertNotIn("## Suggested instructions", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 2)  # one each: nothing was sent back
 
     def test_agent_report_cannot_forge_an_automated_review(self):
         tid = self.new("forge")  # no reviewer configured
@@ -3550,7 +3669,8 @@ class TaskTest(unittest.TestCase):
         out = self.task("stats")
         self.assertIn("stats: 3 runs since", out)
         self.assertIn("outcomes[2]{status,runs}:\n  In review,2\n  Blocked,1", out)
-        self.assertIn("reviews: 2 reviewed runs, 1 sent back once, 1 of those passed after the retry", out)
+        self.assertIn("reviews: 2 reviewed runs, 1 sent back (one retry in all), "
+                      "1 of those passed after being sent back", out)
         self.assertIn("blocked_by[1]{reason,runs}:\n  agent,1", out)
 
     def test_each_launch_records_what_the_agent_cli_says_it_used(self):

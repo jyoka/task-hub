@@ -57,6 +57,7 @@ agent = claude          ; このマシンのデフォルトの worker
 reviewer = agent        ; PR の前の自動レビュー。agent = worker と同じエージェントを新しいコンテキストで
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
+review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
@@ -96,7 +97,7 @@ user = task-agent       ; そのユーザー(これが既定)
 
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
-| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。`needs changes` なら 1 回だけ差し戻し、それでも通らなければドラフト PR で Blocked | マージするかどうか |
+| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
