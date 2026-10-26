@@ -1736,21 +1736,26 @@ def write_rules(t, wt, body):
 # one limit of the Goal's Budget: `2h`, `90m`, `3M tokens`, `$5`, `30 credits`
 BUDGET_ITEM = re.compile(r"(?i)^(?:\$\s*(?P<cost>\d+(?:\.\d+)?)|(?P<time>\d+(?:\.\d+)?)\s*(?P<unit>h|hours?|m|min|minutes?|s|sec|seconds?)"
                          r"|(?P<tokens>\d+(?:\.\d+)?)\s*(?P<scale>[km]?)\s*tokens?|(?P<credits>\d+(?:\.\d+)?)\s*credits?)$")
-# `paid api: openai`, also `**paid api**: openai` or `paid apis:`; any other line naming a paid API fails, as a miss would
-# start the agent without a balance check
-PAID_API = re.compile(r"(?i)[*_`]*paid[ _-]?apis?[*_`]*\s*:[*_`]*\s*(.*)")
-PAID_API_WORDS = re.compile(r"(?i)paid[ _-]?apis?")
-# the Budget heading: `Budget`, with an optional colon and a note in brackets (`## Budget (予算)`)
-BUDGET_HEADING = re.compile(r"(?i)budget[*_`]*\s*:?\s*(?:[(（][^)）]*[)）])?")
+# `paid api: openai`, also `**paid api**: openai`, `paid apis:` or `有料 API：openai`; any other line naming a paid API
+# fails, as a miss would start the agent without a balance check
+PAID_API = re.compile(r"(?i)[*_`]*(?:paid[ _-]?apis?|有料\s*api)[*_`]*\s*[:：][*_`]*\s*(.*)")
+PAID_API_WORDS = re.compile(r"(?i)paid[ _-]?apis?|有料\s*api")
+# the Budget heading: `Budget` or `予算`, with an optional colon and a note in brackets (`## Budget (予算)`)
+BUDGET_HEADING = re.compile(r"(?i)(?:budget|予算)[*_`]*\s*[:：]?\s*(?:[(（][^)）]*[)）])?")
+# a line under Budget that looks meant as a limit (`tokens: 3M`, `2h まで`, `$5`, `500円`): if it does not read, it fails
+BUDGET_HINT = re.compile(r"(?i)[$¥￥]\s*\d|\d\s*(?:k|tokens?|credits?|h|hours?|m|min|minutes?|s|sec|seconds?|トークン|クレジット"
+                         r"|時間|分|秒|ドル|円)(?![a-z])|(?:tokens?|credits?|cost|time|トークン|クレジット|時間|費用)\s*[:：]\s*\d")
+LIST_COMMA = re.compile(r"[,、，]")
 
 
 def goal_budget(body):
     """The Goal's "Budget" heading as (limits, paid APIs): a line like `2h, 3M tokens, $5, 30 credits` gives the run's
     limits in place of the usual ones (over_budget), and `paid api: openai` names what must have a balance before
-    the agent starts ([balance], check_balance). Lines with none of these are prose, left to the agent; a line with
-    one of them that does not read, or in ASCII starting with a number or $, fails, as a Rules line does: a mistyped
-    limit would quietly be no limit, and so does a line naming a paid API, or a heading starting with Budget, that does
-    not read. Lines in a code block are neither headings nor limits."""
+    the agent starts ([balance], check_balance). The heading may be `予算`, and the words `有料 API`. Lines with none
+    of these are prose, left to the agent; a line with one of them, or with a number and a unit (BUDGET_HINT), that
+    does not read fails, as a Rules line does: a mistyped limit would quietly be no limit, and so does a line naming a
+    paid API, or a heading starting with Budget, that does not read. A `paid api:` line under any other heading fails
+    too, as it would start the agent unchecked. Lines in a code block are neither headings nor limits."""
     limits, paid, inside, fenced = {}, [], False, False
     for line in body.splitlines():
         if re.match(r"\s*(```|~~~)", line):
@@ -1761,15 +1766,21 @@ def goal_budget(body):
         if re.match(r"\s*#+\s", line):  # a heading; `#12` (an Issue) or `#tag` is text
             title = line.strip().lstrip("#").strip().lstrip("*_`")
             inside = bool(BUDGET_HEADING.fullmatch(title))
-            if not inside and title.lower().startswith("budget"):
-                raise RuntimeError(f"the Goal has the heading {line.strip()!r}; write the Budget heading as `## Budget`, "
-                                   "with the limits on the lines under it (docs/task-format.md)")
+            if not inside and title.lower().startswith(("budget", "予算")):
+                raise RuntimeError(f"the Goal has the heading {line.strip()!r}; write the Budget heading as `## Budget` "
+                                   "or `## 予算`, with the limits on the lines under it (docs/task-format.md)")
             continue
         text = re.sub(r"^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?", "", line).strip().strip("*_`").strip()
-        if not inside or not text:
+        if not text:
+            continue
+        if not inside:
+            if PAID_API.fullmatch(text):
+                raise RuntimeError(f"the Goal has {text!r} outside the Budget heading; put the paid APIs under "
+                                   "`## Budget` (docs/task-format.md)")
             continue
         if m := PAID_API.fullmatch(text):
-            names = [n.strip().strip("*_`").strip().lower() for n in m[1].split(",") if n.strip().strip("*_`").strip()]
+            names = [n.strip().strip("*_`").strip().lower() for n in LIST_COMMA.split(m[1])]
+            names = [n for n in names if n]
             if not names or any(not re.fullmatch(r"[\w.-]+", n) for n in names):
                 raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs as names, like "
                                    "`paid api: openai, anthropic` (docs/task-format.md)")
@@ -1778,10 +1789,11 @@ def goal_budget(body):
         if PAID_API_WORDS.search(text):
             raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs on their own line, like "
                                "`paid api: openai, anthropic` (docs/task-format.md)")
-        items = [i.strip().strip("*_`").strip() for i in text.split(",")]
+        items = [i.strip().strip("*_`").strip() for i in LIST_COMMA.split(text)]
         found = [BUDGET_ITEM.fullmatch(i) for i in items]
-        # prose, for the agent; one in ASCII starting with a number or $ was meant as limits (`3M tokns`, `2 hrs`)
-        if not any(found) and not re.fullmatch(r"[\d$][\x20-\x7e]*", text):
+        # prose, for the agent; one in ASCII starting with a number or $, or with a number and a unit, was meant as
+        # limits (`3M tokns`, `2 hrs`, `tokens: 3M`, `2h まで`)
+        if not any(found) and not re.fullmatch(r"[\d$][\x20-\x7e]*", text) and not BUDGET_HINT.search(text):
             continue
         if not all(found):
             raise RuntimeError(f"the Goal's Budget has {text!r}; each limit is like 2h, 90m, 3M tokens, $5 "

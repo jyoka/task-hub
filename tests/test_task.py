@@ -3989,17 +3989,23 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(task.goal_budget(body), ({"seconds": 5400, "cost": 5.0, "tokens": 500_000, "credits": 3.0},
                                                   ["openai", "anthropic"]))
         for line in ("- **paid api**: openai", "- __paid api__: openai", "- paid apis: openai", "- *Paid API:* openai",
-                     "- `paid-api`: **openai**", "* PAID_API : openai"):
+                     "- `paid-api`: **openai**", "* PAID_API : openai", "- 有料 API: openai", "- 有料API：OpenAI"):
             self.assertEqual(task.goal_budget(f"## Budget\n{line}\n"), ({}, ["openai"]), line)
-        for heading in ("## Budget (予算)", "### **Budget**:", "## Budget（予算）"):
+        self.assertEqual(task.goal_budget("## Budget\n- 有料 API: openai、anthropic\n- 2h、$5\n"),
+                         ({"seconds": 7200, "cost": 5.0}, ["openai", "anthropic"]))
+        for heading in ("## Budget (予算)", "### **Budget**:", "## Budget（予算）", "## 予算", "### 予算："):
             self.assertEqual(task.goal_budget(f"{heading}\n- 2h\n- paid api: openai\n"), ({"seconds": 7200}, ["openai"]),
                              heading)
-        self.assertEqual(task.goal_budget("## Over budget\n- paid api: openai\n"), ({}, []))  # not the Budget heading
+        self.assertEqual(task.goal_budget("## Over budget\n- 2h\n- 有料 API を使うときは先に残高を見る\n"), ({}, []))
         # a paid API that does not read would start the agent unchecked, and a Budget heading that does not read would
-        # drop its lines: both fail the start, as a mistyped limit does
+        # drop its lines: both fail the start, as a mistyped limit does; so does a line meant as a limit that does not
+        # read, and a paid API under another heading
         for text in ("## Budget\n- 3M tokns", "## Budget\n- 2 hrs", "## Budget\n- 2h, soon", "## Budget\n- paid api: open ai",
                      "## Budget\n- paid api openai", "## Budget\n- Paid API - openai", "## Budget\nwe use the paid API of openai",
-                     "## Budget\n- paid apis = openai", "## Budget and limits\n- paid api: openai", "## Budget: 2h"):
+                     "## Budget\n- paid apis = openai", "## Budget and limits\n- paid api: openai", "## Budget: 2h",
+                     "## Budget\n- 有料 API は openai", "## 予算と上限\n- 2h", "## Over budget\n- paid api: openai",
+                     "## Notes\n- 有料 API: openai", "## Budget\n- tokens: 3M", "## Budget\n- 時間: 2h、トークン: 3M",
+                     "## Budget\n- 2h まで", "## Budget\n- Cost: $5", "## Budget\n- 500円まで"):
             with self.assertRaises(RuntimeError, msg=text):
                 task.goal_budget(f"{text}\n")
 
@@ -4007,7 +4013,10 @@ class TaskTest(unittest.TestCase):
         for goal, said in (("## Budget\n\n- 3M tokns, $5\n", "each limit is like"),
                            ("## Budget\n\npaid api:\n", "write the paid APIs as names"),
                            ("## Budget\n\n- Paid API - openai\n", "write the paid APIs on their own line"),
-                           ("## Budget and limits\n\n- paid api: openai\n", "write the Budget heading as")):
+                           ("## Budget and limits\n\n- paid api: openai\n", "write the Budget heading as"),
+                           ("## 予算\n\n- 有料 API は openai\n", "write the paid APIs on their own line"),
+                           ("## Notes\n\n- 有料 API: openai\n", "outside the Budget heading"),
+                           ("## Budget\n\n- 2h まで\n", "each limit is like")):
             tid = self.new_with_goal(f"Say hello. MODE:ok\n\n{goal}")
             self.task("start", tid)
             self.assertEqual(self.wait(tid), "Blocked")

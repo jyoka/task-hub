@@ -728,7 +728,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 |---|---|
 | GitHub の失敗(同期の中) | その回の `github_errors` に出し、次の回にまた試す。watch は止めない |
 | GitHub の失敗(実行の終わり) | レポートを worktree に残し、次の同期が止まった実行として Blocked にする(段階が空なので再開しない) |
-| 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、Goal の Budget に読めない行(`paid api` を含む行、`Budget` で始まる見出しを含む)がある、`paid api:` の `[balance]` がない、もここ(エージェントは起動しない) |
+| 開始の失敗 | カードを Blocked にし、理由をコメントする。herdr のペインが 2 回とも実行を始めなかったときは「the run did not start in herdr ...」。`[sandbox]` が使えない、Goal の Rules に知らない語がある、Goal の Budget に読めない行(`paid api` か `有料 API` を含む行、数字と単位を含む行、`Budget` か `予算` で始まる見出し、Budget の外の `paid api:` の行を含む)がある、`paid api:` の `[balance]` がない、もここ(エージェントは起動しない) |
 | 残高が足りない(`[balance]` が 0 以外、60 秒で終わらない) | エージェントを起動せずに Blocked(`blocked_by: balance`)。理由はコマンドの出力の最後の行。replanner は動かさない |
 | 予算の確認の失敗(`over_budget` の例外) | ログに 1 行出して無視する(実行を止めない) |
 | 通知、キャッシュ、集計、カードの並べ替えの失敗 | 無視する(実行とコマンドを止めない) |
