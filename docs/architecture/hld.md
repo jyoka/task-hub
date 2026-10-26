@@ -187,6 +187,11 @@ sequenceDiagram
 `[merge] queue = on` のときは、最後の「あなたが PR をマージする」が「`task merge` でキューに入れる」になります。
 その先は 4.5 のとおり task-hub がマージします。
 
+reviewer が `needs changes` と判定すると、実装エージェントに差し戻し、もう一度レビューします(`[runner] review_retries`
+回まで。既定 2)。差し戻した指摘がまた出たときや、差し戻しの変更が小さくならないときは、回数が残っていても止めて
+Blocked にし、次の実行への修正指示の下書きを Issue に書きます。minor の指摘だけなら In review に進み、PR に
+「Known issues」として残します([task-format.md](../task-format.md#自動レビューの差し戻し)、決定事項 32)。
+
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
 PR で続きます。前回の実行より後の人のコメントは、次の実行のプロンプトと reviewer に渡ります([task-format.md](../task-format.md#人のコメント))。

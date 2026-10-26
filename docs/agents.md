@@ -46,8 +46,11 @@ PR 全体の差分(新しいファイルを含む)を渡します。実行に人
 
 reviewer は `.task-review.md` だけを書きます。テストは実行できます。テストが残した新しいファイルは自動で消し、
 PR のファイルを書き換えた場合は元に戻して Blocked にします。判定は `pass` / `needs changes` / `blocked` です。
-`needs changes` の場合、task-hub は 1 回だけ実装エージェントに自動で差し戻します。2 回目も通らなければ
-ドラフト PR を作り、カードを Blocked にします。マージの判断は今までどおり人が行います。
+指摘は blocking(`Please fix`)と minor(`Known issues`)に分かれ、minor だけなら通過として In review に進みます。
+`needs changes` の場合、task-hub は `[runner] review_retries` の回数(既定 2 回)まで実装エージェントに自動で差し戻します。
+同じ指摘がまた出たり、差し戻しの変更が小さくならなかったりすると、回数が残っていても止めます。止まったら
+ドラフト PR を作り、修正指示の下書きを Issue に書いて、カードを Blocked にします。詳しくは
+[task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し)。マージの判断は今までどおり人が行います。
 
 ## Blocked の仕分け(replanner)
 

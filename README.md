@@ -101,7 +101,7 @@ Example: you ask to fix the login, then merge.
 You         /task (or tell /chief)                    → Issue jyoka/tasks#12, Backlog
 You         Move the card to Ready                    → task-hub starts it           In progress
 worker      Edits, tests, writes the report
-reviewer    Checks each acceptance criterion          → pass (needs changes: sent back once)
+reviewer    Checks each acceptance criterion          → pass (needs changes: sent back, 2 times at most)
 task-hub    Pushes task/12, opens the PR, comments the report and verdict on the Issue   In review
 You         Review and merge the PR                   → the Issue closes             Done
 ```

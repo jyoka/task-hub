@@ -229,12 +229,13 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 書きます。すでに追跡されているファイルには影響しません)。
 
 `[runner] reviewer` が設定されている場合、task-hub は PR を作る前に reviewer を実行します。reviewer が
-`needs changes` と判定したら、実装エージェントに 1 回だけ自動で差し戻します。2 回目も通らない場合は Blocked になります。
+`needs changes` と判定したら、実装エージェントに自動で差し戻します。流れは次の「自動レビューの差し戻し」にあります。
 
 | エージェントの結果 | task-hub の処理 | カードの列 |
 |---|---|---|
 | レポートあり、ファイル変更あり、レビュー通過または reviewer なし | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
-| reviewer が 2 回目も `needs changes`、または `blocked`、判定なし、ファイルを変更した(変更は取り消します) | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント | Blocked |
+| reviewer の指摘が minor(`Known issues`)だけ | 通過と同じ。指摘は PR とコメントの「Known issues」に残す | In review |
+| 差し戻しを止めたあとも `needs changes`、または `blocked`、判定なし、ファイルを変更した(変更は取り消します) | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント。`needs changes` で止めたときは「Suggested instructions」(次の実行への修正指示の下書き)も書く | Blocked |
 | `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
 | レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
 | レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |
@@ -242,6 +243,39 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 
 再実行(Blocked のカードを Ready に戻す、または `task start`)は同じブランチで作業を続け、同じ PR を更新します。
 最新の実行で使われたプロンプトそのものは `~/.local/share/task-hub/prompts/<番号>.md` に保存されます。
+
+### 自動レビューの差し戻し
+
+reviewer は指摘を 2 つに分けます([worker/REVIEW.md](../worker/REVIEW.md))。
+
+| 種類 | 書く場所 | 扱い |
+|---|---|---|
+| blocking | `## Please fix` | 受け入れ条件を満たさない、使う人やリポジトリの決まりが頼っているものを壊す。差し戻す |
+| minor | `## Known issues` | 本物だが、マージしてよい(Goal の外の端の場合、動くもののテストがない、別のタスクにすべきもの)。差し戻さない |
+
+blocking がなく minor だけなら、レビューは通過です。判定が `needs changes` でも、`Please fix` が空で `Known issues`
+だけなら通過として扱います。カードは In review に進み、minor の指摘は PR の本文と Issue のコメントの
+「Known issues」に残ります。
+
+`needs changes` で差し戻す回数は `[runner] review_retries` で決めます。既定は 2 回、0 にすると差し戻しません。
+次のどれかに当たると、回数が残っていても差し戻しをやめて Blocked にします。
+
+| 止まる条件 | 理由の行(Blocked の 1 行目) |
+|---|---|
+| 差し戻した指摘がまた出た(reviewer が `(again)` を付けたか、同じ文の指摘) | `automated review stopped after ...: a finding came back after the retry it was sent back with` |
+| 最後の差し戻しで、ファイルが何も変わらなかった | `automated review stopped after ...: the last retry changed no files` |
+| 差し戻しの変更が、前の差し戻しより小さくならない(変えた行数。足した行と消した行の和) | `automated review stopped after ...: the retries' changes are not getting smaller (<前> then <今> changed lines)` |
+| 差し戻しの回数を使い切った | `automated review did not pass after <回数> retries` |
+
+2 回目からのレビューには、それまでに差し戻した指摘を渡します。reviewer は直っていないものを同じ文で `(again)`
+を付けて書き直します。task-hub は、印のある指摘と、空白や大文字小文字、Markdown の飾りを除いて同じ文の指摘を、
+「また出た」と数えます。
+
+`needs changes` のまま止まったときは、Issue のレポートと PR の本文の自動レビューの節のあとに `## Suggested instructions` を書きます。
+最後のレビューの blocking の指摘を番号付きで並べ、また出たものには印を付けた、次の実行への修正指示の下書きです。
+人は中身を確かめて Ready に戻すだけで済みます。次の実行は前回のレポートを読むので、この下書きも受け取り、
+Goal やその後のコメントと食い違わない限りそれに従います。直したいときは、そのコメントを編集するか、コメントを足します。
+reviewer が `blocked`(人にしか出せない情報が要る)と判定したときは、下書きを書きません。
 
 ## PR
 

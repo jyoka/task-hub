@@ -40,7 +40,7 @@ flowchart LR
 ## 特長
 
 - **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
-- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
+- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)
 - **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
 - **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません)
@@ -97,7 +97,7 @@ Ready のカードを自動で始めるには、`task watch` を動かしてお�
 あなた      /task(または /chief に話す)            → Issue jyoka/tasks#12、Backlog
 あなた      カードを Ready に移す                    → task-hub が開始                 In progress
 worker      編集し、テストし、レポートを書く
-reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら 1 回差し戻し)
+reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら差し戻し。2 回まで)
 task-hub    task/12 を push し、PR を作り、レポートと判定を Issue にコメント   In review
 あなた      PR をレビューしてマージ                  → Issue が閉じる                  Done
 ```

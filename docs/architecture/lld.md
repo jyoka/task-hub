@@ -78,10 +78,15 @@ classDiagram
     }
     class ReviewResult {
         verdict: pass / needs changes / blocked
+        fix: Please fix(blocking)
+        minor: Known issues
         passed
         needs_changes
+        findings
+        repeated(sent)
         issue_section()
-        blocked_line(retried)
+        blocked_line(stop)
+        suggested_instructions(stop, sent)
     }
     class UpdateCheck {
         別スレッドで origin の v* タグを確かめる
@@ -101,7 +106,7 @@ classDiagram
 | `updated`、`closed` | GitHub | カードを最後に変えた時刻、Issue が閉じているか |
 | `blockers`、`waits_for` | GitHub + 計算 | Blocked by のリンク、まだ始められない理由 |
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
-| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューの何回目か(`0`、`1`)、実行かエージェントが最後に止まった理由(`SIGHUP`、`SIGTERM`、`SIGINT`、`the agent was killed (SIGKILL)`、watchdog がエージェントを止めたときの `silent`、`the run process is gone`)。5 章 |
+| `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューか差し戻しの何回目か(`0` から `[runner] review_retries` まで)、実行かエージェントが最後に止まった理由(`SIGHUP`、`SIGTERM`、`SIGINT`、`the agent was killed (SIGKILL)`、watchdog がエージェントを止めたときの `silent`、`the run process is gone`)。5 章 |
 | `resumes`、`resumed`、`resume_stage`、`resumed_at` | 手元(`runs/<id>.json`。`relaunch` と `task _run` が書き、`launch` が空に戻す) | この実行を再開した回数(`MAX_RESUMES` まで)、再開した段階(空白で区切る)、次の `task _run` が続ける段階(読んだら空にする)、`relaunch` が起動し直した時刻。4.3 |
 | `session`、`session_role` | 手元(`runs/<id>.json`。`task _run` が実装エージェントの起動の前に書き、`launch` が空に戻す) | その起動の `{session}`(UUID)と段階(`agent`、`retry`)。再開は同じ段階なら同じ値をコマンドに渡す。4.3 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
@@ -296,11 +301,11 @@ flowchart TB
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
     review -- "あり" --> rv["run_review<br/>snapshot(snap に記録)→ reviewer → restore"]
-    rv -- "pass" --> finish
-    rv -- "needs changes(1 回目)" --> retry["retry<br/>差し戻しつきで run_worker"]
+    rv -- "pass、minor(Known issues)だけ" --> finish
+    rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
     retry --> rv
-    rv -- "2 回目も不合格、blocked" --> finish
+    rv -- "review_stop(回数、また出た指摘、変更なし、収束しない)<br/>Suggested instructions を足す、blocked" --> finish
     finish["finish<br/>add -A、commit、push、upsert_pr、comment、set_status"]
     finish -- "In review" --> close["タブを閉じる"]
     finish -- "エージェント自身の Blocked" --> replan["run_replan<br/>仕分けてコメント、replan の出来事"]
@@ -321,8 +326,8 @@ flowchart TB
 |---|---|
 | `preparing`、`setup` | 最初から(`[setup]` は何度動かしても同じ結果になる約束。プロンプトは作り直さない) |
 | `agent` | エージェントを再開のコマンドで起動。そのあとは今までどおり review、finish |
-| `review` | `snap` で worktree を戻し(`release_snapshot`)、reviewer を新しく起動。`review_attempt` が 1 なら 2 回目のレビュー(差し戻しは増えない) |
-| `retry` | 差し戻しのプロンプト(`prompts/<id>-retry.md`)で、エージェントを再開のコマンドで起動。そのあと 2 回目のレビュー |
+| `review` | `snap` で worktree を戻し(`release_snapshot`)、reviewer を新しく起動。`review_attempt` が n なら n 回の差し戻しのあとのレビュー(差し戻しは増えない)。それまでの指摘と変更の行数は `prompts/<id>-review.json` から読む |
+| `retry` | 差し戻しのプロンプト(`prompts/<id>-retry.md`)で、エージェントを再開のコマンドで起動。`review_attempt` はその差し戻しの番号。そのあと次のレビュー |
 | `finishing` | `prompts/<id>-finish.json`(`review_loop` の結果とエージェントの終了コード)で `finish` をもう一度。commit、push、PR は同じ結果になる。Issue の最後のレポートが「Resumed once」の行のほかは同じ本文なら、コメントを書かない |
 
 再開した実行の Issue のレポート(`finish`、`report_comment`)には、`Resumed once at <段階>: <理由>.` の 1 行が入ります
@@ -337,7 +342,7 @@ SIGKILL で止めます。止まらなければ再開しません。
 | 条件 | 結果 |
 |---|---|
 | レポートがない | Blocked(`agent exited without a report`) |
-| reviewer が 2 回不合格、または blocked | Blocked(review) |
+| reviewer の `needs changes` を `review_stop` が止めた(Suggested instructions つき)、または blocked | Blocked(review) |
 | レポートに `## Blocked` | Blocked(エージェント自身)→ replanner |
 | 変更なし、research ラベルなし | Blocked(`changed no files`) |
 | それ以外 | In review(変更があれば PR、research ならレポートだけ) |
@@ -538,6 +543,7 @@ stateDiagram-v2
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
 | `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
 | `share/prompts/<id>-retry.md` | `review_loop`(差し戻しの前)。`launch` が消す | 再開した `task _run`(`retry` から) | Markdown(差し戻しのプロンプト) |
+| `share/prompts/<id>-review.json` | `review_loop`(差し戻しの前)、`review_retry`(差し戻しのあと)。`launch` が消す | 再開した `task _run`(`review`、`retry` から)の `review_stop` | JSON。`sent`(差し戻した指摘の列)、`sizes`(差し戻しごとに変えた行数)、`tree`(今の差し戻しの前の worktree の tree) |
 | `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由 |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
@@ -566,7 +572,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ### 実行の集計(metrics.jsonl の 1 行)
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
-`retried`、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`、
+`retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
+`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`blocked_by`、`replan`、`usage`(起動ごとのトークン、呼び出し、モデル)、`files`、`added`、`removed`、
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
 起動は、`usage` に `agent, resumed` のような役で入ります。
