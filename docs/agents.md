@@ -15,7 +15,7 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 |---|---|---|---|
 | `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose --session-id {session} {prompt}` | 同じコマンドの `--session-id` を `--resume` にしたもの | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
 | `codex` | `codex exec -s workspace-write --json {prompt}` | なし(新しいセッション) | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
-| `pi` | `pi -p --mode json --session-id {session} {prompt}` | 同じコマンド | Pi の print モード。`--mode json` は途中の手順をログに出すためです。`--session-id` はその ID の会話がなければ作り、あれば続けます(pi 1.4.0 で確認) |
+| `pi` | `pi -p --mode json -e <task-hub>/pi/task-groups.ts --session-id {session} {prompt}` | 同じコマンド | Pi の print モード。`--mode json` は途中の手順をログに出すためです。`-e` は bash のコマンドを `worker/group-shell` に通す拡張で、`<task-hub>` は `task` を動かしている clone(ふつうは `~/.local/lib/task-hub`)です([落ちたエージェントのコマンドを止める](#落ちたエージェントのコマンドを止める))。`--session-id` はその ID の会話がなければ作り、あれば続けます(pi 1.4.0 で確認) |
 | `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | なし(新しいセッション) | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
 
 `{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。`{session}` も同じく
@@ -143,11 +143,11 @@ aider = aider --yes-always --message {prompt}
 
 ```ini
 [agents]
-pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna --session-id {session} {prompt}
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna -e /Users/me/.local/lib/task-hub/pi/task-groups.ts --session-id {session} {prompt}
 
 [resume]
 ; the command that goes on with the agent's own saved conversation, under the same {session}
-pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna --session-id {session} {prompt}
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna -e /Users/me/.local/lib/task-hub/pi/task-groups.ts --session-id {session} {prompt}
 myagent = myagent --continue {prompt}
 ```
 
@@ -157,6 +157,27 @@ myagent = myagent --continue {prompt}
 
 pi も claude も、会話をそれぞれの置き場所(pi は `~/.pi/agent/sessions/`、claude は `~/.claude/projects/`)に実行ごとに
 残します。task-hub はそれを消しません。
+
+### 落ちたエージェントのコマンドを止める
+
+pi と claude は、ツールのコマンド(長いテストなど)をエージェントとは別のプロセスグループで動かします。エージェントが
+落ちてもそのコマンドは最後まで動くので、再開したエージェントの横で同じ worktree に書き続けることがあります。
+task-hub はこれを防ぐため、コマンドを `worker/group-shell` に通してそのプロセスグループを記録し、エージェントを起動する前に、
+前のエージェントが残したものを止めます。止めたときはログに `== stopped process group <番号>: ...` と出ます。
+
+| エージェント | 通し方 | 自分のコマンドに変えたとき |
+|---|---|---|
+| `pi` | 拡張 `pi/task-groups.ts` が `bash` のツールを置き換え、シェルを `group-shell` にする(`-e` は `--no-extensions` でも読む)。ほかの拡張が `bash` を置き換えていれば、そちらを使い、記録しない | `[agents]` と `[resume]` に `-e <task-hub>/pi/task-groups.ts` を足す |
+| `claude` | task-hub がエージェントに環境変数 `CLAUDE_CODE_SHELL_PREFIX` を渡す | そのままで使える。自分で `CLAUDE_CODE_SHELL_PREFIX` を決めていれば(環境変数でも `~/.claude/settings.json` の `env` でも)、そちらを使い、記録しない |
+| `codex`、`kiro` | 差し込み口がなく、記録しない | - |
+
+- 利用者の `~/.pi` と `~/.claude` の設定ファイルは書き換えません。pi の拡張は pi の設定(`shellPath`、`shellCommandPrefix`)を
+  読んで使うだけです。`shellPath` の `~/` と `file://` の URL は、pi と同じくパスに直します
+- 止めるのは、記録したグループの先頭が記録と同じ開始時刻で生きているときだけです。番号が別のプロセスに渡っていれば止めません
+- 止めるのは、次のエージェントを起動するときと、片付け(`cleanup`)のときです
+- Windows と `[sandbox] mode = user` では記録しません(今までどおり)。`[sandbox] mode = user` では、組み込みの pi のコマンドから `-e` を外します
+- 調べた根拠と、差し込み口のないエージェントで止められない理由は
+  [durable-runs-comparison.md の「A でツールのコマンドを止める」](durable-runs-comparison.md#a-でツールのコマンドを止めるタスク-238)にあります
 
 実験として、Pi Durable で作った実行役(`durable/`)も `[agents] durable` と `[resume] durable` に同じコマンドを書いて使えます。会話を worktree の `.task-durable/` に残し、止まったところから続けます。入れ方、実験版であること、認証は [durable/README.md](../durable/README.md) にあります。
 

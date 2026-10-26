@@ -376,6 +376,10 @@
     (なければ `[agents]` の新しいセッション)。どちらでも、元のプロンプトに「# Resumed」の節(`worker/PROMPT.md`)を
     足すので、会話が残っていなくても worktree から続けられます。エージェントの名前で分ける処理はありません(決定事項 4)。
     同じ worktree で 2 つのエージェントが書かないよう、再開の前に残ったエージェントのプロセスグループを止めます。
+    pi と claude はツールのコマンドをさらに自分のプロセスグループで動かすので、task-hub はそれを `worker/group-shell` に
+    通して記録し、次のエージェントを起動する前に止めます(タスク 238。pi は `-e pi/task-groups.ts`、claude は
+    `CLAUDE_CODE_SHELL_PREFIX`。どちらも利用者の設定ファイルは変えない)。比べた実験で、長いテストが 2 つ同時に動いたのは
+    このためでした([durable-runs-comparison.md](durable-runs-comparison.md))。
     会話の ID は `{session}` で渡します。task-hub が起動ごとに UUID を決めて `runs/<id>.json` に残し、再開で同じ値を
     渡すので、CLI の出力から ID を拾う処理は要りません。組み込みの `pi`(`--session-id`)と `claude`(`--session-id`、
     `--resume`)は既定の `[resume]` を持ち、`[agents]` が組み込みのままのときだけ使います。Pi Durable の実行役(B)は

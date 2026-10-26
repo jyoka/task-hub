@@ -82,11 +82,13 @@ SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
 HERDR_START_SECONDS = float(os.environ.get("TASK_HERDR_START_SECONDS") or 8)  # tests: a dead pane fails in seconds
 CLAUDE_P = ("env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000"
             " claude -p --dangerously-skip-permissions --output-format stream-json --verbose")
+# pi's bash tool through worker/group-shell (command_groups_env): -e loads it, with --no-extensions too
+PI_GROUPS = Path(__file__).resolve().parent.parent / "pi" / "task-groups.ts"
 # {session}: a new UUID for each launch (claude wants a UUID); a resume passes the one of the launch it goes on with
 DEFAULT_AGENTS = {
     "claude": f"{CLAUDE_P} --session-id {{session}} {{prompt}}",
     "codex": "codex exec -s workspace-write --json {prompt}",
-    "pi": "pi -p --mode json --session-id {session} {prompt}",
+    "pi": f"pi -p --mode json -e {shlex.quote(str(PI_GROUPS))} --session-id {{session}} {{prompt}}",
     "kiro": "kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}",
 }
 # [resume] <name> by default, while [agents] <name> is the built-in one (resume_command): it goes on with the
@@ -110,6 +112,7 @@ WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
 WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
 WORKER_CONFLICT = BIN.parent.parent / "worker" / "CONFLICT.md"
+GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what the agents' tool commands run in (command_groups_env)
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
 # mode = user has run here: until repos/ and worktrees/ are gone, mode = off must not trust what the agent left there
@@ -464,6 +467,10 @@ def agent_command(name, prompt, resume=False, session=""):
         parts = shlex.split(command or c["agents"][name])
     except ValueError as e:  # a quote left open, or cut by a ; or # that starts a comment
         raise RuntimeError(f"[{section}] {name} in {home(CONFIG)} cannot be read: {e}") from None
+    if sandbox_mode() != "off" and str(PI_GROUPS) in parts:  # its user cannot read this clone (command_groups_env)
+        i = parts.index(str(PI_GROUPS))
+        if i and parts[i - 1] in ("-e", "--extension"):
+            del parts[i - 1:i + 1]
     return [{"{prompt}": prompt, "{session}": session}.get(part, part) for part in parts]
 
 
@@ -2395,7 +2402,10 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
         # it showed
         t["agent_stopped"], t["agent_silenced"], t["agent_steps"], t["agent_group"] = False, False, 0, 0
     try:
+        if t is not None:
+            stop_left_commands(t, say)  # never two writers in one worktree: a cut-short agent's long test, say
         argv, env = windows_command(agent_command(agent, prompt, resume, session or new_session()))
+        env.update(command_groups_env(t))
         argv = as_agent(argv, wt, [*pass_env(), *env])
         proc = subprocess.Popen(argv, cwd=wt, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors="replace", env={**os.environ, **env},
@@ -2463,6 +2473,69 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
             if t.get("agent_pid") and (proc is None or proc.returncode is not None):
                 t["agent_pid"] = t["agent_started"] = ""  # nothing of it left to stop
                 save_run(t)
+
+
+def commands_dir(t):
+    """runs/<id>.groups: a file for each process group the task's agents ran a tool command in, named after it and
+    holding its leader's start time (worker/group-shell). It outlives the command, until the next stop_left_commands."""
+    return RUNS / f"{t['id']}.groups"
+
+
+def command_groups_env(t):
+    """The variables that have worker/group-shell note the agent's tool commands, so that what a cut-short agent
+    left running can be stopped (stop_left_commands): the folder for the notes; group-shell for pi's bash tool
+    (pi/task-groups.ts, which the built-in [agents] pi loads); and group-shell as Claude Code's
+    CLAUDE_CODE_SHELL_PREFIX, unless you set one or its path has " -" (where Claude Code would cut it).
+    Agents with no such hook (codex, kiro) note nothing. None without a task, on Windows (no group-shell), and with
+    [sandbox] mode = user (its user cannot write the notes here)."""
+    if t is None or WINDOWS or sandbox_mode() != "off" or not os.access(GROUP_SHELL, os.X_OK):
+        return {}  # never a shell the agent's commands cannot run in
+    env = {"TASK_HUB_GROUPS": str(commands_dir(t)), "TASK_HUB_GROUP_SHELL": str(GROUP_SHELL)}
+    if "CLAUDE_CODE_SHELL_PREFIX" not in os.environ and " -" not in str(GROUP_SHELL):
+        env["CLAUDE_CODE_SHELL_PREFIX"] = str(GROUP_SHELL)
+    return env
+
+
+def stop_left_commands(t, say):
+    """Stop what tool commands an earlier agent of the task left running, before another one starts. pi and Claude Code
+    start each command in a process group of its own, which stopping the agent's group does not reach (lld.md 7): a
+    long test cut short with its agent went on beside the resumed one. group-shell noted each group with its leader's
+    start time, and the note outlives the command: a group is stopped only while that leader still lives, so neither
+    an ended command nor a process the id went to since. The notes go. RuntimeError when a group does not stop."""
+    d = commands_dir(t)
+    if WINDOWS or not d.is_dir():
+        return
+    leaders = None
+    for f in sorted(d.iterdir()):
+        if not f.name.isdigit():  # a note being written (.<pid>)
+            continue
+        noted = ""
+        with contextlib.suppress(OSError):
+            noted = " ".join(f.read_text().split())
+        if leaders is None:
+            leaders = group_leaders()
+        pgid = int(f.name)
+        if not noted or leaders.get(pgid) != noted:
+            continue
+        if not stop_group(pgid, (signal.SIGTERM, signal.SIGKILL)):
+            raise RuntimeError(f"a command an earlier agent left running (process group {pgid}) does not stop")
+        say(f"== stopped process group {pgid}: a command an earlier agent left running")
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def group_leaders():
+    """{pgid: its leader's start time (ps lstart)} of the processes that lead their own process group; none when ps
+    cannot run (then nothing is stopped: it cannot be told apart)."""
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,lstart="], capture_output=True, text=True,
+                           env={**os.environ, "LC_ALL": "C"})
+    except OSError:
+        return {}
+    leaders = {}
+    for fields in map(str.split, r.stdout.splitlines()):
+        if len(fields) > 2 and fields[0] == fields[1] and fields[0].isdigit():
+            leaders[int(fields[0])] = " ".join(fields[2:])
+    return leaders
 
 
 class Interrupted(BaseException):
@@ -3414,6 +3487,8 @@ def cleanup(t):
     """
     t = {**t, **load_run(t["id"])}  # remove the saved run's resources, even if the card's settings changed
     close_herdr(t)
+    with contextlib.suppress(RuntimeError):  # what a cut-short agent left running must not write on in its worktree
+        stop_left_commands(t, lambda _line: None)
     if sandbox_mode() == "off":
         try:
             refuse_after_user()
@@ -3436,6 +3511,7 @@ def cleanup(t):
         if git_shared(repo, "rev-parse", "--verify", "-q", f"refs/heads/{t['branch']}").returncode == 0:
             return f"branch {t['branch']} could not be deleted"
     (ASKED / f"{t['id']}.json").unlink(missing_ok=True)
+    shutil.rmtree(commands_dir(t), ignore_errors=True)
     (RUNS / f"{t['id']}.json").unlink(missing_ok=True)
     with contextlib.suppress(OSError):
         (RUNS / f"{t['id']}.lock").unlink(missing_ok=True)

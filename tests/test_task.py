@@ -34,6 +34,8 @@ from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
 DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
+PI_GROUPS = BIN.parent.parent / "pi" / "task-groups.ts"  # pi's bash through worker/group-shell (-e in the built-in pi)
+GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what pi's and Claude Code's tool commands run in
 KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
 KIRO_WATCH = BIN.parent.parent / "kiro" / "task-events-watch"
 KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.workflow.json"
@@ -438,6 +440,21 @@ if mode == "frozen" or mode in ("slow", "slowtree") and "# Resumed" not in promp
         Path(f"{kid}.tmp").replace(kid)
     print("waiting", flush=True)
     import time; time.sleep(60)
+if mode == "longtest":  # a long test run as Claude Code runs a Bash command, in a process group of its own, through
+    # task-hub's hook (worker/group-shell): its CLAUDE_CODE_SHELL_PREFIX; PISHELL: as pi's shell (pi/task-groups.ts)
+    test = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent / ("long-test-" + re.search(r"Task (\d+):", prompt)[1])
+    if "# Resumed" not in prompt:
+        Path("hello.txt").write_text("partial work\n")
+        command = f"echo $$ > {test}.tmp && mv {test}.tmp {test} && sleep 60 && echo done > {test}.done"
+        argv = [os.environ["TASK_HUB_GROUP_SHELL"], "-c", command] if "PISHELL" in prompt else \
+            ["/bin/sh", "-c", f"{os.environ['CLAUDE_CODE_SHELL_PREFIX']} '{command}'"]
+        subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while not test.exists():
+            import time; time.sleep(0.05)
+        print("waiting", flush=True)
+        import time; time.sleep(60)
+    left = subprocess.run(["ps", "-p", test.read_text().strip(), "-o", "stat="], capture_output=True, text=True)
+    Path(f"{test}.at-resume").write_text("running" if left.stdout.strip()[:1] not in ("", "Z") else "gone")
 if mode == "retryhang":  # sent back by the reviewer, then cut short in its retry; resumed, it fixes it
     if "# Automated review feedback" not in prompt:
         Path("hello.txt").write_text("hello, reviewfix pending\n")
@@ -1094,6 +1111,8 @@ class TaskTest(unittest.TestCase):
         (fakebin / "launchctl").chmod(0o755)
         self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
+        for name in ("CLAUDE_CODE_SHELL_PREFIX", "TASK_HUB_GROUPS", "TASK_HUB_GROUP_SHELL", "TASK_HUB_SHELL"):
+            self.env.pop(name, None)  # set when a task-hub agent runs these tests: bin/task sets its own from here
         self.write_config()
         self.origin("jyoka/app")
         self.stderr = []  # of every `task` the test ran, for the warning check in tearDown
@@ -1450,8 +1469,8 @@ class TaskTest(unittest.TestCase):
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             for config, expected in (
-                    ("", {"pi": "pi -p --mode json --session-id {session} {prompt}", "codex": None, "kiro": None,
-                          "fake": None}),
+                    ("", {"pi": f"pi -p --mode json -e {shlex.quote(str(PI_GROUPS))} --session-id {{session}} "
+                                "{prompt}", "codex": None, "kiro": None, "fake": None}),
                     ("pi = /opt/pi -p --mode json --model m {prompt}\n", {"pi": None}),
                     ("pi = /opt/pi -p --session-id {session} {prompt}\n\n[resume]\npi = /opt/pi -p --session-id {session} "
                      "{prompt}\nfake = \n", {"pi": "/opt/pi -p --session-id {session} {prompt}", "fake": None}),
@@ -1464,6 +1483,11 @@ class TaskTest(unittest.TestCase):
                         self.assertEqual(task.agent_command("pi", "P", resume=True, session="S"),
                                          task.agent_command("pi", "P", session="S"))  # [agents]: a new session
             self.assertEqual(task.agent_command("pi", "P", resume=True, session="S")[-3:], ["--session-id", "S", "P"])
+            self.assertIn(str(PI_GROUPS), task.agent_command("pi", "P", session="S"))
+            self.write_config("\n[sandbox]\nmode = user\n")  # its user cannot read this clone: no -e (no notes either)
+            task.config.cache_clear()
+            self.assertEqual(task.agent_command("pi", "P", session="S"),
+                             ["pi", "-p", "--mode", "json", "--session-id", "S", "P"])
 
     def test_unknown_agent_on_a_card_blocks_only_that_card(self):
         bad, good = self.new(title="bad"), self.new(title="good")
@@ -4722,9 +4746,8 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "In review")
         calls = [json.loads(line) for line in steps.read_text().splitlines()]
         session = self.run_state(tid)["session"]
-        self.assertEqual([(c["argv"], c["resumed"]) for c in calls],
-                         [(["-p", "--mode", "json", "--session-id", session], False),
-                          (["-p", "--mode", "json", "--session-id", session], True)])
+        argv = ["-p", "--mode", "json", "-e", str(PI_GROUPS), "--session-id", session]  # -e: bash through group-shell
+        self.assertEqual([(c["argv"], c["resumed"]) for c in calls], [(argv, False), (argv, True)])
         self.assertIn("== agent, resumed: pi ([resume])", self.task("log", tid, "--full"))
 
     def test_a_resumed_run_that_stops_again_is_blocked(self):
@@ -4789,6 +4812,120 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "In review")
         self.assertTrue(process_gone(child))
         self.assertEqual(len(self.agent_calls()), 2)
+
+    def long_test_started(self, tid):
+        """The pid of the long test the agent (mode longtest) started, once it runs, in a process group of its own."""
+        test = self.root / f"long-test-{tid}"
+        self.wait_for(lambda: test.exists() and "waiting" in self.task("log", tid))
+        pid = int(test.read_text())
+        self.assertNotEqual(os.getpgid(pid), int(self.run_state(tid)["agent_pid"]))
+        return pid
+
+    def assert_long_test_stopped_before_the_resume(self, tid, pid):
+        """lld.md 7: what the cut-short agent left running is stopped before the resumed agent starts, not left to
+        finish beside it."""
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertTrue(process_gone(pid))
+        self.assertEqual((self.root / f"long-test-{tid}.at-resume").read_text(), "gone")
+        self.assertFalse((self.root / f"long-test-{tid}.done").exists())
+        self.assertRegex(self.task("log", tid, "--full"),
+                         r"== stopped process group \d+: a command an earlier agent left running")
+        self.assertFalse((self.root / ".local/state/task-hub/runs" / f"{tid}.groups").exists())
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_long_test_left_by_an_agent_killed_with_its_run_is_stopped_before_it_resumes(self):
+        """durable-runs.md K2: `_run` and the agent killed (kill -9) during a long test. The test, in a process group
+        of its own as Claude Code and pi start their commands, outlives them; relaunch's run stops it before its agent
+        starts."""
+        for form in ("claude", "pi"):  # CLAUDE_CODE_SHELL_PREFIX, pi's shell (pi/task-groups.ts)
+            with self.subTest(form):
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("longtest" + (" PISHELL" if form == "pi" else ""))
+                self.task("start", tid)
+                pid = self.long_test_started(tid)
+                self.kill_run_and_agent(tid)
+                self.assertFalse(process_gone(pid))  # killing the agent's group does not reach it
+                self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+                self.assert_long_test_stopped_before_the_resume(tid, pid)
+
+    def test_a_long_test_left_by_an_agent_killed_in_place_is_stopped_before_it_resumes(self):
+        """durable-runs.md K1: only the agent's group killed, `_run` alive: it resumes the agent in place, the long test
+        stopped first."""
+        tid = self.new("longtest")
+        self.task("start", tid)
+        pid = self.long_test_started(tid)
+        os.killpg(int(self.run_state(tid)["agent_pid"]), signal.SIGKILL)
+        self.assert_long_test_stopped_before_the_resume(tid, pid)
+
+    def test_group_shell_runs_the_command_as_the_agents_shell_would_and_notes_its_group(self):
+        """worker/group-shell as pi's shell (-c) and as Claude Code's prefix: the command gets stdin, and its output
+        and exit code are its own. The note names its process group and holds the leader's start time; without
+        TASK_HUB_GROUPS nothing is noted."""
+        groups = self.root / "groups"
+        command = "read x; echo got $x; echo to stderr >&2; exit 3"
+        for form, argv in (("pi", [str(GROUP_SHELL), "-c", command]),
+                           ("claude", ["/bin/sh", "-c", f"{GROUP_SHELL} '{command}'"])):
+            for noting in (True, False):
+                with self.subTest(form=form, noting=noting):
+                    shutil.rmtree(groups, ignore_errors=True)
+                    env = {**self.env, **({"TASK_HUB_GROUPS": str(groups)} if noting else {})}
+                    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True, env=env, start_new_session=True)
+                    out, err = p.communicate("hi\n", timeout=20)
+                    self.assertEqual((p.returncode, out, err), (3, "got hi\n", "to stderr\n"))
+                    if noting:
+                        self.assertEqual(os.listdir(groups), [str(p.pid)])  # its own group, which it leads
+                        self.assertRegex((groups / str(p.pid)).read_text(), r"^\w{3} \w{3} +\d+ [\d:]+ \d{4}\s*$")
+                    else:
+                        self.assertFalse(groups.exists())
+
+    def run_pi_shell_path(self, shell_path):
+        """A command as pi's bash tool runs it under task-hub when pi's shellPath setting is shell_path: through
+        group-shell, with TASK_HUB_SHELL as pi/task-groups.ts sets it (pi/shell-path.ts, run by node)."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        script = ("import { normalizeShellPath } from " + json.dumps((PI_GROUPS.parent / "shell-path.ts").as_uri())
+                  + "; process.stdout.write(normalizeShellPath(process.argv[1]));")
+        p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script,
+                            shell_path], capture_output=True, text=True, env=self.env, timeout=20)
+        if p.returncode and "strip-types" in p.stderr:
+            self.skipTest(f"this node cannot run TypeScript: {p.stderr.strip()}")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = subprocess.run([str(GROUP_SHELL), "-c", "echo hi"], capture_output=True, text=True, timeout=20,
+                           env={**self.env, "TASK_HUB_GROUPS": str(self.root / "groups"), "TASK_HUB_SHELL": p.stdout})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def fake_shell(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#!/bin/sh\necho "fake shell $*"\n')
+        path.chmod(0o755)
+
+    def test_a_pi_shell_path_under_home_runs_pis_commands_with_that_shell(self):
+        """shellPath "~/bin/bash" names the same shell under task-hub as pi alone gives it (normalizePath expands ~),
+        not the bash group-shell falls back to."""
+        self.fake_shell(self.root / "bin" / "bash")  # self.root is HOME
+        self.assertEqual(self.run_pi_shell_path("~/bin/bash"), "fake shell -c echo hi\n")
+
+    def test_a_pi_shell_path_given_as_a_file_url_runs_pis_commands_with_that_shell(self):
+        self.fake_shell(self.root / "my shells" / "bash")
+        url = (self.root / "my shells" / "bash").as_uri()  # file:///.../my%20shells/bash
+        self.assertEqual(self.run_pi_shell_path(url), "fake shell -c echo hi\n")
+
+    def test_a_noted_group_whose_id_went_to_another_process_is_not_stopped(self):
+        """A note whose leader started at another time than noted names a process group long gone: the id is another
+        process's now, which is left alone."""
+        other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(other.kill)
+        tid = self.new("ok")
+        groups = self.root / ".local/state/task-hub/runs" / f"{tid}.groups"
+        groups.mkdir(parents=True)
+        (groups / str(other.pid)).write_text("Thu Jan  1 00:00:00 2026\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(other.poll())
+        self.assertFalse(groups.exists())
 
     def test_a_run_killed_while_its_agent_lives_stops_that_agent_before_resuming(self):
         """Two agents must never write the same worktree: relaunch stops the one left (and what it started) first."""
