@@ -688,7 +688,8 @@ GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカ
   `stop_left_agent`)そのコマンドは残り、親が launchd に替わって最後まで動く(本物で確かめた)。Claude Code 2.1.310 の
   `Bash` も同じ(`detached: true`、本物で確かめた)。task-hub は pi の `bash` を `pi/task-groups.ts`(同じ名前のツールで
   置き換え、`shellPath` を `worker/group-shell` にする。`session_start` で登録し、ほかの拡張の `bash` があれば何もしない。
-  pi の設定は `pi.getSettings()` で読むだけ)で、Claude Code の `Bash` を
+  pi の設定は `pi.getSettings()` で読むだけ。`shellPath` の `~/` と `file://` は pi と同じく `pi/shell-path.ts` で
+  パスにしてから `TASK_HUB_SHELL` に入れる)で、Claude Code の `Bash` を
   `CLAUDE_CODE_SHELL_PREFIX`(コマンドの文字列を `<prefix> '<コマンド>'` の形で渡す)で、`group-shell` に通す(2 章)。
 - B の実行役(`durable/`)は `step_format` が None(`Steps` そのもの)で、自分で `· <名前>: <入力の 1 つ>` と文の 1 行、
   最後の答えの全文をテキストで出す。Pi Durable 1.4.0 の `NodeExecutionEnv` も bash のコマンドを自分のプロセスグループで

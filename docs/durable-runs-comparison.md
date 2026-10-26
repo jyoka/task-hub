@@ -289,6 +289,9 @@ pi 1.4.0(`~/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-cod
   `detectExtensionConflicts`、`main.js:750` の `process.exit(1)`)。`session_start` では、ほかの拡張の `bash` があれば(`pi.getAllTools()` の
   `sourceInfo.path` が `builtin:` でない)何もしません。設定は `pi.getSettings()` で pi と同じものを読み(プロジェクトの設定は pi が信頼したときだけ)、
   `shellPath` は `group-shell` の中で動かすシェルとして、`shellCommandPrefix` はそのまま渡します。書き込みはしません
+- `shellPath` は、pi と同じ形に直してから `group-shell` に渡します(`pi/shell-path.ts` の `normalizeShellPath`)。pi は `getShellPath` で
+  `normalizePath`(`utils/paths.js`)を通し、先頭の `~` と `~/` をホームに、`file://` の URL をパスにします。そのまま渡すと、
+  `"shellPath": "~/bin/bash"` は `group-shell` の `[ -x ]` に通らず、`/bin/bash` に替わっていました(タスク 238 の自動レビューで見つかった)
 - 試したもの: ほかに `bash` を置き換える拡張(pi の `examples/extensions/bash-spawn-hook.ts` と同じ形)を `-e` で一緒に読ませても、pi は起動し、
   コマンドはその拡張の `bash` で動き、記録はありませんでした
 
@@ -370,7 +373,9 @@ status Blocked | long test gone? True | finished? False
 Blocked は、偽のモデルがレポートを書かないためです。長いテストは再開のエージェントの前に止まり、最後まで走りませんでした(`finished? False`)。
 CI で動くテストは、偽のエージェントで同じことを確かめます(`test_a_long_test_left_by_an_agent_killed_*`、
 `test_a_noted_group_whose_id_went_to_another_process_is_not_stopped`、`test_group_shell_runs_the_command_as_the_agents_shell_would_and_notes_its_group`)。
-CI には pi がないので、`pi/task-groups.ts` を読むテストはありません。偽のエージェントは、Claude Code と同じく
+CI には pi がないので、`pi/task-groups.ts` を読むテストはありません。`shellPath` の直し方は、node で `pi/shell-path.ts` を動かして
+確かめます(`test_a_pi_shell_path_under_home_runs_pis_commands_with_that_shell`、`test_a_pi_shell_path_given_as_a_file_url_runs_pis_commands_with_that_shell`)。
+偽のエージェントは、Claude Code と同じく
 `CLAUDE_CODE_SHELL_PREFIX` を通して、または pi と同じく `group-shell -c` で、自分のプロセスグループで長いテストを始めます。
 
 ### 3. 差し込み口がないエージェント

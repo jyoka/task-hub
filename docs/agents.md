@@ -172,7 +172,7 @@ task-hub はこれを防ぐため、コマンドを `worker/group-shell` に通�
 | `codex`、`kiro` | 差し込み口がなく、記録しない | - |
 
 - 利用者の `~/.pi` と `~/.claude` の設定ファイルは書き換えません。pi の拡張は pi の設定(`shellPath`、`shellCommandPrefix`)を
-  読んで、そのまま使うだけです
+  読んで使うだけです。`shellPath` の `~/` と `file://` の URL は、pi と同じくパスに直します
 - 止めるのは、記録したグループの先頭が記録と同じ開始時刻で生きているときだけです。番号が別のプロセスに渡っていれば止めません
 - 止めるのは、次のエージェントを起動するときと、片付け(`cleanup`)のときです
 - Windows と `[sandbox] mode = user` では記録しません(今までどおり)。`[sandbox] mode = user` では、組み込みの pi のコマンドから `-e` を外します

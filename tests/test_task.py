@@ -4879,6 +4879,40 @@ class TaskTest(unittest.TestCase):
                     else:
                         self.assertFalse(groups.exists())
 
+    def run_pi_shell_path(self, shell_path):
+        """A command as pi's bash tool runs it under task-hub when pi's shellPath setting is shell_path: through
+        group-shell, with TASK_HUB_SHELL as pi/task-groups.ts sets it (pi/shell-path.ts, run by node)."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        script = ("import { normalizeShellPath } from " + json.dumps((PI_GROUPS.parent / "shell-path.ts").as_uri())
+                  + "; process.stdout.write(normalizeShellPath(process.argv[1]));")
+        p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script,
+                            shell_path], capture_output=True, text=True, env=self.env, timeout=20)
+        if p.returncode and "strip-types" in p.stderr:
+            self.skipTest(f"this node cannot run TypeScript: {p.stderr.strip()}")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = subprocess.run([str(GROUP_SHELL), "-c", "echo hi"], capture_output=True, text=True, timeout=20,
+                           env={**self.env, "TASK_HUB_GROUPS": str(self.root / "groups"), "TASK_HUB_SHELL": p.stdout})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def fake_shell(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#!/bin/sh\necho "fake shell $*"\n')
+        path.chmod(0o755)
+
+    def test_a_pi_shell_path_under_home_runs_pis_commands_with_that_shell(self):
+        """shellPath "~/bin/bash" names the same shell under task-hub as pi alone gives it (normalizePath expands ~),
+        not the bash group-shell falls back to."""
+        self.fake_shell(self.root / "bin" / "bash")  # self.root is HOME
+        self.assertEqual(self.run_pi_shell_path("~/bin/bash"), "fake shell -c echo hi\n")
+
+    def test_a_pi_shell_path_given_as_a_file_url_runs_pis_commands_with_that_shell(self):
+        self.fake_shell(self.root / "my shells" / "bash")
+        url = (self.root / "my shells" / "bash").as_uri()  # file:///.../my%20shells/bash
+        self.assertEqual(self.run_pi_shell_path(url), "fake shell -c echo hi\n")
+
     def test_a_noted_group_whose_id_went_to_another_process_is_not_stopped(self):
         """A note whose leader started at another time than noted names a process group long gone: the id is another
         process's now, which is left alone."""

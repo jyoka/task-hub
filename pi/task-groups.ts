@@ -6,6 +6,7 @@
 // task-hub's built-in [agents] pi loads this file with -e (which --no-extensions leaves on). It does nothing unless
 // task-hub set TASK_HUB_GROUPS, and never writes pi's settings: it reads them for the shell and its prefix.
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { normalizeShellPath } from "./shell-path.ts";
 
 export default function (pi: ExtensionAPI) {
   const groupShell = process.env.TASK_HUB_GROUP_SHELL;
@@ -21,7 +22,8 @@ export default function (pi: ExtensionAPI) {
       }
       const settings = pi.getSettings(); // pi's own reading: global and, if trusted, the project's
       if (settings.shellPath) {
-        process.env.TASK_HUB_SHELL = settings.shellPath; // group-shell runs the command with it, as pi would have
+        // group-shell runs the command with it, as pi would have: ~ and file:// URLs read as pi reads them
+        process.env.TASK_HUB_SHELL = normalizeShellPath(settings.shellPath);
       }
       pi.registerTool(
         createBashToolDefinition(process.cwd(), { shellPath: groupShell, commandPrefix: settings.shellCommandPrefix }),
