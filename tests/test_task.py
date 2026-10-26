@@ -3996,6 +3996,7 @@ class TaskTest(unittest.TestCase):
         for heading in ("## Budget (予算)", "### **Budget**:", "## Budget（予算）", "## 予算", "### 予算："):
             self.assertEqual(task.goal_budget(f"{heading}\n- 2h\n- paid api: openai\n"), ({"seconds": 7200}, ["openai"]),
                              heading)
+        self.assertEqual(task.goal_budget("## Budget\n- 90m, 2H, 3M tokens\n"), ({"seconds": 7200, "tokens": 3_000_000}, []))
         self.assertEqual(task.goal_budget("## Over budget\n- 2h\n- 有料 API を使うときは先に残高を見る\n"), ({}, []))
         # a paid API that does not read would start the agent unchecked, and a Budget heading that does not read would
         # drop its lines: both fail the start, as a mistyped limit does; so does a line meant as a limit that does not
@@ -4005,7 +4006,9 @@ class TaskTest(unittest.TestCase):
                      "## Budget\n- paid apis = openai", "## Budget and limits\n- paid api: openai", "## Budget: 2h",
                      "## Budget\n- 有料 API は openai", "## 予算と上限\n- 2h", "## Over budget\n- paid api: openai",
                      "## Notes\n- 有料 API: openai", "## Budget\n- tokens: 3M", "## Budget\n- 時間: 2h、トークン: 3M",
-                     "## Budget\n- 2h まで", "## Budget\n- Cost: $5", "## Budget\n- 500円まで"):
+                     "## Budget\n- 2h まで", "## Budget\n- Cost: $5", "## Budget\n- 500円まで",
+                     "## Budget\n- 300万トークン", "## 予算\n- 300万トークンまで", "## 予算\n- 1万円", "## Budget\n- 3M",
+                     "## Budget\n- 2h, 3M", "## Budget\n- 3 M"):
             with self.assertRaises(RuntimeError, msg=text):
                 task.goal_budget(f"{text}\n")
 
@@ -4016,7 +4019,8 @@ class TaskTest(unittest.TestCase):
                            ("## Budget and limits\n\n- paid api: openai\n", "write the Budget heading as"),
                            ("## 予算\n\n- 有料 API は openai\n", "write the paid APIs on their own line"),
                            ("## Notes\n\n- 有料 API: openai\n", "outside the Budget heading"),
-                           ("## Budget\n\n- 2h まで\n", "each limit is like")):
+                           ("## Budget\n\n- 2h まで\n", "each limit is like"),
+                           ("## Budget\n\n- 2h, 3M\n", "each limit is like")):
             tid = self.new_with_goal(f"Say hello. MODE:ok\n\n{goal}")
             self.task("start", tid)
             self.assertEqual(self.wait(tid), "Blocked")
