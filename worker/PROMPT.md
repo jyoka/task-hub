@@ -28,8 +28,12 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    it as Blocked, naming the approval you need. `can:` lines are allowed without asking.
 2. Make the change. Keep it to what the Goal asks for.
 3. Run the project's tests and linters, and fix what you broke.
-   While you work, run only the tests related to what you changed. Run the full test suite once,
-   at the end: it is slow, and other runs on the same machine need the CPU too.
+   While you work, run only the tests related to what you changed.
+   The full test suite is slow, and other runs on the same machine need the CPU too. If the
+   repository's instructions leave the full suite to CI, or say not to run it locally unless asked,
+   never run it: the related tests are enough, and the Report says CI runs the rest. Otherwise run
+   it once, at the end, and not again on a re-run unless your fix could affect tests outside the
+   related ones.
    Your tools may have a time limit per command, and may move a command that runs past it to the
    background. If a command might run that long, split it into smaller runs (one test file or class
    at a time, for example) and wait for each to finish; do not leave it in the background.
