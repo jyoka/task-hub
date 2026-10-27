@@ -72,6 +72,7 @@ flowchart TB
         trig["トリガー<br/>check_triggers(task watch だけ)"]
         links["つなぎ先<br/>task share、to_team、つなぎ手 TeamGitHub"]
         mergeq["マージキュー(任意)<br/>task merge、merge_queue"]
+        check["Goal の確かめ<br/>task check、readiness_gate"]
     end
 
     subgraph runner["実行(タスクごとの別プロセス: task _run)"]
@@ -105,6 +106,10 @@ flowchart TB
     piext -. "task events --next" .-> cli
     cli --> sync
     cli --> trig
+    cli --> check
+    sync -- "[runner] readiness" --> check
+    check -- "起動(Goldfish)" --> agents
+    check -- "判定のコメント、Readiness 欄" --> board
     trig -- "カードを作る(create_task)" --> board
     trig -- "gh run list、gh issue list" --> gh
     trig --> state
@@ -147,6 +152,7 @@ flowchart TB
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
 | `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする。In review の通知のボタン(Merge、Reject)の文も受ける | Backlog のカードの登録、トークンの合ったボタンの PR をマージキューに入れる、または PR を閉じてカードを Blocked にする、ntfy への返事だけ(Ready には動かさない) |
 | マージキュー(`[merge] queue`、既定はオフ) | 人が承認した PR(`task merge`、wait for merge の列)を、リポジトリごとに 1 つずつ base に追いつかせ、チェックを待ってマージする。競合は `task _fix` がエージェントに解かせる。キューにない In review の PR の競合は知らせるだけ | `merge-queue.json`、PR のブランチへのマージコミットの push、承認した PR のマージ、止めたときの Blocked とコメント |
+| `task check <番号>` | Ready の前の Goal の確かめ。文脈のない Goldfish(Comprehension、3 視点の批評を同時に、Readiness)が、Goal と base ブランチのコードだけを読んで GO / NO-GO を出す。`[runner] readiness`(既定 off)が `require` なら、`sync` は今の Goal への GO がない Ready のカードを始めない | Issue の判定のコメント、カードの Readiness 欄(なければ作る)、Goldfish ごとの使い捨ての worktree(変えたら戻して blocked) |
 | `task _fix <番号> <base>` | 1 回の競合の解消(base のマージを始め、エージェントがファイルを直し、task-hub がマージコミットを作って push) | そのタスクの worktree、PR のブランチ、Issue のコメント、カード(Blocked のときだけ) |
 
 ## 4. データの流れ
@@ -305,6 +311,24 @@ flowchart LR
 
 詳しくは [autopilot.md](../autopilot.md) です。
 
+### 4.7 Ready の前の確かめ
+
+`task check` は、Elephant-Goldfish Model の Goldfish を task-hub に入れたものです。Goal を書いた側(人、`/chief`)は
+会話の文脈を持っているので、Goal の抜けに気づきにくい。Goal とコードしか知らないエージェントに読ませ、実装に入れるかを
+判定します。判定はレポートの本文に埋めず、Issue の印つきコメントと Project の欄に残し、コードが読み戻します。
+
+```mermaid
+flowchart LR
+    goal["Goal(Issue の本文)<br/>+ base ブランチのコード"] --> comp["Comprehension Check"]
+    comp --> critics["Design Critic / Naive Reader /<br/>Codebase Auditor(同時に)"]
+    critics --> ready["Implementation Readiness"]
+    ready --> verdict["Issue: Verdict と Goal のハッシュ<br/>Project: Readiness 欄"]
+    verdict -- "[runner] readiness = require<br/>今の Goal への GO" --> start["sync が開始"]
+    verdict -- "NO-GO、stale" --> you(["あなた: Goal を直す / Backlog に戻す"])
+```
+
+詳しくは [task-format.md](../task-format.md#ready-の前の確かめtask-check) です。
+
 ## 5. 責任の分担
 
 | 判断が要る(LLM) | 決まっている(コード) |
@@ -312,6 +336,7 @@ flowchart LR
 | 実装する(worker) | いつ始めるか(Ready、待ち先、枠)。`[autopilot]` のリポジトリでは Ready に移すことも |
 | 評価する(reviewer。`[autopilot]` ではその `pass` がマージの承認になる) | git、push、PR、Issue へのコメント |
 | 止まった理由を仕分ける(replanner) | 判定の読み取り、reviewer の書き換えの取り消し |
+| Goal で実装に入れるかを判定する(`task check` の Goldfish) | 判定の読み戻し、Goal のハッシュの照合、開始の門(`[runner] readiness`)、Goldfish の書き換えの取り消し |
 | 会話を分けて提案する(/chief) | replanner の根拠と実物の照合、通知、並び順、アーカイブ |
 | マージの競合を解く(`task _fix`) | マージキューの順番、base の取り込み、マージコミットと push、競合の印の確認、チェック待ち、マージ |
 

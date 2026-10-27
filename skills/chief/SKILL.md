@@ -132,6 +132,9 @@ review in 10 to 15 minutes (a few hundred changed lines, not counting generated 
    and `task start <id>`. Register the tasks others need first, so their ids exist for `--blocked-by`.
    Starting a waiting task is fine: it stays Ready and starts by itself once what it waits for is done.
    If the user wants them registered but not started, skip `task start`.
+   Once a card exists, recommend `task check <id>` before it goes to Ready: agents that know only its Goal and the
+   code say GO or NO-GO, with wording to add for a NO-GO (and with `[runner] readiness = require` a card without a
+   GO for its current Goal does not start). Run it only on the user's yes, and leave the card where it is.
 
 Tasks registered from this pane open as tabs in this herdr workspace, and each tab closes itself
 when its run reaches In review.

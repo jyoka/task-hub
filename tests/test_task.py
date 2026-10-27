@@ -169,6 +169,12 @@ elif cmd == ["project", "item-edit"] and opt("--project-id").removeprefix("PVT_"
     value = next(o["name"] for o in field["options"] if o["id"] == opt("--single-select-option-id"))
     db["team_items"][opt("--id")]["values"][field["name"]] = value
     out = {"id": opt("--id")}
+elif cmd == ["project", "field-create"]:  # a single-select field, as `task check` makes Readiness
+    assert opt("--data-type") == "SINGLE_SELECT" and a[2] == "2" and opt("--owner") == "jyoka", a
+    fid = "F_" + opt("--name").lower().replace(" ", "_")
+    db["fields"].append({"id": fid, "name": opt("--name"), "type": "ProjectV2SingleSelectField", "dataType": "SINGLE_SELECT",
+                         "options": [{"id": f"{fid}_{n}", "name": n} for n in opt("--single-select-options").split(",")]})
+    out = {"id": fid}
 elif cmd == ["project", "item-add"]:
     number = int(opt("--url").rstrip("/").rsplit("/", 1)[-1])
     iid = f"PVTI_{number}"
@@ -194,7 +200,10 @@ elif cmd == ["project", "item-edit"]:
         value = next(o["name"] for o in field["options"] if o["id"] == opt("--single-select-option-id"))
     else:
         value = opt("--text")
-    db["items"][opt("--id")]["values"][field["name"].lower()] = value
+    if "--clear" in a:
+        db["items"][opt("--id")]["values"].pop(field["name"].lower(), None)
+    else:
+        db["items"][opt("--id")]["values"][field["name"].lower()] = value
     touch(opt("--id"))
     out = {"id": opt("--id")}
 elif cmd == ["issue", "create"] and opt("--repo") in db.get("team_repos", {}):
@@ -653,6 +662,51 @@ body = f"## Verdict\n\n{verdict}\n\n## Review\n\nchecked hello.txt\n"
 if fix:
     body += f"\n## Please fix\n\n{fix}\n"
 Path(".task-review.md").write_text(body)
+'''
+
+FAKE_GOLDFISH = r'''#!/usr/bin/env python3
+# `task check`'s Goldfish: the stage from its part of worker/READINESS.md, what it writes from a READY=<mode> word
+import os, re, subprocess, sys, time
+from pathlib import Path
+prompt = sys.argv[-1]
+role = "readiness" if "# Implementation Readiness" in prompt else \
+    re.search(r"# Adversarial review: (.+)", prompt)[1] if "# Adversarial review:" in prompt else \
+    "comprehension" if "# Comprehension Check" in prompt else "?"
+mode = (re.findall(r"READY=([\w-]+)", prompt.split("## Goal", 1)[-1]) or ["go"])[0]
+forced = Path(os.environ["TASK_TEST_GOLDFISH_CALLS"] + ".mode")  # another verdict on the very same Goal
+mode = forced.read_text().strip() if forced.exists() else mode
+with open(os.environ["TASK_TEST_GOLDFISH_CALLS"], "a") as f:
+    f.write(repr({"role": role, "cwd": os.getcwd(), "prompt": prompt, "at": time.time(),
+                  "head": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
+                  "files": sorted(os.listdir("."))}) + "\n")
+out = Path(".task-readiness.md")
+if role == "comprehension":
+    out.write_text("## Restatement\n\nSay hello in hello.txt.\n\n## Ambiguities\n\n- \"hello\": hello / Hello\n")
+elif role != "readiness":
+    if mode == "edit" and role == "Naive Reader":  # breaks the rule: edits a file of the repo, stages a new one
+        Path("README.md").write_text("app\ngoldfish was here\n")
+        Path("sneaky.txt").write_text("added by a goldfish\n")
+        subprocess.run(["git", "add", "sneaky.txt"], check=True)
+    if mode == "silent" and role == "Codebase Auditor":
+        sys.exit(1)
+    if mode == "hang":  # the human stops the check while the critics run
+        Path(os.environ["TASK_TEST_GOLDFISH_CALLS"] + f".{os.getpid()}.pid").write_text(str(os.getpid()))
+        time.sleep(120)
+    if mode == "slow":  # the critics must run at once: each waits until all three have started
+        calls = Path(os.environ["TASK_TEST_GOLDFISH_CALLS"])
+        for _ in range(100):
+            if calls.read_text().count("'role': '") - 1 >= 3:
+                break
+            time.sleep(0.1)
+    blocking = "- \"Say hello\": no file named\n" if mode == "nogo" else "none"
+    out.write_text(f"## Blocking\n\n{blocking}\n\n## Minor\n\n- {role}: wording could be clearer\n")
+else:
+    verdict = {"nogo": "NO-GO", "minoronly": "**No go**", "gobutblocking": "`GO`", "junk": "maybe"}.get(mode, "GO")
+    blocking = {"nogo": "- The Goal names no file for hello (Design Critic)", "gobutblocking": "- The Goal names no "
+                "file for hello (Design Critic)", "golistnone": "- None."}.get(mode, "none")
+    out.write_text(f"## Verdict\n\n{verdict}\n\n## Summary\n\nchecked by the fake\n\n## Blocking\n\n{blocking}\n\n"
+                   "## Minor\n\n- wording could be clearer\n\n## Goal additions\n\n"
+                   + {"nogo": "- Add: \"Write it to hello.txt.\"\n", "golistnone": "- n/a\n"}.get(mode, "none\n"))
 '''
 
 FAKE_HERDR = r'''#!/usr/bin/env python3
@@ -1149,7 +1203,7 @@ class TaskTest(unittest.TestCase):
                                  {"id": "F_base", "name": "Base branch", "type": "ProjectV2Field", "dataType": "TEXT"}]})
         self.calls = root / "agent-calls.txt"
         self.review_calls = root / "review-calls.txt"
-        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER),
+        for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER), ("goldfish", FAKE_GOLDFISH),
                           ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO), ("pi", FAKE_PI)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
@@ -1158,6 +1212,7 @@ class TaskTest(unittest.TestCase):
         self.env = {**os.environ, **git_id, "HOME": str(root), "TASK_GH": str(root / "gh"), "TASK_HERDR": "0",
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
+                    "TASK_TEST_GOLDFISH_CALLS": str(root / "goldfish-calls.txt"),
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"), "TASK_TEST_KIRO": str(root / "kiro"),
                     "TASK_TEST_PI": str(root / "pi"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
@@ -1249,7 +1304,8 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries=""):
+    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries="",
+                     readiness=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
@@ -1257,8 +1313,9 @@ class TaskTest(unittest.TestCase):
                        + (f"replanner = {replanner}\n" if replanner else "")
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
                        + (f"parallel = {parallel}\n" if parallel else "")
-                       + (f"review_retries = {review_retries}\n" if review_retries else "") + "\n"
-                       f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
+                       + (f"review_retries = {review_retries}\n" if review_retries else "")
+                       + (f"readiness = {readiness}\n" if readiness else "") + "checker = goldfish\n\n"
+                       f"[agents]\nfake = {self.root}/agent {{prompt}}\ngoldfish = {self.root}/goldfish {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
 
@@ -7671,6 +7728,272 @@ class TaskTest(unittest.TestCase):
             self.assertIn(why, self.task("watch", code=1))
             self.env.pop("TASK_WATCH_ONCE")
         self.assertEqual(self.status(tid), "Backlog")
+
+    # --- `task check`: the Goldfish's GO / NO-GO on a Goal, and [runner] readiness ---
+
+    def goldfish_calls(self):
+        f = self.root / "goldfish-calls.txt"
+        return [eval(line) for line in f.read_text().splitlines()] if f.exists() else []
+
+    def readiness_comments(self, tid):
+        return [c for c in self.comments(tid) if c.startswith("<!-- task-hub readiness -->")]
+
+    def readiness_field(self, tid):
+        return self.gh()["items"][f"PVTI_{tid}"]["values"].get("readiness")
+
+    def worktrees_left(self):
+        d = self.root / ".local/share/task-hub/worktrees"
+        return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+    def test_check_runs_the_three_goldfish_stages_and_writes_a_marked_verdict(self):
+        other = self.new("ok OTHER-CARD-GOAL", "another card")
+        tid = self.new("ok READY=nogo", "Add hello")
+        db = self.gh()  # an earlier report on its Issue: a Goldfish must never see it
+        db["issues"][tid]["comments"].append({"body": "<!-- task-hub report -->\n\n## Report\n\nEARLIER-REPORT",
+                                              "viewerDidAuthor": True})
+        self.save_db(db)
+        out = self.task("check", tid)
+        self.assertIn("verdict: NO-GO", out)
+        calls = self.goldfish_calls()
+        self.assertEqual([c["role"] for c in calls][0], "comprehension")
+        self.assertEqual(sorted(c["role"] for c in calls[1:4]), ["Codebase Auditor", "Design Critic", "Naive Reader"])
+        self.assertEqual(calls[4]["role"], "readiness")
+        self.assertEqual(len(calls), 5)
+        # each in a fresh worktree of its own at the base branch, with only the Goal and the code
+        self.assertEqual(len({c["cwd"] for c in calls}), 5)
+        main = subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "rev-parse", "main"],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual({c["head"] for c in calls}, {main})
+        for c in calls:
+            self.assertIn("Say hello. MODE:ok READY=nogo", c["prompt"])
+            self.assertNotIn("EARLIER-REPORT", c["prompt"])
+            self.assertNotIn("OTHER-CARD-GOAL", c["prompt"])
+            self.assertIn("README.md", c["files"])
+        for c in calls[1:4]:  # the critics see neither each other nor the Comprehension Check
+            self.assertNotIn("## Restatement", c["prompt"])
+            self.assertNotIn("wording could be clearer", c["prompt"])
+        readiness = calls[4]["prompt"]
+        for name in ("Design Critic", "Naive Reader", "Codebase Auditor"):
+            self.assertIn(f"# Critic: {name}", readiness)
+            self.assertIn(f"- {name}: wording could be clearer", readiness)
+        self.assertIn("Say hello in hello.txt.", readiness)
+        self.assertEqual(self.worktrees_left(), [])
+        comment, = self.readiness_comments(tid)
+        head = comment.split("\n")
+        self.assertEqual(head[1], "Verdict: NO-GO")
+        self.assertRegex(head[2], r"^Goal: [0-9a-f]{16}$")
+        self.assertIn("### Blocking\n\n- The Goal names no file for hello (Design Critic)", comment)
+        self.assertIn("### Minor\n\n- wording could be clearer", comment)
+        self.assertIn("### Suggested Goal additions\n\n- Add: \"Write it to hello.txt.\"", comment)
+        self.assertIn("Comprehension Check", comment)
+        self.assertEqual(self.readiness_field(tid), "NO-GO")
+        self.assertIn("field-create", self.gh()["gh_calls"])
+        self.assertEqual((self.status(tid), self.status(other)), ("Backlog", "Backlog"))  # never moved
+        self.assertEqual([e.get("decision") for e in self.events_of(tid) if e["event"] == "readiness"], ["NO-GO"])
+        check, = [json.loads(line) for line in (self.root / ".local/state/task-hub/checks.jsonl").read_text().splitlines()]
+        self.assertEqual((check["id"], check["verdict"], check["blocking"], len(check["usage"])), (tid, "NO-GO", 1, 5))
+        self.assertFalse((self.root / ".local/state/task-hub/metrics.jsonl").exists(), "a check is no run")
+        self.assertIn("checks: 1 `task check` runs (GO 0, NO-GO 1, blocked 0)", self.task("stats"))
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_check_runs_the_critics_at_once(self):
+        tid = self.new("ok READY=slow")
+        began = time.time()
+        self.assertIn("verdict: GO", self.task("check", tid))
+        critics = [c["at"] for c in self.goldfish_calls()[1:4]]
+        self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other two to start")
+        self.assertLess(time.time() - began, 30)
+
+    def test_check_sorts_the_verdict_by_blocking_and_minor_findings(self):
+        # as #249's review: only minor findings is a GO; a GO with a blocking finding is a NO-GO; no verdict is blocked;
+        # a GO whose Blocking is a list of one "None." has nothing blocking
+        for mode, verdict in (("go", "GO"), ("minoronly", "GO"), ("gobutblocking", "NO-GO"), ("junk", "blocked"),
+                              ("golistnone", "GO")):
+            tid = self.new(f"ok READY={mode}", mode)
+            self.assertIn(f"verdict: {verdict}", self.task("check", tid))
+            comment = self.readiness_comments(tid)[-1]
+            self.assertEqual(comment.split("\n")[1], f"Verdict: {verdict}")
+            self.assertEqual(self.readiness_field(tid), None if verdict == "blocked" else verdict)
+            if mode == "golistnone":
+                self.assertIn("### Blocking\n\nnone", comment)
+                self.assertNotIn("n/a", comment)
+
+    def test_a_goldfish_that_edits_files_is_undone_and_blocks_the_check(self):
+        tid = self.new("ok READY=go")
+        self.task("check", tid)
+        self.assertEqual(self.readiness_field(tid), "GO")
+        self.edit_issue(tid, body="Say hello. MODE:ok READY=edit")
+        out = self.task("check", tid)
+        self.assertIn("verdict: blocked", out)
+        self.assertIn("the Naive Reader changed files; its edits were undone", out)
+        comment = self.readiness_comments(tid)[-1]
+        self.assertEqual(comment.split("\n")[1], "Verdict: blocked")
+        self.assertNotIn("### Blocking", comment)
+        self.assertIsNone(self.readiness_field(tid), "a blocked check leaves no GO on the card")
+        self.assertNotIn("readiness", [c["role"] for c in self.goldfish_calls()[5:]], "the check stops at the stage")
+        self.assertEqual(self.worktrees_left(), [])
+        clone = self.root / ".local/share/task-hub/repos/jyoka/app"
+        self.assertEqual((clone / "README.md").read_text(), "app\n")
+        self.assertEqual(subprocess.run(["git", "-C", str(clone), "status", "--porcelain"], capture_output=True,
+                                        text=True).stdout, "")
+        self.assertEqual(subprocess.run(["git", "-C", str(clone), "worktree", "list"], capture_output=True,
+                                        text=True).stdout.count("\n"), 1)
+        # a critic that writes nothing blocks it too
+        self.edit_issue(tid, body="Say hello. MODE:ok READY=silent")
+        self.assertIn("the Codebase Auditor exited 1 without writing .task-readiness.md", self.task("check", tid))
+
+    def test_stopping_a_check_stops_its_goldfish_and_removes_their_worktrees(self):
+        tid = self.new("ok READY=hang")
+        proc = subprocess.Popen([str(BIN), "check", tid], env=self.env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
+        self.addCleanup(proc.kill)
+        pids = lambda: [int(f.read_text()) for f in self.root.glob("goldfish-calls.txt.*.pid") if f.read_text()]
+        self.wait_for(lambda: len(pids()) == 3)
+        proc.send_signal(signal.SIGTERM)  # a closed pane, or kill: as Ctrl-C
+        try:
+            output, _ = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate(timeout=10)
+            self.fail(f"task check did not stop: {output}")
+        self.assertEqual(proc.returncode, 130, output)
+        self.assertTrue(all(process_gone(pid) for pid in pids()), "every Goldfish is stopped")
+        self.assertEqual(self.worktrees_left(), [])
+        self.assertEqual(self.readiness_comments(tid), [])
+
+    def test_check_no_write_prints_the_verdict_of_any_card_at_a_ref(self):
+        tid = self.new("ok READY=nogo")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        first = subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "rev-parse", "main"],
+                               capture_output=True, text=True).stdout.strip()
+        self.push_branch("later", "later.txt")
+        self.assertIn("judges Backlog and Ready cards", self.task("check", tid, code=1))
+        out = self.task("check", tid, "--no-write", "--ref", "origin/later")
+        self.assertIn("verdict: NO-GO", out)
+        self.assertIn("written: nothing (--no-write)", out)
+        self.assertIn("Verdict: NO-GO\nGoal: ", out)
+        self.assertIn("later.txt", self.goldfish_calls()[0]["files"])
+        self.task("check", tid, "--no-write", "--ref", first)
+        self.assertEqual(self.goldfish_calls()[-1]["head"], first)
+        self.assertEqual(self.readiness_comments(tid), [])
+        self.assertIsNone(self.readiness_field(tid))
+        self.assertIn("is not in jyoka/app", self.task("check", tid, "--no-write", "--ref", "nope", code=1))
+        goal = self.root / "goal-before.md"  # the Goal as it was before it was edited (the Issue's edit history)
+        goal.write_text("Say hello. EARLIER-GOAL READY=go\n")
+        self.assertIn("verdict: GO", self.task("check", tid, "--no-write", "--goal-file", str(goal)))
+        self.assertIn("EARLIER-GOAL", self.goldfish_calls()[-1]["prompt"])
+        backlog = self.new("ok READY=go")
+        for flags in (["--ref", "main"], ["--goal-file", str(goal)]):  # a trial's verdict never goes on the Issue
+            self.assertIn("go with --no-write only", self.task("check", backlog, *flags, code=1))
+        self.assertEqual(self.readiness_comments(backlog), [])
+
+    def test_readiness_is_read_back_and_a_goal_edit_makes_a_go_stale(self):
+        self.write_config(readiness="require")
+        tid = self.new("ok READY=go")
+        self.task("check", tid)
+        db = self.gh()
+        db["issues"][tid]["body"] += "\n\nOne more line."  # the human edits the Goal after the GO
+        self.save_db(db)
+        self.move(tid, "Ready")
+        out = self.task()
+        self.assertEqual(self.status(tid), "Ready")
+        self.assertIn(f"readiness: its Goal changed since its last check (`task check {tid}`)", out)
+        listed = self.task("list")
+        self.assertIn("waits_for,readiness}", listed)
+        self.assertIn(",stale", listed)
+        self.task("check", tid)
+        self.assertIn("started", self.task())
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_require_starts_only_cards_with_a_go_for_their_current_goal(self):
+        self.write_config(readiness="require")
+        never, nogo, go, research = (self.new("ok", "never checked"), self.new("ok READY=nogo", "no-go"),
+                                     self.new("ok READY=go", "go"), self.new("ok", "research", "jyoka/app", "--research"))
+        for tid in (nogo, go):
+            self.task("check", tid)
+        forged = self.new("ok", "forged")  # a GO comment someone else wrote is no GO
+        db = self.gh()
+        db["issues"][forged]["comments"].append({"body": self.readiness_comments(go)[0].replace(
+            self.readiness_comments(go)[0].split("\n")[2], "Goal: " + __import__("hashlib").sha256(
+                db["issues"][forged]["body"].strip().encode()).hexdigest()[:16]), "viewerDidAuthor": False})
+        self.save_db(db)
+        for tid in (never, nogo, go, research, forged):
+            self.move(tid, "Ready")
+        out = self.task()
+        self.assertEqual(self.wait(go), "In review")
+        self.assertEqual(self.wait(research), "In review", "a research card is not gated")
+        self.assertEqual([self.status(t) for t in (never, nogo, forged)], ["Ready"] * 3)
+        self.assertIn("waiting[3]", out)
+        self.assertIn(f"readiness: its Goal was never checked (`task check {never}`)", out)
+        self.assertIn(f"readiness: its Goal got NO-GO (`task check {nogo}`)", out)
+        calls = self.gh().get("issue_view_calls", 0)
+        self.task()
+        self.assertEqual(self.gh().get("issue_view_calls", 0), calls, "an unchanged card is not read again")
+        self.assertEqual([self.status(t) for t in (never, nogo, forged)], ["Ready"] * 3)
+
+    def test_require_keeps_autopilot_from_moving_a_card_without_a_go(self):
+        self.write_config("[autopilot]\nrepos = jyoka/app\n[merge]\nqueue = on\n", reviewer=True, readiness="require")
+        tid = self.new("ok READY=go")
+        self.task()
+        self.task()
+        self.assertEqual(self.status(tid), "Backlog")
+        self.assertEqual(self.autopilot_events(tid), [])
+        self.task("check", tid)
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.autopilot_events(tid)[0], "ready")
+
+    def test_warn_starts_a_card_without_a_go_and_says_so(self):
+        self.write_config(readiness="warn")
+        tid, go = self.new("ok", "unchecked"), self.new("ok READY=go", "checked")
+        self.task("check", go)
+        self.move(tid, "Ready")
+        self.move(go, "Ready")
+        listed = self.task("list")
+        self.assertIn("waits_for,readiness}", listed)
+        out = self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.wait(go), "In review")
+        self.assertIn(f"readiness: task {tid} started without a GO for its current Goal: its Goal was never checked",
+                      out)
+        self.assertNotIn(f"readiness: task {go} ", out)
+        self.assertEqual([e.get("reason") for e in self.events_of(tid) if e["event"] == "readiness"],
+                         ["started without a GO for its current Goal: its Goal was never checked"])
+
+    def test_a_new_verdict_counts_even_when_the_readiness_field_cannot_be_set(self):
+        self.write_config(readiness="require")
+        first = self.new(title="first")
+        tid = self.new("ok READY=go", "second", "jyoka/app", "--blocked-by", f"#{first}")
+        self.task("check", tid)
+        self.move(tid, "Ready")
+        self.assertIn(f'second,"#{first} (Backlog)"', self.task())  # the gate read the GO and keeps it
+        db = self.gh()
+        field = next(f for f in db["fields"] if f["name"] == "Readiness")
+        field.update(type="ProjectV2Field", dataType="TEXT")  # the human made it a text field since
+        del field["options"]
+        self.save_db(db)
+        (self.root / "goldfish-calls.txt.mode").write_text("nogo")  # the same Goal gets a NO-GO this time
+        out = self.task("check", tid, code=1)
+        self.assertIn('"Readiness" field is TEXT', out + self.stderr[-1])
+        self.assertEqual(self.readiness_comments(tid)[-1].split("\n")[1], "Verdict: NO-GO")
+        self.close(first)
+        out = self.task()
+        self.assertIn(f"readiness: its Goal got NO-GO (`task check {tid}`)", out)
+        self.assertEqual(self.status(tid), "Ready", "the GO the comment replaced does not start it")
+
+    def test_readiness_off_changes_nothing(self):
+        tid = self.new("ok")
+        self.move(tid, "Ready")
+        before = self.gh().get("issue_view_calls", 0)
+        self.assertNotIn("readiness", self.task("list"))
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertFalse([e for e in self.events_of(tid) if e["event"] == "readiness"])
+        self.assertFalse((self.root / ".local/state/task-hub/readiness.json").exists())
+        self.assertGreater(self.gh().get("issue_view_calls", 0), before)  # the run's own reads, nothing more is asked
+        self.write_config(readiness="sometimes")
+        self.assertIn("[runner] readiness must be off, warn or require", self.task(code=1))
 
 
 class SlowThresholdTableTest(unittest.TestCase):

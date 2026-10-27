@@ -14,6 +14,7 @@
 | カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
+| カードの Readiness | `task check` の判定 `GO` / `NO-GO`(任意。初めての `task check` が作ります。[下記](#ready-の前の確かめtask-check)) | task-hub |
 | Issue のコメント | task-hub のレポート(下記)。人のコメントは、再実行のときにエージェントへの追加の指示として渡ります(下記) | task-hub / あなた |
 
 ### 開始の条件: Blocked by と Ready conditions
@@ -114,6 +115,121 @@ Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロッ
 
 実行中の情報(ブランチ、プロセス、herdr のワークスペース、worktree、ログ)は手元のマシンの
 `~/.local/state/task-hub/runs/<番号>.json` にだけ保存され、GitHub には載りません。
+
+## Ready の前の確かめ(task check)
+
+`task check <番号>` は、カードを Ready に移す前に、Goal だけで実装に取りかかれるかを GO / NO-GO で判定します。
+Elephant-Goldfish Model([EGM](https://egm.dev/))の Goldfish の考え方です。Goal を書いた側(あなたや `/chief`)は
+会話の文脈を持っているので、Goal の抜けに気づきにくい。そこで、文脈を持たないエージェントに Goal を読ませます。
+
+```
+task check 12                 # Backlog か Ready のカード。判定を Issue と Project に書く
+task check 12 --no-write      # どの列のカードでも。判定を表示するだけで、何も書かない
+task check 12 --no-write --ref 1a2b3c4 --goal-file goal.md
+                              # 試すとき: 過去のカードを、変更の前のコミットと、編集される前の Goal で
+```
+
+### Goldfish に渡すもの
+
+Goldfish に渡すのは、カードのタイトル、Goal(Issue の本文)、作業先リポジトリの base ブランチのコードだけです
+(Base branch 欄のブランチ、空欄なら既定のブランチ。`--ref` ならそのコミット)。会話の履歴、過去のレポート、人のコメント、
+ほかのカードは渡しません。指示は [worker/READINESS.md](../worker/READINESS.md) にあり、3 つの段に分かれます。
+どの段も新しい文脈のエージェントで、1 体ずつ、そのコミットの worktree(`~/.local/share/task-hub/worktrees/<番号>-check-<役>`)
+を自分用に持ちます。終わった worktree は消します。
+
+| 段 | エージェント | すること |
+|---|---|---|
+| 1. Comprehension Check | 1 体 | Goal を自分の言葉で言い直し、2 通りに読める箇所を両方の読み方つきで挙げる |
+| 2. 敵対的レビュー | 3 体を同時に | Design Critic(決まっていない設計)、Naive Reader(初めて読む人に通じない言葉や前提)、Codebase Auditor(Goal とコードの食い違い、Ready conditions、リポジトリの決まり)。互いの結果は見ない |
+| 3. Implementation Readiness | 1 体 | 1 と 2 の結果を Goal とコードで確かめ直し、まとめて GO / NO-GO を決める。NO-GO なら Goal に足す文言案を書く |
+
+2 の視点は、READINESS.md の 3 つ目の部分の `## ` 見出しです。見出しを足すと、視点が増えます。
+使うエージェントは `[runner] checker` です。空か `agent` なら、カードの Agent 欄(空ならそのマシンのデフォルト)です。
+Goldfish はコードを読むだけで、ビルドやテストは動かしません。
+
+Goldfish がファイルを変えたら(編集、追加して stage、コミット)、task-hub はその worktree を元に戻し、判定を `blocked`
+にしてその段で止めます。結果のファイル `.task-readiness.md` を書かずに終わった場合も `blocked` です。
+
+### 判定と指摘の分け方
+
+指摘は、自動レビュー([下記](#自動レビューの差し戻し))と同じく 2 つに分けます。
+
+| 種類 | 意味 |
+|---|---|
+| blocking | Goal とコードだけを渡されたエージェントが、違うものを作るか、止まって聞くか、終わりを判断できない。決まっていないこと、作るコードが変わる 2 通りの読み方、確かめられない受け入れ条件、Goal とコードや Goal 自身の食い違い、満たされていない Ready conditions |
+| minor | 本物だが、注意深いエージェントなら意図どおりに作れる |
+
+blocking が 1 つもなければ GO、あれば NO-GO です。エージェントが NO-GO と書いても blocking がなく minor だけなら GO、
+GO と書いても blocking が残っていれば NO-GO として扱います。判定の語がなければ `blocked` です。
+
+### Issue のコメントと Readiness 欄
+
+判定は Issue のコメントに書きます。1 行目が印、2 行目が判定、3 行目が判定した Goal のハッシュです。task-hub はこの
+2 行を読み戻します。
+
+```markdown
+<!-- task-hub readiness -->
+Verdict: NO-GO
+Goal: 3f2a9c0d41b7e865
+
+## Readiness
+
+Checked ... by 5 Goldfish (claude) that read only this Goal and owner/app at main (1a2b3c4d5e6f): 6 min, 1.2M tokens.
+
+(Readiness エージェントの要約)
+
+### Blocking
+
+### Minor
+
+### Suggested Goal additions      <- NO-GO のときだけ。blocking ごとに Goal に足す文言案
+
+<details><summary>Comprehension Check</summary> ... </details>
+```
+
+- **Goal のハッシュ**: Issue の本文の SHA-256 の先頭 16 文字です(改行コードと前後の空白は除く)。Goal を 1 文字でも
+  編集すると、それより前の判定は「古い判定」(`stale`)になります。GO も古くなります。
+- **数えるコメント**: この GitHub アカウントが書いた、印のついたコメントのうち最新のものです。ほかの人が書いたコメントは、
+  中身にかかわらず判定として扱いません。
+- **Readiness 欄**: Project の単一選択フィールド `Readiness`(`GO` / `NO-GO`)に判定を入れます。欄がなければ、
+  初めての `task check` が作ります。`blocked` のときは空にします。欄はボードで見るためのもので、開始の判断には
+  コメントのハッシュを使います。
+- `--no-write` のときは、コメントの全文を表示するだけで、コメントも欄も書きません。
+- 判定ごとに、エージェントの起動ごとの秒数とトークン数を `~/.local/state/task-hub/checks.jsonl` に 1 行残します
+  (`task stats` の `checks:` 行)。実行の記録 `metrics.jsonl` には入れません。そこは実行の数や「いつもの時間」を
+  数えるところなので、判定が混ざると数字がずれます。判定 1 回で使った量が、そのエージェントの実行 1 回の予算を超えたら、
+  `over budget` イベントを出します(理由の先頭が `task check:`)。
+- 全体のログは `~/.local/state/task-hub/logs/<番号>-check.log` です。判定のあとに `readiness` イベントを書きます。
+
+task-hub は、どの判定でもカードを動かしません。NO-GO のカードを Backlog に戻すか、Goal を直してもう一度確かめるかは、
+人が決めます。
+
+### 開始の門: [runner] readiness
+
+```ini
+[runner]
+readiness = off     ; off(既定)/ warn / require
+checker =           ; task check のエージェント。空か agent = カードの Agent 欄
+```
+
+| 値 | Ready のカード | オートパイロット |
+|---|---|---|
+| `off`(既定) | 今までどおり。Issue を読みに行くこともない | 今までどおり |
+| `warn` | 今の Goal への GO がなくても始める。そのとき `readiness` イベントを書き、`task` の出力に `readiness:` の行を出す。`task list` に `readiness` の列が付く | 今までどおり |
+| `require` | 今の Goal への GO がなければ始めない。`waits_for` に理由(`readiness: its Goal changed since its last check (`task check 12`)` など)を出し、`task check` で GO になれば次の確認で始まる | GO のない Backlog のカードを Ready に移さない |
+
+- 「今の Goal への GO」は、最新の判定コメントが GO で、そのハッシュが今の Goal のハッシュと同じことです。
+- `task` と `task watch` は、カードの Goal かカード自体(Project の更新時刻)が変わったときだけ、Issue のコメントを読み直します
+  (1 回の呼び出し)。読んだ結果は `~/.local/state/task-hub/readiness.json` に残します。`task list` は GitHub を読み足さず、
+  このマシンが最後に読んだものを出します(まだ読んでいなければ `unknown`)。
+- `task list` の `readiness` の列の値: `GO`、`NO-GO`、`blocked`、`stale`(前の Goal への判定)、`none`(確かめていない)、
+  `research`、`unknown`。
+- `require` では、Goal を書き足すたびに GO が古くなります。Blocked のカードに答えを Goal に書き足して Ready に戻すときも、
+  `[triggers] ready` の繰り返しの目標のカードも、`task check` で GO を取るまで始まりません。答えをコメントで渡せば
+  (Goal を編集しなければ)GO は古くなりません。
+- **`--research` のカードは門の対象外**です(`research`)。調べものは、答えの見つけ方を決めるのも仕事のうちで、
+  レポートが「分からなかったこと」を書く形になっています。実装の Readiness(作るものが 1 通りに決まるか、受け入れ条件で
+  確かめられるか)の物差しが合いません。`task check` を手で動かすことはできます。
 
 ## エージェントのレポートファイル
 

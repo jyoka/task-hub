@@ -46,6 +46,7 @@ flowchart LR
 - **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back if needed (2 times at most by default).
 - **Continue after a stop.** A run that stops unexpectedly (a crash, a restart, a closed pane) is resumed once, from where it stopped, after the commands its agent left running (a long test) are stopped (pi and claude); Ctrl-C stops it for good. For a Blocked task, task-hub sorts out why it stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
+- **Goal check before Ready.** `task check <id>` has agents that know only the Goal and the code (Goldfish, from the [Elephant-Goldfish Model](https://egm.dev/)) say GO or NO-GO, with the wording to add for a NO-GO. With `[runner] readiness = require`, a Ready card without a GO for its current Goal does not start ([how](docs/task-format.md#ready-の前の確かめtask-check)).
 - **Notifications.** In review, Blocked, long runs, and runs over budget show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used ([how the ways to be told compare](docs/notifications.md)).
 - **Cost.** The tokens, cost, and credits of each agent launch are read from the agent CLI's own records (Claude Code, pi, Kiro). A card can set its budget, and a card that uses a paid API has its balance checked before its agent starts ([Budget](docs/task-format.md#budget-予算と有料-api)).
 - **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.
@@ -134,6 +135,7 @@ archives the oldest Done cards.
 | `task start [<id>] [--agent name]` | Approves a Backlog card, or runs a Blocked card again |
 | `task watch` | Starts Ready cards automatically (every minute) |
 | `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards, and handles the Merge and Reject buttons of In review notifications ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
+| `task check <id> [--no-write]` | Checks the Goal before Ready: GO or NO-GO on the Issue and in the Project's Readiness field (`[runner] readiness` can require a GO to start) |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
