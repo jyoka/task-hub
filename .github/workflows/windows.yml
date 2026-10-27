@@ -22,8 +22,9 @@ jobs:
       - run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      # side by side, as on macOS (tests/run.py): each test has its own user folder and registry keys
-      - run: python tests/run.py -j 4 test_windows.
+      # one by one, not side by side as on macOS: run side by side (tests/run.py -j 4), a test failed here that
+      # passes one by one, and which one is not known yet (CONTRIBUTING.md, テスト)
+      - run: python -m unittest tests.test_windows -v
         env:
           TASK_TEST_WINDOWS_INSTALL: "1"
       - run: python -m unittest tests.test_run -v  # tests/run.py: its lock and its low priority on Windows
@@ -55,7 +56,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: the installer, the diagnosis and the uninstaller, as a standard user
-        run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Command "python tests\run.py -j 4 test_windows.SetupTest test_windows.InstallBoardTest"
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Command "python -m unittest tests.test_windows.SetupTest tests.test_windows.InstallBoardTest -v"
       - name: a task at the user's own logon (task watch, Slack triage's key), as a standard user
         run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Minutes 3 -Command "powershell -NoProfile -ExecutionPolicy Bypass -File tests\ci\register-own-task.ps1"
 

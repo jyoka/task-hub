@@ -1435,7 +1435,13 @@ class TaskTest(unittest.TestCase):
                     e["event"] == status for e in self.events_of(tid)[-3:])):
                 return status
             time.sleep(0.2)
-        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
+        # what this machine knows of the run too: a run that never wrote its log (CI, #289) says nothing else
+        state = self.root / ".local/state/task-hub"
+        record = state / f"runs/{tid}.json"
+        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}\n"
+                  f"run record: {record.read_text() if record.exists() else 'none'}\n"
+                  f"logs: {sorted(f.name for f in (state / 'logs').glob('*'))}\n"
+                  f"events: {self.events_of(tid)}")
 
     def wait_for(self, check, timeout=20):
         """The replanner runs after the card is already Blocked."""
