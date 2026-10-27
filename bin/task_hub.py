@@ -15,44 +15,54 @@ whose PR is approved but not merged yet; the merged PR moves them to Done as usu
 With [merge] queue = on, an approved PR (`task merge`, or that column) is kept up to date with its base, its
 conflicts fixed by an agent, and merged once its checks pass: one PR at a time per repo.
 """
-import calendar
 import configparser
 import contextlib
 import datetime
 from functools import cache
-import hashlib
-import hmac
 import json
 import os
-import platform
-import queue
 import re
-import secrets
 import shlex
-import shutil
 import signal
-import sqlite3
-import subprocess
 import sys
-import tempfile
 import threading
 import time
-import traceback
-import uuid
 from pathlib import Path
 from urllib.parse import quote, urlencode
+
+
+class Lazy:
+    """A standard module imported where it is first used, not at every start: `task list` and the other quick commands
+    often need neither subprocess nor shutil (about 20 ms on an efficiency core, docs/benchmark.md). Modules used in
+    a function or two are imported in it instead."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __getattr__(self, attr):
+        module = globals()[self.name] = __import__(self.name)
+        return getattr(module, attr)
+
+
+subprocess, shutil = Lazy("subprocess"), Lazy("shutil")
 
 BIN = Path(__file__).resolve().parent / "task"  # the launcher: `task` runs it, and so do the runs task-hub starts
 
 
 def launcher_version(launcher):
     """The VERSION line of a bin/task, or "unknown". The release's version is written there (docs/release.md), so the
-    `task update` of a release from before task_hub.py reads the new one too."""
+    `task update` of a release from before task_hub.py reads the new one too. Read without a regex: it runs at every
+    start."""
     try:
-        m = re.search(r'(?m)^VERSION = "([^"]+)"', launcher.read_text(errors="replace"))
+        text = launcher.read_text(errors="replace")
     except OSError:
         return "unknown"
-    return m.group(1) if m else "unknown"
+    for line in text.splitlines():
+        if line.startswith('VERSION = "'):
+            version, closed, _ = line[len('VERSION = "'):].partition('"')
+            if version and closed:
+                return version
+    return "unknown"
 
 
 VERSION = launcher_version(BIN)
@@ -96,8 +106,10 @@ WATCH_SECONDS = 60
 # "over budget": a run used more than its budget (over_budget)
 NOTIFY_EVENTS = "In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget"
 # a line of the Goal that keeps [autopilot] off this one card, both its start and its merge (a note, a PRD, a step
-# only a human can do). Also as a list item, in emphasis or code, with a period: a miss would start the card
-AUTOPILOT_OFF = re.compile(r"(?im)^[ \t]*(?:[-*+][ \t]+)?[*_`]*autopilot[*_`]*:[*_`]*[ \t]*[*_`]*off[*_`]*\.?[*_`]*[ \t]*$")
+# only a human can do). Also as a list item, in emphasis or code, with a period: a miss would start the card.
+# Patterns like this one are kept as strings for re.search and the like, which compile one the first time it is used
+# and keep it: compiling them all at every start took about 10 ms on an efficiency core (docs/benchmark.md)
+AUTOPILOT_OFF = r"(?im)^[ \t]*(?:[-*+][ \t]+)?[*_`]*autopilot[*_`]*:[*_`]*[ \t]*[*_`]*off[*_`]*\.?[*_`]*[ \t]*$"
 # a live run is "slow" once it runs SLOW_TIMES the median of its agent's finished runs, at least SLOW_FLOOR;
 # with fewer than SLOW_MIN_RUNS finished runs, after SLOW_DEFAULT. Constants on purpose: nothing to configure
 SLOW_TIMES, SLOW_FLOOR, SLOW_DEFAULT, SLOW_MIN_RUNS = 3, 15 * 60, 30 * 60, 3
@@ -369,7 +381,7 @@ class ReviewResult:
     def repeated(self, sent):
         """The findings that were already sent back once: marked (again), as worker/REVIEW.md asks, or word for word."""
         earlier = {finding_key(f) for f in sent}
-        return [f for f in self.findings if AGAIN.match(finding_text(f)) or finding_key(f) in earlier]
+        return [f for f in self.findings if re.match(AGAIN, finding_text(f)) or finding_key(f) in earlier]
 
     def blocked_line(self, stop=""):
         """One line for the card's Blocked reason: what happened (stop: why sending back stopped) and the reviewer's
@@ -401,7 +413,7 @@ class ReviewResult:
         """The draft of the next run's instructions, for the human to check before moving the card to Ready again."""
         repeated = self.repeated(sent)
         again = " (it came back after a retry)"
-        items = "\n".join(f"{n}. {AGAIN.sub('', finding_text(f), 1)}" + again * (f in repeated)
+        items = "\n".join(f"{n}. {re.sub(AGAIN, '', finding_text(f), count=1)}" + again * (f in repeated)
                           for n, f in enumerate(self.findings, 1))
         return "\n\n".join([
             "## Suggested instructions",
@@ -456,7 +468,7 @@ def combine_reviews(found):
     return ReviewResult("\n\n".join(parts), mode="goldfish")
 
 
-AGAIN = re.compile(r"\(again\)\s*", re.I)
+AGAIN = r"(?i)\(again\)\s*"
 
 
 def list_items(text):
@@ -485,7 +497,7 @@ def finding_place(finding):
 def finding_key(finding):
     """A finding as review_loop compares it with the ones sent back: without its list mark, (again), markdown
     decoration, case and spacing."""
-    return " ".join(re.sub(r"[*`_]", "", AGAIN.sub("", finding_text(finding), 1)).lower().split())
+    return " ".join(re.sub(r"[*`_]", "", re.sub(AGAIN, "", finding_text(finding), count=1)).lower().split())
 
 
 class AgentReport:
@@ -670,6 +682,7 @@ def has_resume_command(name):
 
 
 def new_session():
+    import uuid
     return str(uuid.uuid4())
 
 
@@ -1157,7 +1170,7 @@ def tasks(include_done=False, max_age=0):
                            "reason": n.get("stateReason") or ""}
                           for n in (content.get("blockedBy") or {}).get("nodes") or [] if n]}
         t["mentioned"] = mentioned_blockers(content.get("body") or "")
-        t["autopilot_off"] = bool(AUTOPILOT_OFF.search(content.get("body") or ""))
+        t["autopilot_off"] = bool(re.search(AUTOPILOT_OFF, content.get("body") or ""))
         t["goal_hash"] = goal_hash(content.get("body") or "")  # a readiness verdict counts for this Goal only
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
@@ -1423,7 +1436,7 @@ def report_comment(t, blocked="", report="", review="", pr="", auto_review=""):
                            auto_review=auto_review).issue_comment(pr, resumed_line(t)))
 
 
-RESUMED_LINE = re.compile(r"\n\nResumed once at [^\n]*")
+RESUMED_LINE = r"\n\nResumed once at [^\n]*"
 
 
 def interrupted_text(why):
@@ -1935,18 +1948,18 @@ def write_rules(t, wt, body):
 
 # one limit of the Goal's Budget: `2h`, `90m`, `3M tokens`, `$5`, `30 credits`; a bare `M` is millions, not minutes,
 # so `3M` does not read and fails
-BUDGET_ITEM = re.compile(r"(?i)^(?:\$\s*(?P<cost>\d+(?:\.\d+)?)|(?P<time>\d+(?:\.\d+)?)\s*(?P<unit>h|hours?|(?-i:m)|min|minutes?|s|sec|seconds?)"
-                         r"|(?P<tokens>\d+(?:\.\d+)?)\s*(?P<scale>[km]?)\s*tokens?|(?P<credits>\d+(?:\.\d+)?)\s*credits?)$")
+BUDGET_ITEM = (r"(?i)^(?:\$\s*(?P<cost>\d+(?:\.\d+)?)|(?P<time>\d+(?:\.\d+)?)\s*(?P<unit>h|hours?|(?-i:m)|min|minutes?|s|sec|seconds?)"
+               r"|(?P<tokens>\d+(?:\.\d+)?)\s*(?P<scale>[km]?)\s*tokens?|(?P<credits>\d+(?:\.\d+)?)\s*credits?)$")
 # `paid api: openai`, also `**paid api**: openai`, `paid apis:` or `有料 API：openai`; any other line naming a paid API
 # fails, as a miss would start the agent without a balance check
-PAID_API = re.compile(r"(?i)[*_`]*(?:paid[ _-]?apis?|有料\s*api)[*_`]*\s*[:：][*_`]*\s*(.*)")
-PAID_API_WORDS = re.compile(r"(?i)paid[ _-]?apis?|有料\s*api")
+PAID_API = r"(?i)[*_`]*(?:paid[ _-]?apis?|有料\s*api)[*_`]*\s*[:：][*_`]*\s*(.*)"
+PAID_API_WORDS = r"(?i)paid[ _-]?apis?|有料\s*api"
 # the Budget heading: `Budget` or `予算`, with an optional colon and a note in brackets (`## Budget (予算)`)
-BUDGET_HEADING = re.compile(r"(?i)(?:budget|予算)[*_`]*\s*[:：]?\s*(?:[(（][^)）]*[)）])?")
+BUDGET_HEADING = r"(?i)(?:budget|予算)[*_`]*\s*[:：]?\s*(?:[(（][^)）]*[)）])?"
 # a line under Budget that looks meant as a limit (`tokens: 3M`, `2h まで`, `$5`, `500円`, `300万トークン`): if it does not read, it fails
-BUDGET_HINT = re.compile(r"(?i)[$¥￥]\s*\d|\d\s*[万千百億]?\s*(?:k|tokens?|credits?|h|hours?|m|min|minutes?|s|sec|seconds?|トークン|クレジット"
-                         r"|時間|分|秒|ドル|円)(?![a-z])|(?:tokens?|credits?|cost|time|トークン|クレジット|時間|費用)\s*[:：]\s*\d")
-LIST_COMMA = re.compile(r"[,、，]")
+BUDGET_HINT = (r"(?i)[$¥￥]\s*\d|\d\s*[万千百億]?\s*(?:k|tokens?|credits?|h|hours?|m|min|minutes?|s|sec|seconds?|トークン|クレジット"
+               r"|時間|分|秒|ドル|円)(?![a-z])|(?:tokens?|credits?|cost|time|トークン|クレジット|時間|費用)\s*[:：]\s*\d")
+LIST_COMMA = r"[,、，]"
 
 
 def goal_budget(body):
@@ -1966,7 +1979,7 @@ def goal_budget(body):
             continue
         if re.match(r"\s*#+\s", line):  # a heading; `#12` (an Issue) or `#tag` is text
             title = line.strip().lstrip("#").strip().lstrip("*_`")
-            inside = bool(BUDGET_HEADING.fullmatch(title))
+            inside = bool(re.fullmatch(BUDGET_HEADING, title))
             if not inside and title.lower().startswith(("budget", "予算")):
                 raise RuntimeError(f"the Goal has the heading {line.strip()!r}; write the Budget heading as `## Budget` "
                                    "or `## 予算`, with the limits on the lines under it (docs/task-format.md)")
@@ -1975,26 +1988,26 @@ def goal_budget(body):
         if not text:
             continue
         if not inside:
-            if PAID_API.fullmatch(text):
+            if re.fullmatch(PAID_API, text):
                 raise RuntimeError(f"the Goal has {text!r} outside the Budget heading; put the paid APIs under "
                                    "`## Budget` (docs/task-format.md)")
             continue
-        if m := PAID_API.fullmatch(text):
-            names = [n.strip().strip("*_`").strip().lower() for n in LIST_COMMA.split(m[1])]
+        if m := re.fullmatch(PAID_API, text):
+            names = [n.strip().strip("*_`").strip().lower() for n in re.split(LIST_COMMA, m[1])]
             names = [n for n in names if n]
             if not names or any(not re.fullmatch(r"[\w.-]+", n) for n in names):
                 raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs as names, like "
                                    "`paid api: openai, anthropic` (docs/task-format.md)")
             paid += [n for n in names if n not in paid]
             continue
-        if PAID_API_WORDS.search(text):
+        if re.search(PAID_API_WORDS, text):
             raise RuntimeError(f"the Goal's Budget has {text!r}; write the paid APIs on their own line, like "
                                "`paid api: openai, anthropic` (docs/task-format.md)")
-        items = [i.strip().strip("*_`").strip() for i in LIST_COMMA.split(text)]
-        found = [BUDGET_ITEM.fullmatch(i) for i in items]
+        items = [i.strip().strip("*_`").strip() for i in re.split(LIST_COMMA, text)]
+        found = [re.fullmatch(BUDGET_ITEM, i) for i in items]
         # prose, for the agent; one in ASCII starting with a number or $, or with a number and a unit, was meant as
         # limits (`3M tokns`, `2 hrs`, `tokens: 3M`, `2h まで`)
-        if not any(found) and not re.fullmatch(r"[\d$][\x20-\x7e]*", text) and not BUDGET_HINT.search(text):
+        if not any(found) and not re.fullmatch(r"[\d$][\x20-\x7e]*", text) and not re.search(BUDGET_HINT, text):
             continue
         if not all(found):
             raise RuntimeError(f"the Goal's Budget has {text!r}; each limit is like 2h, 90m, 3M tokens, $5 "
@@ -2744,6 +2757,7 @@ def kiro_db_usage(dirs, began, ended):
 
     Opened read-only; missing, locked, or of another shape, it simply has nothing to say.
     """
+    import sqlite3
     path = kiro_db()
     if not path.is_file():
         return None
@@ -2918,6 +2932,7 @@ HELPERS_LOCK = threading.Lock()
 
 
 def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
+    import queue
     proc = None
     if t is not None:
         t["agent_running"] = True  # never saved: tells cmd_run's signal handler there is an agent to stop
@@ -3885,6 +3900,7 @@ def run_replan(t, report, say, usage=None):
 def goal_hash(body):
     """The Goal a readiness verdict was given for: 16 hex characters of the SHA-256 of the Issue body, its line ends
     and outer blank space aside. Any other edit of the Goal makes the verdict stale."""
+    import hashlib
     return hashlib.sha256(body.replace("\r\n", "\n").strip().encode()).hexdigest()[:16]
 
 
@@ -4588,7 +4604,7 @@ def finish(t, report, code, say, auto_review="", blocked_override="", again=Fals
         t["pr"] = upsert_pr(t, parsed.pr_body(t), bool(parsed.blocked), base.split("/", 1)[-1])
         say(f"== PR: {t['pr']}")
     body = parsed.issue_comment(t.get("pr", "") if ahead else "", resumed_line(t))
-    if again and RESUMED_LINE.sub("", issue(t)["report"]) == RESUMED_LINE.sub("", body):
+    if again and re.sub(RESUMED_LINE, "", issue(t)["report"]) == re.sub(RESUMED_LINE, "", body):
         say("== the report is on the Issue already")
     else:
         comment(t, body)
@@ -4891,7 +4907,7 @@ MERGE_WAIT = {"BLOCKED", "UNKNOWN", ""}  # may still change by itself (GitHub re
 MERGE_STATES = {"BLOCKED": "a required review or a rule of the branch is missing",
                 "UNSTABLE": "a check that is not required failed or has not finished",
                 "DRAFT": "the PR is a draft"}
-CONFLICT_MARKER = re.compile(r"(?m)^(<{7}|>{7})( |$)")
+CONFLICT_MARKER = r"(?m)^(<{7}|>{7})( |$)"
 
 
 def merge_config():
@@ -5150,7 +5166,7 @@ def push_failed(wt, head):
     return f"pushing {head} failed, the merge commit is kept in {home(wt)}: {git_said(r)}"
 
 
-TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]")
+TERMINAL_ESCAPE = r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]"
 
 
 def git_said(r, limit=300):
@@ -5161,7 +5177,7 @@ def git_said(r, limit=300):
     push` only say where."""
     lines = []
     for line in (r.stderr or r.stdout or "").split("\n"):  # not splitlines(): that splits at \r too
-        drawn = [d.strip() for d in TERMINAL_ESCAPE.sub("", line).split("\r")]
+        drawn = [d.strip() for d in re.sub(TERMINAL_ESCAPE, "", line).split("\r")]
         if last := next((d for d in reversed(drawn) if d not in ("", "remote:")), ""):
             lines.append(last[:limit])
     text = "\n".join(lines)
@@ -5406,7 +5422,7 @@ def fix_conflicts(t, wt, base, say):
                    "merge commit", report, conflicted, False
         git_shared(wt, "add", "-A", check=True)
         left = unmerged(wt) + [f for f in conflicted
-                               if CONFLICT_MARKER.search((shared_read(wt / f) or b"").decode(errors="replace"))]
+                               if re.search(CONFLICT_MARKER, (shared_read(wt / f) or b"").decode(errors="replace"))]
         if left:
             return f"conflict markers are left in {', '.join(dict.fromkeys(left))}", report, conflicted, False
     git_shared(wt, "commit", "-q", "--no-edit", check=True)  # MERGE_HEAD: a commit with both parents
@@ -5720,6 +5736,7 @@ def due_period(schedule, when):
         year, week, _ = date.isocalendar()
         key, start = f"{year}-W{week:02d}", date + datetime.timedelta(days=day - date.weekday())
     else:
+        import calendar
         key, start = date.strftime("%Y-%m"), date.replace(day=min(day, calendar.monthrange(date.year, date.month)[1]))
     return key if when >= datetime.datetime.combine(start, datetime.time(hour, minute)) else None
 
@@ -6159,6 +6176,7 @@ def copy_kiro():
 
 
 def cmd_kiro_copy(a):
+    import hashlib
     if a["key"] not in KIRO_COPIES:
         fail(f"unknown key {a['key']!r}", "kiro-hook or kiro-workflow", 2)
     want = kiro_copy_bytes(a["key"])
@@ -6174,6 +6192,7 @@ def cmd_kiro_copy(a):
 
 def note_install_copy(key, dest):
     """kiro/install.sh replaces only the copies whose SHA-256 it recorded: record the new one of a copy it owns."""
+    import hashlib
     try:
         m = json.loads(INSTALL_MANIFEST.read_text())
         if not isinstance(m, dict) or (m.get("installed") or {}).get(key) != str(dest):
@@ -6405,6 +6424,7 @@ def cmd_watch(_):
         except SystemExit:  # a config edited into a bad state meanwhile: fail() said why; the next check reads it again
             lines = []
         except Exception as e:  # a bug must not end it either: under launchd it would fail the same way at every start
+            import traceback
             lines = [f"error: unexpected {type(e).__name__}: {e} (please report it with this log)"]
             traceback.print_exc()
         lines += update_notice(check)
@@ -6504,8 +6524,8 @@ ACTION_KEY = STATE / "action.key"  # the local secret the buttons' tokens are si
 ACTIONS_USED = STATE / "intake-actions.json"  # {"used": {token: time}}: the tokens already acted on, newest last
 ACTIONS_USED_MAX = 2000
 ACTION_WORD = "task-hub "  # a button's message starts with it; no [intake] secret can (16 characters at least)
-ACTION_MESSAGE = re.compile(r"task-hub (merge|reject) (\d+) ([\w.-]+/[\w.-]+)#(\d+) ([0-9a-f]{40}) ([0-9a-f]{32})")
-PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+ACTION_MESSAGE = r"task-hub (merge|reject) (\d+) ([\w.-]+/[\w.-]+)#(\d+) ([0-9a-f]{40}) ([0-9a-f]{32})"
+PR_URL = r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)"
 
 
 def action_target():
@@ -6528,6 +6548,7 @@ def action_key():
     with contextlib.suppress(FileNotFoundError):
         if key := ACTION_KEY.read_text().strip():
             return key.encode()
+    import secrets
     ACTION_KEY.parent.mkdir(parents=True, exist_ok=True)
     temp = ACTION_KEY.parent / f".{ACTION_KEY.name}.{os.getpid()}.tmp"
     try:
@@ -6544,6 +6565,8 @@ def action_key():
 def action_token(action, tid, repo, number, sha):
     """One button's token: an HMAC of what it does, to which card, PR and head commit. A new push changes the head,
     so a button from before it no longer matches."""
+    import hashlib
+    import hmac
     signed = "\n".join(["task-hub action 1", action, str(tid), repo.lower(), str(number), sha.lower()])
     return hmac.new(action_key(), signed.encode(), hashlib.sha256).hexdigest()[:32]
 
@@ -6551,7 +6574,7 @@ def action_token(action, tid, repo, number, sha):
 def review_actions(tid, pr, sha):
     """The In review notification's ntfy buttons: Merge (when [merge] queue = on), Reject and View PR; none without
     `task intake`. Merge and Reject post `task-hub <action> <id> <owner/name>#<n> <sha> <token>` to [intake] topic."""
-    m = PR_URL.fullmatch(pr)
+    m = re.fullmatch(PR_URL, pr)
     if not m or not re.fullmatch(r"[0-9a-f]{40}", sha) or not (target := action_target()):
         return []
     server, topic, token = target
@@ -6567,8 +6590,9 @@ def review_actions(tid, pr, sha):
 
 def action_message(m):
     """Handle one button: check its token, then queue or reject the PR and say so on [notify] ntfy; a log line."""
+    import hmac
     mid = m.get("id", "?")
-    a = ACTION_MESSAGE.fullmatch((m.get("message") or "").strip())
+    a = re.fullmatch(ACTION_MESSAGE, (m.get("message") or "").strip())
     if not a:  # anyone who knows the topic can write to it: say nothing back
         return [f"intake: refused: not a button's message (message {mid}, {len(m.get('message') or '')} chars)"]
     action, tid, repo, number, sha, token = a.groups()
@@ -6753,6 +6777,7 @@ def update_by_installer(current):
         installed = json.loads(INSTALL_MANIFEST.read_text()).get("installed") or {}
     except (OSError, ValueError, AttributeError):
         installed = {}
+    import tempfile
     snapshot = Path(tempfile.mkdtemp(prefix="task-hub-update-"))
     try:
         copy = snapshot / "task-hub"
@@ -6854,6 +6879,7 @@ def cmd_open(a):
 
 def os_description():
     """This machine for a bug report: the OS, its version and CPU, and the Python that runs task."""
+    import platform
     if sys.platform == "darwin":
         name = f"macOS {platform.mac_ver()[0]}"
     elif WINDOWS:
