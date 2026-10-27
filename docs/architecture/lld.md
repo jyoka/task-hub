@@ -499,10 +499,11 @@ stateDiagram-v2
     fixing --> update: task _fix が終わった
     update --> Blocked: 同じ base でまた競合
     ci --> ci: チェック待ち(ci-wait はコミットごとに 1 回)
+    ci --> ci: チェックが落ちた、このコミットでまだ走らせ直していない(gh run rerun --failed、rerun = sha、ci-rerun)
     ci --> update: BEHIND、DIRTY、CONFLICTING
     ci --> ci: UNSTABLE で、落ちたチェックも動いているチェックもない(GitHub が数えるのを待つ。ci_minutes まで)
     ci --> merged: CLEAN、HAS_HOOKS、checks = required なら UNSTABLE も(gh pr merge --merge --match-head-commit)
-    ci --> Blocked: チェックが落ちた、ci_minutes を過ぎた、ほかの mergeStateStatus
+    ci --> Blocked: 走らせ直したコミットでまた落ちた、走らせ直せない、ci_minutes を過ぎた、ほかの mergeStateStatus
 ```
 
 - 図の `fixing` はキューの `step` には書きません(`step` は `update` のまま)。`task _fix` が生きている間は、`tasks()` の
@@ -518,6 +519,17 @@ stateDiagram-v2
   数秒遅れる。jyoka/tasks#246)。そこで `checks = all` の `UNSTABLE` は、落ちたチェックがなければ(落ちていれば
   その前に Blocked)、`ci_minutes` まではチェック待ちと同じに待ちます(`ci_wait` で `ci-wait` をコミットごとに 1 回)。
   過ぎたら、今までどおり `GitHub does not allow the merge (UNSTABLE: ...)` で Blocked にします
+- `ci_failed`(`merge_ci` でチェックが落ちたとき): キューの項目の `rerun.sha` が PR の先頭のコミット(`headRefOid`)と
+  違えば、落ちたチェックの `link` から GitHub Actions の run id(`/actions/runs/<id>`)を取り、run ごとに
+  `gh run rerun <id> --failed --repo <repo>` を呼びます。そのあと `rerun`(`sha` と落ちたチェックの `name`、`link`)と
+  `since`(`ci_minutes` を数え直す)を書き、`ci-rerun`(`sha` つき)を出して `ci` の段のまま待ちます。`rerun.sha` が
+  同じなら `merge_block` します(`failed twice`)。ただし落ちたチェックの `link` がどれも `rerun.checks` にあるなら、GitHub が
+  まだ前の結果を返しているだけなので、`ci_minutes` までは待ちます。`[merge] rerun = 0`、Actions でない `link` がある、
+  `gh run rerun` が失敗した(`; rerun failed: ...`)ときは、すぐ `merge_block` します。落ちたチェックと同じ run に
+  `pending` のチェックがあれば、走らせ直す前にそれを待ちます(動いている run は走らせ直せない。`ci_minutes` を過ぎたら
+  `its checks did not finish`)。`checks = required` のときは、同じ run の必須でないジョブも見るため、このときだけ
+  `pr_checks` を `--required` なしでもう 1 回読みます。走らせ直すのはコミットごとに 1 回だけです。
+  新しいコミットでは `rerun.sha` が合わないので、また 1 回走らせ直します
 - `watch_conflict`: キューにない In review のカードは、マージの確認(`pr_merged` の REST)の `mergeable_state` が
   `dirty` のとき、`conflict` を PR の先頭のコミット(`sha`)ごとに 1 回書きます。`[merge] prefix = on` なら、その `sha` で
   `conflict-fix` をまだ出していなければ `launch_fix` します。どちらも `events.jsonl` で「1 回」を判定します(`check_slow` と同じ)
@@ -618,7 +630,7 @@ sequenceDiagram
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
-| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット |
+| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait, rerun}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット、`rerun` は落ちたチェックを走らせ直したコミットとそのチェック(`{sha, checks: [{name, link}]}`) |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
@@ -668,9 +680,11 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
 予算を超えた `over budget`(`reason` に何がどの予算を超えたか)、
 再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
-マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`merged`、`conflict`、オートパイロットの `autopilot`
+マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`(既定の `[notify] events` には入れない)、
+`merged`、`conflict`、オートパイロットの `autopilot`
 (`action` は `ready` か `merge`)のどれかです。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
+`ci-rerun` の `sha` は走らせ直したコミットです。
 空の欄は書きません。
 
 ### 実行の集計(metrics.jsonl の 1 行)
@@ -748,7 +762,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり。research のカード(`task new --research`、`[triggers] drift_report`)は作る前に `gh label create --force` も |
 | `git fetch`、`push` | git | - | 開始、終わり |
-| マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`git fetch`、`merge`、`push` | gh(GraphQL)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
+| マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`gh run rerun <run id> --failed --repo <repo>`(落ちたチェックの run。コミットごとに 1 回)、`git fetch`、`merge`、`push` | gh(GraphQL、`run rerun` は REST)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1。走らせ直しは落ちた run ごとに REST 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
 | チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
