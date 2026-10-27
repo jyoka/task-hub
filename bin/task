@@ -11,7 +11,7 @@ import os
 import sys
 
 # the release (docs/release.md); task_hub.py reads it from here, as does `task update` of a release before the launcher
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 
 if __name__ == "__main__":
     if os.name == "nt" and not sys.flags.utf8_mode:  # files and pipes would be read in the ANSI code page (cp932)

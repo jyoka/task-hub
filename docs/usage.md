@@ -99,6 +99,14 @@ rerun = 1                 ; キューで落ちたチェックを同じコミッ�
 [autopilot]
 repos = jyoka/app         ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
 
+[resume]
+; 止まった実行を、エージェント自身の会話の続きから再開するコマンド。組み込みの claude と pi は書かなくてよい(docs/agents.md の「止まった実行の再開」)
+myagent = myagent --continue {prompt}
+
+[balance]
+; Goal の Budget に書いた有料 API の残高を、起動の前に確かめるコマンド。0 で終われば足りている(docs/operations.md の「予算と残高」)
+openai = python3 scripts/check_openai_balance.py
+
 [sandbox]
 mode = user             ; Linux だけ。エージェントを専用のユーザーで動かす(既定 off)
 user = task-agent       ; そのユーザー(これが既定)
