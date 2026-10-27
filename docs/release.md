@@ -9,7 +9,8 @@ task-hub の変更は、1 コミットごとではなく 1 リリースごとに
 ## 版の付け方
 
 - 版は [semver](https://semver.org/lang/ja/)(`MAJOR.MINOR.PATCH`)です。
-- 版は `bin/task` の `VERSION` に書きます。`task --version` で出る値です。
+- 版は `bin/task` の `VERSION` に書きます。`task --version` で出る値です。本体は `bin/task_hub.py` ですが、版はランチャーの
+  `bin/task` に置きます(前の版の `task update` が、ここを読むため。[lld.md の 1 章](architecture/lld.md#1-bintask-の構成))。
 - タグは `v<VERSION>` です(`VERSION = "0.6.0"` なら `v0.6.0`)。**タグの名前と、そのタグのコミットの `VERSION` は
   必ず一致させます。** 一致しないと、`task --version` とリリースの一覧で版の名前が食い違います。
 - 1.0.0 になるまでは、次のように上げます。

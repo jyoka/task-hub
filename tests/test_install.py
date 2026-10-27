@@ -33,6 +33,7 @@ INSTALL = Path(__file__).resolve().parent.parent / "kiro" / "install.sh"
 DOCTOR, UNINSTALL = INSTALL.with_name("doctor.sh"), INSTALL.with_name("uninstall.sh")
 REPO = INSTALL.parent.parent
 TASK = REPO / "bin" / "task"
+TASK_HUB = REPO / "bin" / "task_hub.py"  # the code bin/task starts
 # what stage 9 puts in ~/.kiro, from the clone: (in the clone, in ~/.kiro)
 KIRO_LINKS = [("skills/task", "skills/task"), ("skills/chief", "skills/chief"),
               ("kiro/steering/task-hub.md", "steering/task-hub.md")]
@@ -462,11 +463,13 @@ class InstallTest(unittest.TestCase):
              "sha256": sha or sha256(dmg), "cliPath": "Contents/MacOS/kiro-cli"}]}).encode()
         self.server.files[f"{base}/{KIRO_CLI_VERSION}/Kiro%20CLI.dmg"] = dmg
 
-    def make_origin(self, task=FAKE_TASK):
+    def make_origin(self, task=FAKE_TASK, task_hub=None):
         src = self.root / "src"
         (src / "bin").mkdir(parents=True)
         (src / "bin/task").write_text(task)
         (src / "bin/task").chmod(0o755)
+        if task_hub is not None:
+            (src / "bin/task_hub.py").write_text(task_hub)
         for path, _ in KIRO_LINKS + KIRO_COPIES + [("slack-triage", None)]:  # the real ones
             (src / path).parent.mkdir(parents=True, exist_ok=True)
             if (REPO / path).is_dir():
@@ -977,7 +980,7 @@ class InstallTest(unittest.TestCase):
         self.use_python3()
         shutil.rmtree(self.root / "src")
         shutil.rmtree(self.root / "origin.git")
-        self.make_origin(task=TASK.read_text())
+        self.make_origin(task=TASK.read_text(), task_hub=TASK_HUB.read_text())
         lines = self.install()
         self.assertTrue(any(line.startswith("8. 設定: 作りました(") and "task list で確かめました" in line
                             for line in lines), lines)
