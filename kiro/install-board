@@ -69,10 +69,10 @@ class GhError(Exception):
 
 
 def load_task():
-    """bin/task of this checkout, as a module: the board has to be what it checks."""
+    """bin/task_hub.py of this checkout (the code bin/task starts), as a module: the board has to be what it checks."""
     sys.dont_write_bytecode = True  # no __pycache__ in the checkout
     loader = importlib.machinery.SourceFileLoader("task_hub_bin",
-                                                  str(Path(__file__).resolve().parent.parent / "bin" / "task"))
+                                                  str(Path(__file__).resolve().parent.parent / "bin" / "task_hub.py"))
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(module)
     return module

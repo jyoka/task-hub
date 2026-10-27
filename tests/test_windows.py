@@ -8,6 +8,7 @@ user's and machine's PATH in test keys under HKCU (TASK_INSTALL_USER_ENV, TASK_I
 TASK_TEST_WINDOWS_INSTALL=1 (CI only) also runs windows/install.ps1 for real: it installs into this user's
 profile, PATH and Task Scheduler, since the scheduled watch runs as the user, whatever a test sets.
 """
+import importlib.util
 import io
 import json
 import os
@@ -41,7 +42,7 @@ if WINDOWS:  # test_task imports fcntl, which Windows lacks
     exec(FCNTL, sys.modules["fcntl"].__dict__)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_bench  # noqa: E402
-from test_task import BIN, FAKE_AGENT, FAKE_GH, STATUS_OPTIONS  # noqa: E402
+from test_task import BIN, FAKE_AGENT, FAKE_GH, STATUS_OPTIONS, TASK_HUB  # noqa: E402
 
 REPO = BIN.parent.parent
 
@@ -274,6 +275,31 @@ class WindowsTest(unittest.TestCase):
         self.assertIn("Say hello.\nMODE:ok", prompt)  # every line of it, not cut at the first
         self.assertEqual(self.branch_file(tid, "hello.txt"), "hello from mode ok\n")
         self.assertIn("挨拶を追加する", self.task("list"))
+
+    def test_task_runs_from_the_bytecode_in_pycache_and_without_it(self):
+        """bin/task imports task_hub.py, in the UTF-8 child it starts: from the second `task`, its bytecode comes from
+        __pycache__. Where that cannot be written (here a file in its place), task compiles it at every start."""
+        self.new(title="挨拶を追加する")
+        for name in ("pycache", "no-pycache"):
+            with self.subTest(name):
+                bindir = self.root / name / "bin"
+                bindir.mkdir(parents=True)
+                shutil.copy(BIN, bindir / "task")
+                shutil.copy(TASK_HUB, bindir / "task_hub.py")
+                bindir = bindir.resolve()  # the launcher's realpath: no 8.3 name (RUNNER~1) in the bytecode's path
+                if name == "no-pycache":
+                    (bindir / "__pycache__").write_text("")
+                pyc = importlib.util.cache_from_source(str(bindir / "task_hub.py"))
+                env = {k: v for k, v in self.env.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+                for n, args in enumerate([["--version"], ["--version"], ["list"]]):
+                    r = subprocess.run([sys.executable, str(bindir / "task"), *args], env={**env, "PYTHONVERBOSE": "1"},
+                                       capture_output=True, encoding="utf-8", errors="replace",
+                                       stdin=subprocess.DEVNULL, timeout=60)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr[-3000:])
+                    hub = "\n".join(line for line in r.stderr.splitlines() if "task_hub" in line)
+                    self.assertEqual(f"code object from {pyc!r}" in hub, name == "pycache" and n > 0, hub)
+                self.assertIn("挨拶を追加する", r.stdout)
+                self.assertEqual(os.path.isfile(pyc), name == "pycache")
 
     def test_a_running_task_is_alive_until_it_is_killed_then_resumed_once(self):
         # docs/architecture/designs/durable-runs.md: a run that stops unexpectedly is started again once, from its
@@ -1053,7 +1079,7 @@ class SetupTest(unittest.TestCase):
         spaced.mkdir()
         (spaced / "x.exe").write_bytes(b"")
         code = ("import importlib.machinery, importlib.util, sys\n"
-                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(BIN)!r})\n"
+                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(TASK_HUB)!r})\n"
                 "task = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
                 "loader.exec_module(task)\n"
                 "print(task.windows_command_path(sys.argv[1]))\n")
@@ -1258,10 +1284,12 @@ class UpdateTest(unittest.TestCase):
                               env=self.env).stdout.strip()
 
     def release(self, tag):
-        """A release of task-hub: this checkout's bin/task, and a stand-in windows\\install.ps1"""
+        """A release of task-hub: this checkout's bin/task and task_hub.py, and a stand-in windows\\install.ps1"""
         (self.seed / "bin").mkdir(exist_ok=True)
         (self.seed / "windows").mkdir(exist_ok=True)
         shutil.copy(BIN, self.seed / "bin/task")
+        shutil.copy(TASK_HUB, self.seed / "bin/task_hub.py")
+        (self.seed / ".gitignore").write_text("__pycache__/\n")  # as this repo's: `task` keeps its bytecode there
         (self.seed / "windows/install.ps1").write_text(FAKE_RELEASE_INSTALLER.replace("@TAG@", tag), encoding="utf-8-sig")
         (self.seed / "release.txt").write_text(tag)
         self.git(self.seed, "add", ".")
@@ -1583,7 +1611,7 @@ class InstallTest(unittest.TestCase):
         # task update starts the watch again with the new code: a new loop, the bystander left alone
         before = set(self.watch_loops()) - {bystander.pid}
         code = ("import importlib.machinery, importlib.util\n"
-                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(self.home / '.local/lib/task-hub/bin/task')!r})\n"
+                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(self.home / '.local/lib/task-hub/bin/task_hub.py')!r})\n"
                 "task = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
                 "loader.exec_module(task)\n"
                 "print(task.restart_windows_watch())\n")
