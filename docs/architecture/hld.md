@@ -291,7 +291,8 @@ sequenceDiagram
                 Fix->>GH: push(updated)、解けなければ Blocked
             end
         else チェックの段
-            Task->>GH: gh pr checks(ci-wait、落ちたら Blocked)
+            Task->>GH: gh pr checks(ci-wait)
+            Task->>GH: 落ちたら gh run rerun --failed(コミットごとに 1 回、ci-rerun)。また落ちたら Blocked
             Task->>GH: CLEAN なら gh pr merge --merge(merged、Done)
         end
     end
