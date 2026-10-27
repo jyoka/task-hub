@@ -1,4 +1,4 @@
-import { SLOW_MIN_RUNS, jsonLines } from './panel'
+import { AGENT_NEVER_RAN, SLOW_MIN_RUNS, jsonLines } from './panel'
 
 // Achievements, judged from metrics.jsonl alone (one line per finished run, in the order the runs finished).
 // events.jsonl is not used: a card closed by merging its PR has no `Done` there, so no badge counts merges.
@@ -37,8 +37,9 @@ export const earned = (metrics: string): string[] => {
   for (const r of runs) {
     const reviews = Array.isArray(r.reviews) ? r.reviews : []
     const done = r.status === 'In review'
-    // A run where the agent never ran (it could not start, or its setup failed) neither extends nor breaks a streak.
-    if (r.blocked_by !== 'start' && r.blocked_by !== 'setup') {
+    // A run where the agent never ran (it could not start, its setup failed, or a paid API was short) neither extends nor breaks a streak.
+    const ran = !AGENT_NEVER_RAN.includes(str(r.blocked_by))
+    if (ran) {
       streak = done && reviews[0] === 'pass' && r.retried !== true ? streak + 1 : 0
       for (const n of STREAKS) if (streak >= n) got.add(`streak-${n}`)
     }
@@ -47,7 +48,7 @@ export const earned = (metrics: string): string[] => {
     const times = before.get(agent) ?? []
     // "Usual" as the pane and bin/task count it (slowThreshold), from the runs before this one only.
     const usual = times.length >= SLOW_MIN_RUNS ? times[Math.floor(times.length / 2)]! : null
-    if (r.blocked_by !== 'start' && r.blocked_by !== 'setup') {
+    if (ran) {
       const t = seconds ?? 0
       let at = 0
       while (at < times.length && times[at]! <= t) at++

@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::io::{self, Write};
 use std::{env, fs, thread};
 
+mod art;
 mod tui;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION"); // task-rs's own version, not task-hub's

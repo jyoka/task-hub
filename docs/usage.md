@@ -57,6 +57,7 @@ agent = claude          ; このマシンのデフォルトの worker
 reviewer = agent        ; PR の前の自動レビュー。agent = worker と同じエージェントを新しいコンテキストで
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
+review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
@@ -67,7 +68,7 @@ jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
-events = In review, Blocked, replan, Done, slow, update, conflict   ; 通知を出す出来事(これが既定)。空にすると出さない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget   ; 通知を出す出来事(これが既定)。空にすると出さない
 ntfy =                    ; https://ntfy.sh/<トピック> を書くと、スマートフォンにも送る(既定は空)
 
 [intake]
@@ -85,16 +86,25 @@ deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
 [merge]
 queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
 prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
+
+[autopilot]
+repos = jyoka/app         ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
+
+[sandbox]
+mode = user             ; Linux だけ。エージェントを専用のユーザーで動かす(既定 off)
+user = task-agent       ; そのユーザー(これが既定)
 ```
 
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
-| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。`needs changes` なら 1 回だけ差し戻し、それでも通らなければドラフト PR で Blocked | マージするかどうか |
+| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
+| `[sandbox]` | エージェントと、worktree への git を専用の Linux ユーザーで動かし、あなたの HOME(ほかのリポジトリ、鍵、`gh` のログイン)に届かせない([sandbox.md](sandbox.md)) | そのユーザーを用意し、GitHub のトークンをどこまで許すか |
 | `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る) |
 | `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
+| `[autopilot]` | 書いたリポジトリの Backlog のカードを、待ち先が終わったら Ready に移す。自動レビューが `pass` の PR をマージキューに入れる([autopilot.md](autopilot.md)) | どのリポジトリを任せるか。任せたくないカードには Goal に `Autopilot: off` |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
 
@@ -219,7 +229,7 @@ Ready のカードを自動で始めるには、herdr のペインで `task watc
 `task watch` は、GitHub のエラー、動いている間に壊れた設定ファイル、始められないカードでは止まりません。
 `error:` の行を出し(始められないカードは理由を書いて Blocked にし)、次の回にまた確かめます。
 
-In review、Blocked、replanner の仕分け、Done、長引いている実行(`slow`)は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
+In review、Blocked、replanner の仕分け、Done、長引いている実行(`slow`)、予算を超えた実行(`over budget`)は、task-hub 自身が通知で知らせます(herdr が動いていれば herdr の
 通知、なければ macOS の通知)。文面はタイトル、判定か理由、見てほしいこと、PR の URL で、LLM は使わないので
 費用はかかりません。知らせを受けるためだけに `/chief` を開いておく必要はなく、相談したいときに開けば足ります。
 

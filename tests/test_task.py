@@ -17,6 +17,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -25,16 +26,22 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import unittest.mock
 import urllib.parse
+import uuid
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
+DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
+PI_GROUPS = BIN.parent.parent / "pi" / "task-groups.ts"  # pi's bash through worker/group-shell (-e in the built-in pi)
+GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what pi's and Claude Code's tool commands run in
 KIRO_HOOK = BIN.parent.parent / "kiro" / "task-events-since"
 KIRO_WATCH = BIN.parent.parent / "kiro" / "task-events-watch"
 KIRO_WORKFLOW = BIN.parent.parent / "kiro" / "workflows" / "task-hub-events.workflow.json"
 UNEXPECTED_MOVE = "not in StatusLifecycle.transitions"  # set_status's warning
+SANDBOX_USER = os.environ.get("TASK_TEST_SANDBOX_USER", "task-agent")  # tests/test_task.py runs as it when it can
 
 FAKE_GH = r'''#!/usr/bin/env python3
 import fcntl, json, os, re, shutil, subprocess, sys, tempfile
@@ -170,6 +177,19 @@ elif cmd == ["project", "item-add"]:
     touch(iid)
     out = {"id": iid}
 elif cmd == ["project", "item-edit"]:
+    if db.get("hang_status") and opt("--single-select-option-id") == db["hang_status"]:  # the run is cut short here
+        del db["hang_status"]
+        with open(f"{path}.{os.getpid()}.tmp", "w") as f:
+            json.dump(db, f)
+        os.replace(f"{path}.{os.getpid()}.tmp", path)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        import time
+        hanging = os.path.join(os.path.dirname(path), "gh-hanging")
+        with open(hanging + ".tmp", "w") as f:
+            f.write(str(os.getpid()))
+        os.replace(hanging + ".tmp", hanging)
+        time.sleep(60)
+        sys.exit(1)
     field = next(f for f in db["fields"] if f["id"] == opt("--field-id"))
     if "--single-select-option-id" in a:
         value = next(o["name"] for o in field["options"] if o["id"] == opt("--single-select-option-id"))
@@ -293,6 +313,18 @@ elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?he
     out = [{"merged_at": p.get("merged_at") or ("2026-09-23T00:00:00Z" if p.get("merged") else None),
             "body": p.get("body", "")}
            for p in prs if state == "all" or p["state"] != "OPEN"][:1]
+elif a[0] == "api" and "/compare/" in a[1]:  # REST: repos/<owner>/<name>/compare/<base>...<head>, from the origin
+    import subprocess, urllib.parse
+    repo, spec = a[1].split("/", 1)[1].split("/compare/")
+    base, head = (urllib.parse.unquote(x) for x in spec.split("..."))
+    bare = os.environ["TASK_CLONE_URL"].removeprefix("file://").format(repo=repo)
+    git = lambda *x: subprocess.run(["git", "-c", "safe.directory=*", "-C", bare, *x], capture_output=True, text=True)
+    if git("rev-parse", "--verify", "-q", f"refs/heads/{head}").returncode != 0:
+        fail("HTTP 404: Not Found (gh: Not Found)")
+    numstat = [line.split("\t", 2) for line in git("diff", "--numstat", f"{base}...{head}").stdout.splitlines()]
+    out = {"ahead_by": int(git("rev-list", "--count", f"{base}..{head}").stdout),
+           "files": [{"filename": n, "additions": int(p) if p.isdigit() else 0, "deletions": int(m) if m.isdigit() else 0}
+                     for p, m, n in numstat]}
 elif cmd in (["repo", "view"], ["run", "list"], ["issue", "list"]):  # the triggers ask the work repos
     db["trigger_calls"] = db.get("trigger_calls", 0) + 1
     repo = a[2] if cmd == ["repo", "view"] else opt("--repo")
@@ -392,20 +424,88 @@ if "USAGE" in prompt:  # this agent leaves records the way Claude Code does
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "agent"], check=True)
 for form in re.findall(r"\bKIRO(V1|V2|BAD)\b", prompt)[:1]:  # ... or the way kiro-cli does
     subprocess.run([os.environ["TASK_TEST_KIRO"], form], check=True)
+if "PIRECORDS" in prompt:  # ... or the way pi does
+    subprocess.run([os.environ["TASK_TEST_PI"]], check=True)
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
 if mode == "crash":
     sys.exit(1)
-if mode == "slow":  # works a bit, then keeps running until stopped
+# works a bit, then keeps running until stopped; once resumed (# Resumed), as "ok". "frozen": resumed too
+if mode == "frozen" or mode in ("slow", "slowtree") and "# Resumed" not in prompt:
     Path("hello.txt").write_text("partial work\n")
+    if mode == "slowtree":  # with a child of its own (a test run, a dev server), which must stop with it
+        # QUIETKID: one that does not hold the agent's output open (its run would wait for it to end)
+        quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if "QUIETKID" in prompt else {}
+        child = subprocess.Popen(["sleep", "60"], **quiet)
+        kid = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent / "agent-child"
+        Path(f"{kid}.tmp").write_text(str(child.pid))
+        Path(f"{kid}.tmp").replace(kid)
     print("waiting", flush=True)
+    import time; time.sleep(60)
+if mode == "longtest":  # a long test run as Claude Code runs a Bash command, in a process group of its own, through
+    # task-hub's hook (worker/group-shell): its CLAUDE_CODE_SHELL_PREFIX; PISHELL: as pi's shell (pi/task-groups.ts)
+    test = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent / ("long-test-" + re.search(r"Task (\d+):", prompt)[1])
+    if "# Resumed" not in prompt:
+        Path("hello.txt").write_text("partial work\n")
+        command = f"echo $$ > {test}.tmp && mv {test}.tmp {test} && sleep 60 && echo done > {test}.done"
+        argv = [os.environ["TASK_HUB_GROUP_SHELL"], "-c", command] if "PISHELL" in prompt else \
+            ["/bin/sh", "-c", f"{os.environ['CLAUDE_CODE_SHELL_PREFIX']} '{command}'"]
+        subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while not test.exists():
+            import time; time.sleep(0.05)
+        print("waiting", flush=True)
+        import time; time.sleep(60)
+    left = subprocess.run(["ps", "-p", test.read_text().strip(), "-o", "stat="], capture_output=True, text=True)
+    Path(f"{test}.at-resume").write_text("running" if left.stdout.strip()[:1] not in ("", "Z") else "gone")
+if mode == "retryhang":  # sent back by the reviewer, then cut short in its retry; resumed, it fixes it
+    if "# Automated review feedback" not in prompt:
+        Path("hello.txt").write_text("hello, reviewfix pending\n")
+    elif "# Resumed" not in prompt:
+        Path("hello.txt").write_text("partial fix\n")
+        print("waiting", flush=True)
+        import time; time.sleep(60)
+    else:
+        Path("hello.txt").write_text("fixed after review\n")
+if mode in ("hang", "hangterm", "busy"):  # waits without a word on a command that hangs, or one that works a while
+    command = {"hang": ["sleep", "60"], "hangterm": ["sh", "-c", "trap '' TERM; sleep 60"],  # sleep ignores it too
+               "busy": [sys.executable, "-c", "import time\nend = time.time() + 4\nwhile time.time() < end: pass"]}[mode]
+    code = subprocess.run(command).returncode
+    print(f"the command exited with {code}", flush=True)
+    Path("hello.txt").write_text(f"the command exited with {code}\n")
+    Path(".task-report.md").write_text(report)
+    sys.exit(0)
+# works a bit, then hangs itself, with nothing of its own running; "silentonce": once resumed (# Resumed), as "ok"
+if mode == "silent" or mode == "silentonce" and "# Resumed" not in prompt:
+    Path("hello.txt").write_text("partial work\n")
     import time; time.sleep(60)
 if mode == "env":  # proves the agent got the env files: writes what it read
     seen = [Path(p).read_text().strip() for p in (".env", "voice/.env") if Path(p).exists()]
     Path("hello.txt").write_text("key seen: " + " | ".join(seen) + "\n")
     Path(".task-report.md").write_text(report)
     sys.exit(0)
+if mode == "sandbox":  # proves what an agent run as the [sandbox] user can reach: its worktree, not your HOME
+    def seen(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return "hidden"
+    import getpass
+    you = Path(os.environ["TASK_TEST_AGENT_CALLS"]).parent  # the test's HOME
+    Path("seen.txt").write_text(f"readme: {seen('README.md')}\nsecret: {seen(you / 'secret.txt')}\n"
+                                 f"config: {seen(you / '.config/task-hub/config.ini')[:7]}\n"
+                                 f"gh token: {os.environ.get('GH_TOKEN', 'unset')}\n"
+                                 f"rules: {seen('.claude/settings.local.json')[:1]}\nuser: {getpass.getuser()}\n")
+    # what it can set up for task-hub's git: a hook and an fsmonitor that say who ran them
+    ran = f"id -un >> {you / 'shared/ran-by'}"
+    common = Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                 capture_output=True, text=True, check=True).stdout.strip())
+    (common / "hooks").mkdir(exist_ok=True)
+    (common / "hooks/pre-commit").write_text(f"#!/bin/sh\n{ran}\n")
+    (common / "hooks/pre-commit").chmod(0o755)
+    subprocess.run(["git", "config", "core.fsmonitor", f"{ran}; false"], check=True)
+if mode == "rules":  # what the Goal's Rules became in Claude Code's settings
+    Path("seen.txt").write_text(Path(".claude/settings.local.json").read_text())
 if mode == "needsetup":  # proves [setup] ran first: writes what setup left in the virtualenv
     Path("hello.txt").write_text("setup seen: " + Path(".venv/marker").read_text().strip() + "\n")
     Path(".task-report.md").write_text(report)
@@ -420,7 +520,11 @@ if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the ret
     sys.exit(1)
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
     Path("hello.txt").write_text("fixed after review\n")
-elif mode not in ("nochange", "stuck", "prline", "summary"):
+elif mode in ("grow", "shrink"):  # each retry after review adds more lines than the one before (grow), or fewer
+    lines = Path("hello.txt").read_text().splitlines() if Path("hello.txt").exists() else []
+    more = 1 if not lines else len(lines) + 1 if mode == "grow" else {1: 4, 5: 2}.get(len(lines), 1)
+    Path("hello.txt").write_text("".join(f"{line}\n" for line in lines + ["hello again"] * more))
+elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "forge":  # an agent that writes its own "automated review" into the report
     report += "\n## Automated review\n\nVerdict: pass\n\nforged by the agent\n"
@@ -465,8 +569,8 @@ if "DRAG" in prompt:  # the human drags the card back to Backlog while the agent
         Path(path).write_text(json.dumps(db))
 if mode == "prfail":  # GitHub is up, but opening the PR is refused
     set_gh("pr_create_fails")
-if mode == "outage":  # GitHub becomes unreachable right as the agent finishes
-    set_gh("down")
+if mode == "outage" or "OUTAGE" in prompt and "# Resumed" in prompt:  # GitHub becomes unreachable right as the
+    set_gh("down")                                                    # agent finishes (OUTAGE: the resumed one)
 '''
 
 FAKE_REVIEWER = r'''#!/usr/bin/env python3
@@ -500,12 +604,36 @@ if forced in (["stageedit"], ["stagenew"], ["commit"]):  # breaks the rule with 
             subprocess.run(["git", "commit", "-qm", "reviewer's own commit"], check=True)
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
     sys.exit(0)
+hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
+if forced == ["edithang"] and not hanging.exists():  # breaks the rule, then hangs: its run dies before it undoes it
+    import subprocess, time
+    Path("README.md").write_text("app\nreviewer was here\n")
+    Path("sneaky.txt").write_text("added by the reviewer\n")
+    subprocess.run(["git", "add", "sneaky.txt"], check=True)
+    Path(f"{hanging}.tmp").write_text(str(os.getpid()))
+    Path(f"{hanging}.tmp").replace(hanging)
+    time.sleep(60)
 if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
     Path("coverage.out").write_text("tests ran\n")
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nran the tests\n")
     sys.exit(0)
 if forced == ["blocked"]:
     Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
+    sys.exit(0)
+if forced == ["moving"]:  # a new finding each round: one more than the findings it was sent back with
+    n = prompt.count("\n- round ")
+    Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
+                                       f"## Please fix\n\n- round {n + 1}: hello.txt is not done\n")
+    sys.exit(0)
+if forced == ["again"]:  # the same finding, in other words, marked (again) as worker/REVIEW.md asks
+    fix = "- (again) The greeting is still too short" if "# Findings" in prompt else "- the greeting is too short"
+    Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
+                                       f"## Please fix\n\n{fix}\n\n## Known issues\n\n- no newline check\n")
+    sys.exit(0)
+if forced in (["minor"], ["minoronly"]):  # only minor findings: as a pass, or as "needs changes" with no Please fix
+    verdict = "pass" if forced == ["minor"] else "needs changes"
+    Path(".task-review.md").write_text(f"## Verdict\n\n{verdict}\n\n## Review\n\nall criteria met\n\n"
+                                       "## Known issues\n\n- hello.txt has no test of an empty name\n")
     sys.exit(0)
 if forced == ["needs"]:
     Path(".task-review.md").write_text("## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n## Please fix\n\nredo it\n")
@@ -724,6 +852,49 @@ if form in ("V2", "BAD"):
         session("old", cwd, [turn(iso(now - 3600), [100], 50)], "old-model", at=now - 3600)
 '''
 
+FAKE_PI = r'''#!/usr/bin/env python3
+# What pi 1.4.0 (`-p --mode json --session-id`) leaves in ~/.pi/agent/sessions during one launch, in the shapes of
+# its docs/session-format.md and of real sessions, plus what task-hub must not count: an earlier launch of the same
+# session (a resume goes on in the same file), another directory, entries without usage, a broken line.
+import datetime, json, os, time
+from pathlib import Path
+cwd, now = os.getcwd(), time.time()
+root = Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi/agent") / "sessions"
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def usage(i, o, read=0, write=0, cost=0.0):
+    return {"input": i, "output": o, "cacheRead": read, "cacheWrite": write, "reasoning": 3,
+            "totalTokens": i + o + read + write,
+            "cost": {"input": cost / 2, "output": cost / 2, "cacheRead": 0, "cacheWrite": 0, "total": cost}}
+def assistant(at, u, model="gpt-5.5"):
+    return {"type": "message", "id": "a", "parentId": "p", "timestamp": iso(at), "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "done"}], "api": "openai-codex-responses",
+        "provider": "openai-codex", "model": model, "usage": u, "stopReason": "stop", "timestamp": int(at * 1000)}}
+def session(name, where, entries):
+    folder = root / ("--" + where.strip("/").replace("/", "-") + "--")
+    folder.mkdir(parents=True, exist_ok=True)
+    head = {"type": "session", "version": 3, "id": name, "timestamp": iso(now - 3600), "cwd": where}
+    (folder / f"{name}.jsonl").write_text("\n".join(e if isinstance(e, str) else json.dumps(e)
+                                                     for e in [head, *entries]) + "\n")
+session("this", cwd, [
+    assistant(now - 3600, usage(1000, 1000, cost=9.0), "old-model"),  # the launch before a resume
+    {"type": "model_change", "id": "m", "parentId": None, "timestamp": iso(now), "provider": "openai-codex",
+     "modelId": "gpt-5.5"},
+    {"type": "message", "id": "u", "parentId": "a", "timestamp": iso(now),
+     "message": {"role": "user", "content": "go", "timestamp": int(now * 1000), "usage": usage(7, 7)}},
+    assistant(now, usage(100, 20, 300, 40, 0.0125)),
+    {"type": "message", "id": "t", "parentId": "a", "timestamp": iso(now), "message": {
+        "role": "toolResult", "toolCallId": "c", "toolName": "bash", "content": [], "isError": False}},
+    assistant(now, usage(200, 30, 600, 0, 0.0175)),
+    {"type": "usage", "id": "w", "parentId": "a", "timestamp": iso(now), "kind": "cache_warm",
+     "provider": "openai-codex", "model": "gpt-5.5-mini", "usage": usage(0, 0, 50, 0, 0.001)},
+    {"type": "message", "id": "x", "timestamp": iso(now), "message": "a format we do not know"},
+    '{"type": "message", "timestamp": "' + iso(now) + '", "mess',  # cut off mid-line
+])
+session("elsewhere", "/somewhere/else", [assistant(now, usage(5000, 5000, cost=5.0), "other-model")])
+(root / "--odd--").mkdir(parents=True, exist_ok=True)
+(root / "--odd--" / "garbage.jsonl").write_bytes(b"\xff\xfe" + cwd.encode() + b"\x00\n")
+'''
+
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 # Claude Code's print mode, in the shapes seen from claude 2.1.296: only the final result as text, or with
 # --output-format stream-json --verbose one JSON line per step. WAIT in the goal holds it before it finishes, until
@@ -801,6 +972,9 @@ FAKE_STEPS = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
 from pathlib import Path
 cli, prompt, argv = Path(sys.argv[0]).name, sys.argv[-1], sys.argv[1:-1]
+if os.environ.get("TASK_TEST_STEPS_CALLS"):  # the arguments of each launch, for the tests of {session}
+    with open(os.environ["TASK_TEST_STEPS_CALLS"], "a") as f:
+        f.write(json.dumps({"cli": cli, "argv": argv, "resumed": "# Resumed" in prompt}) + "\n")
 given = lambda flag, value: any(a == flag and b == value for a, b in zip(argv, argv[1:]))
 stream = {"codex": "--json" in argv, "pi": given("--mode", "json"), "kiro-cli": given("--output-format", "stream-json")}[cli]
 cwd = os.path.realpath(os.getcwd())
@@ -956,6 +1130,12 @@ finish("All done.\nAdded hello.txt and wrote the report.\n\nThe last line of the
 STATUS_OPTIONS = ["Backlog", "Ready", "In progress", "In review", "Blocked", "Done"]  # GitHub's spelling
 
 
+def process_gone(pid):
+    """No such process, or only its exit status left for its parent to collect (a zombie)."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    return r.returncode != 0 or r.stdout.strip().startswith("Z")
+
+
 class TaskTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -971,7 +1151,7 @@ class TaskTest(unittest.TestCase):
         self.calls = root / "agent-calls.txt"
         self.review_calls = root / "review-calls.txt"
         for name, src in (("gh", FAKE_GH), ("agent", FAKE_AGENT), ("reviewer", FAKE_REVIEWER),
-                          ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO)):
+                          ("transcript", FAKE_TRANSCRIPT), ("kiro", FAKE_KIRO), ("pi", FAKE_PI)):
             (root / name).write_text(src)
             (root / name).chmod(0o755)
         git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
@@ -980,6 +1160,7 @@ class TaskTest(unittest.TestCase):
                     "TASK_TEST_GH_DB": str(self.db), "TASK_TEST_AGENT_CALLS": str(self.calls),
                     "TASK_TEST_REVIEW_CALLS": str(self.review_calls),
                     "TASK_TEST_TRANSCRIPT": str(root / "transcript"), "TASK_TEST_KIRO": str(root / "kiro"),
+                    "TASK_TEST_PI": str(root / "pi"),
                     "TASK_CLONE_URL": f"file://{root}/origins/{{repo}}.git",
                     "TASK_TEST_NOTIFY": str(root / "notifications.jsonl"),
                     "TASK_TEST_IDE_CALLS": str(root / "ide-calls.jsonl"),
@@ -996,6 +1177,10 @@ class TaskTest(unittest.TestCase):
         (fakebin / "launchctl").chmod(0o755)
         self.env["PATH"] = f"{fakebin}:{self.env['PATH']}"
         self.env.pop("CLAUDE_CONFIG_DIR", None)  # the transcripts are read from this test's HOME
+        self.env.pop("PI_CODING_AGENT_DIR", None)  # ... and pi's sessions
+        self.env.pop("PI_CODING_AGENT_SESSION_DIR", None)
+        for name in ("CLAUDE_CODE_SHELL_PREFIX", "TASK_HUB_GROUPS", "TASK_HUB_GROUP_SHELL", "TASK_HUB_SHELL"):
+            self.env.pop(name, None)  # set when a task-hub agent runs these tests: bin/task sets its own from here
         self.write_config()
         self.origin("jyoka/app")
         self.stderr = []  # of every `task` the test ran, for the warning check in tearDown
@@ -1010,6 +1195,11 @@ class TaskTest(unittest.TestCase):
                 continue
             if not pid:
                 continue
+            with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):  # its own group (agent_process)
+                agent = int(json.loads(f.read_text()).get("agent_pid") or 0)
+                if agent and str(self.root) in subprocess.run(["ps", "-p", str(agent), "-o", "command="],
+                                                              capture_output=True, text=True).stdout:
+                    os.killpg(agent, signal.SIGKILL)
             try:
                 cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
                 if "_run" not in cmd and "_fix" not in cmd:
@@ -1060,14 +1250,15 @@ class TaskTest(unittest.TestCase):
 
     # --- helpers ---
 
-    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel=""):
+    def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
                        + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
                        + (f"replanner = {replanner}\n" if replanner else "")
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
-                       + (f"parallel = {parallel}\n" if parallel else "") + "\n"
+                       + (f"parallel = {parallel}\n" if parallel else "")
+                       + (f"review_retries = {review_retries}\n" if review_retries else "") + "\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
                        + extra)
@@ -1156,7 +1347,7 @@ class TaskTest(unittest.TestCase):
 
     def origin_files(self, branch):
         bare = self.root / "origins" / "jyoka/app.git"
-        return subprocess.run(["git", "-C", str(bare), "ls-tree", "--name-only", branch],
+        return subprocess.run(["git", "-c", "safe.directory=*", "-C", str(bare), "ls-tree", "--name-only", branch],
                               capture_output=True, text=True).stdout.split()
 
     def push_branch(self, branch, filename):
@@ -1184,7 +1375,8 @@ class TaskTest(unittest.TestCase):
         return self.root / ".local/state/task-hub/runs" / f"{tid}.json"
 
     def fake_running(self, tid):
-        """Make a task look like a live run on this machine."""
+        """Make a task look like a live run on this machine. It has no stage: once killed, it is Blocked, not resumed
+        (resumable)."""
         proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", str(tid)])  # as `task _run`
         self.addCleanup(proc.kill)
         self.move(tid, "In progress")
@@ -1194,18 +1386,29 @@ class TaskTest(unittest.TestCase):
         return proc
 
     def test_a_pid_now_another_tasks_run_is_not_this_run(self):
-        # pids are handed out again (the run files outlive a restart): another task's run is not this one
+        # pids are handed out again (the run files outlive a restart): another task's run is not this one, so this
+        # run is gone and is resumed once (durable-runs.md), and the other one is left alone
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
+        self.addCleanup(other.kill)
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "pid": str(other.pid)}))
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(other.poll())
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_dead_run_with_no_stage_is_blocked_not_resumed(self):
+        # a run file with no stage (a run that had ended, or one from before durable runs): nothing to go on from
         tid = self.new()
         proc = self.fake_running(tid)
         proc.kill()
         proc.wait()
-        other = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "_run", "99"])
-        self.addCleanup(other.kill)
-        state = json.loads(self.run_file(tid).read_text())
-        self.run_file(tid).write_text(json.dumps({**state, "pid": str(other.pid)}))
         self.task()
         self.assertEqual(self.status(tid), "Blocked")
-        self.assertIn("the run stopped unexpectedly", self.comments(tid)[-1])
+        self.assertIn("the run stopped unexpectedly, see", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
 
     # --- registering ---
 
@@ -1318,11 +1521,42 @@ class TaskTest(unittest.TestCase):
             loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
-            cmd = task.agent_command("claude", "do it")
+            cmd = task.agent_command("claude", "do it", session="S")
+            resumed = task.agent_command("claude", "go on", resume=True, session="S")
         # claude -p ends without waiting for a backgrounded test, so the run has no report (tasks#47, #51)
-        self.assertEqual(cmd, ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
-                               "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions",
-                               "--output-format", "stream-json", "--verbose", "do it"])
+        claude = ["env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "BASH_DEFAULT_TIMEOUT_MS=1800000",
+                  "BASH_MAX_TIMEOUT_MS=1800000", "claude", "-p", "--dangerously-skip-permissions",
+                  "--output-format", "stream-json", "--verbose"]
+        self.assertEqual(cmd, [*claude, "--session-id", "S", "do it"])
+        self.assertEqual(resumed, [*claude, "--resume", "S", "go on"])  # the same conversation (durable-runs.md A)
+
+    def test_builtin_resume_commands_only_go_with_the_builtin_agent_commands(self):
+        """durable-runs.md A: pi and claude go on with their saved conversation by default, codex and kiro start a
+        new session. An [agents] command of your own never gets the built-in [resume] (another program or model)."""
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+            for config, expected in (
+                    ("", {"pi": f"pi -p --mode json -e {shlex.quote(str(PI_GROUPS))} --session-id {{session}} "
+                                "{prompt}", "codex": None, "kiro": None, "fake": None}),
+                    ("pi = /opt/pi -p --mode json --model m {prompt}\n", {"pi": None}),
+                    ("pi = /opt/pi -p --session-id {session} {prompt}\n\n[resume]\npi = /opt/pi -p --session-id {session} "
+                     "{prompt}\nfake = \n", {"pi": "/opt/pi -p --session-id {session} {prompt}", "fake": None}),
+                    ("\n[resume]\npi =\n", {"pi": None})):
+                with self.subTest(config):
+                    self.write_config(config)
+                    task.config.cache_clear()
+                    self.assertEqual({name: task.resume_command(name) for name in expected}, expected)
+                    if expected["pi"] is None:
+                        self.assertEqual(task.agent_command("pi", "P", resume=True, session="S"),
+                                         task.agent_command("pi", "P", session="S"))  # [agents]: a new session
+            self.assertEqual(task.agent_command("pi", "P", resume=True, session="S")[-3:], ["--session-id", "S", "P"])
+            self.assertIn(str(PI_GROUPS), task.agent_command("pi", "P", session="S"))
+            self.write_config("\n[sandbox]\nmode = user\n")  # its user cannot read this clone: no -e (no notes either)
+            task.config.cache_clear()
+            self.assertEqual(task.agent_command("pi", "P", session="S"),
+                             ["pi", "-p", "--mode", "json", "--session-id", "S", "P"])
 
     def test_unknown_agent_on_a_card_blocks_only_that_card(self):
         bad, good = self.new(title="bad"), self.new(title="good")
@@ -1487,17 +1721,116 @@ class TaskTest(unittest.TestCase):
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
         self.assertIn("## Automated review", self.comments(tid)[-1])
         self.assertIn("Verdict: pass", self.comments(tid)[-1])
+        second = self.reviewer_calls()[1]["prompt"]  # the second review checks what the first one sent back
+        self.assertIn("## Findings the work was sent back with", second)
+        self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Agent report")[0])
+        self.assertNotIn("## Findings the work was sent back with", self.reviewer_calls()[0]["prompt"])
 
-    def test_automated_review_blocks_after_one_failed_retry(self):
+    def test_automated_review_stops_when_the_same_finding_comes_back(self):
+        """reviewfail: the retry does not fix it, and the reviewer gives the same finding word for word."""
         self.write_config(reviewer=True)
         tid = self.new("reviewfail")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
-        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len(self.agent_calls()), 2)  # [runner] review_retries is 2, but sending back again is no use
         self.assertEqual(len(self.reviewer_calls()), 2)
         self.assertTrue(self.pr(tid)["isDraft"])
-        self.assertIn("automated review did not pass after one retry", self.comments(tid)[-1])
-        self.assertIn("Verdict: needs changes", self.comments(tid)[-1])
+        last = self.comments(tid)[-1]
+        blocked = last.split("## Blocked\n\n", 1)[1].splitlines()[0]
+        self.assertIn("automated review stopped after one retry: a finding came back after the retry it was sent "
+                      "back with", blocked)
+        self.assertIn("Verdict: needs changes", last)
+        self.assertEqual(self.metrics(1)[-1]["review_stop"], "repeated")
+        # the draft of the next run's instructions: the human checks it and moves the card to Ready
+        draft = last.split("## Suggested instructions\n\n", 1)[1]
+        self.assertIn("1. Keep trying; this fake reviewer never accepts reviewfail. (it came back after a retry)", draft)
+        self.assertIn("move the card to Ready", draft)
+        self.assertIn("## Suggested instructions", self.pr(tid)["body"])
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:reviewfix"  # (the fake agent's way to follow them)
+        self.save_db(db)
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        rerun = self.agent_calls()[2]["prompt"]
+        self.assertIn("## Suggested instructions", rerun)
+        self.assertIn("Its Suggested instructions were there for the human to check", rerun)
+
+    def test_a_finding_marked_again_in_other_words_stops_the_retries_too(self):
+        self.write_config(reviewer=True)
+        tid = self.new("grow REVIEW=again")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 2)
+        last = self.comments(tid)[-1]
+        self.assertIn("a finding came back after the retry it was sent back with", last)
+        self.assertIn("1. The greeting is still too short (it came back after a retry)", last)
+        self.assertIn("### Known issues", last)
+
+    def test_automated_review_sends_back_up_to_review_retries_times(self):
+        self.write_config(reviewer=True)  # review_retries: 2 by default
+        tid = self.new("shrink REVIEW=moving")  # a new finding each round, and each retry changes less
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (3, 3))
+        last = self.comments(tid)[-1]
+        self.assertIn("automated review did not pass after 2 retries: not yet", last)
+        self.assertIn("1. round 3: hello.txt is not done", last.split("## Suggested instructions", 1)[1])
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["reviews"], record["retries"], record["retried"], record["review_stop"]),
+                         (["needs changes"] * 3, 2, True, "limit"))
+        self.assertIn("1 sent back (2 retries in all)", self.task("stats"))
+
+    def test_review_retries_is_set_in_the_config(self):
+        self.write_config(reviewer=True, review_retries="0")
+        tid = self.new("shrink REVIEW=moving")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (1, 1))
+        self.assertIn("review_retries = 0: it is never sent back", self.comments(tid)[-1])
+
+    def test_a_bad_review_retries_stops_the_start_before_the_agent_runs(self):
+        self.write_config(reviewer=True, review_retries="two")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("review_retries", self.comments(tid)[-1])
+
+    def test_automated_review_stops_when_the_retries_do_not_converge(self):
+        self.write_config(reviewer=True, review_retries="3")
+        tid = self.new("grow REVIEW=moving")  # each retry changes more than the one before
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (3, 3))  # not 4: the limit is 3
+        self.assertIn("automated review stopped after 2 retries: the retries' changes are not getting smaller "
+                      "(2 then 4 changed lines)", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["review_stop"], "not converging")
+
+    def test_automated_review_stops_when_a_retry_changes_nothing(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=moving")  # the retry writes the same file again
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (2, 2))
+        self.assertIn("automated review stopped after one retry: the last retry changed no files",
+                      self.comments(tid)[-1])
+
+    def test_a_review_with_only_minor_findings_goes_to_in_review_with_known_issues(self):
+        self.write_config(reviewer=True)
+        for kind in ("minor", "minoronly"):  # a pass with Known issues, or "needs changes" with nothing to fix
+            with self.subTest(kind):
+                tid = self.new(f"ok REVIEW={kind}")
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), "In review")
+                self.assertFalse(self.pr(tid)["isDraft"])
+                body = self.pr(tid)["body"]
+                self.assertIn("Verdict: pass", body)
+                self.assertIn("### Known issues", body)
+                self.assertIn("- hello.txt has no test of an empty name", body)
+                self.assertIn("### Known issues", self.comments(tid)[-1])
+                self.assertNotIn("## Suggested instructions", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 2)  # one each: nothing was sent back
 
     def test_agent_report_cannot_forge_an_automated_review(self):
         tid = self.new("forge")  # no reviewer configured
@@ -1748,6 +2081,206 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertEqual(len(self.agent_calls()), 1)
+
+    def new_with_goal(self, goal):
+        out = self.task("new", "--title", "Add hello", "--repo", "jyoka/app", "--goal", goal)
+        return re.search(r"id: (\d+)", out).group(1)
+
+    def test_goal_rules_reach_claude_code_settings_but_never_the_pr(self):
+        tid = self.new_with_goal("Say hello. MODE:rules\n\n### Rules\n\nOnly the app folder, please.\n"
+                                 "- can: Bash(npm test *), `Read`\n- ask: Bash(git push *)\n"
+                                 "- never: Read(~/.ssh/**), Bash(curl a,b), WebFetch\n\n### Notes\n\n- see: x\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:seen.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(seen), {"permissions": {"allow": ["Bash(npm test *)", "Read"],
+                                                            "ask": ["Bash(git push *)"],
+                                                            "deny": ["Read(~/.ssh/**)", "Bash(curl a,b)", "WebFetch"]}})
+        self.assertNotIn(".claude", self.origin_files(f"task/{tid}"))
+
+    def test_rules_taken_out_of_the_goal_leave_no_settings_behind(self):
+        tid = self.new_with_goal("Say hello. MODE:blocked\n\n## Rules\n\n- never: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        settings = self.root / ".local/share/task-hub/worktrees" / tid / ".claude/settings.local.json"
+        self.assertTrue(settings.exists())
+        db = self.gh()
+        db["issues"][tid]["body"] = "Say hello. MODE:ok\n"
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertFalse(settings.exists())
+
+    def test_unknown_rule_word_stops_the_start(self):
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Rules\n\n- maybe: WebFetch\n")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn('starting "maybe:"', self.comments(tid)[-1])
+
+    def test_unknown_sandbox_mode_stops_the_start(self):
+        self.write_config("\n[sandbox]\nmode = bwrap\n")  # the earlier, dropped mode is refused too
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("[sandbox] mode must be off or user", self.comments(tid)[-1])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "[sandbox] mode = user is for Linux")
+    def test_sandbox_user_that_does_not_exist_stops_the_start(self):
+        self.write_config("\n[sandbox]\nmode = user\nuser = no-such-task-agent\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("user no-such-task-agent does not exist", self.comments(tid)[-1])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_the_clones_while_the_agent_user_still_has_an_acl_on_them(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        # what a mode = user run's agent could have left in the shared clone: your git would run it as you
+        data = self.root / ".local/share/task-hub"
+        ran = self.root / "planted-ran"
+        clone = data / "repos/jyoka/app"
+        hook = clone / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
+        hook.chmod(0o755)
+        subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
+                       check=True)
+        subprocess.run(["setfacl", "-m", "u:nobody:rwx", str(data / "repos")], check=True)
+        tid2 = self.new("ok")
+        self.task("start", tid2)
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertIn("nobody still has an ACL on", self.comments(tid2)[-1])
+        self.assertIn("setup_agent_user.sh uninstall", self.comments(tid2)[-1])
+        self.assertFalse(ran.exists())
+        # emptied folders keep their default ACL, so what off mode makes there next is the agent's to write
+        subprocess.run(["setfacl", "-b", str(data / "repos")], check=True)
+        shutil.rmtree(data / "repos")
+        (data / "repos").mkdir()
+        subprocess.run(["setfacl", "-d", "-m", "u:nobody:rwx", str(data / "worktrees")], check=True)
+        for d in (data / "worktrees").iterdir():
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("still has an ACL on ~/.local/share/task-hub/worktrees", self.comments(tid2)[-1])
+        subprocess.run(["setfacl", "-b", str(data / "worktrees")], check=True)  # what uninstall does
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")  # emptied, not deleted
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
+        self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl"), "ACLs as the setup gives them")
+    def test_mode_off_refuses_what_the_agent_planted_even_after_the_setup_is_undone(self):
+        self.write_config("\n[sandbox]\nmode = off\nuser = nobody\n")  # a user every Linux has stands in
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        data = self.root / ".local/share/task-hub"
+        ran = self.root / "planted-ran"
+        clone = data / "repos/jyoka/app"
+        hook = clone / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
+        hook.chmod(0o755)
+        subprocess.run(["git", "-C", str(clone), "config", "core.fsmonitor", f"echo fsmonitor >> {ran}; false"],
+                       check=True)
+        subprocess.run(["setfacl", "-R", "-m", "u:nobody:rwX", str(data / "repos")], check=True)
+        tid2 = self.new("ok")
+        self.task("start", tid2)
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("For you, not task-hub: sudo scripts/setup_agent_user.sh uninstall",
+                      self.comments(tid2)[-1])
+        self.assertIn("(not just empty them): docs/sandbox.md", self.comments(tid2)[-1])
+        # uninstall takes the ACLs away, but what the agent planted is still in the clone
+        subprocess.run(["setfacl", "-bR", str(data / "repos")], check=True)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertFalse(ran.exists())
+        # emptied folders are not enough either: the marker stays until both are gone
+        for d in (data / "repos", data / "worktrees"):
+            for c in d.iterdir():
+                shutil.rmtree(c)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.status(tid2), "Blocked")
+        self.assertIn("repos is still there after mode = user ran here", self.comments(tid2)[-1])
+        self.assertTrue((data / "sandbox-used").exists())
+        # with no ACL left, what off mode makes there next is yours
+        for d in (data / "repos", data / "worktrees"):
+            shutil.rmtree(d)
+        self.move(tid2, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid2), "In review")
+        self.assertFalse(ran.exists())
+        self.assertFalse((data / "sandbox-used").exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("setfacl") and shutil.which("sudo")
+                         and subprocess.run(["sudo", "-n", "-u", SANDBOX_USER, "-D", "/", "--", "true"],
+                                            capture_output=True, stdin=subprocess.DEVNULL).returncode == 0,
+                         f"needs a sandbox user {SANDBOX_USER} you can sudo to without a password (docs/sandbox.md)")
+    def test_agent_run_as_the_sandbox_user_sees_only_its_worktree_yet_the_run_opens_a_pr(self):
+        """The real thing: the agent, and every git command on the clone and worktree, run as another Linux user."""
+        me, agent = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(), SANDBOX_USER
+        data = self.root / ".local/share/task-hub"
+        shared = [data / "repos", data / "worktrees", self.root / "origins", self.root / "shared"]
+        for d in shared:
+            d.mkdir(parents=True, exist_ok=True)
+        acl = lambda *a: subprocess.run(["setfacl", *map(str, a)], check=True)
+        acl("-m", f"u:{agent}:x", self.root, self.root / ".local", self.root / ".local/share", data)  # a way in only
+        for d in shared:  # as setup_agent_user.sh shares them: both users read and write, new files too
+            acl("-R", "-m", f"u:{agent}:rwX,u:{me}:rwX", d)
+            acl("-R", "-d", "-m", f"u:{agent}:rwX,u:{me}:rwX", d)
+        self.calls.touch()
+        acl("-m", f"u:{agent}:rw", self.calls)
+        # GitHub's side belongs to neither: here the agent's user owns it, as its git refuses a repository of yours
+        bare = self.root / "origins" / "jyoka/app.git"
+        subprocess.run(["sudo", "-n", "-u", agent, "-D", "/", "--", "cp", "-r", str(bare), f"{bare}.own"], check=True)
+        shutil.rmtree(bare)
+        os.rename(f"{bare}.own", bare)
+        (self.root / "secret.txt").write_text("my ssh key\n")
+        (self.root / "secret.txt").chmod(0o600)
+        (self.root / ".config").chmod(0o700)
+        self.write_config(f"\n[sandbox]\nmode = user\nuser = {agent}\n", pass_env="TASK_TEST_AGENT_CALLS",
+                          reviewer="agent")  # the reviewer's snapshot and restore are git as that user too
+        self.env["GH_TOKEN"] = "gho_secret"  # the fake gh ignores it; the agent must not get it
+        try:
+            tid = self.new_with_goal("Say hello. MODE:sandbox\n\n## Rules\n\n- never: WebFetch\n")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid, timeout=60), "In review", self.task("log", tid, "--full"))
+            self.assertIn(f"== sandbox: user {agent}", self.task("log", tid, "--full"))
+            show = lambda *a: subprocess.run(["git", "-c", "safe.directory=*", "-C", str(bare), *a], capture_output=True, text=True).stdout
+            self.assertEqual(show("show", f"task/{tid}:seen.txt"), "readme: app\nsecret: hidden\nconfig: hidden\n"
+                                                                    f"gh token: unset\nrules: {{\nuser: {agent}\n")
+            self.assertIn("reviewed by the agent itself", "\n".join(self.comments(tid)))
+            self.assertTrue(self.pr(tid))  # the agent's user committed and pushed; task-hub opened the PR
+            self.assertNotIn(".claude", self.origin_files(f"task/{tid}"))
+            # the hook and fsmonitor the agent set up did run, for task-hub's commit, but only ever as the agent's user
+            self.assertEqual(set((self.root / "shared/ran-by").read_text().split()), {agent})
+            metrics = json.loads((self.root / ".local/state/task-hub/metrics.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(metrics["files"], 2)  # seen.txt and hello.txt: the PR's size, as GitHub has it
+            # going back to off now needs both shared folders deleted (docs/sandbox.md)
+            self.assertTrue((self.root / ".local/share/task-hub/sandbox-used").exists())
+        finally:  # what the agent's user made: removed as that user, before the test's folder goes
+            for d in shared:
+                subprocess.run(["sudo", "-n", "-u", agent, "-D", "/", "--", "rm", "-rf", "--", str(d)],
+                               stdin=subprocess.DEVNULL)
 
     def test_missing_env_file_stops_the_start(self):
         self.write_config(f"\n[env]\njyoka/app = {self.root}/nowhere/.env\n")
@@ -3137,7 +3670,8 @@ class TaskTest(unittest.TestCase):
         out = self.task("stats")
         self.assertIn("stats: 3 runs since", out)
         self.assertIn("outcomes[2]{status,runs}:\n  In review,2\n  Blocked,1", out)
-        self.assertIn("reviews: 2 reviewed runs, 1 sent back once, 1 of those passed after the retry", out)
+        self.assertIn("reviews: 2 reviewed runs, 1 sent back (one retry in all), "
+                      "1 of those passed after being sent back", out)
         self.assertIn("blocked_by[1]{reason,runs}:\n  agent,1", out)
 
     def test_each_launch_records_what_the_agent_cli_says_it_used(self):
@@ -3494,6 +4028,166 @@ class TaskTest(unittest.TestCase):
             task.kiro_db().unlink()  # and no database at all
             self.assertIsNone(task.agent_usage(wt, began, time.time()))
 
+    def new_with_goal(self, goal, *extra):
+        out = self.task("new", "--title", "Add hello", "--repo", "jyoka/app", "--goal", goal, *extra)
+        return re.search(r"id: (\d+)", out).group(1)
+
+    def test_each_launch_records_the_tokens_and_cost_pi_says_it_used(self):
+        self.write_config(reviewer=True)
+        tid = self.new("ok PIRECORDS")  # the agent's name is "fake": the records are read whatever it is
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        agent, reviewer = self.metrics(1)[0]["usage"]
+        # neither the launch before, nor another directory, nor a user's line, nor a format we do not know
+        self.assertEqual({k: v for k, v in agent.items() if k not in ("role", "agent", "seconds")},
+                         {"calls": 3, "input": 300, "cache_creation": 40, "cache_read": 950, "output": 50,
+                          "cost": 0.031, "models": ["gpt-5.5", "gpt-5.5-mini"]})
+        # the reviewer ran next in the same worktree and left nothing: the agent's records are not its own
+        self.assertEqual(set(reviewer), {"role", "agent", "seconds"})
+        self.assertIn("== agent used 3 calls, 1.3k tokens (50 out), $0.0310, models gpt-5.5, gpt-5.5-mini",
+                      self.task("log", tid, "--full"))
+        stats = self.task("stats")
+        self.assertIn("tokens: 1 of 1 runs measured", stats)
+        self.assertIn("cost: 1 of 1 runs measured, median $0.0310 per run", stats)
+
+    def test_pi_sessions_are_read_from_pi_coding_agent_dir_when_set(self):
+        self.env["PI_CODING_AGENT_DIR"] = str(self.root / "pi-config")
+        tid = self.new("ok PIRECORDS")
+        self.task("start", tid)
+        self.wait(tid)
+        self.assertEqual(self.metrics(1)[0]["usage"][0]["cost"], 0.031)
+        self.assertFalse((self.root / ".pi").exists())
+
+    def test_a_run_past_the_goals_budget_gets_one_over_budget_event_and_goes_on(self):
+        self.write_config(reviewer=True)
+        tid = self.new_with_goal("Say hello. MODE:ok PIRECORDS\n\n## Budget\n\n- 2h, $0.01, 900 tokens\n"
+                                 "- Over these, the card is only noted for now.\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")  # only the event, for now: the run goes on
+        self.metrics(1)
+        [over] = [e for e in self.events_of(tid) if e["event"] == "over budget"]  # the reviewer adds no new one
+        self.assertEqual(over["reason"], "used 1.3k tokens, over 900 tokens (the Goal's Budget); "
+                                         "used $0.03, over $0.01 (the Goal's Budget)")
+        self.assertIn("== over budget: used 1.3k tokens", self.task("log", tid, "--full"))
+        notes = [json.loads(line) for line in (self.root / "notifications.jsonl").read_text().splitlines()]
+        self.assertTrue(any("over budget" in json.dumps(n) for n in notes), notes)  # in [notify] events by default
+        self.assertIn("over budget: 1 `over budget` event(s)", self.task("stats"))
+
+    def test_a_run_within_its_budget_gets_no_event(self):
+        tid = self.new_with_goal("Say hello. MODE:ok PIRECORDS\n\n### Budget\n\n- 2h, $1, 3M tokens, 30 credits\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.metrics(1)
+        self.assertEqual([e for e in self.events_of(tid) if e["event"] == "over budget"], [])
+
+    def test_the_usual_budget_is_a_multiple_of_the_agents_median_run(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        metrics = self.root / "metrics.jsonl"
+        run = lambda seconds, tok, by="": json.dumps({"agent": "pi", "blocked_by": by, "seconds": seconds, "usage": [
+            {"role": "agent", "seconds": seconds, "input": tok, "output": 0, "cost": 0.5}]})
+        with unittest.mock.patch.object(task, "METRICS", metrics):
+            metrics.write_text("\n".join(run(300, 1_000_000) for _ in range(9)) + "\n")
+            self.assertEqual(task.budget_limits("pi")["tokens"], (20_000_000, "the default, under 10 runs of pi measured"))
+            # a run whose agent never started (the balance check stopped it) is no usual run
+            metrics.write_text(metrics.read_text() + run(0, 0, "balance") + "\n")
+            self.assertEqual(task.budget_limits("pi")["seconds"][0], 3 * 3600)
+            metrics.write_text(metrics.read_text() + run(1200, 3_000_000) + "\n" + "not json\n")
+            limits = task.budget_limits("pi", {"cost": 0.2})
+            self.assertEqual(limits["tokens"], (5_000_000, "5 x the median of 10 runs of pi"))
+            self.assertEqual(limits["seconds"], (3600, "10 x the median of 10 runs of pi"))  # at least an hour
+            self.assertEqual(limits["cost"], (0.2, "the Goal's Budget"))
+            self.assertEqual(limits["credits"][0], 20.0)  # no run of pi has credits
+
+    def test_the_goals_budget_reads_limits_and_paid_apis_and_leaves_prose_to_the_agent(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        body = ("## Goal\n\nSay hello. #12 first.\n- 9h\n\n### Budget:\n\n10/26 に決めた予算です。\n"
+                "- `2h`, **$5**\n1. 500k tokens, 3 credits\n> 90m\n```sh\n# a comment, not a heading\n```\n"
+                "- paid api: OpenAI, `anthropic`\n\n## Notes\n\n- 1M tokens\n")
+        self.assertEqual(task.goal_budget(body), ({"seconds": 5400, "cost": 5.0, "tokens": 500_000, "credits": 3.0},
+                                                  ["openai", "anthropic"]))
+        for line in ("- **paid api**: openai", "- __paid api__: openai", "- paid apis: openai", "- *Paid API:* openai",
+                     "- `paid-api`: **openai**", "* PAID_API : openai", "- 有料 API: openai", "- 有料API：OpenAI"):
+            self.assertEqual(task.goal_budget(f"## Budget\n{line}\n"), ({}, ["openai"]), line)
+        self.assertEqual(task.goal_budget("## Budget\n- 有料 API: openai、anthropic\n- 2h、$5\n"),
+                         ({"seconds": 7200, "cost": 5.0}, ["openai", "anthropic"]))
+        for heading in ("## Budget (予算)", "### **Budget**:", "## Budget（予算）", "## 予算", "### 予算："):
+            self.assertEqual(task.goal_budget(f"{heading}\n- 2h\n- paid api: openai\n"), ({"seconds": 7200}, ["openai"]),
+                             heading)
+        self.assertEqual(task.goal_budget("## Budget\n- 90m, 2H, 3M tokens\n"), ({"seconds": 7200, "tokens": 3_000_000}, []))
+        self.assertEqual(task.goal_budget("## Over budget\n- 2h\n- 有料 API を使うときは先に残高を見る\n"), ({}, []))
+        # a paid API that does not read would start the agent unchecked, and a Budget heading that does not read would
+        # drop its lines: both fail the start, as a mistyped limit does; so does a line meant as a limit that does not
+        # read, and a paid API under another heading
+        for text in ("## Budget\n- 3M tokns", "## Budget\n- 2 hrs", "## Budget\n- 2h, soon", "## Budget\n- paid api: open ai",
+                     "## Budget\n- paid api openai", "## Budget\n- Paid API - openai", "## Budget\nwe use the paid API of openai",
+                     "## Budget\n- paid apis = openai", "## Budget and limits\n- paid api: openai", "## Budget: 2h",
+                     "## Budget\n- 有料 API は openai", "## 予算と上限\n- 2h", "## Over budget\n- paid api: openai",
+                     "## Notes\n- 有料 API: openai", "## Budget\n- tokens: 3M", "## Budget\n- 時間: 2h、トークン: 3M",
+                     "## Budget\n- 2h まで", "## Budget\n- Cost: $5", "## Budget\n- 500円まで",
+                     "## Budget\n- 300万トークン", "## 予算\n- 300万トークンまで", "## 予算\n- 1万円", "## Budget\n- 3M",
+                     "## Budget\n- 2h, 3M", "## Budget\n- 3 M"):
+            with self.assertRaises(RuntimeError, msg=text):
+                task.goal_budget(f"{text}\n")
+
+    def test_a_budget_line_that_does_not_read_blocks_the_start(self):
+        for goal, said in (("## Budget\n\n- 3M tokns, $5\n", "each limit is like"),
+                           ("## Budget\n\npaid api:\n", "write the paid APIs as names"),
+                           ("## Budget\n\n- Paid API - openai\n", "write the paid APIs on their own line"),
+                           ("## Budget and limits\n\n- paid api: openai\n", "write the Budget heading as"),
+                           ("## 予算\n\n- 有料 API は openai\n", "write the paid APIs on their own line"),
+                           ("## Notes\n\n- 有料 API: openai\n", "outside the Budget heading"),
+                           ("## Budget\n\n- 2h まで\n", "each limit is like"),
+                           ("## Budget\n\n- 2h, 3M\n", "each limit is like")):
+            tid = self.new_with_goal(f"Say hello. MODE:ok\n\n{goal}")
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "Blocked")
+            self.assertIn(said, self.events_of(tid)[-1]["reason"])
+        self.assertFalse(self.calls.exists())  # no agent ran
+
+    def test_a_paid_api_without_enough_balance_blocks_the_card_before_the_agent(self):
+        self.write_config("[balance]\nopenai = echo checking; echo 'insufficient_quota: $0.00 left' >&2; exit 3\n")
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: OpenAI\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertFalse(self.calls.exists())  # the agent never started
+        reason = self.events_of(tid)[-1]["reason"]
+        self.assertEqual(reason, "not enough balance on openai ([balance] openai exited 3: insufficient_quota: "
+                                 "$0.00 left); add credit, then move the card to Ready again")
+        self.assertIn(reason, self.comments(tid)[-1])
+        [record] = self.metrics(1)
+        self.assertEqual((record["status"], record["blocked_by"]), ("Blocked", "balance"))
+        log = self.task("log", tid, "--full")
+        self.assertIn("== balance: openai: echo checking", log)
+        self.assertIn("\nchecking\n", log)
+
+    def test_a_paid_api_with_enough_balance_runs_as_usual(self):
+        self.write_config("[balance]\nopenai = test -e .git && test -e README.md\n")
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("== balance: openai: enough", self.task("log", tid, "--full"))  # checked in the worktree
+
+    def test_a_paid_api_without_a_balance_check_blocks_the_start(self):
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai, anthropic\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("[balance] has no openai command", self.events_of(tid)[-1]["reason"])
+        self.assertFalse(self.calls.exists())
+
+    def test_a_balance_check_that_hangs_is_stopped_and_blocks_the_card(self):
+        self.write_config("[balance]\nopenai = sleep 120 & sleep 120\n")
+        self.env["TASK_BALANCE_SECONDS"] = "1"
+        tid = self.new_with_goal("Say hello. MODE:ok\n\n## Budget\n\n- paid api: openai\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.events_of(tid)[-1]["reason"],
+                         "the [balance] openai check did not finish in 1 seconds; the agent was not started")
+        self.assertFalse(self.calls.exists())
+
     def test_stats_shows_tokens_per_run_role_and_the_heaviest_runs(self):
         base = {"repo": "jyoka/app", "agent": "fake", "started": "2026-09-01T00:00:00Z", "status": "In review",
                 "reviews": [], "retried": False, "blocked_by": "", "replan": ""}
@@ -3823,6 +4517,61 @@ class TaskTest(unittest.TestCase):
                                 capture_output=True, text=True).stdout
         self.assertEqual(pushed, "hello from mode ok\n")
 
+    def kill_run_during_review(self, tid):
+        """kill -9 the run, then its reviewer (REVIEW=edithang), while the reviewer's edits are in the worktree."""
+        hanging = self.root / "reviewer-hanging"
+        self.wait_for(hanging.exists)
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGKILL)  # the run, then its reviewer: as if the machine went down
+        os.kill(int(hanging.read_text()), signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run))
+
+    def test_a_run_killed_during_its_review_is_resumed_without_the_reviewers_edits(self):
+        """lld.md 9, promises 2 and 18: the resumed run goes back to its snapshot, then reviews again; none of the
+        first reviewer's changes reach the PR, and the Issue gets one report."""
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edithang")
+        self.task("start", tid)
+        self.kill_run_during_review(tid)
+        self.task()
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertEqual(len(self.agent_calls()), 1)  # the agent's work was done: only the review again
+        bare = self.root / "origins" / "jyoka/app.git"
+        readme = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:README.md"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(readme, "app\n")
+        self.assertEqual(sorted(self.origin_files(f"task/{tid}")), ["README.md", "hello.txt"])
+        reports = [c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("Resumed once at review: the run process is gone.", reports[0])
+        self.assertIn("Verdict: pass", reports[0])
+        self.assertIn("== resumed at review", self.task("log", tid, "--full"))
+
+    def test_a_run_killed_during_its_review_leaves_no_reviewer_edit_for_the_next_run(self):
+        """lld.md 9, promise 2, when the run dies (kill -9, a crash) while its reviewer has changed the worktree, and
+        it cannot be resumed (here: it was resumed once already): once the human moves the card to Ready again, the
+        next run's PR has none of the reviewer's changes."""
+        self.write_config(reviewer=True)
+        tid = self.new("ok REVIEW=edithang")
+        self.task("start", tid)
+        self.kill_run_during_review(tid)
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "resumes": "1", "resumed": "agent"}))
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly again, after resuming once at agent", self.comments(tid)[-1])
+        self.edit_issue(tid, body="Say hello. MODE:ok")
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        bare = self.root / "origins" / "jyoka/app.git"
+        readme = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:README.md"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(readme, "app\n")
+        self.assertEqual(sorted(self.origin_files(f"task/{tid}")), ["README.md", "hello.txt"])
+        self.assertNotIn("Resumed once", self.comments(tid)[-1])  # a new run: launch forgets the last one's resumes
+
     def test_reviewer_agent_means_the_tasks_own_agent(self):
         self.write_config(reviewer="agent")
         tid = self.new("ok")
@@ -3867,6 +4616,13 @@ class TaskTest(unittest.TestCase):
         blocked = self.comments(tid)[-1].split("## Blocked\n\n", 1)[1].splitlines()[0]
         self.assertIn("Need access to the staging logs.", blocked)
         self.assertNotIn("retry", blocked)
+
+    def test_an_agent_that_crashes_is_blocked_with_its_exit_code(self):
+        tid = self.new("crash")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("agent exited without a report (exit 1)", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 1)  # a failing exit is no kill: never resumed
 
     def test_retry_that_crashes_is_not_taken_for_the_old_report(self):
         self.write_config(reviewer=True)
@@ -4031,6 +4787,671 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
+
+    def test_ctrl_c_stops_what_the_agent_started_too(self):
+        tid = self.new("slowtree")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        agent, child = int(self.run_state(tid)["agent_pid"]), int(kid.read_text())
+        os.kill(int(self.run_state(tid)["pid"]), signal.SIGINT)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_for(lambda: process_gone(agent) and process_gone(child))
+        self.assertEqual(len(self.agent_calls()), 1)  # never resumed (lld.md 9, promise 17)
+
+    def test_watchdog_stops_a_silent_command_that_uses_no_cpu_and_the_agent_goes_on(self):
+        """tasks#170: a test's cleanup hung in waitpid and the worker waited 20 minutes and more. With no output for
+        TASK_SILENT_SECONDS and no CPU used, what the agent waits on is stopped; the agent sees it fail and reports."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="60")
+        tid = self.new("hang")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=30), "In review", self.task("log", tid, "--full"))
+        log = self.task("log", tid, "--full")
+        self.assertRegex(log, r"== watchdog: no output for \d+ s and no CPU used by what the agent started: "
+                              r"stopping it \(\d+ sleep\)")
+        self.assertNotIn("stopping the agent", log)
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with -15\n")  # SIGTERM was enough
+        self.assertEqual(self.run_state(tid).get("interrupted", ""), "")
+
+    def test_watchdog_kills_a_silent_command_that_ignores_sigterm(self):
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="60")
+        tid = self.new("hangterm")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=40), "In review", self.task("log", tid, "--full"))
+        self.assertRegex(self.task("log", tid, "--full"), r"stopping it \(\d+ sh, \d+ sleep\)")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with -9\n")  # SIGKILL, AGENT_STOP_SECONDS after the SIGTERM
+
+    def test_watchdog_leaves_a_silent_command_that_uses_cpu(self):
+        """A long test or build that prints nothing but works: a quiet log alone is no hang (docs/lessons.md)."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="1")
+        tid = self.new("busy")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=30), "In review", self.task("log", tid, "--full"))
+        self.assertNotIn("watchdog", self.task("log", tid, "--full"))
+        bare = self.root / "origins" / "jyoka/app.git"
+        seen = subprocess.run(["git", "-C", str(bare), "show", f"task/{tid}:hello.txt"],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(seen, "the command exited with 0\n")
+
+    def test_watchdog_stops_nothing_when_it_cannot_see_the_cpu_of_what_the_agent_started(self):
+        """Windows has no ps (and ps may fail): whether a silent build still works is unknown, so silence alone stops
+        nothing there. Where ps works, an agent silent with nothing under it is stopped after the grace, and one whose
+        descendant keeps using CPU is not."""
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+        task.SILENT_SECONDS, task.SILENT_GRACE, task.SILENT_CHECK = 60.0, 30.0, 10.0
+        clock = [1000.0]
+
+        def run(descendants):
+            said, stopped = [], []
+            with unittest.mock.patch.object(task.time, "monotonic", lambda: clock[0]), \
+                    unittest.mock.patch.object(task, "agent_descendants", lambda _pid: descendants()), \
+                    unittest.mock.patch.object(task, "stop_agent", lambda proc: stopped.append(proc) or -15), \
+                    unittest.mock.patch.object(task, "signal_pids", lambda pids, sig: None):
+                dog = task.Watchdog(types.SimpleNamespace(pid=4242), said.append)
+                for _ in range(60 * 60):  # an hour, a check each second
+                    clock[0] += 1
+                    if dog.watch():
+                        break
+            return said, stopped
+
+        with unittest.mock.patch.object(task, "WINDOWS", True):
+            self.assertEqual(run(lambda: None), ([], []))  # ps unknown: nothing said, nothing stopped
+        said, stopped = run(lambda: {})
+        self.assertEqual(len(stopped), 1)
+        self.assertRegex(said[-1], r"== watchdog: no output for \d+ s: stopping the agent")
+        cpu = [0.0]
+
+        def busy():
+            cpu[0] += 1
+            return {4243: (cpu[0], "make")}
+        self.assertEqual(run(busy), ([], []))  # a descendant using CPU: left alone
+
+    def test_watchdog_stops_an_agent_still_silent_after_the_grace_and_notes_why(self):
+        """Silent itself, with nothing to stop under it: SILENT_GRACE later its group is stopped, as `silent`. It is
+        resumed once (run_worker); silent again, the card is Blocked with the watchdog's reason."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="2")
+        tid = self.new("silent")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=60), "Blocked")
+        log = self.task("log", tid, "--full")
+        self.assertRegex(log, r"== watchdog: no output for \d+ s: stopping the agent")
+        self.assertNotIn("no CPU used by what the agent started", log)  # nothing of its own ran
+        self.assertIn("== the watchdog stopped the agent (no output and no CPU used) during agent; resuming it once",
+                      log)
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertIn("the watchdog stopped the agent: no output and no CPU used", self.comments(tid)[-1])
+        self.assertEqual(self.run_state(tid)["interrupted"], "silent")
+        self.assertEqual(self.run_state(tid)["agent_pid"], "")
+        self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))  # what it did before is pushed, as with Ctrl-C
+
+    def test_watchdog_stop_is_resumed_once_and_the_agent_goes_on(self):
+        """durable-runs.md task 6: an agent the watchdog stopped goes to the one resume, as `silent`."""
+        self.env.update(TASK_SILENT_SECONDS="1", TASK_SILENT_GRACE_SECONDS="2")
+        tid = self.new("silentonce")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid, timeout=60), "In review", self.task("log", tid, "--full"))
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("It stopped during: agent (the watchdog stopped the agent", calls[1]["prompt"])
+        self.assertIn("Resumed once at agent: the watchdog stopped the agent (no output and no CPU used).",
+                      self.comments(tid)[-1])
+        self.assertEqual(self.run_state(tid)["interrupted"], "silent")
+        self.assertEqual([(e["stage"], e["reason"]) for e in self.events_of(tid) if e["event"] == "resumed"],
+                         [("agent", "silent")])
+
+    def test_sighup_or_sigterm_stops_the_agent_group_and_notes_why(self):
+        """The pane closed (SIGHUP), a shutdown or `kill` (SIGTERM): the agent and what it started stop with the
+        run, which notes why and ends there. The card stays In progress, and the next sync resumes it (decision 1)."""
+        kid = self.root / "agent-child"
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            with self.subTest(sig.name):
+                kid.unlink(missing_ok=True)
+                tid = self.new("slowtree")
+                self.task("start", tid)
+                self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+                state = self.run_state(tid)
+                run, agent, child = int(state["pid"]), int(state["agent_pid"]), int(kid.read_text())
+                self.assertEqual(os.getpgid(agent), agent)  # its own group: a closed pane's SIGHUP never reaches it
+                self.assertNotEqual(os.getpgid(run), agent)
+                self.assertRegex(state["agent_started"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+                self.assertEqual(state["head"], subprocess.run(["git", "-C", state["worktree"], "rev-parse", "HEAD"],
+                                                               capture_output=True, text=True).stdout.strip())
+                os.kill(run, sig)
+                self.wait_for(lambda: process_gone(run) and process_gone(agent) and process_gone(child))
+                state = self.run_state(tid)
+                self.assertEqual(state["interrupted"], sig.name)
+                self.assertEqual(state["stage"], "agent")  # where it stopped
+                self.assertEqual(self.status(tid), "In progress")
+                self.assertIn(f"== stopped by {sig.name}", self.task("log", tid))
+                self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                self.assertIn(f"Resumed once at agent: {sig.name}.", self.comments(tid)[-1])
+
+    # --- resuming a run that stopped unexpectedly (docs/architecture/designs/durable-runs.md) ---
+
+    def kill_run_and_agent(self, tid):
+        """kill -9 the run and its agent's group, as a crash or a restart does; once the agent is working."""
+        self.wait_for(lambda: "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        run, agent = int(state["pid"]), int(state["agent_pid"])
+        os.kill(run, signal.SIGKILL)
+        os.killpg(agent, signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run) and process_gone(agent))
+        return run
+
+    def test_a_run_killed_with_its_agent_is_resumed_once_from_its_stage(self):
+        """lld.md 9, promise 17: the next check of the board starts the run again, once, from its stage. The card
+        stays In progress meanwhile, and the agent gets its first prompt with # Resumed."""
+        tid = self.new("slow")
+        self.task("start", tid)
+        first = self.kill_run_and_agent(tid)
+        out = self.task()
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", out)
+        self.assertEqual(self.status(tid), "In progress")
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertNotEqual(self.run_state(tid)["pid"], str(first))
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("# Resumed", calls[0]["prompt"])
+        self.assertTrue(calls[1]["prompt"].startswith(calls[0]["prompt"].rstrip("\n")))  # all of the first prompt
+        self.assertIn("# Resumed", calls[1]["prompt"])
+        self.assertIn("run `git status` and `git diff`", calls[1]["prompt"])
+        self.assertIn("It stopped during: agent (the run process is gone)", calls[1]["prompt"])
+        self.assertEqual(calls[1]["stage"], "agent")
+        resumed = [e for e in self.events_of(tid) if e["event"] == "resumed"]
+        self.assertEqual([(e["stage"], e["reason"]) for e in resumed], [("agent", "the run process is gone")])
+        self.assertEqual(self.notifications_of(tid, "resumed"), [])  # decision 11: not in [notify] events by default
+        self.assertIn("Resumed once at agent: the run process is gone.", self.comments(tid)[-1])
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["status"], record["resumed"], record["interrupted"]),
+                         ("In review", ["agent"], "the run process is gone"))
+        state = self.run_state(tid)
+        self.assertEqual((state["resumes"], state["resume_stage"], state["stage"]), ("1", "", ""))
+        self.assertTrue(state["resumed_at"])
+
+    def test_a_run_killed_during_its_retry_after_review_is_resumed_there(self):
+        """The retry's prompt was kept (prompts/<id>-retry.md): the resumed run goes on with it, then reviews again."""
+        self.write_config(reviewer=True)
+        tid = self.new("retryhang")
+        self.task("start", tid)
+        self.wait_for(lambda: self.run_state(tid).get("stage") == "retry")
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 3)
+        self.assertIn("# Automated review feedback", calls[2]["prompt"])
+        self.assertIn("It stopped during: retry (the run process is gone)", calls[2]["prompt"])
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        last = self.comments(tid)[-1]
+        self.assertIn("Verdict: pass", last)
+        self.assertIn("Resumed once at retry: the run process is gone.", last)
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["resumed"], record["retried"], record["reviews"]), (["retry"], True, ["pass"]))
+
+    def test_a_run_in_herdr_is_resumed_in_a_new_tab(self):
+        self.use_herdr(workspaces=[("w2", "別のプロジェクト")])
+        tid = self.new_in_herdr("w2", "slow")
+        self.task("start", tid)
+        old_tab = self.run_state(tid)["tab"]
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertIn(old_tab, self.herdr_db()["closed"])
+        self.assertTrue(self.run_state(tid)["tab"])
+        self.assertNotEqual(self.run_state(tid)["tab"], old_tab)
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_a_resume_uses_the_agents_resume_command_and_a_new_session_when_that_does_nothing(self):
+        """[resume] <agent> when there is one; one that ends at once with nothing done (no step, no report, a failing
+        exit: the conversation was not found) gets one more go as [agents] <agent>, within the same resume."""
+        for command, argv in ((f"{self.root}/agent --resumed {{prompt}}", ["--resumed"]), ("false {prompt}", [])):
+            with self.subTest(command):
+                self.write_config(extra=f"\n[resume]\nfake = {command}\n")
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.kill_run_and_agent(tid)
+                self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                calls = self.agent_calls()
+                self.assertEqual([c["argv0"] for c in calls], [[], argv])
+                self.assertIn("# Resumed", calls[1]["prompt"])
+                log = self.task("log", tid, "--full")
+                self.assertIn("== agent, resumed: fake ([resume])", log)
+                if not argv:
+                    self.assertIn("== the [resume] command did nothing; starting the agent again in a new session", log)
+
+    def test_a_resume_gets_the_session_of_the_launch_it_goes_on_with(self):
+        """durable-runs.md A: {session} is a new UUID for each launch, kept in runs/<id>.json for the agent's and the
+        retry's launch; the resume command gets the same one, after the run itself died (relaunch) too. A new
+        session gets a new one (claude's --session-id refuses one in use): with no [resume], or after a [resume]
+        command that did nothing."""
+        for resume in (f"{self.root}/agent --resume {{session}}", "false {session}", ""):
+            with self.subTest(resume):
+                self.write_config(extra=f"\n[resume]\nfake = {resume} {{prompt}}\n" if resume else "")
+                cfg = self.root / ".config" / "task-hub" / "config.ini"
+                cfg.write_text(cfg.read_text().replace(f"fake = {self.root}/agent {{prompt}}",
+                                                       f"fake = {self.root}/agent --session-id {{session}} {{prompt}}"))
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.wait_for(lambda: self.run_state(tid).get("session"))
+                first = self.run_state(tid)["session"]
+                self.assertEqual(str(uuid.UUID(first)), first)
+                self.assertEqual(self.run_state(tid)["session_role"], "agent")
+                self.kill_run_and_agent(tid)
+                self.task()
+                self.assertEqual(self.wait(tid), "In review")
+                calls = [c["argv0"] for c in self.agent_calls()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0], ["--session-id", first])
+                if not resume.endswith("--resume {session}"):  # a new session's launch has a new id
+                    self.assertEqual(calls[1][0], "--session-id")
+                    self.assertNotEqual(calls[1][1], first)
+                    self.assertEqual(self.run_state(tid)["session"], calls[1][1])
+                else:
+                    self.assertEqual(calls[1], ["--resume", first])
+
+    def test_builtin_pi_is_resumed_in_its_own_session(self):
+        """The built-in pi gets --session-id {session}, and its resume ([resume] pi, built in) the same id."""
+        self.fake_steps()
+        steps = self.root / "steps-calls.jsonl"
+        self.env["TASK_TEST_STEPS_CALLS"] = str(steps)
+        tid = self.new("ok WAIT", "Add hello", "jyoka/app", "--agent", "pi")
+        self.task("start", tid)
+        self.wait_for(lambda: "· bash: cargo test -p task-rs" in self.task("log", tid, "--full"))
+        os.killpg(int(self.run_state(tid)["agent_pid"]), signal.SIGKILL)  # the agent only: resumed in place
+        self.wait_for(lambda: steps.exists() and len(steps.read_text().splitlines()) == 2)
+        (self.root / "claude.release").touch()
+        self.assertEqual(self.wait(tid), "In review")
+        calls = [json.loads(line) for line in steps.read_text().splitlines()]
+        session = self.run_state(tid)["session"]
+        argv = ["-p", "--mode", "json", "-e", str(PI_GROUPS), "--session-id", session]  # -e: bash through group-shell
+        self.assertEqual([(c["argv"], c["resumed"]) for c in calls], [(argv, False), (argv, True)])
+        self.assertIn("== agent, resumed: pi ([resume])", self.task("log", tid, "--full"))
+
+    def test_a_resumed_run_that_stops_again_is_blocked(self):
+        tid = self.new("frozen")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.wait_for(lambda: len(self.agent_calls()) == 2 and self.run_state(tid).get("agent_pid"))
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("the run stopped unexpectedly again, after resuming once at agent", self.comments(tid)[-1])
+        self.assertEqual(len(self.agent_calls()), 2)
+        self.assertEqual(len([e for e in self.events_of(tid) if e["event"] == "resumed"]), 1)
+
+    def test_a_resumed_run_that_ends_but_cannot_reach_github_is_blocked_as_ended(self):
+        """It ended normally (stage ""), with its report kept: not "stopped unexpectedly again" (operations.md)."""
+        tid = self.new("slow OUTAGE")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        self.task()
+        self.wait_for(lambda: len(self.agent_calls()) == 2 and not self.run_state(tid).get("stage")
+                      and process_gone(int(self.run_state(tid)["pid"])))
+        self.assertIn("could not finish", self.task("log", tid))
+        db = self.gh(); db["down"] = False; self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        last = self.comments(tid)[-1]
+        self.assertIn("the run stopped unexpectedly, see", last)
+        self.assertNotIn("again", last)
+        self.assertIn("Ran the tests: 3 passed.", last)  # the kept report reaches GitHub
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_an_agent_killed_while_its_run_lives_is_resumed_in_place(self):
+        """The run sees its agent end by a signal it did not send, and starts it again at once, itself (POSIX)."""
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.wait_for(lambda: "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        os.killpg(int(state["agent_pid"]), signal.SIGKILL)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(self.run_state(tid)["pid"], state["pid"])  # the same run
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("It stopped during: agent (the agent was killed (SIGKILL))", calls[1]["prompt"])
+        log = self.task("log", tid, "--full")
+        self.assertIn("== the agent was killed (SIGKILL) during agent; resuming it once", log)
+        resumed = [e for e in self.events_of(tid) if e["event"] == "resumed"]
+        self.assertEqual([(e["stage"], e["reason"]) for e in resumed], [("agent", "the agent was killed (SIGKILL)")])
+        self.assertIn("Resumed once at agent: the agent was killed (SIGKILL).", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["resumed"], ["agent"])
+
+    def test_an_agent_killed_in_place_has_what_it_started_stopped_before_it_resumes(self):
+        """Only the agent itself is killed (the OOM killer, `kill <pid>`): what it started is still in its group, and
+        must not go on writing the worktree beside the resumed agent."""
+        tid = self.new("slowtree QUIETKID")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        agent, child = int(self.run_state(tid)["agent_pid"]), int(kid.read_text())
+        os.kill(agent, signal.SIGKILL)  # the agent, not its group
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertTrue(process_gone(child))
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def long_test_started(self, tid):
+        """The pid of the long test the agent (mode longtest) started, once it runs, in a process group of its own."""
+        test = self.root / f"long-test-{tid}"
+        self.wait_for(lambda: test.exists() and "waiting" in self.task("log", tid))
+        pid = int(test.read_text())
+        self.assertNotEqual(os.getpgid(pid), int(self.run_state(tid)["agent_pid"]))
+        return pid
+
+    def assert_long_test_stopped_before_the_resume(self, tid, pid):
+        """lld.md 7: what the cut-short agent left running is stopped before the resumed agent starts, not left to
+        finish beside it."""
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertTrue(process_gone(pid))
+        self.assertEqual((self.root / f"long-test-{tid}.at-resume").read_text(), "gone")
+        self.assertFalse((self.root / f"long-test-{tid}.done").exists())
+        self.assertRegex(self.task("log", tid, "--full"),
+                         r"== stopped process group \d+: a command an earlier agent left running")
+        self.assertFalse((self.root / ".local/state/task-hub/runs" / f"{tid}.groups").exists())
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_long_test_left_by_an_agent_killed_with_its_run_is_stopped_before_it_resumes(self):
+        """durable-runs.md K2: `_run` and the agent killed (kill -9) during a long test. The test, in a process group
+        of its own as Claude Code and pi start their commands, outlives them; relaunch's run stops it before its agent
+        starts."""
+        for form in ("claude", "pi"):  # CLAUDE_CODE_SHELL_PREFIX, pi's shell (pi/task-groups.ts)
+            with self.subTest(form):
+                self.calls.unlink(missing_ok=True)
+                tid = self.new("longtest" + (" PISHELL" if form == "pi" else ""))
+                self.task("start", tid)
+                pid = self.long_test_started(tid)
+                self.kill_run_and_agent(tid)
+                self.assertFalse(process_gone(pid))  # killing the agent's group does not reach it
+                self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+                self.assert_long_test_stopped_before_the_resume(tid, pid)
+
+    def test_a_long_test_left_by_an_agent_killed_in_place_is_stopped_before_it_resumes(self):
+        """durable-runs.md K1: only the agent's group killed, `_run` alive: it resumes the agent in place, the long test
+        stopped first."""
+        tid = self.new("longtest")
+        self.task("start", tid)
+        pid = self.long_test_started(tid)
+        os.killpg(int(self.run_state(tid)["agent_pid"]), signal.SIGKILL)
+        self.assert_long_test_stopped_before_the_resume(tid, pid)
+
+    def test_group_shell_runs_the_command_as_the_agents_shell_would_and_notes_its_group(self):
+        """worker/group-shell as pi's shell (-c) and as Claude Code's prefix: the command gets stdin, and its output
+        and exit code are its own. The note names its process group and holds the leader's start time; without
+        TASK_HUB_GROUPS nothing is noted."""
+        groups = self.root / "groups"
+        command = "read x; echo got $x; echo to stderr >&2; exit 3"
+        for form, argv in (("pi", [str(GROUP_SHELL), "-c", command]),
+                           ("claude", ["/bin/sh", "-c", f"{GROUP_SHELL} '{command}'"])):
+            for noting in (True, False):
+                with self.subTest(form=form, noting=noting):
+                    shutil.rmtree(groups, ignore_errors=True)
+                    env = {**self.env, **({"TASK_HUB_GROUPS": str(groups)} if noting else {})}
+                    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True, env=env, start_new_session=True)
+                    out, err = p.communicate("hi\n", timeout=20)
+                    self.assertEqual((p.returncode, out, err), (3, "got hi\n", "to stderr\n"))
+                    if noting:
+                        self.assertEqual(os.listdir(groups), [str(p.pid)])  # its own group, which it leads
+                        self.assertRegex((groups / str(p.pid)).read_text(), r"^\w{3} \w{3} +\d+ [\d:]+ \d{4}\s*$")
+                    else:
+                        self.assertFalse(groups.exists())
+
+    def run_pi_shell_path(self, shell_path):
+        """A command as pi's bash tool runs it under task-hub when pi's shellPath setting is shell_path: through
+        group-shell, with TASK_HUB_SHELL as pi/task-groups.ts sets it (pi/shell-path.ts, run by node)."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        script = ("import { normalizeShellPath } from " + json.dumps((PI_GROUPS.parent / "shell-path.ts").as_uri())
+                  + "; process.stdout.write(normalizeShellPath(process.argv[1]));")
+        p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script,
+                            shell_path], capture_output=True, text=True, env=self.env, timeout=20)
+        if p.returncode and "strip-types" in p.stderr:
+            self.skipTest(f"this node cannot run TypeScript: {p.stderr.strip()}")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = subprocess.run([str(GROUP_SHELL), "-c", "echo hi"], capture_output=True, text=True, timeout=20,
+                           env={**self.env, "TASK_HUB_GROUPS": str(self.root / "groups"), "TASK_HUB_SHELL": p.stdout})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def fake_shell(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#!/bin/sh\necho "fake shell $*"\n')
+        path.chmod(0o755)
+
+    def test_a_pi_shell_path_under_home_runs_pis_commands_with_that_shell(self):
+        """shellPath "~/bin/bash" names the same shell under task-hub as pi alone gives it (normalizePath expands ~),
+        not the bash group-shell falls back to."""
+        self.fake_shell(self.root / "bin" / "bash")  # self.root is HOME
+        self.assertEqual(self.run_pi_shell_path("~/bin/bash"), "fake shell -c echo hi\n")
+
+    def test_a_pi_shell_path_given_as_a_file_url_runs_pis_commands_with_that_shell(self):
+        self.fake_shell(self.root / "my shells" / "bash")
+        url = (self.root / "my shells" / "bash").as_uri()  # file:///.../my%20shells/bash
+        self.assertEqual(self.run_pi_shell_path(url), "fake shell -c echo hi\n")
+
+    def test_a_noted_group_whose_id_went_to_another_process_is_not_stopped(self):
+        """A note whose leader started at another time than noted names a process group long gone: the id is another
+        process's now, which is left alone."""
+        other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(other.kill)
+        tid = self.new("ok")
+        groups = self.root / ".local/state/task-hub/runs" / f"{tid}.groups"
+        groups.mkdir(parents=True)
+        (groups / str(other.pid)).write_text("Thu Jan  1 00:00:00 2026\n")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(other.poll())
+        self.assertFalse(groups.exists())
+
+    def test_a_run_killed_while_its_agent_lives_stops_that_agent_before_resuming(self):
+        """Two agents must never write the same worktree: relaunch stops the one left (and what it started) first."""
+        tid = self.new("slowtree")
+        self.task("start", tid)
+        kid = self.root / "agent-child"
+        self.wait_for(lambda: kid.exists() and "waiting" in self.task("log", tid))
+        state = self.run_state(tid)
+        run, agent, child = int(state["pid"]), int(state["agent_pid"]), int(kid.read_text())
+        os.kill(run, signal.SIGKILL)  # the run only: its agent, in a session of its own, goes on
+        self.wait_for(lambda: process_gone(run))
+        self.assertFalse(process_gone(agent))
+        self.task()
+        self.assertTrue(process_gone(agent) and process_gone(child))  # before the new run started its agent
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 2)
+
+    def test_a_pid_given_to_another_process_is_not_stopped_as_the_agent_left(self):
+        tid = self.new("slow")
+        self.task("start", tid)
+        self.kill_run_and_agent(tid)
+        other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(other.kill)
+        # its agent_pid now names a process that started later: pids are handed out again
+        self.run_file(tid).write_text(json.dumps({**self.run_state(tid), "agent_pid": str(other.pid),
+                                                  "agent_started": "2026-01-01T00:00:00Z"}))
+        self.task()
+        self.assertIsNone(other.poll())
+        self.assertEqual(self.wait(tid), "In review")
+
+    def test_a_run_cut_short_in_finish_is_resumed_without_a_second_report(self):
+        """lld.md 9, promise 18: finish again gives the same commit, push and PR; the Issue's report is not
+        written again."""
+        tid = self.new("ok")
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["hang_status"] = f"O_{STATUS_OPTIONS.index('In review')}"  # the gh moving the card hangs, once
+            self.db.write_text(json.dumps(db))
+        self.task("start", tid)
+        hanging = self.root / "gh-hanging"
+        self.wait_for(hanging.exists)
+        run = int(self.run_state(tid)["pid"])
+        self.assertEqual(self.run_state(tid)["stage"], "finishing")
+        os.kill(run, signal.SIGKILL)
+        os.kill(int(hanging.read_text()), signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run))
+        self.assertEqual(len([c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]), 1)
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len([c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]), 1)
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertIn("== the report is on the Issue already", self.task("log", tid, "--full"))
+        self.assertEqual(self.origin_files(f"task/{tid}"), ["README.md", "hello.txt"])
+
+    def test_a_run_whose_worktree_changed_is_not_resumed(self):
+        for change, why in (("commit", "the worktree's HEAD moved"), ("remove", "is gone")):
+            with self.subTest(change):
+                tid = self.new("slow")
+                self.task("start", tid)
+                self.kill_run_and_agent(tid)
+                wt = self.run_state(tid)["worktree"]
+                if change == "commit":  # someone committed in it meanwhile
+                    subprocess.run(["git", "-C", wt, "commit", "-q", "--allow-empty", "-m", "by hand"], check=True,
+                                   env=self.env)
+                else:
+                    shutil.rmtree(wt)
+                calls = len(self.agent_calls())
+                self.task()
+                self.assertEqual(self.status(tid), "Blocked")
+                self.assertIn("the run stopped unexpectedly; not resumed: ", self.comments(tid)[-1])
+                self.assertIn(why, self.comments(tid)[-1])
+                self.assertEqual(len(self.agent_calls()), calls)
+
+    # --- B: the Pi Durable runner (durable/), with pi-ai's faux provider in place of the model ---
+
+    def use_durable(self, sleep="0"):
+        """[agents] durable and [resume] durable: one command, the runner's own test agent (durable/test/faux-agent.ts:
+        the runner as built, with a faux model). Skipped unless durable/ is installed and built."""
+        node = shutil.which("node")
+        if not node or not (DURABLE / "node_modules" / "@earendil-works" / "pi-durable").is_dir() \
+                or not (DURABLE / "dist" / "runner.js").is_file():
+            self.skipTest("durable/ is not installed: cd durable && npm ci --ignore-scripts && npm run build")
+        version = subprocess.run([node, "--version"], capture_output=True, text=True).stdout.strip().lstrip("v")
+        if tuple(map(int, version.split(".")[:2])) < (22, 19):
+            self.skipTest(f"Pi Durable needs Node 22.19 or later, not {version}")
+        command = (f"{shlex.quote(node)} --disable-warning=ExperimentalWarning {shlex.quote(str(DURABLE / 'test' / 'faux-agent.ts'))}"
+                   " --session {session} {prompt}")
+        self.write_config(extra=f"durable = {command}\n\n[resume]\ndurable = {command}\n")
+        self.env["FAUX_SLEEP"] = sleep
+
+    def durable_card(self):
+        tid = self.new("ok", "Add hello", "jyoka/app", "--agent", "durable")
+        self.task("start", tid)
+        return tid
+
+    def assert_durable_went_on(self, tid, session):
+        """In review, from the conversation the cut-short run left: the same session, its bash call given to the model as
+        interrupted (not run again), one user input (the prompt not sent again), and .task-durable/ never pushed."""
+        self.assertEqual(self.wait(tid), "In review")
+        log = self.task("log", tid, "--full")
+        self.assertIn("== agent, resumed: durable ([resume])", log)
+        self.assertIn(f"durable: resuming session {session} from .task-durable/{session}.sqlite", log)
+        self.assertIn("which a command of the run cut short left running", log)
+        self.assertEqual(log.count("· bash: echo started"), 1)
+        self.assertIn("bash: interrupted. user inputs: 1.", self.comments(tid)[-1])
+        files = self.origin_files(f"task/{tid}")
+        self.assertIn(".tool-started", files)
+        self.assertNotIn(".task-durable", files)
+        self.assertNotIn("slow-done.txt", files)  # the cut-short command was stopped, not left to finish
+        self.assertEqual(self.metrics(1)[-1]["resumed"], ["agent"])
+
+    def test_durable_runner_takes_a_card_to_in_review(self):
+        self.use_durable()
+        tid = self.durable_card()
+        self.assertEqual(self.wait(tid), "In review")
+        log = self.task("log", tid, "--full")
+        self.assertIn("· bash: echo started > .tool-started && sleep 0", log)
+        self.assertIn(f"durable: session {self.run_state(tid)['session']}, faux/faux-1, thinking medium", log)
+        self.assertIn("bash: finished. user inputs: 1.", self.comments(tid)[-1])
+        self.assertNotIn(".task-durable", self.origin_files(f"task/{tid}"))
+
+    def test_durable_runner_killed_with_its_group_goes_on_in_place(self):
+        """durable-runs.md K1: the agent's process group killed (kill -9), `_run` alive: it starts [resume] durable at once
+        with the same {session}, and the runner goes on from its SQLite."""
+        self.use_durable(sleep="60")
+        tid = self.durable_card()
+        self.wait_for(lambda: self.run_state(tid).get("worktree")
+                      and (Path(self.run_state(tid)["worktree"]) / ".tool-started").exists())
+        state = self.run_state(tid)
+        os.killpg(int(state["agent_pid"]), signal.SIGKILL)
+        self.assert_durable_went_on(tid, state["session"])
+        self.assertEqual(self.run_state(tid)["pid"], state["pid"])  # the same run
+        self.assertIn("== the agent was killed (SIGKILL) during agent; resuming it once", self.task("log", tid, "--full"))
+
+    def test_durable_runner_killed_with_its_run_goes_on_after_relaunch(self):
+        """durable-runs.md K2: `_run` and the agent killed (kill -9): the next check of the board starts the run again,
+        and the runner, given the same {session}, goes on from its SQLite."""
+        self.use_durable(sleep="60")
+        tid = self.durable_card()
+        self.wait_for(lambda: self.run_state(tid).get("worktree")
+                      and (Path(self.run_state(tid)["worktree"]) / ".tool-started").exists())
+        state = self.run_state(tid)
+        run, agent = int(state["pid"]), int(state["agent_pid"])
+        os.kill(run, signal.SIGKILL)
+        os.killpg(agent, signal.SIGKILL)
+        self.wait_for(lambda: process_gone(run) and process_gone(agent))
+        session = state["session"]
+        self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
+        self.assert_durable_went_on(tid, session)
+
+    def test_ctrl_c_outside_the_agent_is_never_resumed(self):
+        self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait_for(lambda: "setting up" in self.task("log", tid))
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGINT)
+        self.wait_for(lambda: process_gone(run))
+        self.assertEqual(self.run_state(tid)["interrupted"], "SIGINT")
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("not resumed: it was stopped with Ctrl-C", self.comments(tid)[-1])
+        self.assertEqual(self.agent_calls(), [])
+
+    def test_sigterm_outside_the_agent_ends_the_run_at_once_and_notes_why(self):
+        """In [setup], git, or a GitHub call: the run ends as it did before it had a handler, and notes why."""
+        self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.wait_for(lambda: "setting up" in self.task("log", tid))
+        run = int(self.run_state(tid)["pid"])
+        os.kill(run, signal.SIGTERM)
+        self.wait_for(lambda: process_gone(run))
+        state = self.run_state(tid)
+        self.assertEqual((state["interrupted"], state["stage"]), ("SIGTERM", "setup"))
+        self.assertIn("== stopped by SIGTERM during setup", self.task("log", tid))
+        self.assertEqual(self.agent_calls(), [])
+        self.assertEqual(self.status(tid), "In progress")
+
+    def test_sigterm_while_the_run_prints_still_ends_it_and_notes_why(self):
+        """The signal often lands inside a print of the setup's output: the handler must not write to the stream
+        that print holds (CPython: "reentrant call"), or the run dies through `fail` and never notes why."""
+        chatty = 'i=0; while [ $i -lt 400000 ]; do echo line $i; i=$((i+1)); done'
+        self.write_config(extra=f"\n[setup]\njyoka/app = {chatty}\n")
+        for _ in range(4):  # a race: each run gives it another chance
+            tid = self.new("ok")
+            self.task("start", tid)
+            log = Path(self.run_state(tid)["log"])
+            self.wait_for(lambda: log.exists() and "line 2000\n" in log.read_text())
+            run = int(self.run_state(tid)["pid"])
+            os.kill(run, signal.SIGTERM)
+            self.wait_for(lambda: process_gone(run))
+            tail = log.read_text()[-300:]
+            self.assertIn("== stopped by SIGTERM during setup", tail)
+            self.assertNotIn("reentrant", tail)
+            self.assertEqual(self.run_state(tid)["interrupted"], "SIGTERM")
+            self.assertEqual(self.status(tid), "In progress")
 
     def test_github_down_when_the_run_finishes_keeps_the_report(self):
         tid = self.new("outage")
@@ -6078,6 +7499,215 @@ class TaskTest(unittest.TestCase):
             out = self.task("watch", code=1)
             self.assertIn(why, out)
         self.assertEqual(self.cards(), [])
+
+    # --- [autopilot]: cards of listed repos start and merge without the human ---
+
+    def autopilot(self, repos="jyoka/app", merge="queue = on\n", reviewer=True):
+        self.write_config(f"[autopilot]\nrepos = {repos}\n" + (f"[merge]\n{merge}" if merge else ""), reviewer=reviewer)
+
+    def autopilot_events(self, tid):
+        return [e.get("action") for e in self.events_of(tid) if e["event"] == "autopilot"]
+
+    def test_no_autopilot_leaves_backlog_and_in_review_cards_to_the_human(self):
+        self.write_config(reviewer=True)
+        waiting = self.new("ok", "waits for approval")
+        reviewed, = self.in_review("ok")
+        self.task()
+        self.task()
+        self.assertEqual((self.status(waiting), self.status(reviewed)), ("Backlog", "In review"))
+        self.assertEqual(self.pr(reviewed)["state"], "OPEN")
+        self.assertFalse([e for e in self.events_file().read_text().split("\n")[:-1] if '"autopilot"' in e])
+
+    def test_autopilot_approves_listed_repos_backlog_cards_once_their_blockers_are_done(self):
+        self.origin("jyoka/web")
+        self.autopilot()
+        go = self.new("ok", "go")
+        other = self.new("ok", "other repo", "jyoka/web")
+        note = self.new("ok\n\nAutopilot: off", "a handoff note")
+        blocker = self.new("ok", "blocker")
+        self.move(blocker, "Blocked")  # a human holds it: nothing that waits for it starts
+        later = self.new("later", "later", "jyoka/app", "--blocked-by", f"#{blocker}")  # go is merged by then
+        out = self.task()
+        self.assertIn("started", out)
+        self.assertEqual(self.wait(go), "In review")
+        self.assertEqual([self.status(t) for t in (other, note, later)], ["Backlog"] * 3)
+        self.assertEqual(self.autopilot_events(go)[0], "ready")
+        self.assertEqual([e["event"] for e in self.events_of(go)][:3], ["Backlog", "Ready", "autopilot"])
+        self.assertTrue(self.notifications_of(go, "autopilot"), "the human hears what it did")
+        self.task("done", blocker)  # its Issue closed: what waited for it goes on
+        self.task()
+        self.assertEqual(self.wait(later), "In review")
+        self.assertEqual([self.status(t) for t in (other, note)], ["Backlog"] * 2)
+
+    def test_autopilot_approves_a_card_only_once(self):
+        self.autopilot()
+        tid = self.new("ok")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.move(tid, "Backlog")  # parked by the human
+        self.task()
+        self.task()
+        self.assertEqual(self.status(tid), "Backlog")
+        self.assertEqual(self.autopilot_events(tid).count("ready"), 1)
+
+    def test_autopilot_merges_the_pr_once_the_automated_review_passed(self):
+        self.autopilot()
+        tid = self.new("ok")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        out = self.task()  # queued, then the queue merges it: no checks on this PR, so the review is the only gate
+        self.assertIn("merged", out)
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
+        self.assertEqual(self.autopilot_events(tid), ["ready", "merge"])
+        merge = [e for e in self.events_of(tid) if e.get("action") == "merge"][0]
+        self.assertEqual(merge["pr"], self.pr(tid)["url"])
+        self.assertIn("automated review passed", merge["reason"])
+        self.assertEqual(self.queue_events(tid), ["queued", "merged", "Done"])
+
+    def test_autopilot_leaves_a_blocked_review_and_a_cancelled_merge_to_the_human(self):
+        self.autopilot()
+        blocked = self.new("ok REVIEW=blocked", "the reviewer stops it")
+        self.task()
+        self.assertEqual(self.wait(blocked), "Blocked")
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)  # autopilot off: this one goes to the human
+        reviewed = self.new("ok", "reviewed")
+        self.task("start", reviewed)
+        self.assertEqual(self.wait(reviewed), "In review")
+        self.autopilot()
+        self.task("merge", reviewed)
+        self.task("merge", reviewed, "--cancel")  # the human took it back out: autopilot must not queue it again
+        self.task()
+        self.task()
+        self.assertEqual((self.status(blocked), self.status(reviewed)), ("Blocked", "In review"))
+        self.assertEqual(self.pr(reviewed)["state"], "OPEN")
+        self.assertNotIn("merge", self.autopilot_events(blocked) + self.autopilot_events(reviewed))
+
+    def test_autopilot_off_in_the_goal_leaves_the_start_and_the_merge_to_the_human(self):
+        self.autopilot()
+        tid = self.new("ok\n\n  AUTOPILOT: Off  ", "the human's own")
+        self.task()
+        self.assertEqual(self.status(tid), "Backlog")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.task()
+        self.assertEqual(self.status(tid), "In review")
+        self.assertEqual(self.pr(tid)["state"], "OPEN")
+        self.assertEqual(self.autopilot_events(tid), [])
+
+    def edit_issue(self, tid, **changes):
+        """The human edits the Issue on GitHub (its Goal, or closes it)."""
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["issues"][tid].update(changes)
+            self.db.write_text(json.dumps(db))
+        self.edited_on_github()
+
+    def test_autopilot_never_merges_on_the_verdict_of_an_older_run(self):
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.edit_issue(tid, body="Say hello. MODE:ok REVIEW=blocked")  # a rework the reviewer then rejects
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "Blocked")
+        with self.db_lock():  # the human readies the PR and drags the card to In review to look at it
+            db = json.loads(self.db.read_text())
+            for pr in db["prs"].values():
+                pr["isDraft"] = False
+            self.db.write_text(json.dumps(db))
+        self.move(tid, "In review")
+        self.autopilot()
+        self.task()
+        self.task()
+        self.assertEqual(self.pr(tid)["state"], "OPEN", "the reviewer rejected the last run")
+        self.assertEqual(self.status(tid), "In review")
+        self.assertNotIn("merge", self.autopilot_events(tid))
+
+    def test_autopilot_never_merges_a_pr_changed_or_drafted_after_its_review(self):
+        self.write_config("[merge]\nqueue = on\n", reviewer=True)
+        pushed, drafted = self.in_review("pushed", "drafted")
+        bare = self.root / "origins" / "jyoka/app.git"
+        seed = self.root / "human-push"
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{pushed}", str(bare), str(seed)], check=True,
+                       capture_output=True)
+        (seed / "extra.txt").write_text("not reviewed\n")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", "a human's push"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", f"task/{pushed}"], check=True,
+                       capture_output=True)
+        with self.db_lock():
+            db = json.loads(self.db.read_text())
+            db["prs"][f"jyoka/app task/{drafted}"]["isDraft"] = True
+            self.db.write_text(json.dumps(db))
+        self.autopilot()
+        self.task()
+        self.task()
+        for tid, why in ((pushed, "changed since its review"), (drafted, "draft")):
+            self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+            skips = [e for e in self.events_of(tid) if e["event"] == "autopilot"]
+            self.assertEqual([e["action"] for e in skips], ["skip"], "told once, not every check")
+            self.assertIn(why, skips[0]["reason"])
+        self.assertNotIn("merged_order", self.gh())
+
+    def test_autopilot_does_not_queue_a_pr_whose_conflict_fix_is_running(self):
+        self.write_config("[merge]\nqueue = on\nprefix = on\n", reviewer=True)
+        tid, = self.in_review("first")
+        self.push_to_main("hello.txt", "main's own greeting\n")
+        self.autopilot(merge="queue = on\nprefix = on\n")
+        out = self.task()
+        self.assertIn("started the conflict fix", out)
+        self.assertNotIn("queued for merge", out)
+        self.fix_ended(tid)
+        self.task()  # the fix changed the PR after its review: the human looks at it
+        self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("In review", "OPEN"))
+        self.assertEqual(self.autopilot_events(tid), ["skip"])
+
+    def test_autopilot_off_takes_list_marks_emphasis_and_a_period(self):
+        self.autopilot()
+        ids = [self.new(f"ok\n\n{line}", f"note {n}") for n, line in enumerate(
+            ["- Autopilot: off", "**Autopilot: off**", "Autopilot: off.", "* `Autopilot: off`", "**Autopilot:** off"])]
+        self.task()
+        self.assertEqual([self.status(t) for t in ids], ["Backlog"] * len(ids))
+
+    def test_autopilot_reports_a_failed_move_to_ready(self):
+        self.autopilot()
+        tid = self.new("ok")
+        db = self.gh()
+        db["down"] = "item-edit"
+        self.save_db(db)
+        out = self.task()
+        self.assertIn("github_errors", out)
+        self.assertIn("autopilot", out)
+        self.assertEqual(self.status(tid), "Backlog")
+
+    def test_autopilot_starts_only_cards_that_never_left_backlog(self):
+        self.write_config(reviewer=True)
+        parked = self.new("ok REVIEW=blocked", "parked after a stop")
+        self.task("start", parked)
+        self.assertEqual(self.wait(parked), "Blocked")
+        self.move(parked, "Backlog")  # parked by the human
+        closed = self.new("ok", "closed")
+        self.edit_issue(closed, state="CLOSED")
+        self.autopilot()
+        self.task()
+        self.task()
+        self.assertEqual((self.status(parked), self.status(closed)), ("Backlog", "Backlog"))
+        self.assertEqual(self.autopilot_events(parked) + self.autopilot_events(closed), [])
+
+    def test_bad_autopilot_config_stops_before_anything_changes(self):
+        tid = self.new("ok")
+        for repos, merge, reviewer, why in [("app", "queue = on\n", True, "owner/name"),
+                                            ("jyoka/app", "", True, "the merge queue, which is off"),
+                                            ("jyoka/app", "queue = on\n", False, "no reviewer is set")]:
+            self.autopilot(repos, merge, reviewer)
+            self.assertIn(why, self.task(code=1))
+            self.env["TASK_WATCH_ONCE"] = "1"
+            self.assertIn(why, self.task("watch", code=1))
+            self.env.pop("TASK_WATCH_ONCE")
+        self.assertEqual(self.status(tid), "Backlog")
+
 
 class SlowThresholdTableTest(unittest.TestCase):
     """The task-board mod works out the usual time in TypeScript (claude/task-board/hooks/panel.ts slowThreshold);

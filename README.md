@@ -43,10 +43,11 @@ flowchart LR
 ## Features
 
 - **1 task = 1 branch = 1 worktree = 1 PR.** Up to 5 tasks run at the same time.
-- **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back once if needed.
-- **Continue after a stop.** task-hub sorts out why the task stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
+- **Review before the PR.** An agent in a fresh context checks each acceptance criterion. It sends the work back if needed (2 times at most by default).
+- **Continue after a stop.** A run that stops unexpectedly (a crash, a restart, a closed pane) is resumed once, from where it stopped, after the commands its agent left running (a long test) are stopped (pi and claude); Ctrl-C stops it for good. For a Blocked task, task-hub sorts out why it stopped and comments on the Issue. Add the answer to the Goal or comment on the Issue or the PR, move the card to Ready, and the same PR continues (the agent gets your comments too).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
-- **Notifications.** In review, Blocked, and long runs show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used.
+- **Notifications.** In review, Blocked, long runs, and runs over budget show as herdr or OS notifications, and on your phone through [ntfy](https://ntfy.sh) if you set it. No LLM is used ([how the ways to be told compare](docs/notifications.md)).
+- **Cost.** The tokens, cost, and credits of each agent launch are read from the agent CLI's own records (Claude Code, pi, Kiro). A card can set its budget, and a card that uses a paid API has its balance checked before its agent starts ([Budget](docs/task-format.md#budget-予算と有料-api)).
 - **Board at your side.** See the board in a Claude Code pane, the Kiro sidebar, or `task list --watch`. In Kiro or VS Code, open a card's Goal, changes, and log in read-only editor tabs.
 - **Light.** Python standard library only. You install one clone.
 
@@ -101,7 +102,7 @@ Example: you ask to fix the login, then merge.
 You         /task (or tell /chief)                    → Issue jyoka/tasks#12, Backlog
 You         Move the card to Ready                    → task-hub starts it           In progress
 worker      Edits, tests, writes the report
-reviewer    Checks each acceptance criterion          → pass (needs changes: sent back once)
+reviewer    Checks each acceptance criterion          → pass (needs changes: sent back, 2 times at most)
 task-hub    Pushes task/12, opens the PR, comments the report and verdict on the Issue   In review
 You         Review and merge the PR                   → the Issue closes             Done
 ```
@@ -137,7 +138,7 @@ archives the oldest Done cards.
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
 | `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
-| `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens) |
+| `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens, cost) |
 | `task merge [<id>] [--cancel]` | Approves the PR for the merge queue (`[merge] queue = on`, off by default): `task watch` brings it up to date with its base, has an agent fix conflicts, waits for its checks, and merges it, one PR per repo at a time ([operations.md](docs/operations.md#マージキュー)) |
 | `task done <id>` | Closes or cancels a task by hand |
 | `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project, then keeps its Status and reports in step |
@@ -159,6 +160,8 @@ The docs are in Japanese.
 | [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
 | | [triggers.md](docs/triggers.md) Cards task-hub makes on its own | | |
+| | [autopilot.md](docs/autopilot.md) Autopilot: task-hub approves and merges for chosen repos | | |
+| | [sandbox.md](docs/sandbox.md) Sandboxed runs (Linux) | | |
 
 ## Bug reports and feature requests
 

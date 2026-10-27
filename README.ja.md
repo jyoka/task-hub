@@ -40,10 +40,11 @@ flowchart LR
 ## 特長
 
 - **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
-- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら 1 回差し戻します
-- **止まっても続きから**: Blocked の理由を仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
+- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)
+- **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **知らせてくれる**: In review、Blocked、長引いている実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません)
+- **知らせてくれる**: In review、Blocked、長引いている実行、予算を超えた実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません。[知らせ方の比較](docs/notifications.md))
+- **費用を測る**: エージェントの起動ごとのトークン、費用、クレジットを、CLI 自身の記録から読みます(Claude Code、pi、Kiro)。カードごとに予算を決められ、有料 API を使うカードはエージェントの起動前に残高を確かめます([Budget](docs/task-format.md#budget-予算と有料-api))
 - **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
 - **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
@@ -97,7 +98,7 @@ Ready のカードを自動で始めるには、`task watch` を動かしてお�
 あなた      /task(または /chief に話す)            → Issue jyoka/tasks#12、Backlog
 あなた      カードを Ready に移す                    → task-hub が開始                 In progress
 worker      編集し、テストし、レポートを書く
-reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら 1 回差し戻し)
+reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら差し戻し。2 回まで)
 task-hub    task/12 を push し、PR を作り、レポートと判定を Issue にコメント   In review
 あなた      PR をレビューしてマージ                  → Issue が閉じる                  Done
 ```
@@ -131,7 +132,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
 | `task events [--follow \| --next]` | 最近の出来事(列の移動、仕分け、長引いている実行) |
-| `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数) |
+| `task stats` | 実行の集計(レビュー、差し戻し、Blocked の理由、トークン数、費用) |
 | `task merge [<番号>] [--cancel]` | PR をマージキューに入れる(`[merge] queue = on`。既定はオフ)。`task watch` が base に追いつかせ、競合はエージェントが解き、チェックが通ったらリポジトリごとに 1 つずつマージする([operations.md](docs/operations.md#マージキュー)) |
 | `task done <番号>` | 手で閉じる・取り消す |
 | `task share <番号> --to owner/name [--project owner/番号]` | 選んだタスクをチームの Issue と Project に出す。その後の Status と Report も写す |
@@ -151,6 +152,8 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
 | | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
+| | [autopilot.md](docs/autopilot.md) オートパイロット(選んだリポジトリの承認とマージを task-hub がする) | | |
+| | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
 
 ## バグ報告と要望
 

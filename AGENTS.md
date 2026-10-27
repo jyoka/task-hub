@@ -30,6 +30,7 @@ task-hub を使いはじめるために、このリポジトリを開いて「�
 python3 tests/run.py <名前の一部>          # 一部だけ(待たない)
 claude plugin test claude/task-board       # Claude Code の mod
 (cd kiro/board-extension && npm test)      # Kiro の拡張
+(cd durable && npm test)                   # B の実行役(実験。先に npm ci --ignore-scripts)
 ```
 
 作業中は変えたところに関係する短いテストだけを手元で動かす。

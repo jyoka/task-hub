@@ -40,7 +40,7 @@
   `== kiro ended with an error: ...`、`== claude ended with ...` の行に出ます。
 - **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
   `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
-  `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です
+  `review`、`retry`(差し戻しを受けた実装エージェント)、`finishing`(push、PR、コメント)、`replanning` です
   (詳しくは [design.md](design.md) の「In progress の段階」)。`Blocked › replanning` は、カードはもう Blocked でも
   replanner がまだ動いているという意味です。段階は手元の `runs/<番号>.json` の `stage` にだけあり、GitHub のボードと
   `events.jsonl` には出ません。実行が終わると何も付かなくなります。
@@ -130,7 +130,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
+`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
 `merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
@@ -197,7 +197,7 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow, update, conflict   ; 既定。列の名前か replan、slow、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget   ; 既定。列の名前か replan、slow、over budget、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
 ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
 ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
@@ -205,6 +205,9 @@ ntfy_token = tk_...                ; 任意。アクセス制御のあるトピ�
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
 システム設定の「通知」で、herdr または「スクリプトエディタ」(osascript の通知はこの名前で出ます)が許可されて
 いるか確かめます。
+
+Blocked や In review を席にいないときにも知るための方法(ntfy、GitHub の通知メールなど)を比べた結果は
+[notifications.md](notifications.md) にあります。
 
 #### スマートフォンに届ける(ntfy)
 
@@ -388,6 +391,8 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
   入れ直すときも同じです
 - カードを wait for merge の列に動かす(GitHub の画面やスマートフォンで): 次の確認でキューの最後に入ります(動かした順)
 - In review の通知の Merge ボタンを押す(`task intake` が要ります。[スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
+- `[autopilot]` に書いたリポジトリでは、自動レビューが `pass` の In review の PR を、task-hub があなたの代わりに入れます
+  ([autopilot.md](autopilot.md))
 
 `task merge` は今のキューを、`task merge <番号> --cancel` はキューから外します(wait for merge のカードは In review に
 戻します)。カードを wait for merge(列がなければ In review)から別の列に動かしても外れます。
@@ -456,7 +461,9 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 ## 実行の結果を集計する
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
-件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定、
+件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、差し戻しをやめた理由(`review_stops`。
+`limit`、`repeated`、`no change`、`not converging`。[task-format.md](task-format.md#自動レビューの差し戻し))、
+Blocked の理由、replanner の判定、
 `slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
@@ -464,11 +471,12 @@ Blocked の理由は次のどれかです。
 | 理由 | 意味 |
 |---|---|
 | `agent` | エージェント自身が `## Blocked` を書いた |
-| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻し後も `needs changes` など) |
+| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻しをやめたあとも `needs changes` など) |
 | `no report` | エージェントがレポートを書かずに終わった |
 | `no changes` | レポートはあるが、ファイルを変えなかった |
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
 | `setup` | `[setup]` の準備が失敗した、または git が無視しないファイルを残した |
+| `balance` | Goal の `paid api:` の残高が足りなかった、または `[balance]` の確認が失敗した([予算と残高](#予算と残高)) |
 | `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
 
 ### エージェントの使用量
@@ -476,23 +484,75 @@ Blocked の理由は次のどれかです。
 実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
 `reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入ります。エージェントの CLI の記録を読めたときだけ、
 Claude Code なら `calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、
-`output`(トークン数)、`subagent_calls`、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
-が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェントでは秒数だけです。
+`output`(トークン数)、`subagent_calls`、`models` が、pi なら `calls`、`input`、`cache_creation`、`cache_read`、`output`、
+`cost`(USD。pi がモデルの価格から計算した値)、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
+が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェント(codex など)では秒数だけです。
 読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
 
 ```
 == agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+== agent used 12 calls, 410k tokens (9.8k out), $0.4210, models gpt-5.5
 == agent used 64 calls, 19.21 credits, models auto
 ```
+
+pi の記録は `~/.pi/agent/sessions/` のセッションのファイルです(`PI_CODING_AGENT_SESSION_DIR` か `PI_CODING_AGENT_DIR` が
+あればそちら。pi の `settings.json` の `sessionDir` は読みません)。最初の行の `cwd` がその worktree のファイルだけを開き、
+時刻がその起動の間の、使用量のある行(assistant の返事、圧縮の要約、キャッシュの温め)を 1 回の呼び出しとして数えます。
+pi は再開(`--session-id`)で同じファイルに書き足すので、前の起動の行は時刻で外れます。ChatGPT のアカウントで動かす
+`openai-codex` でも pi は価格から `cost` を出します。実際の請求とは違うことがあります。
 
 `task stats` の `tokens:` の行は、トークン数を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
 cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
 出します。Kiro の実行はトークン 0 としては数えず、`credits:` の行に、クレジットを測れた実行の数と 1 実行あたりの
-クレジットの中央値を出します。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
+クレジットの中央値を出します。`cost:` の行は、費用を測れた実行(今は pi だけ)の数と、1 実行あたりの費用の中央値です。
+`over budget:` の行は、出来事 `over budget` の数です。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
 `heaviest` はトークン数の多い 3 実行です。
-起動の間にその worktree で動いた Claude Code の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
-起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
-この数字を見て決めます。
+起動の間にその worktree で動いた Claude Code と pi の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
+起動したものも、あなたが同じ worktree で `claude` を開いたものも)。予算を超えたときは出来事を出すだけです(下記)。
+止めるかどうかは、この数字と `over budget` の数を見て決めます。
+
+### 予算と残高
+
+**予算**: エージェントを起動し終えるたびに、その実行のここまでの使用量(`usage` の合計)を予算と比べます。
+再開した実行では、再開のあとの分だけです(`metrics.jsonl` の `usage` と同じ。前の分は落ちた `task _run` のメモリにありました)。超えた
+ものがあれば、出来事 `over budget` を出して通知します。測るものは 4 つで、出来事は測るものごとに実行 1 回につき 1 回です。
+今は知らせるだけで、実行は止めません。
+
+| 測るもの | 予算(Goal に `Budget` がないとき) |
+|---|---|
+| 時間(起動ごとの `seconds` の合計) | そのエージェントの終わった実行の中央値の 10 倍、最低 1 時間。実績が 10 件未満なら 3 時間 |
+| トークン(Claude Code、pi) | 中央値の 5 倍、最低 200 万。実績が 10 件未満なら 2000 万 |
+| 費用(USD、pi) | 中央値の 5 倍、最低 $1。実績が 10 件未満なら $10 |
+| クレジット(Kiro) | 中央値の 5 倍、最低 5。実績が 10 件未満なら 20 |
+
+- 実績は `metrics.jsonl` の、同じエージェント(カードの Agent)の実行です。エージェントが動かなかった実行
+  (`blocked_by` が `start`、`setup`、`balance`)は数えません
+- カードごとの予算は Goal の `Budget` の見出しに書きます([task-format.md](task-format.md#budget-予算と有料-api))。
+  書いたものだけが上の表の代わりになります
+- 値はコードの定数です。設定はありません(`slow` と同じ理由です。決定事項 19)
+- 確かめるのは起動が終わったときです。1 回の起動が長いと、出来事はその起動が終わるまで出ません。
+  長さは `slow` が実行中に知らせます
+- `reason` は `used 25.1M tokens, over 20.0M tokens (5 x the median of 30 runs of claude)` のような 1 行です
+
+**残高**: Goal の `Budget` に `paid api: openai` と書いたカードは、`[setup]` のあと、エージェントを起動する前に、
+`[balance]` のその名前のコマンドで残高を確かめます。
+
+```ini
+[balance]
+openai = python3 scripts/check_openai_balance.py   ; 例。worktree で動く。0 で終われば足りている
+```
+
+- コマンドは worktree で、`[setup]` と同じように動きます(`sh -c`、Windows は PowerShell。`[sandbox]` ではエージェントの
+  ユーザー)。リポジトリの `.env`(`[env]` で写したもの)も読めます
+- 0 で終われば足りています。0 以外なら、エージェントを起動せずに Blocked にします。理由には、コマンドの出力の
+  最後の行が入ります(`not enough balance on openai ([balance] openai exited 3: ...); add credit, then move the card to Ready again`)
+- 60 秒で終わらなければ止めて、Blocked にします
+- `[balance]` にその名前がないと、開始の前に Blocked にします(`could not start: ...`)
+- 再開した実行では、もう一度は確かめません(確かめるのは最初から始めるときだけです)
+
+OpenAI には API キーで残高を読む公式の API が見当たりません(2026-10-26 に調べた範囲)。確かめ方は
+リポジトリごとに決めます。たとえば、いちばん安いモデルに 1 トークンだけの要求を送り、429 の
+`insufficient_quota` が返れば 0 以外で終わるスクリプトです。わずかに費用がかかります。
 
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。
@@ -530,8 +590,14 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 |---|---|
 | エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。Issue の本文に答えを書き足すか、環境を修正します |
 | `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
+| `the watchdog stopped the agent: no output and no CPU used` | エージェントが 45 分以上黙っていて、その子孫も CPU を使っていませんでした(下の「黙って止まったコマンド」)。`task log <番号>` の `== watchdog:` の行の前を読みます |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
-| `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
+| `automated review did not pass after ...`、`automated review stopped after ...: <止まった条件>` | 自動レビューの `needs changes` が、差し戻しのあとも残りました([task-format.md](task-format.md#自動レビューの差し戻し))。Issue のレポートの最後の `## Suggested instructions` を読み、よければそのまま Ready に戻します。指摘が誤りなら、そのコメントを直すか、理由をコメントに書いてから戻します |
+| `automated review: blocked: ...` | reviewer が、人にしか出せない情報が要ると判断しました。求められたものを Issue に書いてから Ready に戻します |
+| `the run stopped unexpectedly again, after resuming once at <段階>` | `task _run` プロセスが予期せず止まり(クラッシュ、kill、Mac の再起動、herdr のペインを閉じた)、task-hub が 1 回だけ再開しましたが、再開した実行もまた止まりました。`task log <番号>` で止まったところを見てから Ready に戻します |
+| `the run stopped unexpectedly; not resumed: <わけ>` | `task _run` プロセスが止まりましたが、再開しませんでした。わけは、Ctrl-C で止めた(`it was stopped with Ctrl-C`)、worktree が消えた、worktree で誰かがコミットした(`HEAD moved`)、続けるのに要る記録やプロンプトがない、などです。直してから Ready に戻します |
+| `the run stopped unexpectedly; could not resume it: <わけ>` | 再開しようとしましたが、起動できませんでした(残ったエージェントが止まらない、herdr のタブが開かない、など)。わけを直してから Ready に戻します |
+| `the run stopped unexpectedly` | 実行は終わっていましたが、カードを動かす前に GitHub に届きませんでした。残ったレポートはこのコメントに載っています。再開した実行が終わったあとでも、この理由です |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
 | `could not start: the run did not start in herdr tab ...` | herdr のペインが 16 秒の間に `task _run` を始めませんでした(シェルが立ち上がらない、など)。そのタブを見てから Ready に戻します(戻すと、そのタブは閉じます)。あとからそのタブで実行が始まることはありません |
@@ -587,8 +653,29 @@ task-hub はカードを動かしません(確認するのは PR がマージさ
 ## 実行中のタスクを止める
 
 herdr のそのタスクのタブでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
-push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
-として Blocked になります。
+push してカードを Blocked にします。やめるなら `task done <番号>` です(下の「タスクを取り消す」)。
+
+ペインを閉じても止まりません。予期せず止まった実行(クラッシュ、kill、Mac の再起動、ペインを閉じた)は、次の確認で
+task-hub が 1 回だけ自動で再開します。カードは In progress のままで、続きは止まった段階(エージェント、レビュー、
+差し戻し、finish)からです。新しいタブ(またはバックグラウンド)で動き、Issue のレポートに `Resumed once at <段階>` の
+1 行が入ります。出来事 `resumed` も出ますが、既定では通知しません(`[notify] events` に `resumed` を足せば通知します)。
+再開した実行もまた止まったら、`the run stopped unexpectedly again, after resuming once at <段階>` として Blocked になります。
+
+### 黙って止まったコマンド
+
+エージェントの出力が 45 分なく、エージェントが動かしたコマンド(その子孫)も前の確認から CPU を使っていなければ、
+`task _run` がそのコマンドを止めます(SIGTERM、10 秒後に SIGKILL)。エージェント自身は止めないので、
+コマンドの失敗を受け取って続けます。ログには次の行が出ます。
+
+```text
+== watchdog: no output for 45 min and no CPU used by what the agent started: stopping it (4242 sleep)
+```
+
+CPU を使って黙っているコマンド(出力しない長いテストやビルド)は止めません。止めたあと(止めるものがなければ 45 分から)
+さらに 10 分黙っていて、子孫も CPU を使っていなければ、エージェントも止め(`== watchdog: no output for 55 min: stopping the agent`)、
+その場で 1 回だけ再開します(上の予期せず止まった実行の再開と同じ 1 回に数えます)。再開したエージェントも止められると、
+カードは Blocked になります。しきい値は設定できません(決定事項 19)。Windows では子孫の CPU が分からないので、watchdog は
+何も止めません。
 
 ## タスクを取り消す
 

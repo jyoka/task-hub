@@ -2,8 +2,10 @@
 
 `task` sends the part between the first and the second line to the agent at the start of every run,
 followed by the task itself (id, title, repository, branch, Goal, and the earlier report on a re-run).
-The part below the second line comes only on a re-run that people commented on since the earlier run,
-at the end, followed by their comments on the Issue and the pull request.
+The part between the second and the third line comes only on a re-run that people commented on since the
+earlier run, at the end, followed by their comments on the Issue and the pull request.
+The part below the third line comes only when task-hub starts an agent again after it was cut short
+(a crash, a kill, a restart, a closed pane), at the very end, followed by the stage it stopped in and why.
 It is the same for every agent (Claude Code, Codex, Pi, Kiro, ...). Edits apply to the next run.
 
 ---
@@ -21,10 +23,17 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    If the Goal has a "Ready conditions" section, check each condition first. If one does not hold
    (a file, function, or decision it needs is not there, a key is missing), stop at once without
    changing files and report it as Blocked (below), naming the condition.
+   If the Goal has a "Rules" section, follow it: never do what a `never:` line names. What an
+   `ask:` line names needs the human's approval first: do not do it; finish the rest, and report
+   it as Blocked, naming the approval you need. `can:` lines are allowed without asking.
 2. Make the change. Keep it to what the Goal asks for.
 3. Run the project's tests and linters, and fix what you broke.
-   While you work, run only the tests related to what you changed. Run the full test suite once,
-   at the end: it is slow, and other runs on the same machine need the CPU too.
+   While you work, run only the tests related to what you changed.
+   The full test suite is slow, and other runs on the same machine need the CPU too. If the
+   repository's instructions leave the full suite to CI, or say not to run it locally unless asked,
+   do not run it unless the Goal asks for it: the related tests are enough, and the Report says CI
+   runs the rest. Otherwise run it once, at the end, and not again on a re-run or a retry after
+   review unless your fix could affect tests outside the related ones.
    Your tools may have a time limit per command, and may move a command that runs past it to the
    background. If a command might run that long, split it into smaller runs (one test file or class
    at a time, for example) and wait for each to finish; do not leave it in the background.
@@ -146,3 +155,19 @@ comment, or cannot be done, do not guess: leave it, and say why.
 In the Report section, under Details, add a list that starts with the line `Comments:` and has one item per comment:
 its number, then what you did about it, or why you did not act on it. Answer a comment that only asks a
 question there. Add no heading for it.
+
+---
+
+# Resumed
+
+This run was cut short (the agent or task-hub stopped unexpectedly), and task-hub started it again, once.
+Everything above is the prompt it started with. The worktree still holds what was done before it stopped.
+You may remember that conversation, or this may be a new session that knows only this prompt.
+
+- Before anything else, run `git status` and `git diff` to see what is already done. Go on from there;
+  if you remember the conversation, pick up where it stopped. Do not start over from scratch.
+- A command may have been cut short too. Before you run again one that changes anything outside the
+  worktree, or one that does harm when it runs twice (a migration, a release, a message sent, a line
+  appended to a file), check whether it already ran, and say in the Report what you found.
+- Write `.task-report.md` as usual when you finish. Do not mention the interruption unless it changed
+  something the human must know.

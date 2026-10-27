@@ -11,14 +11,16 @@ task-hub は、プロンプトを受け取り、誰も入力しなくても作�
 
 ## 組み込みのエージェント
 
-| 名前 | task-hub が実行するコマンド | 補足 |
-|---|---|---|
-| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose {prompt}` | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
-| `codex` | `codex exec -s workspace-write --json {prompt}` | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
-| `pi` | `pi -p --mode json {prompt}` | Pi の print モード。`--mode json` は途中の手順をログに出すためです |
-| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
+| 名前 | task-hub が実行するコマンド | 再開のコマンド(`[resume]`) | 補足 |
+|---|---|---|---|
+| `claude` | `env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000 claude -p --dangerously-skip-permissions --output-format stream-json --verbose --session-id {session} {prompt}` | 同じコマンドの `--session-id` を `--resume` にしたもの | Claude Code の print モード、権限の確認なし。`claude -p` はバックグラウンドのコマンドの終わりを待たずに終わり、レポートのないまま Blocked になるため、環境変数でバックグラウンド実行を止め、代わりに前景のコマンドを 30 分まで待てるようにしています。`--output-format stream-json --verbose` は途中の手順をログに出すためです([operations.md](operations.md#実行の様子を見る)) |
+| `codex` | `codex exec -s workspace-write --json {prompt}` | なし(新しいセッション) | Codex は workspace-write サンドボックスで動きます。worktree の編集とコマンドの実行ができ、デフォルトではネットワークは使えません。`--json` は途中の手順をログに出すためです |
+| `pi` | `pi -p --mode json -e <task-hub>/pi/task-groups.ts --session-id {session} {prompt}` | 同じコマンド | Pi の print モード。`--mode json` は途中の手順をログに出すためです。`-e` は bash のコマンドを `worker/group-shell` に通す拡張で、`<task-hub>` は `task` を動かしている clone(ふつうは `~/.local/lib/task-hub`)です([落ちたエージェントのコマンドを止める](#落ちたエージェントのコマンドを止める))。`--session-id` はその ID の会話がなければ作り、あれば続けます(pi 1.4.0 で確認) |
+| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json {prompt}` | なし(新しいセッション) | Kiro CLI、すべてのツールを信頼。先にログインしてください(`kiro-cli whoami`)。`--output-format stream-json` は途中の手順をログに出すためです。このフラグのない古い kiro-cli では動かないので、`kiro-cli update` で新しくしてください(2.28.0 で確認) |
 
-`{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。
+`{prompt}` はプロンプトを 1 つの引数として置き換えるため、シェルのクォートは関係しません。`{session}` も同じく
+1 つの引数で、起動ごとに新しく作る UUID(会話の ID)に置き換わります。再開では、止まった起動と同じ ID が入ります
+([止まった実行の再開](#止まった実行の再開resume))。
 
 ## エージェントの選び方
 
@@ -44,8 +46,11 @@ PR 全体の差分(新しいファイルを含む)を渡します。実行に人
 
 reviewer は `.task-review.md` だけを書きます。テストは実行できます。テストが残した新しいファイルは自動で消し、
 PR のファイルを書き換えた場合は元に戻して Blocked にします。判定は `pass` / `needs changes` / `blocked` です。
-`needs changes` の場合、task-hub は 1 回だけ実装エージェントに自動で差し戻します。2 回目も通らなければ
-ドラフト PR を作り、カードを Blocked にします。マージの判断は今までどおり人が行います。
+指摘は blocking(`Please fix`)と minor(`Known issues`)に分かれ、minor だけなら通過として In review に進みます。
+`needs changes` の場合、task-hub は `[runner] review_retries` の回数(既定 2 回)まで実装エージェントに自動で差し戻します。
+同じ指摘がまた出たり、差し戻しの変更が小さくならなかったりすると、回数が残っていても止めます。止まったら
+ドラフト PR を作り、修正指示の下書きを Issue に書いて、カードを Blocked にします。詳しくは
+[task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し)。マージの判断は、[オートパイロット](autopilot.md)を使わない限り人が行います。
 
 ## Blocked の仕分け(replanner)
 
@@ -123,6 +128,62 @@ aider = aider --yes-always --message {prompt}
   レポートがなければ、タスクはブロックとして扱われます
 - reviewer として使う場合は `.task-review.md` を書けること。reviewer はそれ以外のファイルを変更してはいけません
 
+### 止まった実行の再開(`[resume]`)
+
+予期せず止まった実行(クラッシュ、kill、再起動、ペインを閉じた)は、task-hub が 1 回だけ再開します
+([operations.md の「実行中のタスクを止める」](operations.md#実行中のタスクを止める))。再開のエージェントには、
+元のプロンプトに「# Resumed」の節(`worker/PROMPT.md` の最後の部分)を足して渡します。コマンドは次の順に選びます。
+
+1. `[resume]` に同じ名前があればそれ。値が空なら再開のコマンドはなし(3 になる)
+2. `[agents]` のコマンドが組み込みのままの `pi` と `claude` は、組み込みの再開のコマンド([上の表](#組み込みのエージェント))。
+   `[agents]` で自分のコマンドに変えたら、`[resume]` に書かない限り使いません(別のプログラムやモデルで続けないため)
+3. それもなければ `[agents]` のコマンド(新しいセッション。worktree の途中の仕事から続けます)
+
+エージェントの会話を続けるには、`[agents]` と `[resume]` の両方に `{session}` を書きます。task-hub は実装エージェントの
+起動(`agent` と、レビューの差し戻しの `retry`)ごとに新しい UUID を作り、`runs/<id>.json` の `session` に残してから
+起動します。再開では、止まった起動と同じ値を `[resume]` のコマンドに渡します。reviewer と replanner は毎回新しい値です。
+`{session}` を書かないコマンドは、会話の ID を受け取らず、再開は新しいセッションになります。
+
+```ini
+[agents]
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna -e /Users/me/.local/lib/task-hub/pi/task-groups.ts --session-id {session} {prompt}
+
+[resume]
+; the command that goes on with the agent's own saved conversation, under the same {session}
+pi = /Users/me/.pi/agent/bin/pi -p --mode json --model openai-codex/gpt-6-luna -e /Users/me/.local/lib/task-hub/pi/task-groups.ts --session-id {session} {prompt}
+myagent = myagent --continue {prompt}
+```
+
+`[resume]` のコマンドが手順を 1 つも出さず、レポートも書かずに 0 以外で終わったら(続ける会話が見つからなかった、など)、
+同じ再開の中で 1 回だけ `[agents]` のコマンドで起動し直します。そのときの `{session}` は新しい値です
+(`claude --session-id` は使われている ID を断り、`claude --resume` はない ID で 1 で終わります。2.1.310 で確認)。
+
+pi も claude も、会話をそれぞれの置き場所(pi は `~/.pi/agent/sessions/`、claude は `~/.claude/projects/`)に実行ごとに
+残します。task-hub はそれを消しません。
+
+### 落ちたエージェントのコマンドを止める
+
+pi と claude は、ツールのコマンド(長いテストなど)をエージェントとは別のプロセスグループで動かします。エージェントが
+落ちてもそのコマンドは最後まで動くので、再開したエージェントの横で同じ worktree に書き続けることがあります。
+task-hub はこれを防ぐため、コマンドを `worker/group-shell` に通してそのプロセスグループを記録し、エージェントを起動する前に、
+前のエージェントが残したものを止めます。止めたときはログに `== stopped process group <番号>: ...` と出ます。
+
+| エージェント | 通し方 | 自分のコマンドに変えたとき |
+|---|---|---|
+| `pi` | 拡張 `pi/task-groups.ts` が `bash` のツールを置き換え、シェルを `group-shell` にする(`-e` は `--no-extensions` でも読む)。ほかの拡張が `bash` を置き換えていれば、そちらを使い、記録しない | `[agents]` と `[resume]` に `-e <task-hub>/pi/task-groups.ts` を足す |
+| `claude` | task-hub がエージェントに環境変数 `CLAUDE_CODE_SHELL_PREFIX` を渡す | そのままで使える。自分で `CLAUDE_CODE_SHELL_PREFIX` を決めていれば(環境変数でも `~/.claude/settings.json` の `env` でも)、そちらを使い、記録しない |
+| `codex`、`kiro` | 差し込み口がなく、記録しない | - |
+
+- 利用者の `~/.pi` と `~/.claude` の設定ファイルは書き換えません。pi の拡張は pi の設定(`shellPath`、`shellCommandPrefix`)を
+  読んで使うだけです。`shellPath` の `~/` と `file://` の URL は、pi と同じくパスに直します
+- 止めるのは、記録したグループの先頭が記録と同じ開始時刻で生きているときだけです。番号が別のプロセスに渡っていれば止めません
+- 止めるのは、次のエージェントを起動するときと、片付け(`cleanup`)のときです
+- Windows と `[sandbox] mode = user` では記録しません(今までどおり)。`[sandbox] mode = user` では、組み込みの pi のコマンドから `-e` を外します
+- 調べた根拠と、差し込み口のないエージェントで止められない理由は
+  [durable-runs-comparison.md の「A でツールのコマンドを止める」](durable-runs-comparison.md#a-でツールのコマンドを止めるタスク-238)にあります
+
+実験として、Pi Durable で作った実行役(`durable/`)も `[agents] durable` と `[resume] durable` に同じコマンドを書いて使えます。会話を worktree の `.task-durable/` に残し、止まったところから続けます。入れ方、実験版であること、認証は [durable/README.md](../durable/README.md) にあります。
+
 ## 始める前の確認と、実行に渡す環境変数
 
 無人で動かすとき(launchd の `task watch` など)は、エージェントのログインが切れていても誰も気づきません。
@@ -165,3 +226,5 @@ Codex を除き、組み込みコマンドは**承認の確認なしで**実行�
 
 マシンによって(たとえば仕事用 Mac で)これでは信頼しすぎだと感じる場合は、config でコマンドを厳しくしてください。
 Claude ならツールの許可リスト、Kiro なら `--trust-tools=...`、Codex ならより厳しいサンドボックスを使います。
+Linux では、`[sandbox] mode = user` でエージェントを専用の Linux ユーザーで動かし、あなたの HOME に届かないようにできます([sandbox.md](sandbox.md))。
+タスクごとにしてはいけないことは、Goal の `Rules` に書きます([task-format.md](task-format.md#rules-タスクごとの決まり))。

@@ -100,6 +100,8 @@ triggered[2]{id,trigger,status,title}:
 - Issue のカードの Goal は、Issue へのリンクと「リポジトリへの変更でなければ何もせずレポートに書く」という指示です。
   Issue の本文はカードにコピーしません
 - ボードの Issue リポジトリ(`[board] issues`)は `issues` に書けません。その Issue はもともとタスクだからです
+- `[autopilot]`([autopilot.md](autopilot.md))に書いたリポジトリのカードは、トリガーで作ったものも、人が読む前に
+  Ready に移ります。Issue を書ける人を信頼できるリポジトリだけを `[autopilot]` に書きます
 
 ## 置かれるもの
 

@@ -115,7 +115,8 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
    ```
 
    `reviewer` を空にするか省略すると、自動レビューは行いません。有効にすると、エージェントの作業後、PR を出す前に
-   reviewer が差分を読み、必要なら 1 回だけ実装エージェントに差し戻します。
+   reviewer が差分を読み、必要なら実装エージェントに差し戻します。回数は `review_retries` で決め、既定は 2 回です
+   (止まる条件は [task-format.md](task-format.md#自動レビューの差し戻し))。
 
    テストに API キーなどが要るリポジトリは、`[env]` に書いたファイルを実行のたびに worktree のルートへコピーできます
    (task-hub は自分用の clone で作業するので、手元のチェックアウトの `.env` はそのままでは届きません):
@@ -154,7 +155,7 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
 
    ```ini
    [notify]
-   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update, conflict。空にすると通知しない
+   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget。空にすると通知しない
    ```
 
    IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの

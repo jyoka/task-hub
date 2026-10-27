@@ -49,6 +49,12 @@ jobs:
           mkdir -p evidence
           cargo test --manifest-path rust/Cargo.toml --locked 2>&1 | tee evidence/rust.log
           cargo build --manifest-path rust/Cargo.toml --locked
+      # before the Python suite, whose test_durable_runner_* run it under task-hub once it is installed and built
+      - name: Durable runner (experiment)
+        working-directory: durable
+        run: |
+          npm ci --ignore-scripts
+          npm test 2>&1 | tee ../evidence/durable.log
       - name: Full Python suite, including CLI and PTY integration tests
         run: python3 tests/run.py 2>&1 | tee evidence/python.log
       - name: Kiro board extension
