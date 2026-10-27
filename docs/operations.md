@@ -130,7 +130,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
+`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、
 `merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
@@ -380,6 +380,7 @@ queue = on          ; 既定は off。キューを動かす
 prefix = off        ; on: キューに入れていない In review の PR も、競合したら承認の前に解いておく(マージはしない)
 checks = all        ; all(既定): PR のチェックをすべて待つ。required: ブランチの保護で必須のものだけ
 ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
+rerun = 1           ; 既定は 1: 落ちたチェックを同じコミットで 1 回だけ走らせ直す。0: すぐ Blocked
 ```
 
 ### キューに入れる
@@ -410,7 +411,9 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
    base の番号を残してこちらの番号を付け直します。エージェントはファイルを直してレポートを書くだけで、マージコミットと
    push は task-hub が行います(push が失敗したときは 1 と同じく、マージコミットを残して Blocked)。解けなかったら(エージェントが `## Blocked` を書いた、競合の印が残った、エージェントが
    自分でコミットや中止をした)、マージを取り消してカードを Blocked にします
-3. PR のチェックを待ちます(`gh pr checks`)。落ちたら、そのチェックのリンクを付けて Blocked にします。PR の最後の
+3. PR のチェックを待ちます(`gh pr checks`)。落ちたら、まず落ちたジョブだけを 1 回走らせ直します(下の
+   [落ちたチェックを走らせ直す](#落ちたチェックを走らせ直す))。同じコミットでまた落ちたら、そのチェックのリンクを付けて
+   Blocked にします。PR の最後の
    コミットから 2 分たつまでは、チェックがまだ 1 つも出ていなくても、出てくるのを待ちます。`checks = required` なら
    必須のチェックだけを見ます。必須でないチェックが動いている、または落ちていても待たず、止めません
 4. `gh pr view --json mergeable,mergeStateStatus` が `CLEAN`(`checks = required` なら、必須でないチェックが通っていない
@@ -426,6 +429,32 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 `merge queue: ...` で始まる 1 行にして、Issue に `<!-- task-hub merge -->` のコメントを書きます(タスクのレポートではないので、
 再実行のプロンプトには入りません)。直したら `task merge <番号>` でもう一度入れます。
 
+### 落ちたチェックを走らせ直す
+
+揺れるテストが 1 回落ちただけで、カードが止まらないようにします。`[merge] rerun = 1`(既定)のとき、チェックが落ちたら:
+
+1. その PR の先頭のコミットでまだ走らせ直していなければ、落ちたチェックの GitHub Actions の run を
+   `gh run rerun <run id> --failed` で走らせ直します。落ちたジョブだけが動きます。キューの項目にそのコミットを記録し、
+   `ci-rerun` の出来事を書いて、チェックの段のまま待ちます。待つ長さ(`ci_minutes`)は走らせ直したときから数え直します
+2. 同じコミットでまた落ちたら、今までどおり Blocked にします。理由は
+   `check <名前> failed twice: <2 回目のリンク> (ran again once on the same commit)` です。走らせ直したあとに
+   はじめて落ちたチェックは `failed` のままです
+3. ブランチに新しいコミットが入ったら(base を取り込んだ、push した)、新しいコミットでもう一度 1 回だけ走らせ直します
+
+次のときは走らせ直さず、今までどおりすぐ Blocked にします。
+
+- `[merge] rerun = 0`
+- 落ちたチェックのリンクが GitHub Actions の run でない(ほかの CI)。task-hub には走らせ直せません
+- `gh run rerun` が失敗した(権限がない、古すぎる run など)。理由の最後に `; rerun failed: <gh のことば>` が付きます
+
+落ちたチェックと同じ run に、まだ動いているジョブがあるときは、それが終わるのを待ってから走らせ直します。GitHub は、
+動いている run を走らせ直せないからです。`checks = required` でも、同じ run の必須でないジョブを待ちます。
+`ci_minutes` までに終わらなければ、`its checks did not finish in N min: ...` で Blocked にします。走らせ直した直後は、GitHub がまだ前の落ちた結果を返すことがあります。
+そのリンクが走らせ直したときと同じなら、2 回目の失敗とは数えずに待ちます。
+
+`task merge` のキューの表示の `rerun` の欄に、走らせ直したコミットの先頭 7 文字が出ます(まだなら空)。
+`ci-rerun` は `[notify] events` の既定には入れていません。通知がほしいときは足してください。
+
 ### 承認していない PR の競合
 
 キューに入れていない In review の PR が base と競合したら、`conflict` の出来事を 1 回書いて通知します(PR のコミットごとに
@@ -440,12 +469,13 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 | `updated` | base をマージして push した(競合を解いたときも) | 何をどこにマージしたか、解いたファイル |
 | `conflict-fix` | 競合を解くエージェントを始めた | 競合したファイル |
 | `ci-wait` | チェックを待ち始めた(コミットごとに 1 回) | 待っているチェック(GitHub がまだ `UNSTABLE` のときは `waiting for GitHub to count its finished checks`) |
+| `ci-rerun` | 落ちたチェックを走らせ直した(コミットごとに 1 回。`sha` にそのコミット) | 落ちたチェックとコミット |
 | `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
 | `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
 | `conflict` | キューにない In review の PR が競合した | 競合した base |
 
 どれも `task events`、`/chief`(`--only` に足したもの)、ntfy(`[notify] events` に足したもの)から見えます。通知の既定には
-`conflict` と(いつもの)`Blocked`、`Done` が入っています。
+`conflict` と(いつもの)`Blocked`、`Done` が入っています(`ci-rerun` は入っていません)。
 
 ### 止まったとき
 
@@ -454,6 +484,8 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 | `the conflict fixer could not resolve them: ...` | エージェントが人の判断を求めました。手で解くか、Goal に答えを書いて Ready に戻し、終わったら `task merge` |
 | `conflict markers are left in ...`、`the conflict fixer ended the merge itself ...`、`the conflict fix did not resolve the conflicts ...` | 解けませんでした(マージは取り消してあります)。`task log <番号>` を読み、手で解いて push してから `task merge` |
 | `check <名前> failed: <リンク>` | リンクのチェックを直します。PR に push すれば、`task merge` でまた入れられます |
+| `check <名前> failed twice: <リンク> (ran again once on the same commit)` | 走らせ直しても落ちました。揺れるだけのテストでないか、リンクの 2 回目の結果を読んで直します。直して push してから `task merge` |
+| `...; rerun failed: ...` | 落ちたチェックを走らせ直せませんでした(権限、古すぎる run など)。手で `gh run rerun <run id> --failed` をするか、直して push してから `task merge` |
 | `its checks did not finish in N min: ...` | チェックが止まっていないか確かめます。長いなら `[merge] ci_minutes` を延ばします |
 | `GitHub does not allow the merge (BLOCKED: ...)` | 必須のレビューやブランチのルールが足りません。満たしてから `task merge` |
 | `GitHub does not allow the merge (UNSTABLE: ...)` | チェックはどれも落ちていないのに、`ci_minutes` を過ぎても GitHub が `UNSTABLE` のままでした。PR の画面でチェックを確かめてから `task merge` |

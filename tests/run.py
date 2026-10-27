@@ -111,17 +111,24 @@ def ids(suite):
             yield t.id()
 
 
+# `python -m unittest <id>`, its report in UTF-8 whatever the code page: a Windows in Chinese (gbk) cannot write the
+# Japanese a failing test prints, nor one in English (cp1252) a single "é" as UTF-8. Not PYTHONIOENCODING: the
+# programs a test starts would inherit it
+UNITTEST = ("import sys, unittest; sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace'); "
+            "unittest.main(module=None, argv=['python -m unittest', sys.argv[1]])")
+
+
 def run(test_id):
     began = time.time()
     # low priority (Unix: main's nice, which they inherit), so the person and their agents stay responsive
-    # not the code page: a Windows in Chinese (gbk) cannot read the Japanese a failing test prints
-    r = subprocess.run([sys.executable, "-m", "unittest", test_id], cwd=TESTS, capture_output=True,
+    r = subprocess.run([sys.executable, "-c", UNITTEST, test_id], cwd=TESTS, capture_output=True,
                        encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
                        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if WINDOWS else 0)
     return test_id, r.returncode, r.stderr, time.time() - began
 
 
 def main(argv):
+    sys.stdout.reconfigure(errors="backslashreplace")  # a failure's Japanese, in a code page without it (Windows CI)
     jobs = JOBS
     if argv[:1] == ["-j"]:
         jobs, argv = int(argv[1]), argv[2:]

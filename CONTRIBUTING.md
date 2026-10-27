@@ -93,6 +93,8 @@ python3 tests/run.py test_intake
 ```
 
 テストを 1 件ずつ別のプロセスで、2 つずつ並べて動かします(約 8 分)。並べる数は `-j 4` のように指定できます。
+GitHub Actions の `macos` は `-j 4` で動かします。手元の既定の 2 は変えません。
+`windows` は `python -m unittest` で 1 件ずつ動かします。`-j 4` で並べると落ちるテストがあり、まだ特定できていないためです。
 マシンを使い切らないよう、穏やかに動かします。
 
 - テストのプロセスは低い優先度で動きます(Unix は `nice`、Windows は `BELOW_NORMAL_PRIORITY_CLASS`)。人の作業とエージェントの反応を落とさないためです
@@ -113,7 +115,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 |---|---|
 | `tests/test_task.py` | `bin/task` をサブプロセスとして動かす。GitHub(`gh`)、エージェント、herdr はフェイクに置き換え、git は本物を使う |
 | `tests/test_install.py` | Kiro 用のインストーラ(`kiro/install.sh` など) |
-| `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック。Windows の GitHub Actions でも動く |
+| `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック、出力の文字コードで書けない失敗の表示。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `tests/test_durable_bench.py` | `tests/durable_bench.py` の 63 回の試行の組み合わせと、`--report` の表(モデルは呼ばない) |

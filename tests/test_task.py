@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import shlex
 import shutil
@@ -352,6 +353,10 @@ elif cmd in (["repo", "view"], ["run", "list"], ["issue", "list"]):  # the trigg
                and (not opt("--label") or opt("--label") in i.get("labels", []))]
 elif cmd == ["pr", "ready"]:
     next(p for p in db["prs"].values() if p["url"] == a[2])["isDraft"] = "--undo" in a
+elif cmd == ["run", "rerun"]:  # db["reruns"]: what was run again; db["rerun_fails"]: what gh says instead
+    if db.get("rerun_fails"):
+        fail(db["rerun_fails"])
+    db.setdefault("reruns", []).append({"run": a[2], "failed": "--failed" in a, "repo": opt("--repo")})
 else:
     fail(f"fake gh: unsupported {a}")
 tmp = f"{path}.{os.getpid()}.tmp"  # write, then rename: a reader never sees a half-written file
@@ -1217,6 +1222,24 @@ def process_gone(pid):
     return r.returncode != 0 or r.stdout.strip().startswith("Z")
 
 
+def read_pty_until_exit(master, p, timeout):
+    """All that p wrote to a PTY, read until p exits. The caller keeps its own copy of the PTY's other end open until
+    this returns: on macOS the last close of that end drops what is still unread, so had the test closed its copy
+    first, a p that wrote and exited before that close (as under load, with tests side by side) would leave nothing."""
+    chunks, end = [], time.monotonic() + timeout
+    while True:
+        done = p.poll() is not None  # checked before reading: what p wrote before it exited is in the PTY by now
+        ready, _, _ = select.select([master], [], [], 0 if done else 0.1)
+        if ready:
+            chunks.append(os.read(master, 65536))
+        elif done:
+            return b"".join(chunks)
+        elif time.monotonic() > end:
+            p.kill()
+            p.wait(timeout=5)
+            raise AssertionError(f"still running after {timeout}s; it wrote: {b''.join(chunks)!r}")
+
+
 class TaskTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1416,7 +1439,13 @@ class TaskTest(unittest.TestCase):
                     e["event"] == status for e in self.events_of(tid)[-3:])):
                 return status
             time.sleep(0.2)
-        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
+        # what this machine knows of the run too: a run that never wrote its log (CI, #289) says nothing else
+        state = self.root / ".local/state/task-hub"
+        record = state / f"runs/{tid}.json"
+        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}\n"
+                  f"run record: {record.read_text() if record.exists() else 'none'}\n"
+                  f"logs: {sorted(f.name for f in (state / 'logs').glob('*'))}\n"
+                  f"events: {self.events_of(tid)}")
 
     def wait_for(self, check, timeout=20):
         """The replanner runs after the card is already Blocked."""
@@ -2976,20 +3005,14 @@ class TaskTest(unittest.TestCase):
         master, slave = os.openpty()
         p = subprocess.Popen([str(BIN), "list", "--watch"], env={**self.env, "TASK_WATCH_ONCE": "1"}, stdout=slave,
                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        os.close(slave)
-        chunks = []
-        while True:
-            try:
-                data = os.read(master, 4096)
-            except OSError:  # the other end closed
-                break
-            if not data:
-                break
-            chunks.append(data)
-        os.close(master)
+        try:
+            out = read_pty_until_exit(master, p, 20)
+        finally:
+            os.close(slave)
+            os.close(master)
         self.assertEqual(p.wait(timeout=20), 0, p.stderr.read())
         p.stderr.close()
-        return b"".join(chunks).decode().replace("\r\n", "\n")
+        return out.decode().replace("\r\n", "\n")
 
     def test_list_watch_in_a_terminal_redraws_the_screen_under_a_heading_with_the_time(self):
         tid = self.new("ok")
@@ -6793,6 +6816,160 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["merged_order"], [self.pr(second)["url"]])
         self.assertEqual(self.queue_events(second), ["queued", "merged", "Done"])
 
+    def failing_check(self, tid, job=1, run=101):
+        """The PR's check, failed in a GitHub Actions run (its link names the run): the queue can run it again."""
+        db = self.gh()
+        link = f"https://github.com/jyoka/app/actions/runs/{run}/job/{job}"
+        db.setdefault("checks", {})[self.pr(tid)["url"]] = [{"name": "test", "bucket": "fail", "link": link}]
+        self.save_db(db)
+        return link
+
+    def blocked_reason(self, tid):
+        return [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]["reason"]
+
+    def test_a_failed_check_runs_again_once_and_the_card_merges_when_it_passes(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)  # a flaky test
+        self.task("merge", tid)
+        out = self.task()
+        self.assertIn("test failed; running the failed jobs again once", out)
+        self.assertEqual(self.gh()["reruns"], [{"run": "101", "failed": True, "repo": "jyoka/app"}])
+        self.assertEqual(self.status(tid), "In review")  # not Blocked: it waits in the ci step
+        sha = self.on_origin(f"task/{tid}", "rev-parse").strip()
+        short = json.dumps(sha[:7]) if sha[:7].isdigit() else sha[:7]  # a number-like value is quoted
+        self.assertIn(f'1,"{tid}",jyoka/app,ci,{short},', self.task("merge"))  # the queue shows the rerun
+        # GitHub has not listed the new attempt yet: the old failure is still there, and is not a second one
+        self.assertIn("waiting for its failed checks to run again", self.task())
+        self.assertEqual(len(self.gh()["reruns"]), 1)
+        db = self.gh()
+        db["checks"][self.pr(tid)["url"]] = [{"name": "test", "bucket": "pending",
+                                              "link": "https://github.com/jyoka/app/actions/runs/101/job/2"}]
+        self.save_db(db)
+        self.assertIn("waiting for its checks: test", self.task())
+        db["checks"][self.pr(tid)["url"]][0]["bucket"] = "pass"
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [self.pr(tid)["url"]])
+        rerun, = [e for e in self.events_of(tid) if e["event"] == "ci-rerun"]
+        self.assertEqual(rerun["sha"], sha)
+        self.assertEqual(rerun["reason"], f"test failed on {sha[:7]}; running the failed jobs again once")
+        self.assertEqual(self.queue_events(tid), ["queued", "ci-wait", "merged", "Done"])  # ci-rerun is its own
+        self.wait_for(lambda: self.notifications_of(tid, "Done"))
+        self.assertEqual(self.notifications_of(tid, "ci-rerun"), [])  # not in the default [notify] events
+
+    def test_a_check_that_fails_again_on_the_same_commit_blocks_with_the_second_run(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)
+        self.task("merge", tid)
+        self.task()  # run again once
+        second = self.failing_check(tid, job=2)  # and it failed again
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.blocked_reason(tid),
+                         f"merge queue: check test failed twice: {second} (ran again once on the same commit)")
+        self.assertEqual(len(self.gh()["reruns"]), 1)
+        self.assertNotIn("merged_order", self.gh())
+        self.assertIn("queue: empty", self.task("merge"))
+
+    def test_a_new_commit_runs_its_failed_checks_again_once_more(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)
+        self.task("merge", tid)
+        self.task()  # run again once on the first commit
+        self.push_to_main("other.txt", "someone else's feature\n")
+        db = self.gh()
+        db["checks"][self.pr(tid)["url"]][0]["bucket"] = "pass"
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "BEHIND"  # the base moved on meanwhile
+        self.save_db(db)
+        self.assertIn("main moved on", self.task())
+        db = self.gh()
+        del db["prs"][f"jyoka/app task/{tid}"]["merge_state"]
+        self.save_db(db)
+        self.assertIn(f"merged main into task/{tid} and pushed", self.task())
+        self.failing_check(tid, job=3, run=102)  # the new commit's checks fail
+        self.assertIn("running the failed jobs again once", self.task())
+        self.assertEqual([r["run"] for r in self.gh()["reruns"]], ["101", "102"])
+        self.assertEqual(self.status(tid), "In review")
+        sha = self.on_origin(f"task/{tid}", "rev-parse").strip()
+        self.assertEqual([e["sha"] for e in self.events_of(tid) if e["event"] == "ci-rerun"][-1], sha)
+
+    def test_rerun_0_blocks_a_failed_check_at_once_as_before(self):
+        self.queue_on("rerun = 0\n")
+        tid, = self.in_review("first")
+        link = self.failing_check(tid)
+        self.task("merge", tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.blocked_reason(tid), f"merge queue: check test failed: {link}")
+        self.assertNotIn("reruns", self.gh())
+        self.queue_on("rerun = 2\n")  # more than once is not offered
+        self.assertIn("[merge] rerun must be 0 or 1; got '2'", self.task("merge", code=1))
+
+    def test_required_checks_wait_for_the_optional_jobs_of_the_same_run_before_it_runs_again(self):
+        self.queue_on("checks = required\n")
+        tid, = self.in_review("first")
+        url = self.pr(tid)["url"]
+        db = self.gh()
+        db["checks"] = {url: [{"name": "test", "bucket": "fail", "required": True,
+                               "link": "https://github.com/jyoka/app/actions/runs/101/job/1"},
+                              {"name": "e2e", "bucket": "pending",  # not required, but in the same run
+                               "link": "https://github.com/jyoka/app/actions/runs/101/job/2"},
+                              {"name": "docs", "bucket": "pending",  # another run: it does not hold the rerun
+                               "link": "https://github.com/jyoka/app/actions/runs/200/job/1"}]}
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for e2e before running the failed checks again", self.task())
+        self.assertNotIn("reruns", self.gh())
+        db = self.gh()
+        db["checks"][url][1]["bucket"] = "pass"
+        self.save_db(db)
+        self.assertIn("running the failed jobs again once", self.task())
+        self.assertEqual([r["run"] for r in self.gh()["reruns"]], ["101"])
+        db = self.gh()
+        db["checks"][url][0]["link"] = "https://github.com/jyoka/app/actions/runs/101/job/3"  # failed again
+        db["checks"][url].append({"name": "lint", "bucket": "fail", "required": True,  # and one for the first time
+                                  "link": "https://github.com/jyoka/app/actions/runs/300/job/1"})
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.blocked_reason(tid), "merge queue: check test failed twice: https://github.com/jyoka/"
+                         "app/actions/runs/101/job/3; check lint failed: https://github.com/jyoka/app/actions/runs/"
+                         "300/job/1 (ran again once on the same commit)")
+
+    def test_a_rerun_gh_refuses_blocks_the_card_and_says_so(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        link = self.failing_check(tid)
+        db = self.gh()
+        db["rerun_fails"] = "HTTP 403: Unable to retry this workflow run because it was created over a month ago"
+        self.save_db(db)
+        self.task("merge", tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.blocked_reason(tid), f"merge queue: check test failed: {link}; rerun failed: "
+                         "HTTP 403: Unable to retry this workflow run because it was created over a month ago")
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("ci-rerun"), 0)
+
+    def test_a_failed_check_waits_for_the_running_ones_before_it_runs_again(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)
+        db = self.gh()
+        db["checks"][self.pr(tid)["url"]].append({"name": "lint", "bucket": "pending",
+                                                  "link": "https://github.com/jyoka/app/actions/runs/101/job/9"})
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for lint before running the failed checks again", self.task())
+        self.assertNotIn("reruns", self.gh())  # GitHub cannot run a workflow run again while it still runs
+        db = self.gh()
+        db["checks"][self.pr(tid)["url"]][1]["bucket"] = "pass"
+        self.save_db(db)
+        self.assertIn("running the failed jobs again once", self.task())
+        self.assertEqual(self.gh()["reruns"], [{"run": "101", "failed": True, "repo": "jyoka/app"}])
+        self.assertEqual(self.status(tid), "In review")
+
     def test_a_push_that_fails_blocks_the_card_and_keeps_the_merge_commit(self):
         self.queue_on()
         tid, = self.in_review("first")
@@ -8258,12 +8435,24 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
 
     def test_check_runs_the_critics_at_once(self):
+        """The critics run at once, but make and remove their worktrees of the one clone in turn: two `git worktree`
+        commands at once fail on each other's half-written .git/worktrees (seen under load on CI)."""
+        git, log = shutil.which("git"), self.root / "git-worktree.txt"
+        (self.root / "fakebin" / "git").write_text(  # git, slower and timed for `git -C <dir> worktree ...`
+            f'#!/bin/sh\n[ "$3" = worktree ] || exec {shlex.quote(git)} "$@"\nexec python3 -c \'import subprocess, '
+            'sys, time\nbegan = time.time()\ntime.sleep(0.2)\ncode = subprocess.run(sys.argv[2:]).returncode\n'
+            'open(sys.argv[1], "a").write(f"{began} {time.time()} {sys.argv[6]}\\n")\nsys.exit(code)\' '
+            f'{shlex.quote(str(log))} {shlex.quote(git)} "$@"\n')
+        (self.root / "fakebin" / "git").chmod(0o755)
         tid = self.new("ok READY=slow")
-        began = time.time()
         self.assertIn("verdict: GO", self.task("check", tid))
+        # in turn, each critic would wait 10 s for the others to start
         critics = [c["at"] for c in self.goldfish_calls()[1:4]]
         self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other two to start")
-        self.assertLess(time.time() - began, 30)
+        ran = sorted(tuple(line.split()) for line in log.read_text().splitlines())
+        self.assertIn("add", [op for _, _, op in ran])
+        for (_, ended, op), (began, _, next_op) in zip(ran, ran[1:]):
+            self.assertLessEqual(float(ended), float(began), f"git worktree {op} and {next_op} ran at once")
 
     def test_check_sorts_the_verdict_by_blocking_and_minor_findings(self):
         # as #249's review: only minor findings is a GO; a GO with a blocking finding is a NO-GO; no verdict is blocked;
