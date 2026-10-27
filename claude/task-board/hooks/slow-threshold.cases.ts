@@ -9,6 +9,8 @@ export const CASES =
     "{\"agent\": \"fake\", \"seconds\": 120, \"status\": \"Blocked\", \"blocked_by\": \"agent\"}",
     "{\"agent\": \"fake\", \"seconds\": 0, \"status\": \"Blocked\", \"blocked_by\": \"start\"}",
     "{\"agent\": \"fake\", \"seconds\": 5, \"status\": \"Blocked\", \"blocked_by\": \"setup\"}",
+    "{\"agent\": \"fake\", \"seconds\": 1, \"status\": \"Blocked\", \"blocked_by\": \"balance\"}",
+    "{\"agent\": \"fake\", \"seconds\": 1, \"status\": \"Blocked\", \"blocked_by\": \"balance\"}",
     "{\"agent\": \"fake\", \"seconds\": 9999, \"sta",
     "",
     "{\"agent\": \"even\", \"seconds\": 2400, \"status\": \"In review\"}",

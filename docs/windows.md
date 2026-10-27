@@ -356,7 +356,9 @@ Get-Content $HOME\.local\state\task-hub\watch.log -Tail 20
 - 常駐から始めた作業は、見張りとは別に動きます。常駐をやめるときは、タスク スケジューラの画面で「終了」を押さずに、
   手順 9 のアンインストールを使います(「終了」は、動いている作業まで止めることがあります)。アンインストールは、
   作業中のタスクがあれば見張りだけを止めます
-- 止まった作業のカードは、次の確認で `the run stopped unexpectedly` として Blocked になります。Ready に戻せばやり直せます
+- 止まった作業(PC の再起動など)は、次の確認で 1 回だけ、止まった段階から自動で再開します。再開した作業もまた止まると、
+  `the run stopped unexpectedly again, ...` として Blocked になります。Ready に戻せばやり直せます。
+  エージェントだけが落ちたときのその場の再開は、Windows ではしません(終了コードで見分けられないため)
 - task-hub は日本語を正しく扱うために、自分を UTF-8 モード(`PYTHONUTF8=1`)で動かします。エージェントや、
   エージェントが動かす Python のテストも UTF-8 モードになります
 
@@ -474,7 +476,7 @@ powershell -ExecutionPolicy Bypass -File windows\doctor.ps1
 | `setup failed (exit N), see task log N` | `[setup]` のコマンドが失敗した | `task log <番号> --full` で `== setup:` のあとを読む。作業フォルダー(`task open <番号>` で場所が出る)で、同じコマンドを手で動かして確かめる |
 | `setup left files git would commit (...)` | 準備で作ったファイルが、git に無視されていない | そのファイルをリポジトリの `.gitignore` に足すか、`[setup]` を変える |
 | `setup changed files of the repository (...)` | 準備がリポジトリのファイルを書き換えた(`npm install` と `package-lock.json` など) | 書き換えないコマンドにする(`npm ci` など) |
-| `the run stopped unexpectedly` | 作業のプロセスが止まった(PC の再起動やシャットダウン、タスク スケジューラで「終了」を押した) | Ready に戻せば、続きからやり直します |
+| `the run stopped unexpectedly ...` | 作業のプロセスが止まり、1 回だけの自動の再開もできなかったか、再開した作業もまた止まった(PC の再起動やシャットダウン、タスク スケジューラで「終了」を押した) | Ready に戻せば、続きからやり直します |
 | `agent exited without a report (exit N)` | エージェントが途中で落ちた、ログインが切れた、またはクレジットを使い切った | `task log <番号> --full` の最後のほうを読む |
 
 ほかの理由は、[operations.md の「カードが Blocked になった」](operations.md#カードが-blocked-になった) にあります。
@@ -538,8 +540,9 @@ GitHub Actions の Windows(`windows-latest`)で、`tests/test_windows.py` が次
 偽物(代わりのスクリプト)で、git、作業フォルダー、プロセスは本物です。
 
 - 日本語のタスクが PR まで進むこと(複数行のプロンプトが切れずに届く)
-- 作業中の判定(動いている間は In progress のまま、殺すと Blocked。同じ番号のプロセス ID が別のプロセスに
-  使い回されても、作業中とは見なさない)
+- 作業中の判定(動いている間は In progress のまま。殺すと 1 回だけ自動で再開し、再開した作業が動いていることも
+  確かめる。もう一度殺すと Blocked。同じ番号のプロセス ID が別のプロセスに使い回されても、作業中とは見なさず、
+  そのプロセスを止めない)
 - 見張りを入れたジョブ(タスク スケジューラが常駐を動かす入れ物)を閉じても、作業は抜け出していて続くこと。
   GitHub Actions ではテスト自体が抜け出せないジョブの中で動くので skip になり、手元の Windows でだけ確かめられる
 - `env NAME=値` の置き換え、npm の .cmd(node のスクリプトと .exe の両方。node は .cmd の隣のものを使う)

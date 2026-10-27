@@ -269,6 +269,8 @@ test('実績は metrics.jsonl だけで判定する', () => {
   expect(earned(lines([...four, { id: '9', retried: true, reviews: ['needs changes', 'pass'] }]))).not.toContain('streak-5')
   expect(earned(lines([...four, { id: '8', status: 'Blocked', blocked_by: 'setup', reviews: [] }, { id: '9' }])))
     .toContain('streak-5')
+  expect(earned(lines([...four, { id: '8', status: 'Blocked', blocked_by: 'balance', seconds: 1, reviews: [] }, { id: '9' }])))
+    .toContain('streak-5')
   expect(earned(lines([...four, { id: '8', status: 'Blocked', blocked_by: 'agent', reviews: [] }, { id: '9' }])))
     .not.toContain('streak-5')
   expect(earned(lines(Array.from({ length: 10 }, (_, i) => ({ id: `${i}` }))))).toContain('streak-10')
@@ -296,6 +298,9 @@ test('実績は metrics.jsonl だけで判定する', () => {
   const slow = [500, 600, 700].map((s, i) => ({ id: `s${i}`, seconds: s, reviews: ['needs changes'] }))
   expect(earned(lines([...slow, { id: 'f', seconds: 300, reviews: ['needs changes'] }]))).toContain('fast')
   expect(earned(lines([...slow, { id: 'f', seconds: 301, reviews: ['needs changes'] }]))).not.toContain('fast')
+  // runs where the agent never ran have no time of their own, so they do not pull the usual time down
+  const short = ['start', 'setup', 'balance', 'balance'].map((b, i) => ({ id: `b${i}`, status: 'Blocked', blocked_by: b, seconds: 1, reviews: [] }))
+  expect(earned(lines([...slow, ...short, { id: 'f', seconds: 300, reviews: ['needs changes'] }]))).toContain('fast')
   expect(earned(lines([{ seconds: 1 }, { seconds: 1000 }, { seconds: 1 }]))).not.toContain('fast')
   expect(earned(lines([...slow, { id: 'f', agent: 'kiro', seconds: 10, reviews: ['needs changes'] }]))).not.toContain('fast')
 

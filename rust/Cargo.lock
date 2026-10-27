@@ -1350,10 +1350,11 @@ dependencies = [
 
 [[package]]
 name = "task-rs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ratatui",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

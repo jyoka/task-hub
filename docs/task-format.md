@@ -14,7 +14,7 @@
 | カードの Target repo | 作業先の GitHub リポジトリ `owner/name` | あなた |
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
-| Issue のコメント | task-hub のレポート(下記) | task-hub |
+| Issue のコメント | task-hub のレポート(下記)。人のコメントは、再実行のときにエージェントへの追加の指示として渡ります(下記) | task-hub / あなた |
 
 ### 開始の条件: Blocked by と Ready conditions
 
@@ -39,8 +39,78 @@
 - 決済のテスト用キーが `.env` にあること
 ```
 
+### Rules: タスクごとの決まり
+
+Goal に `Rules` の見出し(`##` でも `###` でも)を書くと、そのタスクでエージェントにしてよいこと、承認が要ること、
+してはいけないことを決められます。1 行に 1 つの段階と、カンマ区切りの規則を書きます。
+
+```markdown
+### Rules
+
+- can: Bash(npm test *), Bash(npm run lint)
+- ask: Bash(npm publish *)
+- never: WebFetch, Read(~/.ssh/**), Bash(curl *)
+```
+
+| 行 | Claude Code の設定 | 意味 |
+|---|---|---|
+| `can:` | `permissions.allow` | 聞かずにしてよい |
+| `ask:` | `permissions.ask` | 人の承認が要る。誰も答えない実行では断られ、エージェントは Blocked で承認を求める |
+| `never:` | `permissions.deny` | してはいけない。`--dangerously-skip-permissions` でも効く |
+
+- 規則の書き方は Claude Code の権限の規則そのままです(`Bash(...)`、`Read(...)`、`WebFetch(domain:...)`、`mcp__...`)
+- task-hub は開始のたびに worktree の `.claude/settings.local.json` に書きます。リポジトリの `.claude/settings.json` と
+  合わさり、deny はどこに書いたものも優先します。このファイルはコミットしません
+- Rules を Goal から消すと、次の実行で task-hub が書いたファイルも消します
+- `can` / `ask` / `never` 以外の語で始まる `語:` の行があると、エージェントを起動せずに Blocked にします。
+  語のない文章の行は、そのままエージェントへの指示として読まれます
+- リポジトリが `.claude/settings.local.json` をコミットしているときは、上書きせずに Blocked にします
+- Claude Code 以外のエージェントには、Goal の一部として文章で届きます。コードで止めるのは Claude Code だけです
+- 承認するときは、その規則を `ask:` から `can:` に移して、カードを Ready に戻します
+
+### Budget: 予算と有料 API
+
+Goal に `Budget` の見出し(`##` でも `###` でも)を書くと、その実行の予算と、使う有料 API を決められます。
+見出しは `Budget` か `予算` だけにします。後ろに付けてよいのは `:` と括弧書き(`## Budget (予算)`)だけです。
+`Budget` か `予算` で始まるほかの見出し(`## Budget and limits`、`## 予算と上限` など)は、開始の前に Blocked にします。
+見出しの下の行を黙って読み飛ばさないためです。
+
+```markdown
+### Budget
+
+- 2h, 3M tokens, $5, 30 credits
+- paid api: openai
+```
+
+| 行 | 意味 |
+|---|---|
+| 予算の行 | カンマ(`,` か `、`)区切りで、時間(`2h`、`90m`。分の `m` は小文字だけで、`M` は百万)、トークン(`3M tokens`、`500k tokens`)、費用(`$5`、USD)、クレジット(`30 credits`)。書いたものだけが、いつもの予算の代わりになる |
+| `paid api:` | 実行の中で使う有料 API の名前(カンマ区切り)。エージェントを起動する前に、`[balance]` のその名前のコマンドで残高を確かめる。`有料 API: openai`、`**paid api**:`、`paid apis:` のように、日本語、太字、複数形で書いてもよい |
+
+- 予算を超えると、出来事 `over budget` を出して通知します。今は知らせるだけで、実行は止めません
+  ([operations.md](operations.md#予算と残高))
+- 時間とトークンと費用は、エージェントの起動ごとの記録(`metrics.jsonl` の `usage`)を足したものです。
+  トークンは Claude Code と pi、費用は pi、クレジットは Kiro の記録にだけあります
+- 残高が足りないと、エージェントを起動せずに、理由をつけて Blocked にします。残高を足してから Ready に戻します
+- `paid api:` の名前の `[balance]` のコマンドがないと、開始の前に Blocked にします。確かめられないまま始めないためです
+- `paid api` か `有料 API` を含むのに `paid api: 名前` の形で読めない行(`paid api openai`、`有料 API は openai`、
+  `the paid API of openai` など)は、開始の前に Blocked にします。読み飛ばすと、残高を確かめずにエージェントが始まるためです。
+  同じ理由で、`Budget` の見出しの外にある `paid api:` の行も Blocked にします
+- 予算の行に読めない項目(`3M tokns`、`2 hrs`、`3M` など)があると、開始の前に Blocked にします。予算の項目も
+  `paid api:` もない文章の行は、そのままエージェントへの指示として読まれます。ただし、次の行は予算の書き間違いとみなします
+  - 数字か `$` で始まる英数字だけの行
+  - 数字と単位を含む行(`tokens: 3M`、`2h まで`、`Cost: $5`、`500円まで`、`300万トークン`、`時間: 2h` など)。予算は上の形でだけ書けます
+- コードブロックの中は読みません
+- 費用はエージェント自身の分です。テストの中で有料 API を呼ぶ費用(評価の台帳など)は、ここでは数えません
+
+### Autopilot: off
+
+`[autopilot]`([autopilot.md](autopilot.md))に書いたリポジトリのカードでも、Goal に `Autopilot: off` の行があれば、
+task-hub は Ready に移さず、PR もマージキューに入れません。引き継ぎのメモ、PRD、人がする手順のカードに書きます。
+箇条書き(`- Autopilot: off`)、強調(`**Autopilot: off**`)、終わりの句点でも効きます。
+
 Goal(Issue の本文)は GitHub 上でいつでも編集できます。ブロックされたタスクに答えるときも、本文に書き足してから
-カードを Ready に戻します。
+カードを Ready に戻します。Issue や PR にコメントで書いてもかまいません([人のコメント](#人のコメント))。
 
 実行中の情報(ブランチ、プロセス、herdr のワークスペース、worktree、ログ)は手元のマシンの
 `~/.local/state/task-hub/runs/<番号>.json` にだけ保存され、GitHub には載りません。
@@ -58,6 +128,14 @@ Need the Stripe test key.
 
 ## Report
 
+### Summary                <- 3 to 5 bullets: what was done, the check's result, what to decide
+
+- Added the save check for required fields.
+- The tests pass.
+- Decide whether an empty name is an error.
+
+### Details                <- per-file changes, commands and results, what was not done
+
 What changed, how it was verified, what was not done.
 
 ## Please review
@@ -72,6 +150,20 @@ Exact files, decisions, and risks to check.
   - Check: ...
   - Explain yourself: ...
 ```
+
+Report は、人が判断に要る結論を先に置くため、`### Summary`(要点)と `### Details`(詳細)の 2 つに分けます。
+
+- 要点: 3〜5 行の箇条書き。何をしたか(結論)、確かめた結果を 1 行、人に判断してほしいことがあればその 1 行。
+  コマンド、コミットのハッシュ、行番号は入れません
+- 詳細: 変えたファイルごとの説明、実行したコマンドと結果、やっていないこと。人のコメントへの `Comments:` の
+  箇条書き([人のコメント](#人のコメント))もここに書きます
+- research タスクでは、要点に調べた結論(Goal の問いへの答え)を、詳細に調べたことと根拠を書きます
+- `## Blocked` の 1 行も同じ考えで、人に求めること(決めてほしいこと、鍵、権限)とその理由だけを書き、
+  試したことは Report の詳細に回します
+
+区切りは `##` より下の `###` 見出しなので、task-hub が読み取る `##` の見出しは変わらず、PR の本文と Issue の
+コメントにはどちらもそのまま載ります。research タスクの digest の `report`([operations.md](operations.md#判断用の要点digest))
+と通知には、要点だけが出ます。
 
 Please review の最後の項目は、人がコードを自分で探して理解するための学習ルート(Learning route)です。
 変えた中でいちばん大事な動きについて、次の 6 行を 1 つの項目の下に字下げして書きます。
@@ -138,6 +230,33 @@ Decision: answered
 
 最新の `answered` のコメントは、次の実行のプロンプトに「Replanner notes」として入ります。
 
+## 人のコメント
+
+再実行(Blocked や In review のカードを Ready に戻す、`task start`)のとき、task-hub は前回の実行より後に人が書いた
+次のコメントを、プロンプトの最後に「Comments since the earlier run」として古い順に入れます。
+
+| どこの | 何を | 添えるもの |
+|---|---|---|
+| Issue | コメント | 書いた人、日時 |
+| タスクの PR | 会話のコメント | 書いた人、日時 |
+| タスクの PR | レビューの本文(送信済みのものだけ。本文が空のレビューは除く) | 判定(`changes requested` など)、書いた人、日時 |
+| タスクの PR | 行へのコメント | ファイルと行(`lines 10-12` のような範囲、行が変わったあとは前の版の行と `outdated`)、書いた人、日時 |
+
+- 「前回の実行」は、このマシンでの前回の開始の時刻(`runs/<番号>.json` の `started`)です。記録がなければ(別のマシンで
+  実行した)、Issue の最後のレポートのコメントの時刻です。どちらもなければ(初めての実行)コメントは渡しません。
+  タスクの PR は、手元の記録の PR だけを見ます
+- task-hub 自身のコメント(`<!-- task-hub` で始まるもの: レポート、仕分け、つなぎ先)と bot のコメント(GitHub の
+  ユーザーの種類が Bot、または名前が `[bot]` で終わる)は入れません
+- エージェントは、コメントを Goal への追加の指示として扱い、レポートの Report の詳細(`### Details`)の中に `Comments:` で始まる箇条書きで、
+  コメントごとに何をしたか、しなかったならその理由を書きます([worker/PROMPT.md](../worker/PROMPT.md) の最後の部分)
+- reviewer にも同じコメントが Goal のすぐ後に渡り、受け入れ条件と同じように 1 つずつ確かめます
+  ([worker/REVIEW.md](../worker/REVIEW.md) の最後の部分)。渡したコメントは `~/.local/share/task-hub/prompts/<番号>-comments.md`
+  に残ります
+- 渡すコメントがなければ、プロンプトは今までと同じです(指示書の最後の部分も入りません)
+- コメントはどこにも写さず、Goal も書き換えません
+- 読むのは REST API で、再実行のたびに Issue のコメント 1 回、PR があれば会話のコメント、レビュー、行へのコメントの
+  3 回です。コメントは前回の実行より後に変わったものの、レビューは全部の、それぞれ最初の 100 件までを見ます
+
 ## 実行終了時の処理
 
 task-hub は worktree の中で git が無視しないファイルをすべてコミットします。`.task-report.md`、`.task-review.md`、
@@ -145,12 +264,13 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 書きます。すでに追跡されているファイルには影響しません)。
 
 `[runner] reviewer` が設定されている場合、task-hub は PR を作る前に reviewer を実行します。reviewer が
-`needs changes` と判定したら、実装エージェントに 1 回だけ自動で差し戻します。2 回目も通らない場合は Blocked になります。
+`needs changes` と判定したら、実装エージェントに自動で差し戻します。流れは次の「自動レビューの差し戻し」にあります。
 
 | エージェントの結果 | task-hub の処理 | カードの列 |
 |---|---|---|
 | レポートあり、ファイル変更あり、レビュー通過または reviewer なし | コミットし、`task/<番号>` を push し、レビュー可能な PR を作成、レポートをコメント | In review |
-| reviewer が 2 回目も `needs changes`、または `blocked`、判定なし、ファイルを変更した(変更は取り消します) | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント | Blocked |
+| reviewer の指摘が minor(`Known issues`)だけ | 通過と同じ。指摘は PR とコメントの「Known issues」に残す | In review |
+| 差し戻しを止めたあとも `needs changes`、または `blocked`、判定なし、ファイルを変更した(変更は取り消します) | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レビュー結果をコメント。`needs changes` で止めたときは「Suggested instructions」(次の実行への修正指示の下書き)も書く | Blocked |
 | `## Blocked` を含むレポート | 現状をコミットして push し、理由を付けた**ドラフト** PR を作成、レポートをコメント | Blocked |
 | レポートなし、ファイル変更あり | push し、ドラフト PR を作成("agent exited without a report") | Blocked |
 | レポートなし、変更なし(クラッシュ) | push せず、PR も作成しない。理由をコメント | Blocked |
@@ -158,6 +278,39 @@ Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたフ�
 
 再実行(Blocked のカードを Ready に戻す、または `task start`)は同じブランチで作業を続け、同じ PR を更新します。
 最新の実行で使われたプロンプトそのものは `~/.local/share/task-hub/prompts/<番号>.md` に保存されます。
+
+### 自動レビューの差し戻し
+
+reviewer は指摘を 2 つに分けます([worker/REVIEW.md](../worker/REVIEW.md))。
+
+| 種類 | 書く場所 | 扱い |
+|---|---|---|
+| blocking | `## Please fix` | 受け入れ条件を満たさない、使う人やリポジトリの決まりが頼っているものを壊す。差し戻す |
+| minor | `## Known issues` | 本物だが、マージしてよい(Goal の外の端の場合、動くもののテストがない、別のタスクにすべきもの)。差し戻さない |
+
+blocking がなく minor だけなら、レビューは通過です。判定が `needs changes` でも、`Please fix` が空で `Known issues`
+だけなら通過として扱います。カードは In review に進み、minor の指摘は PR の本文と Issue のコメントの
+「Known issues」に残ります。[オートパイロット](autopilot.md)の対象なら、この PR もマージキューに入ります。
+
+`needs changes` で差し戻す回数は `[runner] review_retries` で決めます。既定は 2 回、0 にすると差し戻しません。
+次のどれかに当たると、回数が残っていても差し戻しをやめて Blocked にします。
+
+| 止まる条件 | 理由の行(Blocked の 1 行目) |
+|---|---|
+| 差し戻した指摘がまた出た(reviewer が `(again)` を付けたか、同じ文の指摘) | `automated review stopped after ...: a finding came back after the retry it was sent back with` |
+| 最後の差し戻しで、ファイルが何も変わらなかった | `automated review stopped after ...: the last retry changed no files` |
+| 差し戻しの変更が、前の差し戻しより小さくならない(変えた行数。足した行と消した行の和) | `automated review stopped after ...: the retries' changes are not getting smaller (<前> then <今> changed lines)` |
+| 差し戻しの回数を使い切った | `automated review did not pass after <回数> retries` |
+
+2 回目からのレビューには、それまでに差し戻した指摘を渡します。reviewer は直っていないものを同じ文で `(again)`
+を付けて書き直します。task-hub は、印のある指摘と、空白や大文字小文字、Markdown の飾りを除いて同じ文の指摘を、
+「また出た」と数えます。
+
+`needs changes` のまま止まったときは、Issue のレポートと PR の本文の自動レビューの節のあとに `## Suggested instructions` を書きます。
+最後のレビューの blocking の指摘を番号付きで並べ、また出たものには印を付けた、次の実行への修正指示の下書きです。
+人は中身を確かめて Ready に戻すだけで済みます。次の実行は前回のレポートを読むので、この下書きも受け取り、
+Goal やその後のコメントと食い違わない限りそれに従います。直したいときは、そのコメントを編集するか、コメントを足します。
+reviewer が `blocked`(人にしか出せない情報が要る)と判定したときは、下書きを書きません。
 
 ## PR
 

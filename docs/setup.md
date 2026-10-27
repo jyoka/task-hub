@@ -74,7 +74,7 @@ task update
 同じ日の 2 回目からはネットワークに行きません。つながらない、5 秒で答えがないときは何も出さずに、1 時間後に確かめ直します。
 確かめたくないときは、環境変数 `TASK_NO_UPDATE_NOTIFIER=1` で止められます。
 
-task-hub 自体を開発するときは、別の場所に clone して、そこでテストを実行します(`python3 tests/run.py`、[CONTRIBUTING.md](../CONTRIBUTING.md#テスト))。
+task-hub 自体を開発するときは、別の場所に clone します。手元では関係する短いテストだけを動かし、全部は GitHub Actions の `macos` で確かめます([CONTRIBUTING.md](../CONTRIBUTING.md#テスト))。
 
 ## GitHub 側の準備(1 回だけ)
 
@@ -115,7 +115,8 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    ```
 
    `reviewer` を空にするか省略すると、自動レビューは行いません。有効にすると、エージェントの作業後、PR を出す前に
-   reviewer が差分を読み、必要なら 1 回だけ実装エージェントに差し戻します。
+   reviewer が差分を読み、必要なら実装エージェントに差し戻します。回数は `review_retries` で決め、既定は 2 回です
+   (止まる条件は [task-format.md](task-format.md#自動レビューの差し戻し))。
 
    テストに API キーなどが要るリポジトリは、`[env]` に書いたファイルを実行のたびに worktree のルートへコピーできます
    (task-hub は自分用の clone で作業するので、手元のチェックアウトの `.env` はそのままでは届きません):
@@ -149,12 +150,12 @@ task-hub 自体を開発するときは、別の場所に clone して、そこ�
    コピーしたファイルはコミットしません。ファイルがない、またはリポジトリで追跡されている名前のときは、開始せずに
    Blocked にします。書いたリポジトリのエージェントは、そのキーで実際に API を呼べる(費用が出る)ことに注意してください。
 
-   In review や Blocked などの出来事は、herdr か macOS の通知で知らせます(LLM は使いません)。止めたいとき、
-   出来事を絞りたいときは `[notify]` に書きます([docs/operations.md](operations.md#通知llm-なし)):
+   In review や Blocked などの出来事は、herdr か OS の通知で知らせます(LLM は使いません)。止めたいとき、
+   出来事を絞りたいとき、スマートフォンにも届けたい(`ntfy`)ときは `[notify]` に書きます([docs/operations.md](operations.md#通知llm-なし)):
 
    ```ini
    [notify]
-   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update。空にすると通知しない
+   events = In review, Blocked   ; 既定は In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget。空にすると通知しない
    ```
 
    IDE でタスクの worktree を開きたいときは、`[ide]` に開くコマンドを書きます。`task open <番号>` がそのタスクの
@@ -416,6 +417,67 @@ plist を書き換えたら、`bootout` してから `bootstrap` し直すと確
 「見え方と、手元に残るもの」と [operations.md](operations.md#実行の様子を見る) を参照)。通知は、実行が
 終わったプロセス自身が出します。herdr が動いていれば herdr の通知、動いていなければ macOS の通知
 (`osascript`)になるので、launchd から動かしていても In review や Blocked は届きます([operations.md](operations.md#通知llm-なし))。
+
+## スマートフォンから登録する(`task intake`)
+
+外出先からスマートフォンで送った文を Backlog のカードにするには、`task intake` を常駐させます。文の形と安全のための
+決まりは [operations.md](operations.md#スマートフォンからカードを作るtask-intake) にあります。
+
+1. スマートフォンに ntfy アプリを入れ、`[notify] ntfy` の通知のトピックを購読します(返事がここに届きます)
+2. `config.ini` に `[intake]` を足します。合言葉は `python3 -c "import secrets; print(secrets.token_urlsafe(16))"` で
+   作ります:
+
+   ```ini
+   [intake]
+   topic = <登録のトピック。通知とは別の、推測されにくい名前>
+   secret = <合言葉>
+   repo = <owner>/<よく使うリポジトリ>   ; 任意
+   ```
+
+3. ntfy アプリで登録のトピックも購読(または「送る」だけ)できるようにし、`<合言葉> 試しに README の誤字を直す` を
+   送ります。ターミナルで `task intake` を動かしておくと、`intake: #<番号> Backlog in ...` と出て、通知のトピックに
+   リンクが返ります。Ctrl-C で止めます
+
+### systemd で常駐させる(Linux)
+
+Linux では systemd のユーザーのサービスにします。ログインしている間ずっと動き、落ちても立ち上げ直します。
+`task watch` も同じ形で常駐させられます(`ExecStart` を `task watch`、ログの名前を `watch` にするだけです)。
+
+`~/.config/systemd/user/task-hub-intake.service`:
+
+```ini
+# task-hub: cards from the phone (docs/operations.md)
+[Unit]
+Description=task-hub intake (Backlog cards from an ntfy topic)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/task intake
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=%h
+Restart=always
+RestartSec=30
+StandardOutput=append:%h/.local/state/task-hub/intake.out.log
+StandardError=append:%h/.local/state/task-hub/intake.err.log
+
+[Install]
+WantedBy=default.target
+```
+
+- `PATH` には `task` と `gh` の場所を入れます(登録に `gh` を使います)。mise などで入れたなら、そのディレクトリも足します
+- `%h` は自分のホームディレクトリです。ログの `~/.local/state/task-hub/` は `task` が使うので、通常はすでにあります
+
+```
+systemctl --user daemon-reload
+systemctl --user enable --now task-hub-intake   # 登録して起動する
+systemctl --user status task-hub-intake         # 動いているか
+tail -f ~/.local/state/task-hub/intake.out.log  # 受け取った文と、捨てた文の記録
+systemctl --user restart task-hub-intake        # config.ini を変えたあと、task update のあと
+systemctl --user disable --now task-hub-intake  # 止めて登録も外す
+```
+
+ログアウトしている間も動かすなら `loginctl enable-linger $USER` を 1 回実行します。`task update` は systemd の
+サービスを再起動しないので、更新したら `systemctl --user restart task-hub-intake` を実行します。
 
 ## 初回の実行
 

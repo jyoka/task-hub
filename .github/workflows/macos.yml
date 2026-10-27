@@ -1,19 +1,81 @@
-# task-hub on macOS: task update and its notice (tests/test_task.py, -k update), on every push.
-# The rest of the Mac tests are run by hand (python3 tests/run.py, CONTRIBUTING.md)
+# The full macOS suite runs on GitHub-hosted machines, not the developer's Mac.
 name: macos
 on:
-  push:  # every branch: a PR's branch is pushed here too
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash  # includes pipefail, so tee never hides a test failure
+concurrency:
+  group: macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  update:
+  test:
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # installer/update tests clone this checkout and compare release refs
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: |
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+      - name: Git identity for isolated test repositories
+        run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      - run: python -m unittest -k update -k installers_clone tests.test_task -v
+      - name: Rust tests and TUI binary
+        run: |
+          mkdir -p evidence
+          cargo test --manifest-path rust/Cargo.toml --locked 2>&1 | tee evidence/rust.log
+          cargo build --manifest-path rust/Cargo.toml --locked
+      # before the Python suite, whose test_durable_runner_* run it under task-hub once it is installed and built
+      - name: Durable runner (experiment)
+        working-directory: durable
+        run: |
+          npm ci --ignore-scripts
+          npm test 2>&1 | tee ../evidence/durable.log
+      - name: Full Python suite, including CLI and PTY integration tests
+        run: python3 tests/run.py 2>&1 | tee evidence/python.log
+      - name: Kiro board extension
+        working-directory: kiro/board-extension
+        run: npm test 2>&1 | tee ../../evidence/extension.log
+      - name: Python lint and whitespace
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python3 -m pip install ruff
+          ruff check --select E9,F63,F7,F82 bin/task tests
+          base="$CI_DIFF_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          git diff --check "$base" HEAD
+      - name: Test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-evidence
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: warn

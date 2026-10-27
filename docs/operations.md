@@ -40,7 +40,7 @@
   `== kiro ended with an error: ...`、`== claude ended with ...` の行に出ます。
 - **段階**: `task list` の status 列と `task show <番号>` の `status:` は、実行が生きている間、今の段階を
   `In progress › review` のように付けて出します。段階は `preparing`(worktree とタブの準備)、`setup`、`agent`、
-  `review`、`retry`(差し戻しを受けた 2 回目)、`finishing`(push、PR、コメント)、`replanning` です
+  `review`、`retry`(差し戻しを受けた実装エージェント)、`finishing`(push、PR、コメント)、`replanning` です
   (詳しくは [design.md](design.md) の「In progress の段階」)。`Blocked › replanning` は、カードはもう Blocked でも
   replanner がまだ動いているという意味です。段階は手元の `runs/<番号>.json` の `stage` にだけあり、GitHub のボードと
   `events.jsonl` には出ません。実行が終わると何も付かなくなります。
@@ -130,7 +130,8 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow` です。`reason`(Blocked の 1 行、`slow` では
+`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、
+`merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
 GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
@@ -151,8 +152,8 @@ In review、Blocked、replan のイベントには、人が判断するための
 |---|---|---|
 | `verdict` | 自動レビューがあるとき | 自動レビューの判定(`pass`、`needs changes`、`blocked`) |
 | `reason` | Blocked | 止まった理由の 1 行 |
+| `report` | PR のない In review(research タスク) | Report の要点(`### Summary` の箇条書きを 1 行にしたもの。要点のない古いレポートは、最初の `###` 見出しより前) |
 | `review` | レポートに Please review があるとき | 項目を最大 3 つ。多いときは `(+N more)` を足す |
-| `report` | PR のない In review(research タスク) | Report の頭 |
 | `decision` | replan | replanner の判定(`answered`、`human`、`goal-conflict`) |
 | `question` / `answer` / `goal_change` | replan | 人への質問、replanner の答え、Goal の変更案 |
 | `pr` | PR があるとき | PR の URL |
@@ -175,10 +176,13 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 だけで、LLM も GitHub も使いません。知らせを受けるために `/chief` を開いておく必要はありません。
 
 - 見出し: `#<番号> <出来事>: <タイトル>`(例: `#41 In review: 保存できる項目に…`)
-- 本文: 要点を `verdict: pass`、`reason: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
+- 本文: 要点を `verdict: pass`、`reason: ...`、`report: ...`、`review: ...`、`decision: human`、`question: ...` のように 1 行ずつ。
   最後の行が PR の URL(あれば)
 - 出し方: herdr が動いていれば `herdr notification show`(Blocked と replan は `--sound request`、ほかは
-  `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)。どちらもなければ出しません
+  `--sound done`)。herdr がなければ macOS の通知(`osascript` の `display notification`)、Windows のトースト、
+  Linux の `notify-send`(Blocked と replan は `--urgency critical`)の順で、このマシンにあるもの。どれもなければ出しません
+- スマートフォンへ: `[notify] ntfy` を書くと、上のこのマシンの通知に**加えて**、同じ見出しと本文を
+  [ntfy](https://ntfy.sh) のトピックにも送ります(下記)
 
 通知はイベントを書いたプロセス(実行中の `task _run`、`task watch`、`task`、`task start` など)がそのまま出します。
 見張り役のプロセスを別に動かす必要はなく、`task watch` を止めていても、実行が終わった瞬間に届きます。通知のコマンドは
@@ -193,17 +197,273 @@ task-hub は出来事を書くその場で、同じ内容を通知として出�
 
 ```ini
 [notify]
-events = In review, Blocked, replan, Done, slow, update   ; 既定。列の名前か replan、slow、update をカンマ区切りで。空にすると通知しない
+events = In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget   ; 既定。列の名前か replan、slow、over budget、update、マージキューの出来事をカンマ区切りで。空にすると通知しない
+ntfy = https://ntfy.sh/<トピック>   ; 既定は空(送らない)。自分の ntfy サーバーなら https://<サーバー>/<トピック>
+ntfy_token = tk_...                ; 任意。アクセス制御のあるトピックのトークン(Authorization: Bearer で送る)
 ```
 
 通知は、このマシンで task-hub が書いた出来事だけです(events.jsonl と同じ)。macOS で通知が見えないときは、
 システム設定の「通知」で、herdr または「スクリプトエディタ」(osascript の通知はこの名前で出ます)が許可されて
 いるか確かめます。
 
+Blocked や In review を席にいないときにも知るための方法(ntfy、GitHub の通知メールなど)を比べた結果は
+[notifications.md](notifications.md) にあります。
+
+#### スマートフォンに届ける(ntfy)
+
+`ntfy` を書くと、`events` に入っている出来事を ntfy のトピックにも送ります。スマートフォンの ntfy アプリで
+そのトピックを購読しておけば、席を離れていても届きます。このマシンの通知(herdr、macOS など)はそのまま出ます。
+
+- 送り方: ntfy の JSON での送信(サーバーの URL に POST し、トピックは本文に入れる)。見出しに日本語が入っても
+  そのまま届きます。使うのは Python 標準ライブラリの `urllib` だけです
+- 優先度: Blocked と replan は高(4)、ほかは既定(3)
+- タップしたときに開く URL: PR があれば PR、なければ Issue(`[board] issues` から作ります)。`update` には付けません
+- ボタン: `task intake` を設定していれば、実行が終わって In review になった通知に Merge、Reject、View PR の
+  ボタンが付きます([スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
+- 値が空、または `<サーバー>/<トピック>` の形でないときは送りません(それまでと同じ動き)
+
+送るのも、通知のコマンドと同じく切り離した別のプロセス(`python -I -c`、待つのは 10 秒まで)です。サーバーが
+落ちている、名前が引けない、つながったまま答えない、のどれでも、`task _run`、`task watch`、ほかのコマンドは
+待たずにそのまま続きます(その通知が届かないだけで、エラーも出しません)。トピックの名前は知っている人なら
+誰でも購読できるので、ntfy.sh を使うときは推測されにくい名前にするか、トークンで守ります。
+
+## スマートフォンからカードを作る(`task intake`)
+
+`task intake` は ntfy のトピックを購読し続け、スマートフォンから送った文を Backlog のカードにします。カードを
+作ったら、`[notify] ntfy` のトピックにカードの番号とリンクを返します。LLM は使いません。常駐のさせ方(Linux の
+systemd)は [setup.md](setup.md#スマートフォンから登録するtask-intake) にあります。
+
+```ini
+[notify]
+ntfy = https://ntfy.sh/<通知のトピック>   ; 必須。サーバー、トークン、返事の送り先をここから使う
+ntfy_token = tk_...                       ; 任意。購読にも使う
+
+[intake]
+topic = <登録のトピック>   ; 必須。[notify] ntfy と同じサーバーの、通知とは別のトピック(推測されにくい名前に)
+secret = <合言葉>          ; 必須。16 文字以上、空白なし。python3 -c "import secrets; print(secrets.token_urlsafe(16))"
+repo = owner/name          ; 任意。文に owner/name: がないときの作業先(Target repo)
+```
+
+### 送る文の形
+
+ntfy アプリで登録のトピックを開き、次の形で送ります:
+
+```
+<合言葉> owner/name: ログイン画面のボタンを直す
+スマートフォンで下のフッターに重なる。
+```
+
+| 部分 | 意味 |
+|---|---|
+| 1 語目 | 合言葉(`[intake] secret`)。完全に同じでなければ、その文は捨てる |
+| `owner/name:`(任意) | 作業先のリポジトリ。なければ `[intake] repo`。どちらもなければ登録しない |
+| 残り全部 | Goal(Issue の本文)。最後に「From the phone (`task intake`, ntfy message <id>, <時刻>).」を足す。合言葉は本文に入れない |
+| タイトル | ntfy アプリの見出し(Title)を書けばそれ。なければ Goal の 1 行目(72 文字まで。長ければ語の切れ目で `...`) |
+
+`owner/name:` は 2 語目が `<英数字と . _ ->/<同じ>:` の形のときだけ作業先と見なします(`fix http://...:` は Goal の
+一部です)。リポジトリがあるかは登録のときには確かめず、始めたときに clone できなければ Blocked になります。返事の
+`repo:` を見て、違っていればカードの Target repo 欄を直します。
+
+### 安全のための決まり
+
+- カードは必ず **Backlog** に作ります。Ready には動かしません。始めるのは、あなたがボードで Ready に移すか
+  `task start <番号>` を実行したときだけです
+- 公開の ntfy.sh のトピックは、名前を知っていれば誰でも読み書きできます。合言葉のない文、違う文は、
+  ログに `intake: ignored: no secret (message <id>, <文字数> chars)` や `ignored: wrong secret` と 1 行書くだけで、
+  カードも返事も作りません(本文はログに残しません)
+- 合言葉は送った文としてトピックに残り、購読できる人には読めます。トピックの名前も推測されにくくするか、
+  アクセス制御のある自分の ntfy サーバー(`ntfy_token`)を使います。漏れたと思ったら `secret` を変えて再起動します
+- `[intake] topic` は `[notify] ntfy` のトピックと同じにできません(返事を自分で読まないため)
+
+### 返事と記録
+
+| こんなとき | ntfy への返事(`[notify] ntfy` のトピック) | ログの 1 行 |
+|---|---|---|
+| 登録した | `#<番号> Backlog: <タイトル>`、本文に `repo:` と `task start <番号>`。タップで Issue が開く | `intake: #<番号> Backlog in <repo>: ...` |
+| Goal が空、作業先がない | `task intake: not registered`(理由つき、優先度 4) | `intake: rejected: ...` |
+| GitHub に登録できなかった | 同上(`GitHub: ...`) | `intake: error: ...` |
+| 合言葉がない、違う | なし | `intake: ignored: ...` |
+
+返事は `[notify] events` に関係なく送ります(送った人が待っているため)。送り方は通知と同じ、切り離した別のプロセスです。
+
+### つながりと取りこぼし
+
+- ntfy の JSON の購読(`GET <サーバー>/<topic>/json?since=...`)を開いたままにします。120 秒何も来なければ
+  切れたと見なしてつなぎ直します(ntfy は 45 秒ごとに keepalive を送ります)
+- サーバーが落ちている、トークンが違う(`HTTPError: HTTP Error 403`)などは、`intake: ... connecting again in 5s` と
+  記録して待ちます。待つ時間は失敗が続くたびに倍にし、300 秒までです
+- 扱った最後の文の id を `~/.local/state/task-hub/intake.json` に書き、つなぎ直しや再起動のあとはその次の文から
+  受け取ります(ntfy.sh が文を持っている 12 時間のうち)。初めて起動したときは、起動したあとの文だけです
+- 1 つの文からカードを 2 枚作らないよう、id はカードを作る前に書きます。GitHub の失敗で登録できなかった文は
+  もう一度は試さないので、送り直します
+
+## スマートフォンから PR を承認する(ボタン)
+
+`task intake` を設定していると、実行が終わって In review になったときの ntfy の通知に、ボタンが 3 つ付きます。
+外出先でも、通知を 1 回タップするだけでマージキューに入れたり、PR を閉じたりできます。LLM は使いません。
+
+| ボタン | すること | 付くとき |
+|---|---|---|
+| Merge | その PR をマージキューに入れる(`task merge <番号>` と同じ) | `[merge] queue = on` のときだけ |
+| Reject | PR を閉じ、カードを Blocked にする(下記) | いつも |
+| View PR | PR をブラウザで開く(task-hub には何も送らない) | いつも |
+
+Merge と Reject は、ntfy アプリが `[intake] topic` に 1 行の文を送るボタンです(ntfy の `http` アクション)。
+`task intake` がそれを受け取り、確かめてから実行し、`[notify] ntfy` のトピックに結果を返します。設定は
+`task intake` と同じで、増えるものはありません。`task intake` を設定していない(`[intake] topic` か `secret` が
+正しくない)ときは、ボタンは付かず、今までの通知のままです。
+
+ボタンが付くのは、`task _run` が push して In review にした通知だけです(`task merge --cancel` で In review に
+戻したときの通知などには付きません)。
+
+### Reject のあと
+
+Reject は PR を閉じ(`gh pr close`、「Rejected from the phone」のコメントつき)、マージキューに入っていれば外し、
+Issue に「Rejected」のコメントを書いて、カードを **Blocked**(`rejected from the phone: the PR was closed`)にします。
+Done にしないのは、Reject は「この PR は要らない」であって、タスクが済んだかは分からないからです。Issue も
+ブランチも残るので、あとで次のどちらかを選びます。
+
+- 直してほしいことを Issue にコメントしてから `task start <番号>` で再実行する(同じブランチで続け、新しい PR を開きます)
+- やめるなら `task done <番号>`
+
+In review、wait for merge、Blocked 以外のカード、実行中のカードには Reject は効きません(理由を返します)。
+
+### 安全の仕組み
+
+ボタンの文は、公開の ntfy.sh なら名前を知っている人が誰でも送れるトピックに届きます。そこで、ボタンごとに
+使い捨てのトークンを付け、`task intake` が確かめてから動きます。
+
+- ボタンの文は `task-hub <merge|reject> <カードの番号> <owner/name>#<PR の番号> <PR の先頭のコミット> <トークン>` です。
+  トークンは、これらの値(する事、カード、リポジトリ、PR、コミット)の HMAC-SHA256 の先頭 32 文字です
+- HMAC の鍵は、このマシンだけにある `~/.local/state/task-hub/action.key` です(初めて要るときに作る。0600。
+  どこにも送りません)。`[intake] secret`(合言葉)は通知に入れません。鍵を消すと、それまでのボタンはすべて効かなくなります
+- トークンは 1 つのカード、1 つの PR、1 つのコミット、1 つの操作にしか合いません。Merge のトークンで Reject はできず、
+  別の PR にも使えません
+- **古いコミット**: `task intake` はボタンを受けると `gh pr view` で PR の今の先頭のコミットを読み、トークンのものと
+  違えば断ります。PR に新しい push があれば(競合の修正、再実行、手での push)、その前の通知のボタンでは承認できません。
+  最新のコミットを見たうえで、`task merge <番号>` で入れます
+- **使い捨て**: 実行したトークンは `~/.local/state/task-hub/intake-actions.json` に記録し、同じボタンを 2 度押しても
+  2 回目は断ります(新しい順に 2000 個まで覚えます)。断ったとき(古い、閉じた PR など)や GitHub の失敗では記録しないので、
+  理由を直せば同じボタンをもう一度押せます
+- **偽物**: トークンが合わない文、ボタンの形でない文は、ログに 1 行書くだけで、何もせず、返事もしません
+  (合言葉の違う文と同じく、外から確かめられないように)
+- ボタンが送る先は `[intake] topic` です。サーバーがトークンを求めるとき(`[notify] ntfy_token`)は、ボタンが
+  `Authorization` ヘッダーにそのトークンを持ちます。通知のトピックを読める人にはそのトークンも見えるので、
+  `ntfy_token` は通知と登録の 2 つのトピックにだけ使えるものにします。トークンが漏れても、ボタンの HMAC の鍵は
+  漏れないので、勝手にマージや Reject はできません
+- Merge は承認するだけです。マージするのは、チェックが通ったあとのマージキューです(`--match-head-commit` で、
+  チェックを通ったコミットに限ります)
+
+### 返事と記録
+
+| こんなとき | ntfy への返事(`[notify] ntfy` のトピック) | ログの 1 行 |
+|---|---|---|
+| Merge した | `#<番号> PR queued: <タイトル>`、本文にキューの位置 | `intake: queued <PR> at position <n>: merge #<番号> (...)` |
+| もうキューにある | `#<番号> already queued: <タイトル>` | `intake: already queued: ...` |
+| Reject した | `#<番号> rejected: <タイトル>` | `intake: closed <PR>, the card is Blocked: reject #<番号> (...)` |
+| 使ったボタン、古いコミット、閉じた PR、キューがオフ、カードがない、など | `#<番号> merge refused`(または `reject refused`)、本文に理由(優先度 4) | `intake: refused: <理由>: ...` |
+| GitHub の失敗 | 同上(`GitHub: ...`) | `intake: error: ...` |
+| トークンが合わない、ボタンの形でない | なし | `intake: refused: forged token: ...`、`intake: refused: not a button's message ...` |
+
+ログの 1 行には、する事、カード、PR、コミットの先頭 7 文字、ntfy の文の id が入ります。トークンは書きません。
+
+## マージキュー
+
+いくつものタスクを並べて動かすと、1 つの PR がマージされるたびに残りの PR が古くなり、main と競合します。
+`[merge] queue = on` にすると、あなたが承認した PR を `task watch` が 1 つずつ base に追いつかせ、競合はエージェントに
+解かせ、チェックが通ったらマージします。既定はオフで、オフのときは今までと何も変わりません(wait for merge の列も、
+人がマージするまで待つだけの列のままです)。
+
+```ini
+[merge]
+queue = on          ; 既定は off。キューを動かす
+prefix = off        ; on: キューに入れていない In review の PR も、競合したら承認の前に解いておく(マージはしない)
+checks = all        ; all(既定): PR のチェックをすべて待つ。required: ブランチの保護で必須のものだけ
+ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
+```
+
+### キューに入れる
+
+キューに入るのは、あなたが承認した PR だけです。入れ方は 2 つです。
+
+- `task merge <番号>`: In review(または wait for merge、Blocked)のカードの PR をキューの最後に入れます。ボードに
+  wait for merge の列があればカードをそこに動かし、なければ In review のままです。Blocked のカードを直したあとに
+  入れ直すときも同じです
+- カードを wait for merge の列に動かす(GitHub の画面やスマートフォンで): 次の確認でキューの最後に入ります(動かした順)
+- In review の通知の Merge ボタンを押す(`task intake` が要ります。[スマートフォンから PR を承認する](#スマートフォンから-pr-を承認するボタン))
+- `[autopilot]` に書いたリポジトリでは、自動レビューが `pass` の In review の PR を、task-hub があなたの代わりに入れます
+  ([autopilot.md](autopilot.md))
+
+`task merge` は今のキューを、`task merge <番号> --cancel` はキューから外します(wait for merge のカードは In review に
+戻します)。カードを wait for merge(列がなければ In review)から別の列に動かしても外れます。
+
+### 1 つずつ進める
+
+`task watch`(と `task`)は、確認のたびにリポジトリごとにキューの先頭の PR だけを 1 段進めます。1 つがマージされると、
+次の PR が取り込む base が変わるからです。
+
+1. PR のブランチに今の base をマージします(`git merge origin/<base>`。2 つの親を持つ本当のマージコミット)。
+   きれいに入れば push します。もう追いついていれば何もしません。push が失敗したら、マージコミットを worktree に
+   残したまま(捨てません)理由を付けて Blocked にします。直してから入れ直すと、残したコミットを push します
+2. 競合したら、タスクの worktree(PR のブランチ)でエージェントに解かせます(`task _fix`、[worker/CONFLICT.md](../worker/CONFLICT.md))。
+   手で登録していた「競合を解く」タスクと同じ手順です: 両方の機能を残し、両方が足した番号付きの一覧(設計の決定事項など)は
+   base の番号を残してこちらの番号を付け直します。エージェントはファイルを直してレポートを書くだけで、マージコミットと
+   push は task-hub が行います(push が失敗したときは 1 と同じく、マージコミットを残して Blocked)。解けなかったら(エージェントが `## Blocked` を書いた、競合の印が残った、エージェントが
+   自分でコミットや中止をした)、マージを取り消してカードを Blocked にします
+3. PR のチェックを待ちます(`gh pr checks`)。落ちたら、そのチェックのリンクを付けて Blocked にします。PR の最後の
+   コミットから 2 分たつまでは、チェックがまだ 1 つも出ていなくても、出てくるのを待ちます。`checks = required` なら
+   必須のチェックだけを見ます。必須でないチェックが動いている、または落ちていても待たず、止めません
+4. `gh pr view --json mergeable,mergeStateStatus` が `CLEAN`(`checks = required` なら、必須でないチェックが通っていない
+   ときの `UNSTABLE` も)なら、チェックが通ったコミットのまま
+   (`--match-head-commit`)`gh pr merge --merge` でマージし、カードを Done にして、次の PR に進みます。
+   その間に base が進んでいれば(`BEHIND`、`DIRTY`)、1 に戻ります
+
+競合を解いている間も、カードは wait for merge(または In review)のままです。`task list` には
+`wait for merge › conflict-fix` と出て、`task log <番号>` に経過が残ります。Blocked にしたときは、理由を
+`merge queue: ...` で始まる 1 行にして、Issue に `<!-- task-hub merge -->` のコメントを書きます(タスクのレポートではないので、
+再実行のプロンプトには入りません)。直したら `task merge <番号>` でもう一度入れます。
+
+### 承認していない PR の競合
+
+キューに入れていない In review の PR が base と競合したら、`conflict` の出来事を 1 回書いて通知します(PR のコミットごとに
+1 回)。毎分すでに読んでいるマージの確認(REST)の `mergeable_state` を見るだけなので、GitHub の呼び出しは増えません。
+`[merge] prefix = on` なら、そのまま競合を解いて push しておきます(カードは In review のまま。マージはしません)。
+
+### 出来事
+
+| `event` | いつ | `reason` |
+|---|---|---|
+| `queued` | キューに入った | キューの何番目か |
+| `updated` | base をマージして push した(競合を解いたときも) | 何をどこにマージしたか、解いたファイル |
+| `conflict-fix` | 競合を解くエージェントを始めた | 競合したファイル |
+| `ci-wait` | チェックを待ち始めた(コミットごとに 1 回) | 待っているチェック |
+| `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
+| `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
+| `conflict` | キューにない In review の PR が競合した | 競合した base |
+
+どれも `task events`、`/chief`(`--only` に足したもの)、ntfy(`[notify] events` に足したもの)から見えます。通知の既定には
+`conflict` と(いつもの)`Blocked`、`Done` が入っています。
+
+### 止まったとき
+
+| 理由(`merge queue: ...`) | 対処 |
+|---|---|
+| `the conflict fixer could not resolve them: ...` | エージェントが人の判断を求めました。手で解くか、Goal に答えを書いて Ready に戻し、終わったら `task merge` |
+| `conflict markers are left in ...`、`the conflict fixer ended the merge itself ...`、`the conflict fix did not resolve the conflicts ...` | 解けませんでした(マージは取り消してあります)。`task log <番号>` を読み、手で解いて push してから `task merge` |
+| `check <名前> failed: <リンク>` | リンクのチェックを直します。PR に push すれば、`task merge` でまた入れられます |
+| `its checks did not finish in N min: ...` | チェックが止まっていないか確かめます。長いなら `[merge] ci_minutes` を延ばします |
+| `GitHub does not allow the merge (BLOCKED: ...)` | 必須のレビューやブランチのルールが足りません。満たしてから `task merge` |
+| `its PR was closed without merging`、`its PR is a draft` | PR を開き直す、または Ready for review にしてから `task merge` |
+
+チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`)のときは、キューの同じリポジトリのほかの PR も待ちます。
+別のリポジトリのキューは止まりません。
+
 ## 実行の結果を集計する
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
-件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、Blocked の理由、replanner の判定、
+件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、差し戻しをやめた理由(`review_stops`。
+`limit`、`repeated`、`no change`、`not converging`。[task-format.md](task-format.md#自動レビューの差し戻し))、
+Blocked の理由、replanner の判定、
 `slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
@@ -211,11 +471,12 @@ Blocked の理由は次のどれかです。
 | 理由 | 意味 |
 |---|---|
 | `agent` | エージェント自身が `## Blocked` を書いた |
-| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻し後も `needs changes` など) |
+| `review` | 自動レビューが通らなかった(`blocked`、判定なし、差し戻しをやめたあとも `needs changes` など) |
 | `no report` | エージェントがレポートを書かずに終わった |
 | `no changes` | レポートはあるが、ファイルを変えなかった |
 | `start` | 開始できなかった(Target repo、Base branch、`[env]` など) |
 | `setup` | `[setup]` の準備が失敗した、または git が無視しないファイルを残した |
+| `balance` | Goal の `paid api:` の残高が足りなかった、または `[balance]` の確認が失敗した([予算と残高](#予算と残高)) |
 | `finish error` | 終了処理(push、PR、GitHub への書き込み)が失敗した |
 
 ### エージェントの使用量
@@ -223,23 +484,75 @@ Blocked の理由は次のどれかです。
 実行の記録の `usage` は、エージェントを起動するたびに 1 件です(`role` は `agent` / `agent retry after review` /
 `reviewer` / `replanner`)。`agent`(エージェント名)と `seconds` は必ず入ります。エージェントの CLI の記録を読めたときだけ、
 Claude Code なら `calls`(API 呼び出しの数。サブエージェントの分を含む)、`input`、`cache_creation`、`cache_read`、
-`output`(トークン数)、`subagent_calls`、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
-が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェントでは秒数だけです。
+`output`(トークン数)、`subagent_calls`、`models` が、pi なら `calls`、`input`、`cache_creation`、`cache_read`、`output`、
+`cost`(USD。pi がモデルの価格から計算した値)、`models` が、Kiro なら `calls`(リクエスト数)、`credits`(小数 2 桁)、`models`
+が入ります。Kiro の記録にはトークン数がないので、トークンの欄はありません。ほかのエージェント(codex など)では秒数だけです。
 読めたときは、ログ(herdr のタブと `task log`)にも起動ごとに 1 行出ます:
 
 ```
 == agent used 42 calls, 1.2M tokens (18k out), 3 subagent calls, models claude-opus-5-5
+== agent used 12 calls, 410k tokens (9.8k out), $0.4210, models gpt-5.5
 == agent used 64 calls, 19.21 credits, models auto
 ```
+
+pi の記録は `~/.pi/agent/sessions/` のセッションのファイルです(`PI_CODING_AGENT_SESSION_DIR` か `PI_CODING_AGENT_DIR` が
+あればそちら。pi の `settings.json` の `sessionDir` は読みません)。最初の行の `cwd` がその worktree のファイルだけを開き、
+時刻がその起動の間の、使用量のある行(assistant の返事、圧縮の要約、キャッシュの温め)を 1 回の呼び出しとして数えます。
+pi は再開(`--session-id`)で同じファイルに書き足すので、前の起動の行は時刻で外れます。ChatGPT のアカウントで動かす
+`openai-codex` でも pi は価格から `cost` を出します。実際の請求とは違うことがあります。
 
 `task stats` の `tokens:` の行は、トークン数を測れた実行の数と、1 実行あたりのトークン数(input、cache_creation、
 cache_read、output の合計)と呼び出し数の中央値です。測れなかった実行(記録を始める前のもの、Claude Code 以外)の数も
 出します。Kiro の実行はトークン 0 としては数えず、`credits:` の行に、クレジットを測れた実行の数と 1 実行あたりの
-クレジットの中央値を出します。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
+クレジットの中央値を出します。`cost:` の行は、費用を測れた実行(今は pi だけ)の数と、1 実行あたりの費用の中央値です。
+`over budget:` の行は、出来事 `over budget` の数です。`roles` は役割ごとの起動回数、トークンを測れた回数、秒数とトークン数の中央値、
 `heaviest` はトークン数の多い 3 実行です。
-起動の間にその worktree で動いた Claude Code の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
-起動したものも、あなたが同じ worktree で `claude` を開いたものも)。上限や警告はまだありません。どこに線を引くかは、
-この数字を見て決めます。
+起動の間にその worktree で動いた Claude Code と pi の呼び出しと kiro-cli の会話は、すべてその起動の分として数えます(エージェント自身が
+起動したものも、あなたが同じ worktree で `claude` を開いたものも)。予算を超えたときは出来事を出すだけです(下記)。
+止めるかどうかは、この数字と `over budget` の数を見て決めます。
+
+### 予算と残高
+
+**予算**: エージェントを起動し終えるたびに、その実行のここまでの使用量(`usage` の合計)を予算と比べます。
+再開した実行では、再開のあとの分だけです(`metrics.jsonl` の `usage` と同じ。前の分は落ちた `task _run` のメモリにありました)。超えた
+ものがあれば、出来事 `over budget` を出して通知します。測るものは 4 つで、出来事は測るものごとに実行 1 回につき 1 回です。
+今は知らせるだけで、実行は止めません。
+
+| 測るもの | 予算(Goal に `Budget` がないとき) |
+|---|---|
+| 時間(起動ごとの `seconds` の合計) | そのエージェントの終わった実行の中央値の 10 倍、最低 1 時間。実績が 10 件未満なら 3 時間 |
+| トークン(Claude Code、pi) | 中央値の 5 倍、最低 200 万。実績が 10 件未満なら 2000 万 |
+| 費用(USD、pi) | 中央値の 5 倍、最低 $1。実績が 10 件未満なら $10 |
+| クレジット(Kiro) | 中央値の 5 倍、最低 5。実績が 10 件未満なら 20 |
+
+- 実績は `metrics.jsonl` の、同じエージェント(カードの Agent)の実行です。エージェントが動かなかった実行
+  (`blocked_by` が `start`、`setup`、`balance`)は数えません
+- カードごとの予算は Goal の `Budget` の見出しに書きます([task-format.md](task-format.md#budget-予算と有料-api))。
+  書いたものだけが上の表の代わりになります
+- 値はコードの定数です。設定はありません(`slow` と同じ理由です。決定事項 19)
+- 確かめるのは起動が終わったときです。1 回の起動が長いと、出来事はその起動が終わるまで出ません。
+  長さは `slow` が実行中に知らせます
+- `reason` は `used 25.1M tokens, over 20.0M tokens (5 x the median of 30 runs of claude)` のような 1 行です
+
+**残高**: Goal の `Budget` に `paid api: openai` と書いたカードは、`[setup]` のあと、エージェントを起動する前に、
+`[balance]` のその名前のコマンドで残高を確かめます。
+
+```ini
+[balance]
+openai = python3 scripts/check_openai_balance.py   ; 例。worktree で動く。0 で終われば足りている
+```
+
+- コマンドは worktree で、`[setup]` と同じように動きます(`sh -c`、Windows は PowerShell。`[sandbox]` ではエージェントの
+  ユーザー)。リポジトリの `.env`(`[env]` で写したもの)も読めます
+- 0 で終われば足りています。0 以外なら、エージェントを起動せずに Blocked にします。理由には、コマンドの出力の
+  最後の行が入ります(`not enough balance on openai ([balance] openai exited 3: ...); add credit, then move the card to Ready again`)
+- 60 秒で終わらなければ止めて、Blocked にします
+- `[balance]` にその名前がないと、開始の前に Blocked にします(`could not start: ...`)
+- 再開した実行では、もう一度は確かめません(確かめるのは最初から始めるときだけです)
+
+OpenAI には API キーで残高を読む公式の API が見当たりません(2026-10-26 に調べた範囲)。確かめ方は
+リポジトリごとに決めます。たとえば、いちばん安いモデルに 1 トークンだけの要求を送り、429 の
+`insufficient_quota` が返れば 0 以外で終わるスクリプトです。わずかに費用がかかります。
 
 1 行が 1 回の実行の JSON なので、細かく見たいときは `metrics.jsonl` をそのまま読めます。replanner の自動で Ready に
 戻す段階に進むか、reviewer をどのエージェントにするかは、この数字を見て決めます。
@@ -256,8 +569,10 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 | タスク(ボード) | GitHub: Issue リポジトリと Project(非公開) |
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
+| マージキュー | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
+| トリガーが作ったものの記録([triggers.md](triggers.md)) | `~/.local/state/task-hub/triggers.json` |
 | 直近に読んだボード(`task list` が共有) | `~/.local/state/task-hub/board-cache.json`、`board-meta.json` |
 | リポジトリのクローン | `~/.local/share/task-hub/repos/<owner>/<name>` |
 | worktree | `~/.local/share/task-hub/worktrees/<番号>` |
@@ -275,8 +590,14 @@ cache_read、output の合計)と呼び出し数の中央値です。測れな�
 |---|---|
 | エージェント自身が書いた行(`## Blocked` から) | 求められたものを与えます。Issue の本文に答えを書き足すか、環境を修正します |
 | `agent exited without a report (exit N)` | `task log <番号>` を読みます。多くの場合、エージェントがクラッシュした、ログインしていない、または予算を使い切ったのが原因です |
+| `the watchdog stopped the agent: no output and no CPU used` | エージェントが 45 分以上黙っていて、その子孫も CPU を使っていませんでした(下の「黙って止まったコマンド」)。`task log <番号>` の `== watchdog:` の行の前を読みます |
 | `agent wrote a report but changed no files` | エージェントはやることがないと判断しました。Goal を明確にします |
-| `the run stopped unexpectedly` | `task _run` プロセスが停止しました(たとえば herdr のペインを閉じた、Mac が再起動した) |
+| `automated review did not pass after ...`、`automated review stopped after ...: <止まった条件>` | 自動レビューの `needs changes` が、差し戻しのあとも残りました([task-format.md](task-format.md#自動レビューの差し戻し))。Issue のレポートの最後の `## Suggested instructions` を読み、よければそのまま Ready に戻します。指摘が誤りなら、そのコメントを直すか、理由をコメントに書いてから戻します |
+| `automated review: blocked: ...` | reviewer が、人にしか出せない情報が要ると判断しました。求められたものを Issue に書いてから Ready に戻します |
+| `the run stopped unexpectedly again, after resuming once at <段階>` | `task _run` プロセスが予期せず止まり(クラッシュ、kill、Mac の再起動、herdr のペインを閉じた)、task-hub が 1 回だけ再開しましたが、再開した実行もまた止まりました。`task log <番号>` で止まったところを見てから Ready に戻します |
+| `the run stopped unexpectedly; not resumed: <わけ>` | `task _run` プロセスが止まりましたが、再開しませんでした。わけは、Ctrl-C で止めた(`it was stopped with Ctrl-C`)、worktree が消えた、worktree で誰かがコミットした(`HEAD moved`)、続けるのに要る記録やプロンプトがない、などです。直してから Ready に戻します |
+| `the run stopped unexpectedly; could not resume it: <わけ>` | 再開しようとしましたが、起動できませんでした(残ったエージェントが止まらない、herdr のタブが開かない、など)。わけを直してから Ready に戻します |
+| `the run stopped unexpectedly` | 実行は終わっていましたが、カードを動かす前に GitHub に届きませんでした。残ったレポートはこのコメントに載っています。再開した実行が終わったあとでも、この理由です |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
 | `could not start: the run did not start in herdr tab ...` | herdr のペインが 16 秒の間に `task _run` を始めませんでした(シェルが立ち上がらない、など)。そのタブを見てから Ready に戻します(戻すと、そのタブは閉じます)。あとからそのタブで実行が始まることはありません |
@@ -332,8 +653,29 @@ task-hub はカードを動かしません(確認するのは PR がマージさ
 ## 実行中のタスクを止める
 
 herdr のそのタスクのタブでエージェントを停止します(Ctrl-C)。ランナーは最後まで処理を行い、変更された内容を
-push してカードを Blocked にします。または、ペインを閉じます。その場合、次の確認で `the run stopped unexpectedly`
-として Blocked になります。
+push してカードを Blocked にします。やめるなら `task done <番号>` です(下の「タスクを取り消す」)。
+
+ペインを閉じても止まりません。予期せず止まった実行(クラッシュ、kill、Mac の再起動、ペインを閉じた)は、次の確認で
+task-hub が 1 回だけ自動で再開します。カードは In progress のままで、続きは止まった段階(エージェント、レビュー、
+差し戻し、finish)からです。新しいタブ(またはバックグラウンド)で動き、Issue のレポートに `Resumed once at <段階>` の
+1 行が入ります。出来事 `resumed` も出ますが、既定では通知しません(`[notify] events` に `resumed` を足せば通知します)。
+再開した実行もまた止まったら、`the run stopped unexpectedly again, after resuming once at <段階>` として Blocked になります。
+
+### 黙って止まったコマンド
+
+エージェントの出力が 45 分なく、エージェントが動かしたコマンド(その子孫)も前の確認から CPU を使っていなければ、
+`task _run` がそのコマンドを止めます(SIGTERM、10 秒後に SIGKILL)。エージェント自身は止めないので、
+コマンドの失敗を受け取って続けます。ログには次の行が出ます。
+
+```text
+== watchdog: no output for 45 min and no CPU used by what the agent started: stopping it (4242 sleep)
+```
+
+CPU を使って黙っているコマンド(出力しない長いテストやビルド)は止めません。止めたあと(止めるものがなければ 45 分から)
+さらに 10 分黙っていて、子孫も CPU を使っていなければ、エージェントも止め(`== watchdog: no output for 55 min: stopping the agent`)、
+その場で 1 回だけ再開します(上の予期せず止まった実行の再開と同じ 1 回に数えます)。再開したエージェントも止められると、
+カードは Blocked になります。しきい値は設定できません(決定事項 19)。Windows では子孫の CPU が分からないので、watchdog は
+何も止めません。
 
 ## タスクを取り消す
 

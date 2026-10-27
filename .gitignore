@@ -10,3 +10,7 @@ kiro/board-extension/*.vsix
 
 # What slack-triage/hotkey/build.sh builds (kiro/install.sh runs it)
 slack-triage/bin/
+
+# durable/ (the Pi Durable runner, an experiment): what `npm ci` installs and `npm run build` builds
+durable/node_modules/
+durable/dist/

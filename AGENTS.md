@@ -27,13 +27,16 @@ task-hub を使いはじめるために、このリポジトリを開いて「�
 ## 確かめ方
 
 ```sh
-python3 tests/run.py                       # Python のテスト全部(2 並列、約 8 分。1 台に同時に 1 つ)
 python3 tests/run.py <名前の一部>          # 一部だけ(待たない)
 claude plugin test claude/task-board       # Claude Code の mod
 (cd kiro/board-extension && npm test)      # Kiro の拡張
+(cd durable && npm test)                   # B の実行役(実験。先に npm ci --ignore-scripts)
 ```
 
-作業中は変えたところに関係するテストだけを動かし、全部のテストは最後に 1 回だけ動かす。
+作業中は変えたところに関係する短いテストだけを手元で動かす。
+全部のテストは GitHub Actions の `macos` で動かす(PR、main への push、手動実行)。
+手元の Mac では、頼まれない限り全部のテストや Rust のビルドを動かさない。
+CI のログは `macos-test-evidence` から読む。詳しくは CONTRIBUTING.md の「テスト」。
 テストは低い優先度で動き、並べる数は `-j 4` のように変えられる。
 
 不具合は、利用者から見た動きを再現するテストを先に書いてから直す。
