@@ -43,7 +43,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
 REVIEW_RETRIES = 2  # [runner] review_retries by default: how many times the reviewer may send the work back
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)

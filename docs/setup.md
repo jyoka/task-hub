@@ -91,6 +91,8 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
    - テキスト欄 **Target repo**、**Agent**、**Base branch** を追加します(Target repo は作業先リポジトリ `owner/name`、
      Agent は使うエージェント名、Base branch は作業を始めるブランチで、Agent と Base branch は空でも構いません。
      `Repo` という名前は GitHub の予約語なので使えません)
+   - 単一選択の欄 **Readiness**(`task check` の判定)と **Review**(自動レビューの判定)は、足さなくて構いません。
+     task-hub が初めて使うときに作ります
    - Board 表示にして、列を Status でグループ化します。**Sort は付けません**(View の設定の Sort by を「No sorting」に)。
      task-hub はカードを動かすたびに列のいちばん上に置くので、最後に動いたカードが上に来ます。Sort を付けた表示では
      GitHub がこの並びを使いません。Sort の設定は API から変えられないので、画面で外します
