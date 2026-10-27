@@ -1610,8 +1610,12 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(set(self.watch_loops()) - {bystander.pid})  # the loop itself
         # task update starts the watch again with the new code: a new loop, the bystander left alone
         before = set(self.watch_loops()) - {bystander.pid}
+        # the installer took the newest release's tag: one from before bin/task_hub.py keeps all the code in bin/task
+        body = self.home / ".local/lib/task-hub/bin/task_hub.py"
+        if not body.exists():
+            body = body.with_name("task")
         code = ("import importlib.machinery, importlib.util\n"
-                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(self.home / '.local/lib/task-hub/bin/task_hub.py')!r})\n"
+                f"loader = importlib.machinery.SourceFileLoader('task_hub_bin', {str(body)!r})\n"
                 "task = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
                 "loader.exec_module(task)\n"
                 "print(task.restart_windows_watch())\n")
