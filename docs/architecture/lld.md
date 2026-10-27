@@ -483,7 +483,8 @@ stateDiagram-v2
 - 図の `fixing` はキューの `step` には書きません(`step` は `update` のまま)。`task _fix` が生きている間は、`tasks()` の
   `running` で待ちます
 - キューに残す条件は、カードが `queue_column()`(列があれば wait for merge、なければ In review)にあることです。
-  ほかの列に動いたカードは何もせずに外します
+  ほかの列に動いたカードは何もせずに外します。ただし、ボードを読んだ時刻(`tasks()` のカードの `fetched`)より
+  あとに `queued` になった項目は、読んだボードが古いだけなので外さず、次の確認に回します
 - `merge_block` は Issue に `<!-- task-hub merge -->` のコメントを書き、カードを Blocked(理由は `merge queue: ...`)に
   してから、最後にキューから外します(GitHub の失敗のときは残して、次に試し直す)
 - マージしたら、`sync` のマージの確認と同じ `close_merged`(Issue を閉じる、Done、`cleanup`)を呼びます

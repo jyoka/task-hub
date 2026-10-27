@@ -941,14 +941,14 @@ def read_json(path):
 
 
 def cached_items(max_age):
-    """The raw open items of BOARD_CACHE when read from GitHub less than max_age seconds ago and after the last
-    board change, else None."""
+    """The raw open items of BOARD_CACHE and when they were read from GitHub, when that was less than max_age seconds
+    ago and after the last board change, else None."""
     data, stale = read_json(BOARD_CACHE), read_json_number(BOARD_STALE)
     at = data.get("fetched_at")
     if data.get("key") != list(board_config()) or not isinstance(at, (int, float)) or not isinstance(
             data.get("items"), list) or at <= stale or not 0 <= time.time() - at < max_age:
         return None
-    return data["items"]
+    return data["items"], at
 
 
 def read_json_number(path):
@@ -959,7 +959,8 @@ def read_json_number(path):
 
 
 def fetch_items(include_done, saved_ok=False):
-    """The raw items from GitHub; the open ones are kept in BOARD_CACHE for `task list` in other panes."""
+    """The raw items from GitHub and when the read began; the open ones are kept in BOARD_CACHE for `task list` in
+    other panes."""
     b = board(saved_ok)
     query = ITEMS_QUERY
     for n, spelled in b["names"].items():
@@ -979,11 +980,11 @@ def fetch_items(include_done, saved_ok=False):
         raise
     if not include_done and fetched_at > read_json_number(BOARD_STALE):  # else readers would never use it
         write_cache(BOARD_CACHE, json.dumps({"key": list(board_config()), "fetched_at": fetched_at, "items": items}))
-    return items
+    return items, fetched_at
 
 
 def shared_items(max_age):
-    """The open items for `task list`: from BOARD_CACHE when fresh. Otherwise one pane reads GitHub while the
+    """The open items for `task list`, and when they were read: from BOARD_CACHE when fresh. Otherwise one pane reads GitHub while the
     others wait for it, at most 15 seconds; a lock left by a killed process is ignored after 30."""
     items = cached_items(max_age)
     if items is not None:
@@ -1024,8 +1025,9 @@ def tasks(include_done=False, max_age=0):
     minute exceeds; ITEMS_QUERY asks for just our fields and costs 1 point per 100 cards.
     max_age: open cards from BOARD_CACHE when it is fresher, for read-only `task list` only; never before a change.
     What this machine knows (runs, stages, waits_for) is worked out again each time.
+    Each card's "fetched" is when its board snapshot was read from GitHub (UNIX time).
     """
-    items = shared_items(max_age) if max_age and not include_done else fetch_items(include_done)
+    items, fetched = shared_items(max_age) if max_age and not include_done else fetch_items(include_done)
     issues = board_config()[2]
     result = []
     for item in items:
@@ -1035,6 +1037,7 @@ def tasks(include_done=False, max_age=0):
         value = lambda k: ((item.get(k) or {}).get("name") or (item.get(k) or {}).get("text") or "").strip()
         t = {"id": str(content["number"]), "title": content.get("title", ""), "item": item["id"],
              "updated": item.get("updatedAt") or "",  # the card's last change on the Project, e.g. its last move
+             "fetched": fetched,
              "closed": content.get("state") == "CLOSED",
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
              "base": value("base"), "url": content.get("url", ""),
@@ -4755,8 +4758,20 @@ def merge_queue(open_, settings, lines, changed, errors):
                 changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
 
 
+def queued_after(e, fetched):
+    """Whether the entry was queued after the board was read at fetched (UNIX time). `queued` has whole seconds:
+    queued within the second the read began counts as after, so the entry waits one check rather than leaving."""
+    try:
+        queued = datetime.datetime.strptime(e.get("queued") or "", "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return queued.replace(tzinfo=datetime.timezone.utc).timestamp() >= int(fetched)
+
+
 def merge_step(t, e, column, settings):
     """One step of the first PR of a repo's queue; returns what it did, as one line."""
+    if t and t["status"] != column and queued_after(e, t["fetched"]):
+        return None  # queued since the board was read (`task merge` moved it meanwhile): the next check sees it
     if not t or t["status"] != column:  # a human moved it (or `task done`): no longer approved
         queue_drop(e["id"])
         return f"left the queue ({t['status'] if t else 'no longer open'})"
