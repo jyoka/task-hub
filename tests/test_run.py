@@ -128,6 +128,22 @@ class RunTest(unittest.TestCase):
             tuple(map(float, line.split())) for line in self.out.read_text().splitlines())
         self.assertGreaterEqual(b_began, a_ended)  # one after the other
 
+    def test_a_failure_is_shown_whatever_the_output_can_write(self):
+        # as on Windows in CI: the output and the test's own stderr are a pipe in the code page (cp1252), where
+        # "é" is one byte and Japanese cannot be written at all
+        (self.tests / "test_fails.py").write_text(
+            "import unittest\n\nclass Fails(unittest.TestCase):\n"
+            "    def test_it(self):\n        self.fail('café 日本語')\n", encoding="utf-8")
+        p = subprocess.run([sys.executable, str(self.tests / "run.py"), "test_fails"], cwd=self.tests,
+                           env={**self.env, "PYTHONIOENCODING": "cp1252"}, stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=60)
+        out = p.stdout.decode("cp1252") + p.stderr.decode("cp1252", errors="replace")
+        self.assertEqual(p.returncode, 1, out)
+        self.assertNotIn("UnicodeEncodeError", out)
+        self.assertIn("FAIL test_fails.Fails.test_it", out)
+        self.assertIn(r"AssertionError: café \u65e5\u672c\u8a9e", out)  # every character, the Japanese escaped
+        self.assertTrue(out.rstrip().endswith("failed: test_fails.Fails.test_it"), out)
+
 
 if __name__ == "__main__":
     unittest.main()

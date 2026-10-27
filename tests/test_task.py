@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import shlex
 import shutil
@@ -1221,6 +1222,24 @@ def process_gone(pid):
     return r.returncode != 0 or r.stdout.strip().startswith("Z")
 
 
+def read_pty_until_exit(master, p, timeout):
+    """All that p wrote to a PTY, read until p exits. The caller keeps its own copy of the PTY's other end open until
+    this returns: on macOS the last close of that end drops what is still unread, so had the test closed its copy
+    first, a p that wrote and exited before that close (as under load, with tests side by side) would leave nothing."""
+    chunks, end = [], time.monotonic() + timeout
+    while True:
+        done = p.poll() is not None  # checked before reading: what p wrote before it exited is in the PTY by now
+        ready, _, _ = select.select([master], [], [], 0 if done else 0.1)
+        if ready:
+            chunks.append(os.read(master, 65536))
+        elif done:
+            return b"".join(chunks)
+        elif time.monotonic() > end:
+            p.kill()
+            p.wait(timeout=5)
+            raise AssertionError(f"still running after {timeout}s; it wrote: {b''.join(chunks)!r}")
+
+
 class TaskTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1420,7 +1439,13 @@ class TaskTest(unittest.TestCase):
                     e["event"] == status for e in self.events_of(tid)[-3:])):
                 return status
             time.sleep(0.2)
-        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}")
+        # what this machine knows of the run too: a run that never wrote its log (CI, #289) says nothing else
+        state = self.root / ".local/state/task-hub"
+        record = state / f"runs/{tid}.json"
+        self.fail(f"task {tid} still In progress; log:\n{self.task('log', tid, '--full')}\n"
+                  f"run record: {record.read_text() if record.exists() else 'none'}\n"
+                  f"logs: {sorted(f.name for f in (state / 'logs').glob('*'))}\n"
+                  f"events: {self.events_of(tid)}")
 
     def wait_for(self, check, timeout=20):
         """The replanner runs after the card is already Blocked."""
@@ -2980,20 +3005,14 @@ class TaskTest(unittest.TestCase):
         master, slave = os.openpty()
         p = subprocess.Popen([str(BIN), "list", "--watch"], env={**self.env, "TASK_WATCH_ONCE": "1"}, stdout=slave,
                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        os.close(slave)
-        chunks = []
-        while True:
-            try:
-                data = os.read(master, 4096)
-            except OSError:  # the other end closed
-                break
-            if not data:
-                break
-            chunks.append(data)
-        os.close(master)
+        try:
+            out = read_pty_until_exit(master, p, 20)
+        finally:
+            os.close(slave)
+            os.close(master)
         self.assertEqual(p.wait(timeout=20), 0, p.stderr.read())
         p.stderr.close()
-        return b"".join(chunks).decode().replace("\r\n", "\n")
+        return out.decode().replace("\r\n", "\n")
 
     def test_list_watch_in_a_terminal_redraws_the_screen_under_a_heading_with_the_time(self):
         tid = self.new("ok")
@@ -8416,12 +8435,24 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
 
     def test_check_runs_the_critics_at_once(self):
+        """The critics run at once, but make and remove their worktrees of the one clone in turn: two `git worktree`
+        commands at once fail on each other's half-written .git/worktrees (seen under load on CI)."""
+        git, log = shutil.which("git"), self.root / "git-worktree.txt"
+        (self.root / "fakebin" / "git").write_text(  # git, slower and timed for `git -C <dir> worktree ...`
+            f'#!/bin/sh\n[ "$3" = worktree ] || exec {shlex.quote(git)} "$@"\nexec python3 -c \'import subprocess, '
+            'sys, time\nbegan = time.time()\ntime.sleep(0.2)\ncode = subprocess.run(sys.argv[2:]).returncode\n'
+            'open(sys.argv[1], "a").write(f"{began} {time.time()} {sys.argv[6]}\\n")\nsys.exit(code)\' '
+            f'{shlex.quote(str(log))} {shlex.quote(git)} "$@"\n')
+        (self.root / "fakebin" / "git").chmod(0o755)
         tid = self.new("ok READY=slow")
-        began = time.time()
         self.assertIn("verdict: GO", self.task("check", tid))
+        # in turn, each critic would wait 10 s for the others to start
         critics = [c["at"] for c in self.goldfish_calls()[1:4]]
         self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other two to start")
-        self.assertLess(time.time() - began, 30)
+        ran = sorted(tuple(line.split()) for line in log.read_text().splitlines())
+        self.assertIn("add", [op for _, _, op in ran])
+        for (_, ended, op), (began, _, next_op) in zip(ran, ran[1:]):
+            self.assertLessEqual(float(ended), float(began), f"git worktree {op} and {next_op} ran at once")
 
     def test_check_sorts_the_verdict_by_blocking_and_minor_findings(self):
         # as #249's review: only minor findings is a GO; a GO with a blocking finding is a NO-GO; no verdict is blocked;

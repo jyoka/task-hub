@@ -4127,6 +4127,10 @@ def readiness_parts():
 
 
 GOLDFISH_TEXT = 12000 if WINDOWS else 40000  # what the readiness agent gets of each earlier Goldfish's file
+# the critics' threads make and remove their worktrees of one clone in turn: a `git worktree add` reads the files of
+# every worktree in .git/worktrees, and fails ("failed to read .../commondir") when another add or remove is halfway
+# through writing or deleting them. Seen under load (-j 4 on CI's macOS); the Goldfish themselves still run at once
+GOLDFISH_WORKTREES = threading.Lock()
 
 
 def goldfish_prompt(rules, part, t, goal, extra=()):
@@ -4139,13 +4143,15 @@ def goldfish(agent, role, prompt, repo_dir, ref, t, say, usage):
     worktree tells its usage apart from the others' running at the same time. (its file's text, or None and why the
     check is blocked.) An edit is undone (restore) before the worktree goes."""
     wt = DATA / "worktrees" / f"{t['id']}-check-{re.sub(r'[^a-z0-9]+', '-', role.lower()).strip('-')}"
-    if wt.exists():  # left by a check that was killed
-        git_shared(repo_dir, "worktree", "remove", "--force", wt)
-        shutil.rmtree(wt, ignore_errors=True)
-    git_shared(repo_dir, "worktree", "prune")
-    git_shared(repo_dir, "worktree", "add", "-q", "--detach", wt, ref, check=True)
+    with GOLDFISH_WORKTREES:
+        if wt.exists():  # left by a check that was killed
+            git_shared(repo_dir, "worktree", "remove", "--force", wt)
+            shutil.rmtree(wt, ignore_errors=True)
+        git_shared(repo_dir, "worktree", "prune")
+        git_shared(repo_dir, "worktree", "add", "-q", "--detach", wt, ref, check=True)
     try:
-        ensure_internal_excludes(wt)
+        with GOLDFISH_WORKTREES:  # the clone's info/exclude, which all its worktrees share
+            ensure_internal_excludes(wt)
         snap = snapshot(wt)
         code = run_agent_process(agent, prompt, wt, say, role, usage)
         if restore(wt, snap):
@@ -4155,7 +4161,8 @@ def goldfish(agent, role, prompt, repo_dir, ref, t, say, usage):
             return None, f"the {role} exited {code} without writing {READINESS_FILE}"
         return text, ""
     finally:
-        git_shared(repo_dir, "worktree", "remove", "--force", wt)
+        with GOLDFISH_WORKTREES:
+            git_shared(repo_dir, "worktree", "remove", "--force", wt)
 
 
 def at_once(jobs):

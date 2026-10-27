@@ -110,6 +110,24 @@ def build():
     return _built
 
 
+def read_pty_until_exit(master, p, timeout):
+    """All that p wrote to a PTY, read until p exits. The caller keeps its own copy of the PTY's other end open until
+    this returns: on macOS the last close of that end drops what is still unread, so had the test closed its copy
+    first, a p that wrote and exited before that close (as under load, with tests side by side) would leave nothing."""
+    chunks, end = [], time.monotonic() + timeout
+    while True:
+        done = p.poll() is not None  # checked before reading: what p wrote before it exited is in the PTY by now
+        ready, _, _ = select.select([master], [], [], 0 if done else 0.1)
+        if ready:
+            chunks.append(os.read(master, 65536))
+        elif done:
+            return b"".join(chunks)
+        elif time.monotonic() > end:
+            p.kill()
+            p.wait(timeout=5)
+            raise AssertionError(f"still running after {timeout}s; it wrote: {b''.join(chunks)!r}")
+
+
 def git(cwd, *args):
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
@@ -1226,21 +1244,15 @@ class HerdrPaneTest(TuiCase):
                              stderr=subprocess.PIPE, start_new_session=True,
                              env={"HOME": str(self.home), "PATH": self.path, "TASK_GH": str(self.tmp / "gh"),
                                   "HERDR_BIN_PATH": str(self.herdr), **env})
-        os.close(slave)
-        chunks = []
-        while True:
-            try:
-                data = os.read(master, 4096)
-            except OSError:  # the other end closed
-                break
-            if not data:
-                break
-            chunks.append(data)
-        os.close(master)
+        try:
+            out = read_pty_until_exit(master, p, 30)
+        finally:
+            os.close(slave)
+            os.close(master)
         code = p.wait(timeout=30)
         err = p.stderr.read().decode()
         p.stderr.close()
-        return code, b"".join(chunks).decode().replace("\r\n", "\n"), err
+        return code, out.decode().replace("\r\n", "\n"), err
 
     def calls(self):
         return self.herdr_calls.read_text().splitlines() if self.herdr_calls.exists() else []
