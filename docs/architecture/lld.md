@@ -476,6 +476,7 @@ stateDiagram-v2
     update --> Blocked: 同じ base でまた競合
     ci --> ci: チェック待ち(ci-wait はコミットごとに 1 回)
     ci --> update: BEHIND、DIRTY、CONFLICTING
+    ci --> ci: UNSTABLE で、落ちたチェックも動いているチェックもない(GitHub が数えるのを待つ。ci_minutes まで)
     ci --> merged: CLEAN、HAS_HOOKS、checks = required なら UNSTABLE も(gh pr merge --merge --match-head-commit)
     ci --> Blocked: チェックが落ちた、ci_minutes を過ぎた、ほかの mergeStateStatus
 ```
@@ -488,6 +489,11 @@ stateDiagram-v2
 - `merge_block` は Issue に `<!-- task-hub merge -->` のコメントを書き、カードを Blocked(理由は `merge queue: ...`)に
   してから、最後にキューから外します(GitHub の失敗のときは残して、次に試し直す)
 - マージしたら、`sync` のマージの確認と同じ `close_merged`(Issue を閉じる、Done、`cleanup`)を呼びます
+- `merge_ci` は `pr_view`(`mergeStateStatus`)を読んでから `pr_checks` を読みます。チェックが通った直後は、
+  あとで読んだチェックは通っているのに、先に読んだ状態は `UNSTABLE` のままのことがあります(GitHub が数えるのが
+  数秒遅れる。jyoka/tasks#246)。そこで `checks = all` の `UNSTABLE` は、落ちたチェックがなければ(落ちていれば
+  その前に Blocked)、`ci_minutes` まではチェック待ちと同じに待ちます(`ci_wait` で `ci-wait` をコミットごとに 1 回)。
+  過ぎたら、今までどおり `GitHub does not allow the merge (UNSTABLE: ...)` で Blocked にします
 - `watch_conflict`: キューにない In review のカードは、マージの確認(`pr_merged` の REST)の `mergeable_state` が
   `dirty` のとき、`conflict` を PR の先頭のコミット(`sha`)ごとに 1 回書きます。`[merge] prefix = on` なら、その `sha` で
   `conflict-fix` をまだ出していなければ `launch_fix` します。どちらも `events.jsonl` で「1 回」を判定します(`check_slow` と同じ)
