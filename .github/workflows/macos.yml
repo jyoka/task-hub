@@ -55,8 +55,11 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm test 2>&1 | tee ../evidence/durable.log
+      # 4 at a time, not run.py's 2 (kept for a person's Mac): the tests mostly wait on subprocesses (CONTRIBUTING.md)
       - name: Full Python suite, including CLI and PTY integration tests
-        run: python3 tests/run.py 2>&1 | tee evidence/python.log
+        run: |
+          echo "CPUs: $(sysctl -n hw.ncpu)" | tee evidence/python.log
+          python3 tests/run.py -j 4 2>&1 | tee -a evidence/python.log
       - name: Kiro board extension
         working-directory: kiro/board-extension
         run: npm test 2>&1 | tee ../../evidence/extension.log

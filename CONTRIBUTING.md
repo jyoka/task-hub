@@ -92,6 +92,7 @@ python3 tests/run.py test_intake
 ```
 
 テストを 1 件ずつ別のプロセスで、2 つずつ並べて動かします(約 8 分)。並べる数は `-j 4` のように指定できます。
+GitHub Actions の `macos` と `windows` は `-j 4` で動かします。手元の既定の 2 は変えません。
 マシンを使い切らないよう、穏やかに動かします。
 
 - テストのプロセスは低い優先度で動きます(Unix は `nice`、Windows は `BELOW_NORMAL_PRIORITY_CLASS`)。人の作業とエージェントの反応を落とさないためです
