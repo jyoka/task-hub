@@ -47,10 +47,22 @@ PR 全体の差分(新しいファイルを含む)を渡します。実行に人
 reviewer は `.task-review.md` だけを書きます。テストは実行できます。テストが残した新しいファイルは自動で消し、
 PR のファイルを書き換えた場合は元に戻して Blocked にします。判定は `pass` / `needs changes` / `blocked` です。
 指摘は blocking(`Please fix`)と minor(`Known issues`)に分かれ、minor だけなら通過として In review に進みます。
+`[runner] review_mode` で、reviewer に何を渡すかを選べます。
+
+| `[runner] review_mode` | reviewer |
+|---|---|
+| `agent`(既定) | 1 体が、Goal と差分に加えて、実装エージェントのレポートを読みます |
+| `goldfish` | Goal Auditor(受け入れ条件を証拠つきで 1 つずつ)と Codebase Auditor(回帰、リポジトリの決まり、壊れる入力)が、それぞれ新しいコンテキストで順に見ます。レポートは渡さず(視点が動く間は worktree からも外します)、Goal、差分、worktree のコード、`task check` の判定のコメント(あれば)だけです。結果は 1 つの判定にまとめます |
+
+`goldfish` は視点の数だけ時間と token がかかります。まとめ方と、比べた結果は
+[task-format.md の「Goldfish のレビュー」](task-format.md#goldfish-のレビューrunner-review_mode)と
+[lessons.md](lessons.md#自動レビューの-agent-と-goldfish-を比べる-2026-10-27タスク-253) にあります。
+
 `needs changes` の場合、task-hub は `[runner] review_retries` の回数(既定 2 回)まで実装エージェントに自動で差し戻します。
 同じ指摘がまた出たり、差し戻しの変更が小さくならなかったりすると、回数が残っていても止めます。止まったら
 ドラフト PR を作り、修正指示の下書きを Issue に書いて、カードを Blocked にします。詳しくは
-[task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し)。マージの判断は、[オートパイロット](autopilot.md)を使わない限り人が行います。
+[task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し)。最後のレビューの判定は Project の
+Review 欄とレポートのコメントの 1 行にも残ります([判定の残し方](task-format.md#判定の残し方review-欄と機械が読む-1-行))。マージの判断は、[オートパイロット](autopilot.md)を使わない限り人が行います。
 
 ## Blocked の仕分け(replanner)
 

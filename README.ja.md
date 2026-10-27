@@ -40,7 +40,7 @@ flowchart LR
 ## 特長
 
 - **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
-- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)
+- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)。`[runner] review_mode = goldfish` にすると、実装エージェントのレポートを読まない 2 つの視点が、Goal とほかのコードへの影響を別々に確かめます。判定は Project の Review 欄にも入ります([詳しく](docs/task-format.md#goldfish-のレビューrunner-review_mode))
 - **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
 - **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Elephant-Goldfish Model](https://egm.dev/) の Goldfish)が GO / NO-GO を判定します。NO-GO なら Goal に足す文言案も付きます。`[runner] readiness = require` にすると、今の Goal への GO がない Ready のカードは始まりません([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
@@ -130,6 +130,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task check <番号> [--no-write]` | Ready の前に Goal を確かめる。GO / NO-GO を Issue と Project の Readiness 欄に書く(`[runner] readiness` で開始に GO を求められる) |
+| `task review <番号> --no-write --ref <コミット>` | カードのコードのあるコミットで自動レビューを試し、判定を表示する。過去のカードで `[runner] review_mode` を比べる用。何も書かない |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |

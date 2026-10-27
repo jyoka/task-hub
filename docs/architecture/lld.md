@@ -15,7 +15,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
     readiness["readiness<br/>cmd_check、readiness_check、goldfish、at_once、ReadinessResult、readiness_gate、<br/>set_readiness、latest_readiness、goal_hash"]
-    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、run_replan、finish、upsert_pr"]
+    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent"]
@@ -85,6 +85,10 @@ classDiagram
         verdict: pass / needs changes / blocked
         fix: Please fix(blocking)
         minor: Known issues
+        mode: agent / goldfish
+        attempt: その実行の何回目のレビューか
+        field_verdict: Review 欄の値
+        review_line(): 機械が読む 1 行
         passed
         needs_changes
         findings
@@ -202,6 +206,7 @@ flowchart LR
 | `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.7 節) | 同上 + triggers |
 | `task list [--max-age]` | `shared_items`、`tasks`、`listed`(`readiness_gate(read=False)`)、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task check <id> [--no-write] [--ref]` | `get`、`issue`、`ensure_clone`、`readiness_check`(`goldfish`、`at_once`)、`ReadinessResult`、`comment`、`set_readiness`、`note_readiness`(4.10) | 読む、Issue にコメント、Readiness 欄(なければ `project field-create`)。`--no-write` は読むだけ | worktrees(`<id>-check-<役>`。終われば消す)、logs(`<id>-check.log`)、checks、readiness、events |
+| `task review <id> --no-write --ref <commit> [--base] [--mode] [--report-file] [--goal-file]` | `get`、`issue`、`ensure_clone`、`review_by`(`build_review_prompt`、`review_result`、goldfish なら `combine_reviews`)、`snapshot`、`restore` | 読むだけ | worktrees(`<id>-review-trial`。終われば消す)、logs(`<id>-review-trial.log`)、review-trials |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
 | `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
@@ -312,13 +317,13 @@ flowchart TB
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
-    review -- "あり" --> rv["run_review<br/>snapshot(snap に記録)→ reviewer → restore"]
+    review -- "あり" --> rv["run_review → review_by<br/>snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews"]
     rv -- "pass、minor(Known issues)だけ" --> finish
     rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
     retry --> rv
     rv -- "review_stop(回数、また出た指摘、変更なし、収束しない)<br/>Suggested instructions を足す、blocked" --> finish
-    finish["finish<br/>add -A、commit、push、upsert_pr、comment、set_status"]
+    finish["finish<br/>add -A、commit、push、upsert_pr、comment、set_review、set_status"]
     finish -- "In review" --> close["タブを閉じる"]
     finish -- "エージェント自身の Blocked" --> replan["run_replan<br/>仕分けてコメント、replan の出来事"]
     finish -- "ほかの Blocked" --> stay["タブを残す"]
@@ -343,7 +348,7 @@ flowchart TB
 |---|---|
 | `preparing`、`setup` | 最初から(`[setup]` は何度動かしても同じ結果になる約束。プロンプトは作り直さない) |
 | `agent` | エージェントを再開のコマンドで起動。そのあとは今までどおり review、finish |
-| `review` | `snap` で worktree を戻し(`release_snapshot`)、reviewer を新しく起動。`review_attempt` が n なら n 回の差し戻しのあとのレビュー(差し戻しは増えない)。それまでの指摘と変更の行数は `prompts/<id>-review.json` から読む |
+| `review` | `snap` で worktree を戻し(`release_snapshot`)、`prompts/<id>-report.md` があればレポートを worktree に戻して(`unhide_report`)、reviewer を新しく起動。`review_attempt` が n なら n 回の差し戻しのあとのレビュー(差し戻しは増えない)。それまでの指摘と変更の行数は `prompts/<id>-review.json` から読む |
 | `retry` | 差し戻しのプロンプト(`prompts/<id>-retry.md`)で、エージェントを再開のコマンドで起動。`review_attempt` はその差し戻しの番号。そのあと次のレビュー |
 | `finishing` | `prompts/<id>-finish.json`(`review_loop` の結果とエージェントの終了コード)で `finish` をもう一度。commit、push、PR は同じ結果になる。Issue の最後のレポートが「Resumed once」の行のほかは同じ本文なら、コメントを書かない |
 
@@ -617,7 +622,8 @@ sequenceDiagram
 | `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
 | `share/prompts/<id>-retry.md` | `review_loop`(差し戻しの前)。`launch` が消す | 再開した `task _run`(`retry` から) | Markdown(差し戻しのプロンプト) |
 | `share/prompts/<id>-review.json` | `review_loop`(差し戻しの前)、`review_retry`(差し戻しのあと)。`launch` が消す | 再開した `task _run`(`review`、`retry` から)の `review_stop` | JSON。`sent`(差し戻した指摘の列)、`sizes`(差し戻しごとに変えた行数)、`tree`(今の差し戻しの前の worktree の tree) |
-| `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由 |
+| `share/prompts/<id>-report.md` | `hide_report`(goldfish の視点を起動する前に、worktree の `.task-report.md` を移す)。`unhide_report`(視点が終われば、`review`、`finishing` から再開した `task _run`)が worktree に戻して消す。`launch` と、ほかの段から始まる `task _run` も消す | `unhide_report`、`sync`(死んだ実行のレポートを Issue に書くとき) | Markdown(実装エージェントのレポート) |
+| `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked, verdict}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由、Review 欄に入れる最後の判定(レビューがなければ空。古い記録にはない) |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
 
@@ -647,11 +653,16 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
-`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`blocked_by`(`balance` は残高の確認で止めた実行)、
+`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
+`goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行)、
 `replan`、`usage`(起動ごとのトークン、呼び出し、費用(pi の `cost`)、クレジット、モデル)、`files`、`added`、`removed`、
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
-起動は、`usage` に `agent, resumed` のような役で入ります。
+起動は、`usage` に `agent, resumed` のような役で入ります。`goldfish` のレビューの起動は、視点の名前(`Goal Auditor`、
+`Codebase Auditor`)の役で入ります。
+
+`task review --no-write` の結果は `review-trials.jsonl` に 1 行ずつ入ります(`id`、`title`、`repo`、`reviewer`、`mode`、
+`base`、`commit`、`finished`、`seconds`、`verdict`、`blocking`、`minor`、`usage`)。実行ではないので metrics には入れません。
 
 ### Kiro の拡張がタスクの中身を読むところ
 
@@ -718,8 +729,9 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
-| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
 | `task check` の書き込み: `gh issue comment`、`gh project item-edit`(Readiness 欄。blocked は `--clear`)、欄がなければ `gh project field-create` を 1 回 | gh(GraphQL) | 判定ごとに 2〜3 | `task check` だけ(`--no-write` は 0) |
+| Review 欄(`set_review`): `gh project item-edit`(判定、レビューがなければ `--clear`)、欄がなければ `gh project field-create` を 1 回。`ITEMS_QUERY` は欄があるときだけ `review` も読む(同じ呼び出し) | gh(GraphQL) | 実行の終わりに 1〜2。欄がなくレビューもない実行は 0 | `finish` ごと |
 | `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn` か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
 | 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
 | B の実行役のモデル(`durable/`、既定は `openai-codex/gpt-6-luna`、thinking `medium`) | pi-ai の `openai-codex` provider。pi の `auth.json` を読むだけ(`CredentialStore` の `modify` を断るので、切れかけたトークンは更新せず理由つきで 1 で終わる) | ChatGPT のサブスクリプション。再開では元のプロンプトを送り直さず、SQLite の会話から続ける | エージェントのターンごと |
@@ -865,6 +877,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     ハッシュは読み戻され、Readiness 欄に GO / NO-GO が入る。Goal を編集すると前の GO は `stale`。`[runner] readiness = require` では
     今の Goal への GO がない Ready のカードは始まらず、オートパイロットも Ready に移さない。`off`(既定)では何も読まず、何も変わらない。
     task-hub は判定でカードを動かさない
+20. `[runner] review_mode = goldfish` の視点は、実装エージェントのレポートをプロンプトでも worktree のファイル(`.task-report.md`)
+    でも受け取らない。視点が動く間に実行が止まっても、レポートは失われず、再開した実行か `sync` が Issue に書く
 
 ## 10. テストの仕組み
 
@@ -872,7 +886,8 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   持つ偽物の `gh`、作業先は手元の bare リポジトリ、エージェントはゴールの `MODE:` で動きを変える偽物の CLI です。
   偽物の `gh` の `pr merge` は bare リポジトリに本当のマージコミットを作り、`mergeStateStatus` と REST の `mergeable_state` も
   bare リポジトリのブランチから計算します(マージキューのテスト)。偽物のエージェントは競合の解消を Goal の `FIX=` で変えます。`MODE:slowtree` は子のプロセスを 1 つ持って待ち続け
-  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は 1 回目だけ書き換えてから待ち続けます(約束 2、18 のテスト)。
+  (グループごと止まるかのテスト)、偽物の reviewer の `REVIEW=edithang` は 1 回目だけ書き換えてから待ち続け(約束 2、18 のテスト)、`GOAL=hang` は
+  goldfish の Goal Auditor として 1 回目だけ待ち続けます(約束 20 のテスト)。
   `MODE:hang` は黙って `sleep` を待ち、`MODE:busy` は黙って CPU を使う子を待ち、`MODE:silent` は自分が黙って止まり、
   `MODE:silentonce` は「# Resumed」のプロンプトでは `ok` と同じに終わります(watchdog のテスト)。
   再開のテスト(約束 17、18)は、`task _run` とエージェントを外から kill します。`MODE:slow` と `MODE:slowtree` は
