@@ -134,6 +134,7 @@ WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
 WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
 WORKER_CONFLICT = BIN.parent.parent / "worker" / "CONFLICT.md"
 WORKER_READINESS = BIN.parent.parent / "worker" / "READINESS.md"
+WORKER_DRIFT = BIN.parent.parent / "worker" / "DRIFT.md"
 GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what the agents' tool commands run in (command_groups_env)
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
@@ -5605,7 +5606,7 @@ def autopilot_merge(open_, repos, lines, changed, errors):
 
 # ---------- triggers: cards task-hub makes on its own (docs/triggers.md) ----------
 
-TRIGGER_KEYS = {"ci", "issues", "issue_label", "ready"}  # any other name in [triggers] is a recurring goal
+TRIGGER_KEYS = {"ci", "issues", "issue_label", "ready", "drift_report"}  # any other name is a recurring goal
 CI_FAILED = {"failure", "timed_out", "startup_failure"}  # a run's conclusion that needs fixing
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DEFAULT_BRANCH_MAX_AGE = 24 * 3600  # a repo's default branch, asked once a day
@@ -5683,13 +5684,17 @@ def trigger_config():
         raise ValueError(f"[triggers] issues names the board's own Issue repo {board_config()[2]}: "
                          "its Issues are tasks already")
     recurring = [parse_recurring(k, v) for k, v in s.items() if k not in TRIGGER_KEYS]
-    ready = {n for n in re.split(r"[\s,]+", s.get("ready", "").lower()) if n}
+    ready, drift = ({n for n in re.split(r"[\s,]+", s.get(k, "").lower()) if n} for k in ("ready", "drift_report"))
     for n in ready - {r["name"] for r in recurring}:
         raise ValueError(f"[triggers] ready names {n!r}, which is not a recurring goal in [triggers]: only those can "
                          "go to Ready (ci and issues cards always wait in Backlog for you)")
+    for n in drift - {r["name"] for r in recurring}:
+        raise ValueError(f"[triggers] drift_report names {n!r}, which is not a recurring goal in [triggers]: only "
+                         "those can be drift reports (`<schedule> <owner/repo> <documents> against <code>`)")
     if not (repos["ci"] or repos["issues"] or recurring):
         return None
-    return {**repos, "label": s.get("issue_label", "").strip(), "recurring": recurring, "ready": ready}
+    return {**repos, "label": s.get("issue_label", "").strip(), "recurring": recurring, "ready": ready,
+            "drift": drift}
 
 
 def default_branch(repo, state):
@@ -5749,15 +5754,30 @@ def issue_occurrences(repo, label, state):
     return result
 
 
-def recurring_occurrences(goals, ready, state, when):
+def drift_goal(targets):
+    """A drift report's Goal: worker/DRIFT.md's instructions, then the documents and the code to compare."""
+    return f"{instruction_parts(WORKER_DRIFT, 1)[0]}\n\n## Targets\n\n{targets}"
+
+
+def recurring_occurrences(cfg, state, when, errors):
+    """The recurring goals whose period has come and has no card yet. A drift_report goal is a research card whose
+    Goal is worker/DRIFT.md with the goal's text as its targets."""
     result = []
-    for g in goals:
+    for g in cfg["recurring"]:
         period = due_period(g["schedule"], when)
         if not period or f"every:{g['name']}:{period}" in state["seen"]:
             continue
-        result.append({"keys": [f"every:{g['name']}:{period}"], "trigger": g["name"],
-                       "title": f"{clip(g['goal'], 80)} ({period})", "repo": g["repo"], "ready": g["name"] in ready,
-                       "goal": f"{g['goal']}\n\nMade by task-hub's recurring goal `{g['name']}` for {period} "
+        goal, research = g["goal"], g["name"] in cfg["drift"]
+        if research:
+            try:
+                goal = drift_goal(goal)
+            except OSError as e:  # a broken install: asked again at the next check
+                errors.append({"trigger": g["name"], "error": f"cannot read {home(WORKER_DRIFT)}: {e.strerror or e}"})
+                continue
+        result.append({"keys": [f"every:{g['name']}:{period}"], "trigger": g["name"], "research": research,
+                       "title": f"{clip(g['goal'], 80)} ({period})", "repo": g["repo"],
+                       "ready": g["name"] in cfg["ready"],
+                       "goal": f"{goal}\n\nMade by task-hub's recurring goal `{g['name']}` for {period} "
                                "(docs/triggers.md)."})
     return result
 
@@ -5787,7 +5807,7 @@ def check_triggers(open_):
             occurrences += find()
         except (RuntimeError, KeyError, TypeError, ValueError) as e:  # gh failed, or answered in another shape
             errors.append({"trigger": kind, "error": f"{repo}: {e}"})
-    occurrences += recurring_occurrences(cfg["recurring"], cfg["ready"], state, datetime.datetime.now())
+    occurrences += recurring_occurrences(cfg, state, datetime.datetime.now(), errors)
     try:
         write_atomic(TRIGGERS, json.dumps(state))
         for o in occurrences:
@@ -5798,7 +5818,10 @@ def check_triggers(open_):
                 write_atomic(TRIGGERS, json.dumps(state))
             t = None
             try:
-                t, _ = create_task(o["title"], o["repo"], o["goal"], created=noted)
+                labels = [RESEARCH_LABEL] if o.get("research") else []
+                if labels:
+                    research_label()
+                t, _ = create_task(o["title"], o["repo"], o["goal"], labels=labels, created=noted)
                 if o.get("ready"):
                     set_status(t, READY)
             except RuntimeError as e:
@@ -6929,14 +6952,19 @@ def cmd_new(a):
         except RuntimeError:
             fail(f"--blocked-by {n}: no Issue #{n} in {b['issues']}")
     if a["research"]:
-        gh("label", "create", RESEARCH_LABEL, "--repo", b["issues"], "--force",
-           "--description", "task-hub: the deliverable is the agent's report", "--color", "0E8A16")
+        research_label()
     t, url = create_task(a["title"], a["repo"], goal, base=a["base"], agent=a["agent"],
                          labels=[RESEARCH_LABEL] if a["research"] else [], blocker_ids=blocker_ids,
                          asked=remember_where_asked)
     out("task:", f"  id: {t['id']}", f"  status: {BACKLOG}", f"  url: {url}",
         *([f"  blocked_by: {', '.join('#' + n for n in blockers)} (it starts only after they are done)"] if blockers else []),
         "help[1]:", "  Move the card to Ready, or run `task start`, when you want an agent to pick it up")
+
+
+def research_label():
+    """Make sure the board's Issue repo has the research label (`--force`: the same call when it is there)."""
+    gh("label", "create", RESEARCH_LABEL, "--repo", board()["issues"], "--force",
+       "--description", "task-hub: the deliverable is the agent's report", "--color", "0E8A16")
 
 
 def create_task(title, repo, goal, base="", agent="", labels=(), blocker_ids=None, asked=None, created=None):

@@ -96,6 +96,7 @@ Use any of the three ways, or mix them.
 To start Ready cards automatically, keep `task watch` running. It checks every minute.
 With `[triggers]` in the config, `task watch` also makes cards on its own: for failing CI, for Issues assigned to
 you, and for recurring goals. They go to Backlog for you to approve ([docs/triggers.md](docs/triggers.md)).
+A recurring goal can be a drift report: an agent with no other context lists where the docs and the code disagree.
 
 Example: you ask to fix the login, then merge.
 
