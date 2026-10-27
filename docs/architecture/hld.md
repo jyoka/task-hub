@@ -248,7 +248,9 @@ flowchart LR
     trig -- "create_task(Backlog、ready なら Ready)" --> gh
 ```
 
-Ready に入ったカードは、次の確認の `sync` が始めます。詳しくは [triggers.md](../triggers.md) です。
+Ready に入ったカードは、次の確認の `sync` が始めます。`drift_report` に書いた繰り返しの目標のカードは research で、
+Goal は `worker/DRIFT.md` の指示と対象の文書とコードです。エージェントのレポートが drift report になります。
+詳しくは [triggers.md](../triggers.md) です。
 
 ### 4.4 ボードの読み取り
 

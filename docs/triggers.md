@@ -27,8 +27,8 @@ notes = monthly 1 jyoka/web Update the release notes from the merged PRs
 ready = deps                     ; この繰り返しの目標のカードは Ready に入れる
 ```
 
-- `ci`、`issues`、`issue_label`、`ready` 以外の名前は、すべて繰り返しの目標です。名前(上の `deps`)は自由で、
-  `ready` で指すときと、カードがどの目標から来たかの記録に使います
+- `ci`、`issues`、`issue_label`、`ready`、`drift_report` 以外の名前は、すべて繰り返しの目標です。名前(上の `deps`)は
+  自由で、`ready` や `drift_report` で指すときと、カードがどの目標から来たかの記録に使います
 - 繰り返しの目標は `<周期> <owner/repo> <目標>` です。目標の文がそのままカードの Goal とタイトルになります
 - `ci` と `issues` に同じリポジトリを 2 回書いても(大文字と小文字が違っても)、1 回として扱います
 - 目標の文に ` ;` と ` #` は書けません(そこから先はコメントとして読まれます)
@@ -45,6 +45,42 @@ ready = deps                     ; この繰り返しの目標のカードは Re
 どれにも最後に `HH:MM`(24 時間、このマシンの時刻)を付けられます。付けなければ 0:00 です。その日時を過ぎて
 最初の確認でカードを 1 枚作り、同じ周期の間はもう作りません。マシンが止まっていた周期の分を、あとからまとめて
 作ることはしません(今の周期の 1 枚だけです)。cron の書き方(`0 9 * * 1`)は使えません。
+
+## 文書とコードの食い違い(drift report)
+
+`drift_report` に繰り返しの目標の名前を書くと、その目標のカードは drift report になります。文書(仕様)とコードの
+食い違いを週に 1 回調べさせる、という使い方です。Elephant-Goldfish Model の `/egm-drift-report` に当たります。
+毎回のレビューは変えたところしか見ないので、変えていない文書に残った古い記述は拾えません。
+
+task-hub 自身に対して週に 1 回(月曜 9:00)調べるなら、`[triggers]` に次の 2 行を足します。
+
+```ini
+drift = weekly mon 09:00 jyoka/task-hub Drift report: README.md docs/design.md docs/architecture/hld.md docs/architecture/lld.md docs/task-format.md against bin/task worker/
+drift_report = drift
+```
+
+- 目標の文が対象です。`<文書> against <コード>` の形で、リポジトリの中のパスを書きます。フォルダはその中の全部の
+  ファイルです。別のリポジトリなら、そのリポジトリと、その文書とコードを書きます。組ごとに別の名前の目標にできます
+- 設定を書き換えるのはあなたです(`~/.config/task-hub/config.ini`)。書けば、動いている `task watch` の次の確認から効きます
+
+できるカードの流れです。
+
+1. 周期が来ると、`task watch` が research カード(`research` ラベル)を Backlog に作ります。タイトルは
+   ほかの繰り返しの目標と同じく「<目標> (<周期>)」、例えば `Drift report: README.md docs/design.md ... (2026-W44)` です
+2. カードの Goal は、[worker/DRIFT.md](../worker/DRIFT.md) の指示、`## Targets` の見出しと目標の文、の順です。
+   指示はカードを作ったときの task-hub のものが Issue に写ります
+3. あなたが Ready に移すと(`ready = drift` も書けば自動で)、ふだんのカードと同じにエージェントが動きます。
+   周期ごとに新しい Issue なので、エージェントは会話も前の週のレポートも持ちません(Goldfish)。
+   読むのは Targets の文書とコードだけで、git の履歴、PR、Issue、ボードは読みません。ファイルは変えません
+4. エージェントのレポートが drift report です。食い違いを 1 件ずつ、文書の場所(ファイルと行)、コードの場所、
+   どちらが正しそうか、直し方の案と、blocking / minor の別で並べます。research カードなので PR はなく、
+   レポートが Issue のコメントになって In review に進みます([task-format.md](task-format.md))
+5. 読んだら `task done` で閉じます。直すかどうか、どちらを直すかはあなたが決め、直すならカードを別に作ります
+
+1 回の時間と token は、ほかのカードと同じく `metrics.jsonl` に記録され、`task stats` で見られます
+([operations.md](operations.md#エージェントの使用量))。予算の上限もほかのカードと同じに効きます
+([operations.md](operations.md#予算と残高))。
+`drift_report` に書けるのは繰り返しの目標の名前だけです(違えば `task watch` が始めるときに `error:` で止まります)。
 
 ## 1 回に 1 枚
 

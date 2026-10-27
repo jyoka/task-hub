@@ -7590,6 +7590,43 @@ class TaskTest(unittest.TestCase):
         self.assertIn("started[1]", self.task("watch"))  # the next check starts it, as any Ready card
         self.assertEqual(self.wait(chore["id"]), "In review")
 
+    def test_drift_report_goal_makes_a_research_card_with_the_drift_instructions(self):
+        triggers = ("drift = weekly jyoka/app Drift report: README.md against app.py MODE:nochange\n"
+                    "drift_report = drift\nready = drift")
+        self.assertIn("triggered[1]", self.trigger_watch(triggers))
+        [card] = self.cards()
+        self.assertRegex(card["title"], r"^Drift report: README.md against app.py MODE:nochange \(\d{4}-W\d{2}\)$")
+        self.assertEqual(self.gh()["issues"][card["id"]]["labels"], [{"name": "research"}])
+        drift = (BIN.parent.parent / "worker" / "DRIFT.md").read_text().split("\n---\n", 1)[1].strip()
+        self.assertTrue(card["body"].startswith(drift))  # the instructions, not the header for people
+        self.assertIn("## Targets\n\nDrift report: README.md against app.py MODE:nochange\n\nMade by task-hub's "
+                      "recurring goal `drift`", card["body"])
+        task = self.load_bin()
+        # no heading of the instructions is read as the Goal's Rules or blockers
+        self.assertEqual((task.goal_rules(card["body"]), task.mentioned_blockers(card["body"])), ({}, []))
+        self.assertNotIn("triggered", self.trigger_watch(triggers))  # one card a week
+        self.env["TASK_WATCH_ONCE"] = "1"
+        self.task("watch")
+        self.assertEqual(self.wait(card["id"]), "In review")  # its report is the drift report: no PR
+        self.assertIsNone(self.pr(card["id"]))
+        self.assertIn("Kind: research", self.agent_calls()[0]["prompt"])
+        self.assertIn("Write a drift report", self.agent_calls()[0]["prompt"])
+
+    def test_the_drift_report_example_in_docs_triggers_is_read_as_documented(self):
+        doc = (BIN.parent.parent / "docs" / "triggers.md").read_text()
+        [example] = re.findall(r"(?ms)^```ini\n(drift = .*?)^```", doc)
+        task = self.load_bin()
+        name, value = example.split("\n")[0].split(" = ", 1)
+        self.assertEqual(task.parse_recurring(name, value)["schedule"], ("weekly", 0, (9, 0)))
+        # due whatever the day and hour the test runs: Monday 0:00 of this week has always come
+        self.assertIn("triggered[1]", self.trigger_watch(example.strip().replace("weekly mon 09:00", "weekly")))
+        [card] = self.cards()
+        self.assertRegex(card["title"], r"^Drift report: README.md docs/design.md .* \(\d{4}-W\d{2}\)$")
+        self.assertEqual((card["status"], card["target repo"]), ("Backlog", "jyoka/task-hub"))
+        self.assertEqual(self.gh()["issues"][card["id"]]["labels"], [{"name": "research"}])
+        self.assertIn("## Targets\n\nDrift report: README.md docs/design.md docs/architecture/hld.md "
+                      "docs/architecture/lld.md docs/task-format.md against bin/task worker/\n", card["body"])
+
     def test_triggers_are_checked_at_most_every_few_minutes(self):
         self.set_runs(self.ci_run(8, conclusion="success"))
         self.trigger_watch("ci = jyoka/app", every="")
@@ -7611,7 +7648,8 @@ class TaskTest(unittest.TestCase):
         for triggers, why in [("deps = hourly jyoka/app Bump", "unknown schedule"),
                               ("deps = daily Bump the dependencies", "<schedule> <owner/repo> <goal>"),
                               ("ci = app", "owner/name"), ("issues = jyoka/tasks", "the board's own Issue repo"),
-                              ("ci = jyoka/app\nready = ci", "only those can go to Ready")]:
+                              ("ci = jyoka/app\nready = ci", "only those can go to Ready"),
+                              ("ci = jyoka/app\ndrift_report = ci", "drift_report names 'ci'")]:
             self.write_config(extra=f"[triggers]\n{triggers}\n")
             self.env["TASK_WATCH_ONCE"] = "1"
             out = self.task("watch", code=1)
