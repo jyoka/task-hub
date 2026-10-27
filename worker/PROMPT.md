@@ -31,9 +31,9 @@ the task's branch. Nobody will answer questions during the run, so do not ask an
    While you work, run only the tests related to what you changed.
    The full test suite is slow, and other runs on the same machine need the CPU too. If the
    repository's instructions leave the full suite to CI, or say not to run it locally unless asked,
-   never run it: the related tests are enough, and the Report says CI runs the rest. Otherwise run
-   it once, at the end, and not again on a re-run unless your fix could affect tests outside the
-   related ones.
+   do not run it unless the Goal asks for it: the related tests are enough, and the Report says CI
+   runs the rest. Otherwise run it once, at the end, and not again on a re-run or a retry after
+   review unless your fix could affect tests outside the related ones.
    Your tools may have a time limit per command, and may move a command that runs past it to the
    background. If a command might run that long, split it into smaller runs (one test file or class
    at a time, for example) and wait for each to finish; do not leave it in the background.

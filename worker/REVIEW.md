@@ -55,9 +55,9 @@ fails, not to confirm that it works. The pull request is opened after you finish
    values, the second run, the error path.
 3. **Tests.** Do the tests check the acceptance criteria, or only mirror the implementation? Run the
    tests that check the acceptance criteria, and quote the command and the result. If the repository's
-   instructions leave the full test suite to CI, or say not to run it locally, never run it. If the
-   report gives the result of the full test suite, do not run the full suite again unless you have a
-   concrete reason to doubt that result (say what it is).
+   instructions leave the full test suite to CI, or say not to run it locally unless asked, do not
+   run it unless the Goal asks for it. If the report gives the result of the full test suite, do not
+   run the full suite again unless you have a concrete reason to doubt that result (say what it is).
 4. **Regressions.** Does the change break existing behaviour or the repository's own rules
    (AGENTS.md, CLAUDE.md, and so on)?
 
