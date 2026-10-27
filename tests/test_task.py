@@ -1933,6 +1933,16 @@ class TaskTest(unittest.TestCase):
         line, = re.findall(r"^<!-- task-hub review: (\{.*\}) -->$", comment, re.M)
         return json.loads(line)
 
+    def assert_defers_to_ci(self, prompt):
+        """A criterion only the PR's CI can check is `deferred to CI`, never alone a reason to block or send back; one
+        the CI passing or failing does not decide (its time, its log) names where a person checks it."""
+        self.assertIn("Mark such a criterion `deferred to CI`, next to met and not met", prompt)
+        self.assertIn("Do not make it, alone, a reason for `blocked` or `needs changes`", prompt)
+        self.assertIn("the merge queue waits for the CI to pass before it merges", prompt)
+        self.assertIn("`deferred to CI` too, and not a reason for `blocked` either", prompt)
+        self.assertIn("say what a person looks at to check it: the CI job's name and the log line", prompt)
+        self.assertIn("met / not met / deferred to CI", prompt)
+
     def test_goldfish_auditors_get_the_goal_readiness_and_diff_but_never_the_agents_report(self):
         self.write_config(reviewer=True, review_mode="goldfish")
         tid = self.new("ok")
@@ -1958,9 +1968,11 @@ class TaskTest(unittest.TestCase):
             self.assertNotIn("Ran the tests: 3 passed", prompt)  # the report's claim: theirs to check, not to read
             self.assertNotIn("hello.txt: wording", prompt)  # its Please review
             self.assertIn("You get no report from the agent", prompt)
+            self.assert_defers_to_ci(prompt)
             self.assertFalse(c["report"])  # nor in the worktree it inspects
             self.assertEqual(c["cwd"], calls[0]["cwd"])  # the run's worktree, with what [setup] put in it
         self.assertIn("Go through every acceptance criterion", calls[0]["prompt"])
+        self.assertIn("unless only the pull request's CI can give it: mark that one `deferred to CI`", calls[0]["prompt"])
         self.assertNotIn("Go through every acceptance criterion", calls[1]["prompt"])
         self.assertIn("Look for regressions", calls[1]["prompt"])
         comment = self.comments(tid)[-1]
@@ -1985,6 +1997,7 @@ class TaskTest(unittest.TestCase):
                 self.assertNotIn("# Goldfish review", prompt)
                 self.assertNotIn("You get no report from the agent", prompt)
                 self.assertNotIn("# Readiness check of the Goal", prompt)
+                self.assert_defers_to_ci(prompt)
                 self.assertEqual(self.review_line(self.comments(tid)[-1])["mode"], "agent")
         self.assertEqual(len(self.reviewer_calls()), 2)
 

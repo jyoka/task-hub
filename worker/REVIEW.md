@@ -61,7 +61,8 @@ fails, not to confirm that it works. The pull request is opened after you finish
 ## What to check, in this order
 
 1. **Goal.** Go through the Goal's acceptance criteria one by one. For each, say met or not met and
-   the evidence (a file and line, or a command and its output). Also flag work the Goal did not ask for.
+   the evidence (a file and line, or a command and its output), or `deferred to CI` (below). Also flag
+   work the Goal did not ask for.
 2. **Correctness.** Look for concrete inputs that break the change: empty, zero, missing, unexpected
    values, the second run, the error path.
 3. **Tests.** Do the tests check the acceptance criteria, or only mirror the implementation? Run the
@@ -71,6 +72,15 @@ fails, not to confirm that it works. The pull request is opened after you finish
    run the full suite again unless you have a concrete reason to doubt that result (say what it is).
 4. **Regressions.** Does the change break existing behaviour or the repository's own rules
    (AGENTS.md, CLAUDE.md, and so on)?
+
+Some criteria can only be checked on the pull request's CI, which runs after you finish ("the macos and
+Windows CI pass"). Mark such a criterion `deferred to CI`, next to met and not met, with what you checked
+locally instead, if anything. Do not make it, alone, a reason for `blocked` or `needs changes`: the pull
+request's CI runs when it is opened, and the merge queue waits for the CI to pass before it merges. A
+criterion that the CI passing or failing does not decide (how long the CI takes, what its log says) is
+`deferred to CI` too, and not a reason for `blocked` either; but the merge queue does not check it, so on
+its line in the Review, say what a person looks at to check it: the CI job's name and the log line. The
+Review goes into the pull request beside the report's Please review.
 
 For a research task (the diff says there are no file changes), the report is the deliverable: check
 that it answers every question in the Goal, that its claims point to evidence (files and lines, commands
@@ -103,12 +113,12 @@ pass
 
 ## Review
 
-Acceptance criteria, one line each: met / not met, and the evidence.
+Acceptance criteria, one line each: met / not met / deferred to CI, and the evidence.
 Commands you ran and their results. Residual risk, if any.
 ```
 
-Use `pass` only when every acceptance criterion is met and you found nothing blocking. Minor findings,
-if any, go under `## Known issues` after the Review, one list item each:
+Use `pass` only when every acceptance criterion is met or `deferred to CI` and you found nothing
+blocking. Minor findings, if any, go under `## Known issues` after the Review, one list item each:
 
 ```markdown
 ## Known issues
@@ -133,7 +143,8 @@ One line: the most important reason it is not ready. Then the acceptance criteri
   change to make. Only blocking findings; minor ones go under `## Known issues`, as above.
 ```
 
-If you cannot review because information, access, or a decision only the human has is missing:
+If you cannot review because information, access, or a decision only the human has is missing (a
+criterion `deferred to CI` is not such a case):
 
 ```markdown
 ## Verdict
@@ -181,10 +192,11 @@ first; a finding outside your part goes in too, if it is concrete.
 
 You check the work against the Goal, and nothing else first. Go through every acceptance criterion and every
 item the Goal asks for, one by one, and mark each met or not met with its evidence: the file and line that does
-it, and the command you ran that shows it works, with its output. A criterion with no evidence is not met. A
-criterion the change meets only in name (a test that asserts nothing, a setting that is read but changes
-nothing, a document that says what the code does not do) is not met. Flag work the Goal did not ask for, and
-anything the Goal says is out of scope that the change touches anyway.
+it, and the command you ran that shows it works, with its output. A criterion with no evidence is not met,
+unless only the pull request's CI can give it: mark that one `deferred to CI`, as the instructions above say,
+and do not block on it. A criterion the change meets only in name (a test that asserts nothing, a setting that
+is read but changes nothing, a document that says what the code does not do) is not met. Flag work the Goal did
+not ask for, and anything the Goal says is out of scope that the change touches anyway.
 
 ## Codebase Auditor
 
