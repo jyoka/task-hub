@@ -455,8 +455,10 @@ GitHub を読むことはありません(実行の中は `launch` が読んで `
    - `ci_occurrences`: 同じタイトルの開いたカードがあれば何もしない。`default_branch`(1 日取っておく)の
      `gh run list` から、ワークフローごとに最後に終わった実行を取り、`CI_FAILED` のものを 1 枚にまとめる。キーは `ci:<repo>:<run id>`
    - `issue_occurrences`: `gh issue list --assignee @me`、`issue_label` があれば `--label` も。キーは `issue:<repo>#<番号>`
-   - `recurring_occurrences`: `due_period` が今の周期を返したもの。キーは `every:<名前>:<周期>`
-4. occurrence ごとに `create_task`。キーがもう `seen` にあれば(同じ確認の前の occurrence が書いた)作らない。`created` で Issue の URL が分かった直後に `seen` に書く。`ready` なら Backlog のあと `set_status(Ready)`
+   - `recurring_occurrences`: `due_period` が今の周期を返したもの。キーは `every:<名前>:<周期>`。`drift_report` に
+     書いた目標は research で、Goal は `drift_goal`(`worker/DRIFT.md` の `---` より下と `## Targets`、目標の文)。
+     `worker/DRIFT.md` が読めなければ、その目標だけ `trigger_errors` に出して次の確認でまた試す
+4. occurrence ごとに `create_task`(research なら先に `research_label`、`task new --research` と同じ `gh label create --force`)。キーがもう `seen` にあれば(同じ確認の前の occurrence が書いた)作らない。`created` で Issue の URL が分かった直後に `seen` に書く。`ready` なら Backlog のあと `set_status(Ready)`
 
 GitHub の失敗はリポジトリごと、カードごとに `trigger_errors` に出し、ほかは続けます。`triggers.json` が書けなければ
 何も作らずに `error:` を返します。
@@ -711,7 +713,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `gh issue list`(割り当て、ラベル) | GraphQL(gh) | 1 前後 | `[triggers] issues` のリポジトリごとに 1〜2、5 分に 1 回まで |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
 | 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
-| Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり |
+| Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり。research のカード(`task new --research`、`[triggers] drift_report`)は作る前に `gh label create --force` も |
 | `git fetch`、`push` | git | - | 開始、終わり |
 | マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`git fetch`、`merge`、`push` | gh(GraphQL)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
 | チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |
