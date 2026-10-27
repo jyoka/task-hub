@@ -14,6 +14,7 @@ flowchart TB
     mergeq["merge queue<br/>merge_config、read_queue、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged"]
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
+    readiness["readiness<br/>cmd_check、readiness_check、goldfish、at_once、ReadinessResult、readiness_gate、<br/>set_readiness、latest_readiness、goal_hash"]
     runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、run_replan、finish、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
@@ -26,6 +27,10 @@ flowchart TB
 
     commands --> sync
     commands --> runone
+    commands --> readiness
+    sync --> readiness
+    readiness --> start
+    readiness --> boardl
     commands --> boardl
     commands --> updates
     commands --> triggers
@@ -195,7 +200,8 @@ flowchart LR
 |---|---|---|---|
 | `task` | `sync(started_here=True)`、`cmd_home` | ボードを読む、開始、片付け | runs、events、asked |
 | `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.7 節) | 同上 + triggers |
-| `task list [--max-age]` | `shared_items`、`tasks`、`list_lines` | キャッシュが古いときだけ読む | board-cache |
+| `task list [--max-age]` | `shared_items`、`tasks`、`listed`(`readiness_gate(read=False)`)、`list_lines` | キャッシュが古いときだけ読む | board-cache |
+| `task check <id> [--no-write] [--ref]` | `get`、`issue`、`ensure_clone`、`readiness_check`(`goldfish`、`at_once`)、`ReadinessResult`、`comment`、`set_readiness`、`note_readiness`(4.10) | 読む、Issue にコメント、Readiness 欄(なければ `project field-create`)。`--no-write` は読むだけ | worktrees(`<id>-check-<役>`。終われば消す)、logs(`<id>-check.log`)、checks、readiness、events |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
 | `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
@@ -253,6 +259,9 @@ sequenceDiagram
     end
     opt 何かが Done になった
         S->>GH: archive_overflow
+    end
+    opt [runner] readiness が off でない
+        S->>GH: readiness_gate(4.10): Goal かカードが変わった Ready のカードだけ Issue を読む
     end
     opt [autopilot] repos
         S->>GH: autopilot_ready(4.9): Backlog を Ready に
@@ -520,6 +529,51 @@ stateDiagram-v2
   `autopilot: off`。大文字と小文字、前後の空白、箇条書きの印、`*`、`_`、`` ` ``、終わりの `.` を問わない)で求めます。
   実行の記録には保存しません
 
+### 4.10 Ready の前の確かめ(`task check`、`readiness_gate`)
+
+`cmd_check` は Backlog か Ready のカード(`--no-write` ならどの列でも)の Goal を `issue` で読み、作業先の clone を
+`ensure_clone` で fetch し、base(`base_ref`、`--ref` ならそのコミット)を確かめます。`readiness_check` は
+`worker/READINESS.md` を `instruction_parts(..., 4)` で 4 つに分け、3 つの段を順に動かします。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as cmd_check
+    participant G as goldfish(段ごと)
+    participant A as エージェントの CLI
+    participant GH as GitHub
+    C->>GH: issue(本文、ラベル、コメント)
+    C->>G: comprehension(1 体)
+    G->>G: worktree add --detach <ref>、snapshot
+    G->>A: run_agent_process(t なし)
+    G->>G: restore(変えていたら blocked)、.task-readiness.md、worktree remove
+    C->>G: 批評の役ごとに 1 体(at_once で同時に)
+    C->>G: readiness(1 と 2 の結果を足したプロンプト)
+    C->>C: ReadinessResult(blocking / minor で判定を直す)
+    C->>GH: READINESS_MARK のコメント
+    C->>C: checks.jsonl、readiness.json(read を空に)
+    C->>GH: set_readiness(欄。blocked は --clear)
+    C->>C: readiness の出来事
+```
+
+- 各 Goldfish は `DATA/worktrees/<id>-check-<役>` に自分の worktree を持ちます。同時に動く批評のトークンを
+  `agent_usage`(worktree のフォルダと時刻で数える)が分けられるようにするためです。`run_agent_process` には `t` を渡さず、
+  実行の記録(`runs/<id>.json`)は作りません。プロセスは `HELPERS` に入り、Ctrl-C(と `INTERRUPTS`)で `at_once` が止めます。
+  段ごとに `over_budget(save=False, what="task check: ")` で、そのエージェントの実行 1 回の予算と比べます
+- 段が `blocked`(ファイルを変えた、結果がない、git の失敗)になったら、そこで止めます
+- `ReadinessResult`: `## Verdict` の 1 行目を大文字にして `GO` / `NO-GO`。blocking がなく minor だけの NO-GO は GO、
+  blocking のある GO は NO-GO。どちらでもなければ `blocked`。Blocking などの節が `none`、`- None.`、`Nothing blocking.` の
+  ように「ない」とだけ書く 1 項目なら、`none_text` が空にします(指摘として数えると GO が NO-GO になるため)。コメントの先頭 3 行(印、`Verdict:`、`Goal:`)を
+  `parse_readiness` が読み戻し、`latest_readiness` はこのアカウント(`viewerDidAuthor`)の最新の印つきコメントだけを数えます
+- `readiness_gate(board_, mode, repos, read, errors)`: `off` なら何もしません。Ready のカードと、`repos` の Backlog の
+  カードについて、`readiness.json` の `read`(`<Goal のハッシュ> <カードの updatedAt>`)が今と違えば `issue` を 1 回読み、
+  `{read, research, verdict, hash}` を書きます。`readiness_of` が `GO`、`research`、`NO-GO`、`blocked`、`stale`、`none`、
+  `unknown` を `t["readiness"]` に入れます。`require` なら `GO` と `research` 以外の `waits_for` に理由を足すので、開始の
+  一覧からも `autopilot_ready` の候補からも外れます。`warn` は `sync` が開始のあとで `readiness` の出来事を書きます
+- `task check` が欄を変えるとカードの `updatedAt` が変わるので、別のマシンの判定も次の同期で読み直されます
+- `task check` はコメントを書いたらすぐ、欄より先に `readiness.json` の `read` を空にして新しい判定を書きます。欄の
+  変更に失敗しても(欄が TEXT など)、`updatedAt` が動かないまま前の判定が門に残ることはありません
+
 ## 5. 手元のファイル
 
 | ファイル | 書く者 | 読む者 | 形式 |
@@ -534,6 +588,10 @@ stateDiagram-v2
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
 | `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold`、`budget_limits` | JSON Lines |
+| `state/checks.jsonl` | `cmd_check`(追記) | `task stats`(`checks_line`) | JSON Lines。`{id, title, repo, agent, ref, commit, goal, started, finished, seconds, verdict, blocking, minor, written, usage}`。`usage` は metrics と同じ起動ごとの形。metrics に入れないのは、そこを読むものが実行を数えるため |
+| `state/readiness.json`、`state/readiness.lock` | `note_readiness`(`readiness_gate`、`cmd_check`。lock を持って読み、変えて書く) | `readiness_gate` | `{key, cards: {id: {read, research, verdict, hash}}}`。`key` は `board_config()` |
+| `state/runs/<id>.check.lock` | `cmd_check`(中身は空) | `cmd_check` | 同じカードの `task check` を 1 つにする |
+| `state/logs/<id>-check.log` | `cmd_check` | 人 | テキスト。Goldfish の出力(`Steps`)と段の行 |
 | `state/board-cache.json` | `fetch_items`(開いているカードを読んだとき) | `task list`、Kiro の拡張(Goal のタブ。`items[].content.body`) | `{key, fetched_at, items}` |
 | `state/board-cache.stale` | `gh()`(ボードを変える呼び出しのあと) | `cached_items` | UNIX 時刻 |
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
@@ -653,7 +711,9 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
-| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner) |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
+| `task check` の書き込み: `gh issue comment`、`gh project item-edit`(Readiness 欄。blocked は `--clear`)、欄がなければ `gh project field-create` を 1 回 | gh(GraphQL) | 判定ごとに 2〜3 | `task check` だけ(`--no-write` は 0) |
+| `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn` か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
 | 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
 | B の実行役のモデル(`durable/`、既定は `openai-codex/gpt-6-luna`、thinking `medium`) | pi-ai の `openai-codex` provider。pi の `auth.json` を読むだけ(`CredentialStore` の `modify` を断るので、切れかけたトークンは更新せず理由つきで 1 で終わる) | ChatGPT のサブスクリプション。再開では元のプロンプトを送り直さず、SQLite の会話から続ける | エージェントのターンごと |
 | `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
@@ -793,6 +853,11 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     落ちたエージェントが `group-shell` を通して動かしていたツールのコマンドは、次のエージェントを起動する前に止まる。
     番号が別のプロセスに渡ったグループは止めない
 18. 再開しても、reviewer と replanner の書き換えは結果に残らず、Issue のレポートは 1 つ
+19. `task check` の Goldfish は Goal とコードだけを受け取り(過去のレポート、ほかのカードは渡さない)、3 段(批評は 3 体を同時に)を
+    それぞれ自分の worktree で動く。ファイルを変えた Goldfish の変更は戻り、判定は `blocked`。判定のコメントの `Verdict:` と Goal の
+    ハッシュは読み戻され、Readiness 欄に GO / NO-GO が入る。Goal を編集すると前の GO は `stale`。`[runner] readiness = require` では
+    今の Goal への GO がない Ready のカードは始まらず、オートパイロットも Ready に移さない。`off`(既定)では何も読まず、何も変わらない。
+    task-hub は判定でカードを動かさない
 
 ## 10. テストの仕組み
 

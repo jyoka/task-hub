@@ -43,6 +43,7 @@ flowchart LR
 - **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)
 - **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
+- **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Elephant-Goldfish Model](https://egm.dev/) の Goldfish)が GO / NO-GO を判定します。NO-GO なら Goal に足す文言案も付きます。`[runner] readiness = require` にすると、今の Goal への GO がない Ready のカードは始まりません([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
 - **知らせてくれる**: In review、Blocked、長引いている実行、予算を超えた実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません。[知らせ方の比較](docs/notifications.md))
 - **費用を測る**: エージェントの起動ごとのトークン、費用、クレジットを、CLI 自身の記録から読みます(Claude Code、pi、Kiro)。カードごとに予算を決められ、有料 API を使うカードはエージェントの起動前に残高を確かめます([Budget](docs/task-format.md#budget-予算と有料-api))
 - **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
@@ -128,6 +129,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task start [<番号>] [--agent 名前]` | Backlog を承認する、Blocked を再実行する |
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
+| `task check <番号> [--no-write]` | Ready の前に Goal を確かめる。GO / NO-GO を Issue と Project の Readiness 欄に書く(`[runner] readiness` で開始に GO を求められる) |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |

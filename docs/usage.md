@@ -14,6 +14,10 @@
 - **`### Ready conditions`**(任意): 開始前にそろっているべきこと。依存するタスクとそこから使うもの、決まっているべき
   仕様、`.env` のキーなど。エージェントは最初にこれを確かめ、足りなければ何も変えずに Blocked で止まります
 
+Ready に移す前に `task check <番号>` を動かすと、文脈を持たないエージェント(Goldfish)が Goal とコードだけを読み、
+実装に取りかかれるかを GO / NO-GO で判定します。NO-GO なら、Goal に足す文言案が Issue のコメントに付きます
+([task-format.md](task-format.md#ready-の前の確かめtask-check))。
+
 ### 大きさと分け方
 
 1 つのタスクは、単独でレビュー・マージ・取り消しができる 1 つの関心ごとにします(10〜15 分でレビューできる PR が
@@ -58,6 +62,8 @@ reviewer = agent        ; PR の前の自動レビュー。agent = worker と同
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
 review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
+readiness = off         ; Ready のカードを始める前に task check の GO を求めるか。off(既定)/ warn / require
+checker =               ; task check の Goldfish のエージェント。空か agent = カードの Agent 欄
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
@@ -98,6 +104,7 @@ user = task-agent       ; そのユーザー(これが既定)
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
 | `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
+| `readiness` | `warn`: 今の Goal への `task check` の GO がない Ready のカードも始めるが、`readiness` イベントと `task` の出力で知らせる。`require`: GO がなければ始めず(`waits_for` に理由)、オートパイロットも Ready に移さない。どちらも `task list` に `readiness` の列が付く。`--research` のカードは対象外([task-format.md](task-format.md#開始の門-runner-readiness)) | `task check` の NO-GO を見て Goal を直すか、Backlog に戻すか(task-hub はカードを動かさない) |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
@@ -205,6 +212,8 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 | 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
 | 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
 | 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
+| `task check` ごとの判定と、起動ごとの秒数とトークン数 | `~/.local/state/task-hub/checks.jsonl`(`task stats` の `checks:` 行)。ログは `logs/<番号>-check.log` |
+| 最後に読んだ各カードの判定(`[runner] readiness` が `off` 以外のとき) | `~/.local/state/task-hub/readiness.json` |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
 | task-hub の新しい版を確かめた結果(1 日 1 回まで) | `~/.local/state/task-hub/update.json` |
 

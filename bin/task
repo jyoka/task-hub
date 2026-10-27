@@ -56,9 +56,11 @@ REVIEW_FILE = ".task-review.md"
 # never committed: our own files, and Python bytecode that test runs leave in repos without a .gitignore
 # (it reached a PR in jyoka/tasks#43)
 REPLAN_FILE = ".task-replan.md"
-NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, "__pycache__/", "*.pyc"]
+READINESS_FILE = ".task-readiness.md"  # what each Goldfish of `task check` writes, in a worktree of its own
+NEVER_COMMIT = [REPORT_FILE, REVIEW_FILE, REPLAN_FILE, READINESS_FILE, "__pycache__/", "*.pyc"]
 REPORT_MARK = "<!-- task-hub report -->"
 REPLAN_MARK = "<!-- task-hub replan -->"
+READINESS_MARK = "<!-- task-hub readiness -->"  # `task check`'s verdict on the Goal; the last one counts
 MERGE_MARK = "<!-- task-hub merge -->"  # the merge queue's notes on the Issue: never the task's report
 LINK_MARK = "<!-- task-hub link -->"  # a comment on the personal Issue: where `task share` put the task's copy
 SHARED_MARK = "<!-- task-hub shared -->"  # the first line of the copy's body
@@ -66,6 +68,9 @@ SHARE_NOTICE = "> task-hub overwrites this body from a personal task board. Plea
 # the team's column for a personal Status, when [share] names none and the team has no column of the same name
 SHARE_STATUS = {BACKLOG: "Todo", READY: IN_PROGRESS, IN_PROGRESS: IN_PROGRESS, IN_REVIEW: IN_PROGRESS,
                 WAIT_FOR_MERGE: IN_PROGRESS, BLOCKED: IN_PROGRESS, DONE: DONE}
+READINESS_FIELD = "Readiness"  # the Project's single-select field `task check` fills (made when missing)
+READINESS_VERDICTS = ["GO", "NO-GO"]  # its options; a blocked check clears it
+READINESS_MODES = ("off", "warn", "require")  # [runner] readiness: what starting a Ready card asks of its Goal
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
@@ -124,6 +129,7 @@ WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
 WORKER_REPLAN = BIN.parent.parent / "worker" / "REPLAN.md"
 WORKER_CONFLICT = BIN.parent.parent / "worker" / "CONFLICT.md"
+WORKER_READINESS = BIN.parent.parent / "worker" / "READINESS.md"
 GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what the agents' tool commands run in (command_groups_env)
 CONFIG = Path.home() / ".config" / "task-hub" / "config.ini"
 DATA = Path.home() / ".local" / "share" / "task-hub"
@@ -133,6 +139,9 @@ STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
+CHECKS = STATE / "checks.jsonl"  # one line per `task check`, for `task stats`: never in METRICS, whose readers count runs
+READINESS = STATE / "readiness.json"  # the last readiness verdict read of each card, so a check of the board reads
+#                                       an Issue's comments only when its Goal or card changed (readiness_gate)
 # one line per status change task-hub makes, and per Done GitHub makes on a card this machine ran,
 # for whatever watches (see docs/operations.md)
 EVENTS = STATE / "events.jsonl"
@@ -335,15 +344,7 @@ class ReviewResult:
     @property
     def findings(self):
         """The blocking findings, one per top-level list item of Please fix (the whole section when it has no list)."""
-        items = []
-        for line in self.fix.splitlines():
-            if re.match(r"([-*+]|\d+[.)])\s+", line):
-                items.append(line)
-            elif items and line.strip():
-                items[-1] += "\n" + line
-            elif line.strip():
-                items.append(line)
-        return [i.strip() for i in items]
+        return list_items(self.fix)
 
     def repeated(self, sent):
         """The findings that were already sent back once: marked (again), as worker/REVIEW.md asks, or word for word."""
@@ -384,6 +385,19 @@ class ReviewResult:
 
 
 AGAIN = re.compile(r"\(again\)\s*", re.I)
+
+
+def list_items(text):
+    """One string per top-level list item of text (the whole text when it has no list)."""
+    items = []
+    for line in text.splitlines():
+        if re.match(r"([-*+]|\d+[.)])\s+", line):
+            items.append(line)
+        elif items and line.strip():
+            items[-1] += "\n" + line
+        elif line.strip():
+            items.append(line)
+    return [i.strip() for i in items]
 
 
 def finding_text(finding):
@@ -493,7 +507,8 @@ def digest_lines(d, skip=()):
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
-                            "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES)},
+                            "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
+                            "readiness": "off", "checker": ""},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
@@ -891,10 +906,14 @@ def board(saved_ok=False):
     if missing:
         fail(f"the Project is missing: {', '.join(missing)}",
              f"add them in the Project's settings ({project.get('url', '')}); see docs/setup.md")
+    readiness = by_name.get(READINESS_FIELD.lower())  # optional: `task check` makes it when it is missing
     _board.update(owner=owner, number=number, issues=issues, id=project["id"], url=project.get("url", ""),
                   status_field=status["id"], status_options=options,
                   text_fields={n: by_name[n.lower()]["id"] for n in TEXT_FIELDS},
-                  names={n: by_name[n.lower()]["name"] for n in ["Status", *TEXT_FIELDS]})
+                  names={n: by_name[n.lower()]["name"] for n in ["Status", *TEXT_FIELDS]},
+                  readiness={"id": readiness["id"], "type": readiness.get("dataType", ""),
+                             "options": {o["name"].lower(): o["id"] for o in readiness.get("options") or []}}
+                  if readiness else None)
     write_cache(BOARD_META, json.dumps({"key": [owner, number, issues], "at": time.time(), "board": _board}))
     return _board
 
@@ -1026,6 +1045,7 @@ def tasks(include_done=False, max_age=0):
                           for n in (content.get("blockedBy") or {}).get("nodes") or [] if n]}
         t["mentioned"] = mentioned_blockers(content.get("body") or "")
         t["autopilot_off"] = bool(AUTOPILOT_OFF.search(content.get("body") or ""))
+        t["goal_hash"] = goal_hash(content.get("body") or "")  # a readiness verdict counts for this Goal only
         result.append({**load_run(t["id"]), **t})
     statuses = {t["id"]: t["status"] for t in result}
     for t in result:
@@ -1321,6 +1341,7 @@ def issue(t):
             "reported": reported[-1] if reported else "", "replans": replans, "link": links[-1][0] if links else "",
             "link_project": project[1] if project else "",
             "own_comments": [c["body"] for c in data.get("comments", []) if c["body"].startswith((REPORT_MARK, REPLAN_MARK))],
+            "readiness": latest_readiness(data.get("comments") or []),
             "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
 
 
@@ -2304,10 +2325,11 @@ def comments_file(t):
     return DATA / "prompts" / f"{t['id']}-comments.md"
 
 
-def instruction_parts(path):
+def instruction_parts(path, count=3):
     """A worker/*.md file without its header: the instructions, then the part sent only with comments, then the
-    part sent only to a resumed agent (worker/PROMPT.md; "" for those a file does not have)."""
-    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), "", ""][:3]
+    part sent only to a resumed agent (worker/PROMPT.md; "" for those a file does not have). worker/READINESS.md has
+    count=4 parts: the rules and one per stage of `task check` (readiness_parts)."""
+    return [*(part.strip() for part in path.read_text().split("\n---\n")[1:]), *[""] * count][:count]
 
 
 def build_prompt(t, i, comments=""):
@@ -2735,20 +2757,26 @@ def budget_text(k, n):
             "credits": lambda: f"{n:.2f} credits"}[k]()
 
 
-def over_budget(t, usage, say):
+def over_budget(t, usage, say, save=True, what=""):
     """An `over budget` event for each measure the run just went past its limit in, once per measure and run.
-    Only the event, for now: the run goes on (docs/design.md, decision 18)."""
+    Only the event, for now: the run goes on (docs/design.md, decision 18).
+    save: False for what is no run (`task check`): what it told is kept in t only. what: the reason's first words."""
     told = (t.get("over_budget") or "").split()
     limits = budget_limits(t.get("agent") or "", t.get("budget") or None)
     over = [(k, n) for k, n in run_used(usage).items() if k not in told and n > limits[k][0]]
     if not over:
         return
-    reason = "; ".join(f"used {budget_text(k, n)}, over {budget_text(k, limits[k][0])} ({limits[k][1]})"
-                       for k, n in over)
+    reason = what + "; ".join(f"used {budget_text(k, n)}, over {budget_text(k, limits[k][0])} ({limits[k][1]})"
+                              for k, n in over)
     say(f"== over budget: {reason}")
     t["over_budget"] = " ".join(told + [k for k, _ in over])
-    save_run(t)
+    if save:
+        save_run(t)
     emit(t, "over budget", reason=reason)
+
+
+HELPERS = set()  # the agents running without a run (t=None: `task check`'s Goldfish), for Ctrl-C to stop
+HELPERS_LOCK = threading.Lock()
 
 
 def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
@@ -2771,6 +2799,9 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
             t["agent_pid"], t["agent_started"] = str(proc.pid), now()
             t["agent_group"] = proc.pid  # never saved: kept after it ends, for what it left in its group (run_worker)
             save_run(t)
+        else:
+            with HELPERS_LOCK:
+                HELPERS.add(proc)
         steps = STEPS.get(step_format(agent), Steps)(wt)
         lines = queue.Queue()  # read in a thread, so the watchdog runs while the agent is silent
 
@@ -2825,6 +2856,8 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
         say(f"agent cannot run: {e}")
         return 127
     finally:
+        with HELPERS_LOCK:
+            HELPERS.discard(proc)
         if t is not None:
             t["agent_running"] = False
             if t.get("agent_pid") and (proc is None or proc.returncode is not None):
@@ -3651,6 +3684,396 @@ def run_replan(t, report, say, usage=None):
     say(f"== replanner decision: {decision}")
     emit(t, "replan", decision=decision, digest=digest(replan=body))
     return decision
+
+
+# ---------- readiness: `task check`, the Goldfish's GO / NO-GO on a Goal before it starts (docs/task-format.md) ----------
+
+def goal_hash(body):
+    """The Goal a readiness verdict was given for: 16 hex characters of the SHA-256 of the Issue body, its line ends
+    and outer blank space aside. Any other edit of the Goal makes the verdict stale."""
+    return hashlib.sha256(body.replace("\r\n", "\n").strip().encode()).hexdigest()[:16]
+
+
+NONE_WORDS = {"", "-", "none", "n/a", "na", "nothing", "none found", "no findings", "nothing blocking", "none blocking",
+              "no blocking findings", "no minor findings", "nothing to add", "no additions", "なし", "特になし"}
+
+
+def none_text(text):
+    """A section's text, or "" when the agent wrote that there is nothing: `none`, `n/a`, `-`, also as the one item
+    of a list (`- None.`, `- n/a`) and with a few words more (`Nothing blocking.`). The Readiness verdict counts what
+    is left as findings, so a GO with `- None` under Blocking must not become a NO-GO."""
+    items = list_items(text.strip())
+    if len(items) > 1:
+        return text.strip()
+    return "" if not items or " ".join(finding_text(items[0]).strip(".*_`。 ").lower().split()) in NONE_WORDS \
+        else text.strip()
+
+
+class ReadinessResult:
+    """The Goldfish's verdict on a Goal: GO, NO-GO, or blocked (a Goldfish edited files or wrote no result: why says
+    which). Blocking and Minor are sorted as ReviewResult sorts Please fix and Known issues: a NO-GO with only minor
+    findings is a GO, and a GO that still lists a blocking finding is a NO-GO."""
+    def __init__(self, markdown="", blocked=""):
+        self.markdown = markdown or ""
+        # models decorate the word as they do a review's: **GO**, `NO-GO`, No go.
+        said = re.sub(r"[\s_-]+", "-", (section(self.markdown, "Verdict").splitlines() or [""])[0].strip(" *`_.").upper())
+        said = "NO-GO" if said == "NOGO" else said
+        self.summary = none_text(section(self.markdown, "Summary"))
+        self.blocking = list_items(none_text(section(self.markdown, "Blocking")))
+        self.minor = list_items(none_text(section(self.markdown, "Minor")))
+        self.additions = none_text(section(self.markdown, "Goal additions"))
+        self.why = blocked
+        if not blocked and said not in READINESS_VERDICTS:
+            self.why = f"the readiness agent wrote no verdict GO or NO-GO (it wrote {said or 'none'})"
+        if self.why:
+            self.verdict = "blocked"
+        elif said == "NO-GO" and not self.blocking and self.minor:  # nothing blocking: what it lists can wait
+            self.verdict = "GO"
+        elif said == "GO" and self.blocking:
+            self.verdict = "NO-GO"
+        else:
+            self.verdict = said
+
+    def comment(self, tid, hash_, about, comprehension=""):
+        """The Issue comment: READINESS_MARK, then the two lines task-hub reads back (parse_readiness), then the rest."""
+        parts = [f"{READINESS_MARK}\nVerdict: {self.verdict}\nGoal: {hash_}", "## Readiness", about]
+        if self.why:
+            return "\n\n".join(parts + [f"Blocked: {self.why}.", f"Fix that, then run `task check {tid}` again."])
+        parts += [self.summary] * bool(self.summary)
+        parts += ["### Blocking\n\n" + ("\n".join(self.blocking) or "none"),
+                  "### Minor\n\n" + ("\n".join(self.minor) or "none")]
+        if self.verdict == "NO-GO":
+            parts += ["### Suggested Goal additions\n\n" + (self.additions or "none proposed"),
+                      f"Add what the blocking findings need to the Goal, then run `task check {tid}` again. task-hub "
+                      "does not move the card: whether it goes back to Backlog is yours to decide."]
+        else:
+            parts += ["This GO counts for the Goal as it is now: an edit of the Goal makes it stale."]
+        if comprehension:
+            parts += [f"<details><summary>Comprehension Check</summary>\n\n{clip_text(comprehension, 20000)}\n\n"
+                      "</details>"]
+        return clip_text("\n\n".join(parts), COMMENT_MAX)
+
+
+COMMENT_MAX = 60000  # GitHub refuses a comment over 65,536 characters
+
+
+def clip_text(text, limit):
+    """text, cut to limit characters with a note when it is longer (its head, where the verdict is, stays)."""
+    return text if len(text) <= limit else text[:limit] + "\n\n... (cut: too long for one comment)"
+
+
+def parse_readiness(body):
+    """{verdict, hash} from the head of a READINESS_MARK comment (above its first heading), or {}."""
+    head = body.split("\n## ", 1)[0]
+    verdict = re.search(r"(?m)^Verdict: (GO|NO-GO|blocked)[ \t]*$", head)
+    hash_ = re.search(r"(?m)^Goal: ([0-9a-f]{16})[ \t]*$", head)
+    return {"verdict": verdict[1], "hash": hash_[1]} if verdict and hash_ else {}
+
+
+def latest_readiness(comments):
+    """The verdict of the newest READINESS_MARK comment this account wrote, or {}: a comment anyone else wrote is no
+    verdict, whatever it says, and a newest one that does not read is none (never the one before it)."""
+    for c in reversed(comments):
+        if (c.get("body") or "").startswith(READINESS_MARK) and c.get("viewerDidAuthor") is True:
+            return parse_readiness(c["body"])
+    return {}
+
+
+def readiness_mode():
+    """[runner] readiness: off (the default), warn, or require."""
+    mode = config()["runner"].get("readiness", "").strip().lower() or "off"
+    if mode not in READINESS_MODES:
+        fail(f"[runner] readiness must be off, warn or require; got {mode!r}",
+             f"fix it in {home(CONFIG)} (see docs/task-format.md)")
+    return mode
+
+
+def readiness_cards():
+    """READINESS's cards: {id: {read, research, verdict, hash}}, {} when it is another board's or unreadable."""
+    data = read_json(READINESS)
+    cards = data.get("cards")
+    return cards if data.get("key") == list(board_config()) and isinstance(cards, dict) else {}
+
+
+def note_readiness(tid, entry):
+    with file_lock(STATE / "readiness.lock", wait=True):
+        cards = readiness_cards()
+        cards[tid] = entry
+        write_cache(READINESS, json.dumps({"key": list(board_config()), "cards": cards}))
+
+
+READINESS_WHY = {"NO-GO": "its Goal got NO-GO", "blocked": "its last check was blocked",
+                 "stale": "its Goal changed since its last check", "none": "its Goal was never checked",
+                 "unknown": "its readiness was not read on this machine yet"}
+
+
+def readiness_of(t, entry):
+    """What a card's readiness is for the gate: "GO" (given to its Goal as it is now), "research" (not gated),
+    "NO-GO", "blocked", "stale" (the last verdict was given to an earlier Goal), "none" (never checked), or "unknown"
+    (not read on this machine yet)."""
+    if not entry:
+        return "unknown"
+    if entry.get("research"):
+        return "research"
+    if not entry.get("verdict"):
+        return "none"
+    return entry["verdict"] if entry.get("hash") == t["goal_hash"] else "stale"
+
+
+def readiness_gate(board_, mode, repos=(), read=True, errors=None):
+    """[runner] readiness on the board just read. Each Ready card's readiness goes into t["readiness"], and that of
+    the Backlog cards of autopilot's repos: with require, a card without a GO for its current Goal then waits, the
+    reason in its waits_for as a blocker's would be, so it is neither started nor moved to Ready.
+    read: the Issue's comments and labels are read (one call) when the card's Goal or the card itself changed since
+    the last read (`task`, `task watch`); False for the read-only `task list`, which shows what was last read.
+    Off: nothing is read, and nothing changes. task-hub never moves a card for its readiness."""
+    if mode == "off":
+        return
+    cards = readiness_cards()
+    for t in board_:
+        if t["status"] != READY and not (t["status"] == BACKLOG and (t.get("repo") or "").lower() in repos):
+            continue
+        key = f"{t['goal_hash']} {t.get('updated') or ''}"  # a field set by `task check` elsewhere moves updatedAt
+        entry = cards.get(t["id"])
+        if read and (not entry or entry.get("read") != key):
+            try:
+                i = issue(t)
+            except RuntimeError as e:  # unknown until the next check reads it: never a GO meanwhile
+                if errors is not None:
+                    errors.append({"id": t["id"], "error": f"readiness: {e}"})
+            else:
+                entry = {"read": key, "research": i["research"], "verdict": i["readiness"].get("verdict", ""),
+                         "hash": i["readiness"].get("hash", "")}
+                note_readiness(t["id"], entry)
+        t["readiness"] = readiness_of(t, entry)
+        if mode == "require" and t["readiness"] not in ("GO", "research"):
+            t["waits_for"] = ", ".join(filter(None, [t["waits_for"], f"readiness: {READINESS_WHY[t['readiness']]} "
+                                                                     f"(`task check {t['id']}`)"]))
+
+
+def set_readiness(t, verdict):
+    """The card's Readiness field: GO or NO-GO, cleared for a blocked check. The field is made, with both options,
+    when the Project has none; one of another type, or without the option, is the human's to fix."""
+    b = board()
+    if not b.get("readiness"):
+        gh("project", "field-create", b["number"], "--owner", b["owner"], "--name", READINESS_FIELD,
+           "--data-type", "SINGLE_SELECT", "--single-select-options", ",".join(READINESS_VERDICTS))
+        forget_board()
+        b = board()
+    field = b.get("readiness") or {}
+    if field.get("type") != "SINGLE_SELECT":
+        raise RuntimeError(f'the Project\'s "{READINESS_FIELD}" field is {field.get("type") or "missing"}, not a '
+                           f"single select with the options {', '.join(READINESS_VERDICTS)}")
+    if verdict in READINESS_VERDICTS:
+        option = field["options"].get(verdict.lower())
+        if not option:
+            raise RuntimeError(f'the Project\'s "{READINESS_FIELD}" field has no option "{verdict}"; add it in the '
+                               f"Project's settings ({b.get('url', '')})")
+        value = ["--single-select-option-id", option]
+    else:
+        value = ["--clear"]
+    try:
+        gh("project", "item-edit", "--id", t["item"], "--project-id", b["id"], "--field-id", field["id"], *value)
+    except RuntimeError:
+        forget_board()
+        raise
+
+
+def checker(t):
+    """The agent each Goldfish of `task check` runs: [runner] checker ("agent": the card's own), else the card's."""
+    own = t.get("agent") or config()["runner"]["agent"]
+    name = config()["runner"].get("checker", "").strip()
+    name = own if name in ("", "agent") else name
+    if not config().has_option("agents", name):
+        raise RuntimeError(f'unknown agent "{name}" for `task check` ([runner] checker, or the card\'s Agent)')
+    return name
+
+
+def readiness_parts():
+    """worker/READINESS.md as (rules, comprehension, {critic: its persona}, the critics' output format, readiness)."""
+    rules, comprehension, critics, readiness = instruction_parts(WORKER_READINESS, 4)
+    personas, _, output = critics.partition(f"\n## `{READINESS_FILE}`\n")
+    named = dict((n.strip(), text.strip()) for n, text in re.findall(r"(?ms)^## ([^\n]+)\n(.*?)(?=^## |\Z)", personas))
+    if not named:
+        raise RuntimeError(f"{home(WORKER_READINESS)} names no critic (a `## ` heading in its third part)")
+    return rules, comprehension, named, f"## `{READINESS_FILE}`\n{output}", readiness
+
+
+GOLDFISH_TEXT = 12000 if WINDOWS else 40000  # what the readiness agent gets of each earlier Goldfish's file
+
+
+def goldfish_prompt(rules, part, t, goal, extra=()):
+    return "\n".join([rules, "", part, "", "# The task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
+                      "", "## Goal", "", goal.strip(), *extra, ""])
+
+
+def goldfish(agent, role, prompt, repo_dir, ref, t, say, usage):
+    """One Goldfish, in a detached worktree of ref of its own, made for it and removed after: its role's own
+    worktree tells its usage apart from the others' running at the same time. (its file's text, or None and why the
+    check is blocked.) An edit is undone (restore) before the worktree goes."""
+    wt = DATA / "worktrees" / f"{t['id']}-check-{re.sub(r'[^a-z0-9]+', '-', role.lower()).strip('-')}"
+    if wt.exists():  # left by a check that was killed
+        git_shared(repo_dir, "worktree", "remove", "--force", wt)
+        shutil.rmtree(wt, ignore_errors=True)
+    git_shared(repo_dir, "worktree", "prune")
+    git_shared(repo_dir, "worktree", "add", "-q", "--detach", wt, ref, check=True)
+    try:
+        ensure_internal_excludes(wt)
+        snap = snapshot(wt)
+        code = run_agent_process(agent, prompt, wt, say, role, usage)
+        if restore(wt, snap):
+            return None, f"the {role} changed files; its edits were undone. A Goldfish must only read the code"
+        text = agent_file(wt / READINESS_FILE)
+        if not (text or "").strip():
+            return None, f"the {role} exited {code} without writing {READINESS_FILE}"
+        return text, ""
+    finally:
+        git_shared(repo_dir, "worktree", "remove", "--force", wt)
+
+
+def at_once(jobs):
+    """Run each job (a no-argument function) in a thread of its own and wait for all: their results, in order.
+    Ctrl-C reaches only this thread: it stops every Goldfish still running (HELPERS), then goes on as Ctrl-C."""
+    results = [None] * len(jobs)
+
+    def work(n, job):
+        try:
+            results[n] = job()
+        except Exception as e:  # a git or agent failure of one Goldfish blocks the check, with why
+            results[n] = (None, f"{type(e).__name__}: {e}")
+    threads = [threading.Thread(target=work, args=(n, job), daemon=True) for n, job in enumerate(jobs)]
+    for th in threads:
+        th.start()
+    try:
+        while any(th.is_alive() for th in threads):
+            for th in threads:
+                th.join(0.2)
+    except KeyboardInterrupt:
+        with HELPERS_LOCK:
+            procs = list(HELPERS)
+        for proc in procs:
+            stop_agent(proc)
+        for th in threads:
+            th.join(AGENT_STOP_SECONDS)
+        raise
+    return results
+
+
+def readiness_check(t, goal, agent, repo_dir, ref, say, usage):
+    """The three stages of `task check`, each by Goldfish in fresh contexts: the Comprehension Check, then every
+    critic of worker/READINESS.md at once, then Implementation Readiness. (ReadinessResult, the Comprehension Check's
+    text.) A stage that is blocked ends the check there: its verdict is blocked."""
+    rules, comprehension, critics, critic_output, readiness = readiness_parts()
+    probe = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": agent}  # over_budget's; never saved
+
+    def stage(jobs):
+        found = at_once(jobs)
+        over_budget(probe, usage, say, save=False, what="task check: ")
+        return found
+    say("== stage 1: Comprehension Check")
+    (understood, why), = stage([lambda: goldfish(agent, "comprehension", goldfish_prompt(rules, comprehension, t, goal),
+                                                 repo_dir, ref, t, say, usage)])
+    if why:
+        return ReadinessResult(blocked=why), ""
+    say(f"== stage 2: adversarial review by {', '.join(critics)}, at once")
+    found = stage([lambda name=name, persona=persona: goldfish(
+        agent, name, goldfish_prompt(rules, f"# Adversarial review: {name}\n\n{persona}\n\n{critic_output}", t, goal),
+        repo_dir, ref, t, say, usage) for name, persona in critics.items()])
+    blocked = [why for _, why in found if why]
+    if blocked:
+        return ReadinessResult(blocked="; ".join(blocked)), understood.strip()
+    clipped = lambda text: text.strip() if len(text) <= GOLDFISH_TEXT else text[:GOLDFISH_TEXT] + "\n... (cut)"
+    extra = ["", "# Comprehension Check", "", clipped(understood)]
+    for name, (text, _) in zip(critics, found):
+        extra += ["", f"# Critic: {name}", "", clipped(text)]
+    say("== stage 3: Implementation Readiness")
+    (text, why), = stage([lambda: goldfish(agent, "readiness", goldfish_prompt(rules, readiness, t, goal, extra),
+                                           repo_dir, ref, t, say, usage)])
+    return (ReadinessResult(blocked=why) if why else ReadinessResult(text)), understood.strip()
+
+
+def cmd_check(a):
+    """`task check <id>`: Goldfish read only the card's Goal and its repository's base branch, and say GO or NO-GO.
+    The verdict goes on the Issue (READINESS_MARK) and in the Project's Readiness field; --no-write prints it and
+    writes nothing (any card: past cards for a trial, with --ref at the commit before their change)."""
+    t = get(a["id"])
+    write = not a["no_write"]
+    if (a["goal_file"] or a["ref"]) and write:  # a verdict on the Issue is for its Goal at the base branch only
+        fail("--ref and --goal-file are for trials: they go with --no-write only")
+    if write and t["status"] not in (BACKLOG, READY):
+        fail(f"task {t['id']} is {t['status']}; `task check` judges Backlog and Ready cards",
+             f"`task check {t['id']} --no-write` prints a verdict on any card and writes nothing")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or ""):
+        fail('the card has no valid "Target repo" (owner/name)')
+    if t.get("base") and check_base(t["base"]):
+        fail(check_base(t["base"]))
+    readiness_mode()  # a bad config stops before any credit is spent
+    agent = checker(t)
+    check_sandbox()
+    check_ready(agent)
+    i = issue(t)
+    if a["goal_file"]:  # a trial: the Goal as it was before an earlier run (the Issue's edit history)
+        try:
+            i["body"] = read_agent_file(Path(a["goal_file"]))
+        except OSError as e:
+            fail(f"cannot read --goal-file {a['goal_file']}: {e.strerror or e}", code=2)
+    if not i["body"].strip():
+        fail(f"task {t['id']} has no Goal to check", "write the Goal in the Issue body first")
+    repo_dir = ensure_clone(t["repo"])
+    ref = a["ref"] or base_ref(t, repo_dir)
+    commit = git_shared(repo_dir, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}").stdout.strip()
+    if not commit:
+        fail(f"{ref} is not in {t['repo']}", "push the Base branch, or give --ref a commit or branch of the repo")
+    LOGS.mkdir(parents=True, exist_ok=True)
+    log, lock = LOGS / f"{t['id']}-check.log", threading.Lock()
+
+    def say(line):  # the whole of it in the log; the stages and what they come to here too
+        with lock, log.open("a") as f:
+            f.write(line + "\n")
+            if line.startswith("== "):
+                print(line, file=sys.stderr, flush=True)
+    for s in INTERRUPTS:  # a closed pane or kill stops the Goldfish too, as Ctrl-C does
+        signal.signal(s, signal.default_int_handler)
+    began, usage = time.time(), []
+    with file_lock(RUNS / f"{t['id']}.check.lock") as mine:
+        if not mine:
+            fail(f"another `task check {t['id']}` is running")
+        say(f"== task check {t['id']}: {t['title']} | {t['repo']} at {ref} ({commit[:12]}) | agent {agent} | {now()}")
+        try:
+            result, understood = readiness_check(t, i["body"], agent, repo_dir, ref, say, usage)
+        finally:  # stopped (Ctrl-C), a Goldfish's thread may not have removed its worktree yet
+            for wt in DATA.joinpath("worktrees").glob(f"{t['id']}-check-*"):
+                git_shared(repo_dir, "worktree", "remove", "--force", wt)
+    used = run_used(usage)
+    spent = ", ".join([span(round(time.time() - began))] +  # the wall clock: the critics run at once
+                      [budget_text(k, used[k]) for k in ("tokens", "cost", "credits") if k in used])
+    hash_ = goal_hash(i["body"])
+    about = (f"Checked {now()} by {plural(len(usage), 'Goldfish', 'Goldfish')} ({agent}) that read only this Goal and "
+             f"{t['repo']} at " + (commit[:12] if commit.startswith(ref) else f"{ref.removeprefix('origin/')} "
+                                   f"({commit[:12]})") + f": {spent}.")
+    body = result.comment(t["id"], hash_, about, understood)
+    append_jsonl(CHECKS, {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": agent, "ref": ref,
+                          "commit": commit, "goal": hash_, "started": datetime.datetime.fromtimestamp(
+                              began, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "finished": now(),
+                          "seconds": round(time.time() - began), "verdict": result.verdict,
+                          "blocking": len(result.blocking), "minor": len(result.minor), "written": write,
+                          "usage": usage}, say)
+    say(f"== verdict: {result.verdict}")
+    if write:
+        comment(t, body)
+        # before the field: when setting it fails, the gate must not go on with the verdict this comment replaced
+        note_readiness(t["id"], {"read": "", "research": i["research"], "verdict": result.verdict, "hash": hash_})
+        set_readiness(t, result.verdict)
+        emit(t, "readiness", decision=result.verdict, reason=clip(result.why or result.summary, DIGEST_TEXT))
+    out("check:", f"  id: {t['id']}", f"  verdict: {result.verdict}", f"  goal: {hash_}",
+        f"  blocking: {len(result.blocking)}", f"  minor: {len(result.minor)}", f"  used: {q(spent)}",
+        f"  log: {home(log)}", *([f"  why: {q(result.why)}"] if result.why else []),
+        f"  written: {'comment on the Issue, Readiness field' if write else 'nothing (--no-write)'}",
+        *(["comment:", body] if not write else []),
+        "help[1]:", "  " + ("NO-GO: add what the blocking findings need to the Goal, then check again; moving the card "
+                            "is yours to decide" if result.verdict == "NO-GO" else
+                            "GO: it counts for the Goal as it is now; an edit of the Goal makes it stale"
+                            if result.verdict == "GO" else "blocked: fix the cause, then check again"))
 
 
 # ---------- one run (called in the herdr pane or background process) ----------
@@ -4604,6 +5027,7 @@ def sync(started_here=False):
     slots = parallel()  # a bad value stops before anything changes
     merge = merge_config()
     autopilot = autopilot_config()
+    readiness = readiness_mode()
     lines, changed, errors = [], [], []
     open_ = tasks()
     queued = {e["id"] for e in read_queue()} if merge["queue"] else set()
@@ -4692,6 +5116,7 @@ def sync(started_here=False):
         except RuntimeError as e:  # the next card that gets Done tries again
             errors.append({"id": "", "error": f"archiving old Done cards: {e}"})
     board_ = tasks() if changed else open_
+    readiness_gate(board_, readiness, autopilot, errors=errors)  # before autopilot: require holds its Backlog cards too
     if autopilot:  # before the starts: what it approves starts in this same check
         autopilot_ready(board_, autopilot, lines, errors)
     if changed:
@@ -4734,6 +5159,10 @@ def sync(started_here=False):
         started.append({"id": t["id"], "agent": t["agent"],
                         "where": f"herdr tab {t['tab']}" if t["tab"] else
                         f"herdr workspace {t['workspace']}" if t["workspace"] else home(t["log"])})
+        if readiness == "warn" and t.get("readiness") not in ("GO", "research"):  # started anyway: only said
+            why = f"started without a GO for its current Goal: {READINESS_WHY[t.get('readiness') or 'unknown']}"
+            emit(t, "readiness", reason=why)
+            lines.append(f"readiness: task {t['id']} {why} (`task check {t['id']}`)")
     if started:
         lines += table("started", started, ["id", "agent", "where"])
     return lines, board_
@@ -4744,7 +5173,7 @@ def sync(started_here=False):
 def autopilot_config():
     """[autopilot] repos as a set of lower-case owner/name; empty when unset. It merges through the merge queue after
     the automated review, so it needs both: a bad value or a missing one stops before anything changes."""
-    repos = {r.strip().lower() for r in re.split(r"[,\s]+", config()["autopilot"].get("repos", "")) if r.strip()}
+    repos = autopilot_repos()
     for r in sorted(repos):
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", r):
             fail(f"[autopilot] repos takes repos written owner/name; got {r!r}",
@@ -4756,6 +5185,11 @@ def autopilot_config():
         fail("[autopilot] merges only what the automated review passed, and no reviewer is set",
              f"set  [runner]  reviewer = agent  in {home(CONFIG)} (see docs/autopilot.md)")
     return repos
+
+
+def autopilot_repos():
+    """[autopilot] repos as written, lower case, unchecked (autopilot_config checks them)."""
+    return {r.strip().lower() for r in re.split(r"[,\s]+", config()["autopilot"].get("repos", "")) if r.strip()}
 
 
 def all_events():
@@ -5361,17 +5795,24 @@ def cmd_list(a):
     if a["watch"]:
         return list_watch(max_age)
     check = UpdateCheck()  # asks origin while GitHub is read
-    lines = list_lines(tasks(max_age=max_age))
+    lines = list_lines(listed(tasks(max_age=max_age)))
     newest = check.newer()
     out(*lines, *([update_line(newest)] if newest else []))
 
 
+def listed(board_):
+    """The board as `task list` shows it: with [runner] readiness on, each Ready card's readiness as this machine last
+    read it (never read here: `task` or `task watch` reads it), and with require why it waits."""
+    readiness_gate(board_, readiness_mode(), autopilot_repos(), read=False)
+    return board_
+
+
 def list_lines(board_):
-    """`task list`'s lines; the row of board_[i] is line i + 2."""
+    """`task list`'s lines; the row of board_[i] is line i + 2. A readiness column only with [runner] readiness on."""
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
+    cols = ["id", "title", "status", "repo", "agent", "waits_for", *["readiness"] * (readiness_mode() != "off")]
     return ["counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
-            *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], ["id", "title", "status", "repo",
-                                                                                   "agent", "waits_for"])
+            *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], cols)
               if board_ else ["tasks: 0 open tasks"]),
             f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)"]
 
@@ -5390,7 +5831,7 @@ def list_watch(max_age):
     try:
         while True:
             try:
-                board_ = tasks(max_age=max_age)
+                board_ = listed(tasks(max_age=max_age))
                 lines = list_lines(board_)
                 for i, t in enumerate(board_, 2):
                     if terminal and last is not None and last.get(t["id"]) != shown_status(t):
@@ -6023,8 +6464,10 @@ def cmd_stats(_):
     slow = f"slow: {len(events_named('slow'))} run(s) got a `slow` event (ran much longer than usual for their agent)"
     budget = f"over budget: {len(events_named('over budget'))} `over budget` event(s) (a run used more than its " \
              "Goal's Budget, or than usual for its agent; one event per measure and run)"
+    checks = checks_line()
     if not runs:  # the first run can be slow before any run has finished
-        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow, budget)
+        out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow, budget,
+            *checks)
         return
 
     def counts(name, key, values):
@@ -6077,6 +6520,7 @@ def cmd_stats(_):
         *counts("replanner", "decision", [r["replan"] for r in runs if r.get("replan")]),
         slow,
         budget,
+        *checks,
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
            *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
@@ -6089,6 +6533,24 @@ def cmd_stats(_):
            "works it out from the model's prices)"] if costed else []),
         *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
         *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
+
+
+def checks_line():
+    """`task check`'s line of `task stats`, from CHECKS; none before the first check."""
+    checks = []
+    for line in (CHECKS.read_text(errors="replace").splitlines() if CHECKS.exists() else []):
+        with contextlib.suppress(ValueError):
+            r = json.loads(line)
+            if isinstance(r, dict) and r.get("verdict"):
+                checks.append(r)
+    if not checks:
+        return []
+    verdicts = {v: sum(r["verdict"] == v for r in checks) for v in (*READINESS_VERDICTS, "blocked")}
+    measured = [sum(tokens(u) for u in r.get("usage") or [] if "output" in u)
+                for r in checks if any("output" in u for u in r.get("usage") or [])]
+    return [f"checks: {len(checks)} `task check` runs ({', '.join(f'{v} {n}' for v, n in verdicts.items())}), "
+            f"median {span(median(r.get('seconds') or 0 for r in checks))}"
+            + (f" and {short(median(measured))} tokens" if measured else "") + f" each ({home(CHECKS)})"]
 
 
 def median(values):
@@ -6365,6 +6827,12 @@ COMMANDS = {
               "task share <id> --to owner/name [--project owner/number]  # copy a task to a team's GitHub: an Issue "
               "with its Goal and task-hub's reports, and a card on the team's Project ([share] in the config); "
               "its PR then closes both"),
+    "check": (cmd_check, ["id"], {"no-write": False, "ref": True, "goal-file": True},
+              "task check <id> [--no-write [--ref commit] [--goal-file path]]  # Goldfish agents read only the card's "
+              "Goal and its repo's base branch and say GO or NO-GO: on the Issue and in the Project's Readiness field "
+              "([runner] readiness gates starting on it); --no-write prints the verdict and writes nothing (any card), "
+              "--ref checks against that commit of the repo, --goal-file checks that text as the Goal (a past card's "
+              "Goal before it was edited)"),
     "list": (cmd_list, [], {"watch": False, "max-age": True},
              "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
              f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "
