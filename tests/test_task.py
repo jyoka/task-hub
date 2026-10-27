@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import shlex
 import shutil
@@ -1214,6 +1215,24 @@ def process_gone(pid):
     """No such process, or only its exit status left for its parent to collect (a zombie)."""
     r = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
     return r.returncode != 0 or r.stdout.strip().startswith("Z")
+
+
+def read_pty_until_exit(master, p, timeout):
+    """All that p wrote to a PTY, read until p exits. The caller keeps its own copy of the PTY's other end open until
+    this returns: on macOS the last close of that end drops what is still unread, so had the test closed its copy
+    first, a p that wrote and exited before that close (as under load, with tests side by side) would leave nothing."""
+    chunks, end = [], time.monotonic() + timeout
+    while True:
+        done = p.poll() is not None  # checked before reading: what p wrote before it exited is in the PTY by now
+        ready, _, _ = select.select([master], [], [], 0 if done else 0.1)
+        if ready:
+            chunks.append(os.read(master, 65536))
+        elif done:
+            return b"".join(chunks)
+        elif time.monotonic() > end:
+            p.kill()
+            p.wait(timeout=5)
+            raise AssertionError(f"still running after {timeout}s; it wrote: {b''.join(chunks)!r}")
 
 
 class TaskTest(unittest.TestCase):
@@ -2962,20 +2981,14 @@ class TaskTest(unittest.TestCase):
         master, slave = os.openpty()
         p = subprocess.Popen([str(BIN), "list", "--watch"], env={**self.env, "TASK_WATCH_ONCE": "1"}, stdout=slave,
                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        os.close(slave)
-        chunks = []
-        while True:
-            try:
-                data = os.read(master, 4096)
-            except OSError:  # the other end closed
-                break
-            if not data:
-                break
-            chunks.append(data)
-        os.close(master)
+        try:
+            out = read_pty_until_exit(master, p, 20)
+        finally:
+            os.close(slave)
+            os.close(master)
         self.assertEqual(p.wait(timeout=20), 0, p.stderr.read())
         p.stderr.close()
-        return b"".join(chunks).decode().replace("\r\n", "\n")
+        return out.decode().replace("\r\n", "\n")
 
     def test_list_watch_in_a_terminal_redraws_the_screen_under_a_heading_with_the_time(self):
         tid = self.new("ok")
