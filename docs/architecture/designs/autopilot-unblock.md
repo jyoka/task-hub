@@ -256,11 +256,25 @@ sequenceDiagram
 
 `build_prompt` の `# Unblock notes` と、`build_review_prompt` に渡す Scope は、数える範囲と別の範囲から取る。
 
-- `retry` の Instructions と `answered` の Answer: カードのいちばん新しい `Blocked` の出来事より前の、最後の人の開始より
-  後の replan。そのうちいちばん新しい `retry` か `answered` を渡す。今の実行を始めた `Ready` の出来事は境目にしない
-- `narrow` の Scope と Keeps: Issue のすべての `narrow` の replan。人の開始でも消さない
-- `Blocked` の出来事がない、またはその前に `by` のない `Ready` の出来事がない(古い `events.jsonl`)ときは、Issue の
-  すべての replan から取る。今の `build_prompt` が、すべての replan の `answered[-1]` を渡すのと同じ
+- `retry` の Instructions と `answered` の Answer: replanner が動いた Blocked に結びつける。次の順で 1 つだけ選ぶ
+  1. `by` が `review` か `agent` の、いちばん新しい `Blocked` の出来事を探す
+  2. その Blocked のあとの `replan` の出来事が `skipped`(同じ理由、`answered` の上限)なら、その前の `by` が `review` か
+     `agent` の `Blocked` を選び直し、2 を繰り返す。`skipped` は「前と同じ問いで、前の判断がまだ効いている」印のため
+  3. 選んだ Blocked より後の replan(`createdAt` が出来事の時刻より後の最初の replan コメント)を取る。それが `retry` か
+     `answered` なら渡し、ほかの判断(`narrow`、`wait`、`human`、`goal-conflict`)なら渡さない。その Blocked に replan が
+     ない(replanner が書かなかった、書き換えた、失敗した)ときも渡さない
+  4. 選んだ Blocked より後に `In review` の出来事があれば、渡さない。実行がレビューを通って PR になった(人が `task merge`
+     で通したときも同じ)なら、その判断はもう使い終わっている。あとで電話からの却下(`rejected`)やマージキュー
+     (`merge`)で Blocked になっても、その Blocked には replanner が動かないので、新しく渡すものはない
+- `narrow` の Scope と Keeps: Issue のすべての `narrow` の replan。人の開始でも消さない。範囲をやめる手段は Goal を
+  直すことだけ(下の理由)
+- `by` が `review` か `agent` の `Blocked` の出来事がない(`by` のない古い `Blocked` しかない)ときは、今と同じく、
+  Issue のすべての replan の `answered[-1]` を渡す。`by` のない `Blocked` が、`by` が `review` か `agent` のいちばん
+  新しい `Blocked` より後にある(古い bin/task が同じ `events.jsonl` に書いた)ときも同じに倒す。タスク 1 で Blocked に
+  するすべての場所(電話からの却下と `cmd_fix` も)が `by` を書くので、今の bin/task の流れでこの逃げ道には当たらない
+
+境目を出来事の `by` で決め、人の開始の出来事を使わない。人が `task start` で再開しても、GitHub の画面でドラッグして
+再開しても(出来事なし)、オートパイロットの `unblock` で再開しても、同じ replan を拾う。
 
 範囲を分けるのは、問いが違うためです。
 
@@ -270,12 +284,26 @@ sequenceDiagram
   `set_status(t, READY)` のあとに `sync`)。数える範囲を使うと、`hold` のあと人が `task start` で再開した実行に、
   直前の `retry` の Instructions も `narrow` の Scope も渡らない。今の `answered` の引き継ぎ(すべての replan の
   `answered[-1]`)より悪くなる
-- 境目を「いちばん新しい Blocked より前の人の開始」にするのは、replan コメントが Blocked の出来事の前後どちらに付いても
-  拾うため。オートパイロットの `unblock` で再開した実行(`Ready` の `by` が `autopilot`)でも、人の開始で再開した実行でも、
-  同じ replan を拾う
+- 境目を「replanner が動いた Blocked」にするのは、replanner の動かない Blocked(`balance`、`start`、`setup`、
+  `run stopped` など)が間に入っても、直前の判断を落とさないため。たとえば、`answered` のあと人が `task start` で
+  再開し、残高不足で `by: balance` の Blocked になり、残高を足してまた `task start` した実行にも、その Answer が渡る。
+  間の Blocked の `report_comment` でレポートが置き換わっても、判断は replan コメントから渡る
+- `In review` で打ち切るのは、使い終わった判断を混ぜないため。たとえば、`answered` のあと review で止まって `retry`、
+  `unblock` で再開した実行がレビューを通って In review になり、それを電話から却下して、人が直すことをコメントして
+  `task start` する。その実行に `retry` の直し方も 2 つ前の `answered` も渡さない。直すことは人のコメントで渡る
+- `skipped` のときだけ前に戻るのは、今の `answered` の引き継ぎを保つため。エージェントが同じ問いでまた Blocked になると
+  `run_replan` は `skipped` を返し、コメントを書かない。人がコメントして `task start` すると、今の `build_prompt` は前の
+  Answer を渡す。戻らないと、それが渡らなくなる。`human`、失敗、書き換えでは戻らない。replanner がその Blocked を見て
+  人に回した、または決められなかったので、前の判断がまだ効いているとは言えないため
+- いちばん新しい判断だけを渡すのは、古い判断を混ぜないため。`retry` → `unblock` → `narrow` → `unblock` の 3 回目の
+  実行には、1 回目の `retry` の Instructions を渡さない。それは 2 回目の実行ですでに使い、2 回目の Blocked には
+  replanner が `narrow` を選んだ。1 回目の直し方が `narrow` の Scope(「表に足し続けない」など)とぶつかることもある
+- replan コメントは Blocked の出来事より後に付く(`run_task` は `finish` で Blocked にしてから `run_replan` を呼ぶ)。
+  出来事の時刻は手元の時計、`createdAt` は GitHub の時計だが、replanner は 1 回のエージェントの起動のあとに
+  コメントするので、数秒のずれでは前後が入れ替わらない(推測。タスク 6 のテストは偽物の GitHub の時刻で確かめる)
 - `narrow` を全部渡すのは、範囲の追記が Goal の追記で、人が Goal を直すまで効き続けるため(#242 は人の開始を挟んで 3 回、
-  範囲を足した)。人が範囲をやめたいときは Goal を直す。`build_review_prompt` は「Goal の決まりはこの追記より強い」と書くので、
-  直した Goal が勝つ
+  範囲を足した)。そのため、範囲をやめる手段は Goal を直すことだけになる。人の開始でも、新しい判断でも消えない。
+  `build_review_prompt` は「Goal の決まりはこの追記より強い」と書くので、直した Goal が勝つ
 
 ### 有料 API の関門
 
@@ -323,8 +351,8 @@ sequenceDiagram
 
 ## 次の実行に渡すもの
 
-- `build_prompt`: 前回のレポートのあとに `# Unblock notes` を足す。最後の `retry` の Instructions か `answered` の
-  Answer と、すべての `narrow` の Scope と Keeps。範囲は「上限」の「引き継ぐ範囲」で、人の開始で再開した実行にも
+- `build_prompt`: 前回のレポートのあとに `# Unblock notes` を足す。replanner が動いたいちばん新しい Blocked に付いた
+  `retry` の Instructions か `answered` の Answer(`skipped` なら前の Blocked、In review のあとなら渡さない)と、すべての `narrow` の Scope と Keeps。範囲は「上限」の「引き継ぐ範囲」で、人の開始で再開した実行にも
   渡る。範囲の追記は次の実行でも効くので、最後の 1 つでなく全部を渡す(#242 は 3 回、範囲を足した)
 - `build_review_prompt`: `narrow` の Scope と Keeps を(`build_prompt` と同じ範囲で)渡し、「Goal の決まりはこの追記より強い」と書く。範囲の外として
   PR の「要確認」に挙げたものを、reviewer がまた blocking にしないようにするため。jyoka/tasks#253 の Goldfish 方式でも、
@@ -346,9 +374,9 @@ sequenceDiagram
 
 | もの | 書く者 | 読む者 | 形 |
 |---|---|---|---|
-| `Blocked` の出来事の `by`(新規の欄) | `set_status`(`finish`、`run_task` の setup と残高、`sync` の止まった実行と開始の失敗、`merge_block`) | `autopilot_unblock`、`task events` | `review`、`agent`、`no report`、`no changes`、`setup`、`balance`、`start`、`finish error`、`run stopped`、`merge`。`review` には `stop`(`review_stop` の語)、`merge` には `merge_reason`(`checks failed`、`checks timeout`、`not allowed`、`conflict`)と `sha` |
+| `Blocked` の出来事の `by`(新規の欄) | `set_status`(`finish`、`run_task` の setup と残高と finish の失敗、`sync` の止まった実行と開始の失敗、`merge_block`、`cmd_fix`(競合の解決で止まった)、`action_message`(電話からの却下)) | `autopilot_unblock`、`build_prompt`(「引き継ぐ範囲」)、`task events` | `review`、`agent`、`no report`、`no changes`、`setup`、`balance`、`start`、`finish error`、`run stopped`、`merge`、`rejected`。`review` には `stop`(`review_stop` の語)、`merge` には `merge_reason`(`checks failed`、`checks timeout`、`not allowed`、`conflict`)と `sha`。`cmd_fix` は `merge` と `conflict`。電話からの却下は `rejected`(PR を閉じた) |
 | `Ready` の出来事の `by`(新規の欄) | `set_status` | `autopilot_unblock`(人の開始を見分ける) | `autopilot`。人の `task start` は書かない |
-| `replan` の出来事の `decision` | `run_replan` | `autopilot_unblock`、digest | `retry`、`narrow`、`wait` を足す。`wait` には `wait_for` |
+| `replan` の出来事の `decision` | `run_replan`。`skipped` だけは `run_task` | `autopilot_unblock`、`build_prompt`、digest | `retry`、`narrow`、`wait` を足す。`wait` には `wait_for`。`run_replan` が動かなかったとき(`skipped`)も出来事を書き、`skip` に `same reason` か `answer limit`。コメントは書かず、通知もしない(Blocked の通知で足りる) |
 | `autopilot` の出来事の `action` | `autopilot_unblock` | 通知、`task events` | `unblock`、`wait`、`requeue`、`hold` を足す。`reason` に理由と回数 |
 | replan コメントの節 | `run_replan` | `build_prompt`、`build_review_prompt`、`autopilot_unblock`、人 | 見出しの下に `Blocked by: <by> (<stop>)` の行を足す。`### Instructions`、`### Scope`、`### Keeps`、`### Wait for`、`### Category` を足す |
 | autopilot コメント | `autopilot_unblock` | 人 | `<!-- task-hub autopilot -->` の印。`human_comments` は `<!-- task-hub` で始まるので読まない |
@@ -382,6 +410,7 @@ sequenceDiagram
 
 | 場面 | 動き |
 |---|---|
+| replanner が `skipped`(同じ理由、`answered` の上限) | `replan` の出来事(`decision: skipped`)だけ書く。sync は `hold` を 1 回出す(「上限」の表)。次の実行には前の Blocked の判断が渡る(「引き継ぐ範囲」) |
 | replanner が書かない、書き換えた、未知の判断を書いた | 今と同じ `ignored`。実行が終わっても(`alive` でない)Blocked のあとに replan の出来事がないので、sync は `hold`(「replanner が決めなかった」)を 1 回出す。`[runner] replanner` がないときは `hold` も出さない(Blocked の通知で足りる) |
 | Evidence、Keeps、Wait for が確かめられない | `human` に変え、使わなかった理由をコメントに書く(今の `answered` と同じ) |
 | replan に `Category` の行がない、値が読めない、`cost` | 判断(`retry` など)はそのままコメントに残し、sync は `hold`(「有料 API の関門」)。人が Ready に移せば、次の実行はその判断を読む |
@@ -409,6 +438,17 @@ sequenceDiagram
   人の開始に見える。ただ、`retry`、`narrow` の replan と `unblock` の出来事は、タスク 4b と 7 より後にしか出ない。境目が
   タスク 1 より前の出来事になっても、それらはすべて境目より後にあるので、数え漏れは出ない
 - 古い replan コメント(`retry` などの節がない): `build_prompt` は今と同じく `answered` だけを読む
+- 「引き継ぐ範囲」は、`by` が `review` か `agent` の `Blocked` の出来事に結びつける。それがない(`by` のない古い
+  `Blocked` しかない)ときは、今と同じく、すべての replan の `answered[-1]` を渡す。入れたときに今ある Blocked の
+  カードを人が再開しても、今と同じ Answer が渡る
+- 今の bin/task と違うところ: `by` のある Blocked の流れでは、今の `answered[-1]` が渡らない場合がある。どれも、前の
+  `answered` がその実行の Blocked に対する判断でないとき
+  - replanner が、いちばん新しい Blocked で `human` か `goal-conflict` を選んだ
+  - replanner が失敗した、書かなかった、書き換えた(`failed`、`ignored`)
+  - その `answered` のあとに In review の出来事がある(使い終わった)
+  - `skipped`(同じ理由、`answered` の上限)では、前の Blocked に戻るので、今と同じ Answer が渡る
+  - 渡らなくても、前の実行のレポート(`# Earlier run`)と人のコメントは今と同じく渡る。人が Answer をまた使ってほしいときは
+    コメントに書く
 - 古い bin/task が同じ `events.jsonl` を書いても、`by` がないだけで壊れない
 - Windows: 新しいプロセスや外部コマンドはない。replanner は今の `run_agent_process` で動く
 
@@ -421,7 +461,7 @@ sequenceDiagram
 | #255 LINE のトークで直せない | 「ポリシーは変えない。作りを合わせる」と Goal に足して再実行 | `retry`。直し方は機能を足すように見えるが、リポジトリのポリシー 1.4 §7 の行を Evidence に引けるので許す。引けなければ `human`(推測: replanner が引けるかは実物で確かめる)。#247 と同じ共通の前提の行があり、`Category` は同じ読み方 | 回らない(根拠を引け、`Category: none` なら) |
 | #256「しにたい」が表に無い | 「表に足し続けない。NFKC とかなの揃え、当たらない言い方は PR の要確認」と Goal に足した | 指摘が「言い方を表に足す」形なので、1 回目でも `narrow`(Scope: 読む前に揃える、残りは要確認に挙げて差し戻さない。Keeps: 窓口の案内の決まり)→ 再実行。reviewer にも Scope が渡る | 回らない |
 | #258「中学」の例外の表 | 「表をやめ、ボタンで 1 回聞き直し、だめなら中学生として止める」と Goal に足した | `narrow`(Scope: はっきりしない答えは聞き直し、2 回目は止める。Keeps:「中学生は推薦に進まない」)。安全側に倒すので許す | 回らない |
-| #242 年齢の文の読み取り(3 回) | 1、2 回目は直し方、3 回目は利用者が PRD v4 を書くと決めた | Goal に実 LLM の予算($8)の文がある間(今の本文): 1 回目は replanner が `retry`(直し方)。Goal がこのカードの費用の上限を決めているので `Category: cost` になり、有料 API の関門の予備の段で `hold`。人が費用を確かめて `task start 242` で再開する(人の開始)。2 回目は人の開始で 0 に戻った後なので、replanner に渡る replan はなく、`run_replan` も `human` に変えない。replanner は `retry` を選べる(指摘が「言い方を表に足す」形なら `narrow`)。どちらにしても 2 回目の実行は、1 回目の `retry` の Instructions を `# Unblock notes` で受け取る(「引き継ぐ範囲」。境目は 2 回目の実行の `Ready` でなく、1 回目の Blocked より前の人の開始)。2 回目の判断も `Category: cost` で、また `hold`。3 回目の実行も 2 回目の判断を受け取り、`narrow` があれば Issue のすべての `narrow` の Scope を受け取る。3 回目の判断も同じで、製品の判断(全区分で年齢を聞く)が要れば `human`。PRD を書き直す判断は人に回る、と見ている(推測)。直し方と範囲は replan コメントに残り、人が `task start` で再開した実行と reviewer に渡るので、人の仕事は「再実行に費用を使ってよいか」を決めて再開することだけ。予算の文がない場合: 1 回目の `retry` で自動で再実行(1/3)。2 回目は人の開始を挟まないので、続けての `retry` は `human` に変わる。replanner は前の `retry` を見て `narrow`(年齢は自由文から読まずボタンで聞く)を選び、再実行(2/3)。3 回目は 2 つ目の `narrow` か `human`(予算の文がいつ Goal に入ったかは不明。承認は 2026-10-27) | 予算の文がある間は毎回回る(問いは費用だけ)。ない間は、3 回目が回るかもしれない |
+| #242 年齢の文の読み取り(3 回) | 1、2 回目は直し方、3 回目は利用者が PRD v4 を書くと決めた | Goal に実 LLM の予算($8)の文がある間(今の本文): 1 回目は replanner が `retry`(直し方)。Goal がこのカードの費用の上限を決めているので `Category: cost` になり、有料 API の関門の予備の段で `hold`。人が費用を確かめて `task start 242` で再開する(人の開始)。2 回目は人の開始で 0 に戻った後なので、replanner に渡る replan はなく、`run_replan` も `human` に変えない。replanner は `retry` を選べる(指摘が「言い方を表に足す」形なら `narrow`)。どちらにしても 2 回目の実行は、1 回目の `retry` の Instructions を `# Unblock notes` で受け取る(「引き継ぐ範囲」。いちばん新しい `by: review` の Blocked に付いた replan なので、人の開始を挟んでも渡る)。2 回目の判断も `Category: cost` で、また `hold`。3 回目の実行も 2 回目の判断を受け取り、`narrow` があれば Issue のすべての `narrow` の Scope を受け取る。3 回目の判断も同じで、製品の判断(全区分で年齢を聞く)が要れば `human`。PRD を書き直す判断は人に回る、と見ている(推測)。直し方と範囲は replan コメントに残り、人が `task start` で再開した実行と reviewer に渡るので、人の仕事は「再実行に費用を使ってよいか」を決めて再開することだけ。予算の文がない場合: 1 回目の `retry` で自動で再実行(1/3)。2 回目は人の開始を挟まないので、続けての `retry` は `human` に変わる。replanner は前の `retry` を見て `narrow`(年齢は自由文から読まずボタンで聞く)を選び、再実行(2/3)。3 回目は 2 つ目の `narrow` か `human`(予算の文がいつ Goal に入ったかは不明。承認は 2026-10-27) | 予算の文がある間は毎回回る(問いは費用だけ)。ない間は、3 回目が回るかもしれない |
 | #243 設計メモの PR がまだ | 人が PR をマージして再実行 | `Ready conditions` の `jyoka/aica#114` が待ち先になり、マージされるまで始まらない(Blocked にならない)。マージされた次の確認で始まる。待ち先は始める前の関門なので、有料 API の関門は当たらない。始まった後に Blocked になっても、共通の前提の行だけで、このカードの上限がなく受け入れ条件は「実 API なし」なので、予備の段は `Category: none`(#247 の形)で再実行される。移行の手順でも、実 API を呼ばないので `paid api:` は足さない(移行のときに本文を見て決める) | 回らない(PR のマージ自体は人の仕事のまま) |
 | #246 キューのチェック待ち(UNSTABLE) | 人が入れ直した | 別のカードの直し(UNSTABLE をチェック待ちとして待つ)で、まず Blocked にならない。なっても `merge_reason: not allowed` で、先頭のコミットが同じなら 1 回入れ直す。入れ直しはエージェントを動かさないので、有料 API の関門は当たらない | 回らない |
 | #242 実 API の予算の承認 | 利用者に聞いた | 承認の前: replanner が `human`(Category: `cost`。問い:「P3 の実 LLM の測定に $8 まで使ってよいか」)。承認の後: レビューの `needs changes` で replanner が `retry` を選んでも、Goal に実 LLM の予算($8)があるので `Category: cost` になり、`hold` で止まる。移行の手順で `paid api:` を足せば、主の段(`goal_budget`)でも止まる | 回る(承認の後の再実行も人) |
@@ -460,6 +500,17 @@ sequenceDiagram
   再開すると、その実行のプロンプトの `# Unblock notes` に、その `retry` の Instructions がある。`narrow` と
   `Category: cost` でも同じで、プロンプトと reviewer のプロンプトの両方に Scope がある。もう一度 `hold` と
   `task start` を挟んでも、前の `narrow` の Scope は消えない
+- 間に replanner の動かない Blocked があっても引き継ぐ: `answered` か `retry`(`Category: cost` で `hold`)のあと、
+  人が `task start` で再開し、残高不足(`by: balance`)か開始の失敗(`by: start`)で Blocked になる。人がもう一度
+  `task start` で再開すると、その実行の `# Unblock notes` に、その Answer か Instructions がある
+- 古い判断を混ぜない: `retry` → `unblock` → `narrow` → `unblock` の 3 回目の実行の `# Unblock notes` に、1 回目の
+  `retry` の Instructions がない。2 回目の `narrow` の Scope はある
+- 使い終わった判断を渡さない: `answered` のあと review で止まって `retry`、`unblock` で再開した実行が In review になり、
+  電話から却下する(`by: rejected`)。人が `task start` で再開すると、`# Unblock notes` に `retry` の Instructions も
+  `answered` の Answer もない。`human` の判断のあと人が `task start` したときも、前の `answered` がない
+- 同じ理由で `skipped` でも引き継ぐ: エージェントが問い Q で Blocked になり、replanner が `answered` を書く。次の実行も Q で
+  Blocked になり、`skipped` の `replan` の出来事が出る(コメントと通知はない)。人がコメントして `task start` すると、
+  その実行の `# Unblock notes` に、その Answer がある
 - オートパイロットの `unblock` で再開した実行と、人の `task start` で再開した実行で、`# Unblock notes` が同じ
 - Keeps の引用が Goal にない、Evidence が合わない: `human` になり、カードは動かない
 - `unblock_runs` に達した、`over budget` が出た、Goal に有料 API がある、カードの費用が 2 倍を超えた: `hold` が 1 回出て、
@@ -511,13 +562,13 @@ flowchart LR
 
 | # | 中身 | 待ち先 | 受け入れ条件 |
 |---|---|---|---|
-| 1 | Blocked と Ready の出来事に `by` を足す(`stop`、`merge_reason`、`sha` も)。`set_status` に引数を足し、Blocked にするすべての場所で渡す | なし | 種類ごとに出来事の `by` を確かめるテスト。lld.md の 5 章の表。`task events` で読める |
+| 1 | Blocked と Ready の出来事に `by` を足す(`stop`、`merge_reason`、`sha` も)。`set_status` に引数を足し、Blocked にするすべての場所(「データ」の表の書く者。電話からの却下と `cmd_fix` も)で渡す | なし | 種類ごとに出来事の `by` を確かめるテスト。電話からの却下は `rejected`、`cmd_fix` は `merge`(`conflict`)。`by` のない Blocked を書く場所が残っていないことを確かめるテスト(`set_status(t, BLOCKED` のすべての呼び出し)。lld.md の 5 章の表。`task events` で読める |
 | 2 | `Ready conditions` と `Blocked by` の見出しの下の `owner/name#n` を待ち先にする。REST で 5 分に 1 回まで読み、マージか完了で閉じるまで `waits_for` に出す | なし | #243 の形(開いた PR)で始まらず、マージで始まるテスト。task-format.md の「開始の条件」 |
 | 3 | `merge_ci` で、`[merge] checks = all` の `UNSTABLE` を `ci_minutes` まで待つ | なし | brief によると別のカードで直す予定。そのカードがあれば、ここでは新しく登録しない |
-| 4a | replanner を自動レビューの Blocked でも動かす。`run_replan` に `blocked`、`by`、`stop` の引数を足し、`run_task` が review の Blocked では `review_blocked` の文と `record["review_stop"]` の語を渡す(`finishing` からの再開のため、`finish_file` に `stop` も書く)。replan コメントに `Blocked by:` の行。「前回と同じ理由」と `MAX_REPLAN_ANSWERS` の決まりは `by: agent` だけに当て、review の Blocked の `answered` は `human` に変える。判断は今の `answered`、`human`、`goal-conflict` のまま | 1 | レポートに `## Blocked` のない review の Blocked で replan コメントが付き、`Blocked by: review (limit)` がある。2 回続けて review で止まり、reviewer の 1 行目も `stop` の語も同じでも、2 回目の replanner が `skipped` にならない。`answered` が 2 回あるカードでも review の Blocked で動く。`by: agent` で同じ理由なら今と同じく `skipped`。review の Blocked で `answered` を書くと `human`。agents.md と task-format.md の「replanner のコメント」(`Blocked by:` の行) |
+| 4a | replanner を自動レビューの Blocked でも動かす。`run_replan` に `blocked`、`by`、`stop` の引数を足し、`run_task` が review の Blocked では `review_blocked` の文と `record["review_stop"]` の語を渡す(`finishing` からの再開のため、`finish_file` に `stop` も書く)。replan コメントに `Blocked by:` の行。「前回と同じ理由」と `MAX_REPLAN_ANSWERS` の決まりは `by: agent` だけに当て、review の Blocked の `answered` は `human` に変える。`skipped` のとき `run_task` が `replan` の出来事を書く(通知しない)。判断は今の `answered`、`human`、`goal-conflict` のまま | 1 | レポートに `## Blocked` のない review の Blocked で replan コメントが付き、`Blocked by: review (limit)` がある。2 回続けて review で止まり、reviewer の 1 行目も `stop` の語も同じでも、2 回目の replanner が `skipped` にならない。`answered` が 2 回あるカードでも review の Blocked で動く。`by: agent` で同じ理由なら今と同じく `skipped`。review の Blocked で `answered` を書くと `human`。`skipped` のとき `replan` の出来事(`decision: skipped`、`skip`)があり、コメントと通知はない。agents.md と task-format.md の「replanner のコメント」(`Blocked by:` の行) |
 | 4b | `retry` を足す。判断(Instructions、Evidence)、`Goal:` の引用の確かめ、続けての `retry` を `human` に変える決まり(「数える範囲」の `replans_since_start` もここで足す)。プロンプトの入力(Automated review の節、人の開始より後の replan、`by` と `stop`)。`answered` と `retry` に `### Category` を書かせる | 4a | review の Blocked で `retry` の replan コメントが付く。`Goal:` の引用が Goal にないと `human`。人の最後の開始より後のいちばん新しい replan が `retry` なら `human`。人の開始の前に `retry`、後にまた `retry` なら `human` にならない(開始をまたぐテスト)。`by` のない `Ready` の出来事がなければ Issue のすべての replan で決める。replanner のプロンプトに渡す replan と `run_replan` が確かめる replan が同じ(`replans_since_start`)。プロンプトに Automated review の節がある。`Category` の行が replan コメントに残る。REPLAN.md、agents.md |
 | 5 | `narrow`(Scope、Keeps の確かめ、人の開始より後に 2 回)と `wait`(Wait for の形の確かめ)を足す。どちらにも `### Category`。`human` の Category の値をそろえる | 4b | Keeps が Goal にないと `human`。`wait` の形が違うと `human`。続けての `retry` の代わりに `narrow` を選べる |
-| 6 | `build_prompt` の `# Unblock notes`(最後の retry か answered、すべての narrow)と、`build_review_prompt` への Scope。範囲は「引き継ぐ範囲」(数える範囲と別の関数)。PR の「Please review」の先頭に narrow を出す | 5 | プロンプトの中身を確かめるテスト。`Category: cost` で `hold` になった `retry`、`narrow` が、人の `task start` で再開した実行のプロンプトにあり、`narrow` の Scope は reviewer のプロンプトにもある。人の開始を 2 回挟んでも `narrow` が全部渡る。`Blocked` の前に `by` のない `Ready` がなければ、今と同じくすべての replan から取る |
+| 6 | `build_prompt` の `# Unblock notes`(replanner が動いたいちばん新しい Blocked の retry か answered。`skipped` なら前の Blocked に戻り、In review のあとなら渡さない。すべての narrow)と、`build_review_prompt` への Scope。範囲は「引き継ぐ範囲」(数える範囲と別の関数)。PR の「Please review」の先頭に narrow を出す | 5 | プロンプトの中身を確かめるテスト。`Category: cost` で `hold` になった `retry`、`narrow` が、人の `task start` で再開した実行のプロンプトにあり、`narrow` の Scope は reviewer のプロンプトにもある。人の開始を 2 回挟んでも `narrow` が全部渡る。(a) `answered` か `retry` のあと、replanner の動かない Blocked(`by: balance` か `by: start`)を挟んで `task start` しても、その Answer か Instructions が `# Unblock notes` にある。(b) `retry` → `unblock` → `narrow` → `unblock` の 3 回目の実行に、1 回目の `retry` の Instructions が入らない(`narrow` の Scope は入る)。(c) In review のあと電話から却下して `task start` しても、前の `answered` と `retry` が入らない。`human` のあとの `task start` でも前の `answered` が入らない。(d) 同じ理由で `skipped` のあと `task start` すると、前の Answer が入る。`by` が `review` か `agent` の `Blocked` がなければ、今と同じくすべての replan の `answered[-1]` を渡す |
 | 7 | `autopilot_unblock`: `[autopilot] unblock`、`unblock_runs`。Blocked → Ready、`launch_lock`、autopilot コメント、`unblock` と `hold` の出来事、人の開始で数え直す。有料 API の関門(主: `paid api:`、予備: `Category` が `none` でない、行がない、読めない → `hold`)もここに入れる。カードを自動で動かす最初の PR なので、安全の決まりを後に回さない。`unblock` の既定は、8 が入るまで `off` | 1、6 | 「確かめ方」のうち、`retry` で再実行される、続けて止まると `narrow`、Keeps と Evidence が合わないと動かない、`unblock_runs` で `hold`、Goal に `paid api:` があると `hold`、#242 の形(`paid api:` なし、`Category: cost`)と `Category` の行がない replan で `hold`、`[autopilot]` がない・`unblock = off`・`Autopilot: off` で動かない、人が Backlog に戻した・`task start` したカードを動かさない、`retry` のあと GitHub の画面で Backlog にドラッグしたカードを動かさない、`task` と `task watch` が同時でも 1 回、`readiness = require` で GO が古いカードが始まらない。候補はいまのボードの Status が Blocked、Issue が open、動いていないカードだけで、出来事は「Blocked 1 回に 1 回」に使う。`autopilot_unblock` を `readiness_gate` の前に置く。autopilot.md に「Blocked を片付ける」の節と、「何をするか」で実 API を呼ぶカード(今の本文では jyoka/tasks の #242 だけ)に `paid api:` を足す移行の手順。design.md の決定事項 34 |
 | 8 | 費用の上限: `over budget` のあと、カードの使用量が 1 回の上限の 2 倍 → `hold`。`[autopilot] unblock` の既定を「決めてほしいこと」1 で決めた値にする | 7 | 2 つの `hold` のテスト。autopilot.md の上限の表 |
 | 9 | `wait` の見張り(2 の読み取りを使う)と、マージキューの `checks timeout`、`not allowed` の入れ直し(先頭のコミットごとに 1 回) | 2、7(3 があるとよい) | `wait` のテスト、入れ直しのテスト、push されていたら入れないテスト。どちらも候補は 7 と同じ(いまのボードの Status が Blocked、Issue が open、動いていない)で、待つ間に GitHub の画面で Backlog に移したカードは動かさない |
@@ -545,7 +596,7 @@ flowchart LR
   - 候補: いまのボードの Status が Blocked、Issue が open、動いていない(`t["running"]`、`alive`)、`Autopilot: off` がない。
     `autopilot_merge` が `t["status"]` を見るのと同じ。GitHub の画面のドラッグは出来事を残さないので、出来事だけでは決めない
   - 「1 回」: 最後の Status の出来事が Blocked で、そのあとに replan があり、そのあとに autopilot(`unblock`、`hold`)がない。
-    Blocked 1 回に 1 回
+    Blocked 1 回に 1 回。replan が `skipped` の出来事なら `hold`
   - 上限: 「上限」の表
 - lld.md 5 章: 出来事の `by`、`stop`、`merge_reason`、`decision` と `action` の新しい値。コメントの印(タスク 1、4a、4b、5、7)
 - lld.md 7 章: 待ち先の REST、autopilot コメント(タスク 2、7、9)
@@ -581,7 +632,15 @@ flowchart LR
   - 続けての `retry` は人の開始で 0 に戻す。ほかの上限と同じ扱いにするため。replanner に渡す範囲と `run_replan` が
     確かめる範囲は、どちらも「人の最後の開始より後」(「数える範囲」)
   - 次の実行と reviewer に渡す範囲は、数える範囲と分ける(「引き継ぐ範囲」)。人の開始で再開した実行にも、
-    直前の判断が渡るようにするため(自動レビューの指摘を受けて決めた。`narrow` を全部渡すのは worker の判断)
+    直前の判断が渡るようにするため(自動レビューの指摘を受けて決めた)
+  - `retry` と `answered` を渡す境目は、replanner が動いた Blocked(`by` が `review` か `agent`)に結びつけ、その
+    Blocked に付いた replan が `retry` か `answered` のときだけ渡す。人の開始の出来事に頼らず、間に replanner の
+    動かない Blocked があっても判断を落とさないため。`by` のない古い `Blocked` しかないときは今と同じ `answered[-1]`
+  - `narrow` は Issue のすべてから渡す。範囲をやめる手段は Goal を直すことだけになる
+  - `retry` と `answered` は、選んだ Blocked より後に In review があれば渡さない(使い終わったため)。`skipped` のときだけ
+    前の Blocked に戻って引き継ぐ。`human`、失敗、書き換えでは戻らない。そのため、今の bin/task なら渡る `answered` が
+    渡らない場合がある(「互換性」)。電話からの却下と `cmd_fix` にも `by` を付け、古い bin/task 用の逃げ道に当たらないように
+    する(自動レビューの指摘を受けて決めた)
   - `paid api:` は「何をするか」で実 API を呼ぶカードだけに足す。実 API を呼ばないカードは、予備の段で `none` になり
     自動で再実行されてよい(費用がかからないため)
 
