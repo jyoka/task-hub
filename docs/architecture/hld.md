@@ -182,9 +182,9 @@ sequenceDiagram
     Run->>Run: [setup]、Goal の paid api があれば [balance] で残高を確かめる(足りなければ Blocked)
     Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
-    Run->>Agent: reviewer(新しいコンテキスト)
+    Run->>Agent: reviewer(新しいコンテキスト。goldfish なら視点ごとに 1 体、レポートなし)
     Agent-->>Run: .task-review.md(pass / needs changes)
-    Run->>GH: commit、push、PR、Issue にコメント、In review にする
+    Run->>GH: commit、push、PR、Issue にコメント、Review 欄、In review にする
     You->>GH: PR をマージする
     GH->>GH: Closes で Issue を閉じ、Item closed で Done にする
     Task->>GH: 開いた列から消えたことを読む
@@ -198,6 +198,9 @@ reviewer が `needs changes` と判定すると、実装エージェントに差
 回まで。既定 2)。差し戻した指摘がまた出たときや、差し戻しの変更が小さくならないときは、回数が残っていても止めて
 Blocked にし、次の実行への修正指示の下書きを Issue に書きます。minor の指摘だけなら In review に進み、PR に
 「Known issues」として残します([task-format.md](../task-format.md#自動レビューの差し戻し)、決定事項 32)。
+`[runner] review_mode = goldfish` では、実装エージェントのレポートを渡さない視点(Goal Auditor、Codebase Auditor)を
+1 体ずつ新しいコンテキストで動かし、結果を 1 つの判定にまとめてから、同じ差し戻しの流れに渡します。最後の判定は
+Project の Review 欄と、レポートのコメントの機械が読む 1 行に残ります([task-format.md](../task-format.md#goldfish-のレビューrunner-review_mode))。
 
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと

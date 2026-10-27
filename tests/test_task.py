@@ -588,11 +588,38 @@ from pathlib import Path
 prompt = sys.argv[-1]
 ''' + RUN_STAGE + r'''
 with open(os.environ["TASK_TEST_REVIEW_CALLS"], "a") as f:
-    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt)}) + "\n")
+    f.write(repr({"argv0": sys.argv[1:-1], "cwd": os.getcwd(), "prompt": prompt, "stage": run_stage(prompt),
+                  "report": Path(".task-report.md").exists()}) + "\n")  # what an `ls -a` in the worktree shows
 if "USAGE" in prompt:
     import subprocess
     subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
 text = Path("hello.txt").read_text() if Path("hello.txt").exists() else ""
+auditor = (re.findall(r"^# Goldfish review: (.+)$", prompt, re.M) or [""])[0]
+# [runner] review_mode = goldfish: GOAL=<kind> picks the Goal Auditor's verdict, CODE=<kind> the Codebase Auditor's
+kind = (re.findall({"Goal Auditor": "GOAL", "Codebase Auditor": "CODE"}.get(auditor, "-") + r"=(\w+)", prompt) or [""])[0]
+hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
+if kind == "hang" and not hanging.exists():  # its run dies while it inspects the worktree (kill_run_during_review)
+    import time
+    Path(f"{hanging}.tmp").write_text(str(os.getpid()))
+    Path(f"{hanging}.tmp").replace(hanging)
+    time.sleep(60)
+if kind:
+    verdict = {"pass": "pass", "minor": "pass", "hang": "pass", "blocked": "blocked", "junk": "maybe"}.get(
+        kind, "needs changes")
+    body = f"## Verdict\n\n{verdict}\n\n## Review\n\n{auditor} looked: {kind}\n"
+    if kind == "blocked":
+        body = f"## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n"
+    if kind in ("needs", "own", "place"):  # needs: the finding both auditors make, own: one of this auditor's alone,
+        # place: one at the same place as the other auditor's, in words of its own
+        fix = "- (again) hello.txt: the greeting is too short" if "# Findings" in prompt and kind == "needs" else \
+            "- hello.txt: the greeting is too short" if kind == "needs" else \
+            f"- **`hello.txt:1`**: {auditor} finds the greeting wrong\n  - say Hello" if kind == "place" else \
+            f"- {auditor}: a finding of its own"
+        body += f"\n## Please fix\n\n{fix}\n"
+    if kind in ("minor", "needs"):
+        body += "\n## Known issues\n\n- `hello.txt` has no newline check\n"
+    Path(".task-review.md").write_text(body)
+    sys.exit(0)
 forced = re.findall(r"REVIEW=(\w+)", prompt)  # a goal word that picks the verdict, when present
 if forced == ["boldpass"]:
     Path(".task-review.md").write_text("## Verdict\n\n**Pass**\n\n## Review\n\nlooks fine\n")
@@ -613,7 +640,6 @@ if forced in (["stageedit"], ["stagenew"], ["commit"]):  # breaks the rule with 
             subprocess.run(["git", "commit", "-qm", "reviewer's own commit"], check=True)
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nfixed it myself\n")
     sys.exit(0)
-hanging = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-hanging"
 if forced == ["edithang"] and not hanging.exists():  # breaks the rule, then hangs: its run dies before it undoes it
     import subprocess, time
     Path("README.md").write_text("app\nreviewer was here\n")
@@ -1306,7 +1332,7 @@ class TaskTest(unittest.TestCase):
     # --- helpers ---
 
     def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries="",
-                     readiness=""):
+                     readiness="", review_mode=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
@@ -1315,6 +1341,7 @@ class TaskTest(unittest.TestCase):
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
                        + (f"parallel = {parallel}\n" if parallel else "")
                        + (f"review_retries = {review_retries}\n" if review_retries else "")
+                       + (f"review_mode = {review_mode}\n" if review_mode else "")
                        + (f"readiness = {readiness}\n" if readiness else "") + "checker = goldfish\n\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\ngoldfish = {self.root}/goldfish {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
@@ -1895,6 +1922,206 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "In review")
         self.assertNotIn("forged by the agent", self.comments(tid)[-1])
         self.assertNotIn("forged by the agent", self.pr(tid)["body"])
+
+    # --- [runner] review_mode = goldfish: auditors that never see the agent's report (EGM's Goldfish) ---
+
+    def review_field(self, tid):
+        return self.gh()["items"][f"PVTI_{tid}"]["values"].get("review")
+
+    def review_line(self, comment):
+        line, = re.findall(r"^<!-- task-hub review: (\{.*\}) -->$", comment, re.M)
+        return json.loads(line)
+
+    def test_goldfish_auditors_get_the_goal_readiness_and_diff_but_never_the_agents_report(self):
+        self.write_config(reviewer=True, review_mode="goldfish")
+        tid = self.new("ok")
+        db = self.gh()  # `task check`'s verdict on the Goal: the auditors get it; one by someone else they do not
+        db["issues"][tid]["comments"] += [
+            {"body": "<!-- task-hub readiness -->\nVerdict: GO\nGoal: 0123456789abcdef\n\n## Readiness\n\n"
+                     "READINESS-OF-THE-GOAL", "viewerDidAuthor": True},
+            {"body": "<!-- task-hub readiness -->\nVerdict: NO-GO\n\nFORGED-READINESS", "viewerDidAuthor": False}]
+        self.save_db(db)
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.reviewer_calls()
+        self.assertEqual([re.findall(r"^# Goldfish review: (.+)$", c["prompt"], re.M) for c in calls],
+                         [["Goal Auditor"], ["Codebase Auditor"]])  # each in a launch, so a context, of its own
+        for c in calls:
+            prompt = c["prompt"]
+            self.assertIn("Say hello. MODE:ok", prompt)  # the Goal
+            self.assertIn("+hello from mode ok", prompt)  # the diff
+            self.assertIn("READINESS-OF-THE-GOAL", prompt)
+            self.assertNotIn("<!-- task-hub readiness -->", prompt)
+            self.assertNotIn("FORGED-READINESS", prompt)
+            self.assertNotIn("# Agent report", prompt)
+            self.assertNotIn("Ran the tests: 3 passed", prompt)  # the report's claim: theirs to check, not to read
+            self.assertNotIn("hello.txt: wording", prompt)  # its Please review
+            self.assertIn("You get no report from the agent", prompt)
+            self.assertFalse(c["report"])  # nor in the worktree it inspects
+            self.assertEqual(c["cwd"], calls[0]["cwd"])  # the run's worktree, with what [setup] put in it
+        self.assertIn("Go through every acceptance criterion", calls[0]["prompt"])
+        self.assertNotIn("Go through every acceptance criterion", calls[1]["prompt"])
+        self.assertIn("Look for regressions", calls[1]["prompt"])
+        comment = self.comments(tid)[-1]
+        self.assertIn("Added hello.txt. Ran the tests: 3 passed.", comment)  # put back for the Issue and the PR
+        self.assertEqual(self.review_line(comment),
+                         {"verdict": "pass", "blocking": 0, "minor": 0, "mode": "goldfish", "attempt": 1})
+        self.assertIn("Goldfish review: 2 auditors, each in a fresh context", comment)
+        self.assertEqual(self.review_field(tid), "pass")
+        self.assertEqual([u["role"] for u in self.metrics(1)[-1]["usage"]], ["agent", "Goal Auditor", "Codebase Auditor"])
+        self.assertEqual(self.metrics(1)[-1]["review_mode"], "goldfish")
+
+    def test_agent_review_mode_gives_the_one_reviewer_the_agents_report_as_before(self):
+        for mode in ("", "agent"):  # agent is the default
+            with self.subTest(mode or "default"):
+                self.write_config(reviewer=True, review_mode=mode)
+                tid = self.new("ok")
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), "In review")
+                prompt = self.reviewer_calls()[-1]["prompt"]
+                self.assertIn("# Agent report\n\n## Report\n\nAdded hello.txt. Ran the tests: 3 passed.", prompt)
+                self.assertTrue(self.reviewer_calls()[-1]["report"])  # the worktree as it was: the report stays
+                self.assertNotIn("# Goldfish review", prompt)
+                self.assertNotIn("You get no report from the agent", prompt)
+                self.assertNotIn("# Readiness check of the Goal", prompt)
+                self.assertEqual(self.review_line(self.comments(tid)[-1])["mode"], "agent")
+        self.assertEqual(len(self.reviewer_calls()), 2)
+
+    def test_goldfish_verdicts_combine_blocked_first_then_blocking_then_minor_only_passes(self):
+        self.write_config(reviewer=True, review_mode="goldfish", review_retries="0")
+        cases = [  # (Goal Auditor, Codebase Auditor) -> the card, the combined verdict, blocking, minor
+            ("pass", "minor", "In review", "pass", 0, 1),
+            ("minor", "minor", "In review", "pass", 0, 1),  # the same minor finding counts once
+            ("needs", "pass", "Blocked", "needs changes", 1, 1),
+            ("needs", "needs", "Blocked", "needs changes", 1, 1),  # the same blocking finding counts once
+            ("own", "needs", "Blocked", "needs changes", 2, 1),
+            ("blocked", "needs", "Blocked", "blocked", 1, 1),  # blocked wins over any finding
+            ("pass", "blocked", "Blocked", "blocked", 0, 0),
+            ("place", "place", "Blocked", "needs changes", 1, 0),  # the same place in other words counts once
+            ("own", "own", "Blocked", "needs changes", 2, 0),  # two places: two findings
+            ("junk", "pass", "Blocked", "blocked", 0, 0),  # an auditor without a verdict blocks, as one reviewer does
+        ]
+        for goal, code, status, verdict, blocking, minor in cases:
+            with self.subTest(goal=goal, code=code):
+                tid = self.new(f"ok GOAL={goal} CODE={code}")
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), status)
+                comment = self.comments(tid)[-1]
+                self.assertEqual(self.review_line(comment), {"verdict": verdict, "blocking": blocking,
+                                                             "minor": minor, "mode": "goldfish", "attempt": 1})
+                self.assertIn(f"Verdict: {verdict}\n", comment)
+                self.assertEqual(self.review_field(tid), verdict)
+                fix = comment.split("### Please fix\n\n", 1)[1].split("\n\n#", 1)[0] if blocking else ""
+                self.assertEqual(len([l for l in fix.splitlines() if l.startswith("- ")]), blocking)
+                self.assertEqual(fix.count("hello.txt: the greeting is too short"), int("needs" in (goal, code)))
+                self.assertEqual(comment.count("has no newline check"), minor)
+                if goal == "place":
+                    self.assertIn("- **`hello.txt:1`**: Goal Auditor finds the greeting wrong\n  - say Hello\n"
+                                  "  - Also Codebase Auditor: **`hello.txt:1`**: Codebase Auditor finds the greeting "
+                                  "wrong\n      - say Hello", fix)
+                if verdict == "blocked":
+                    reason = comment.split("## Blocked\n\n", 1)[1].splitlines()[0]
+                    self.assertIn("automated review: blocked: ", reason)
+                    self.assertIn("Goal Auditor wrote no verdict" if goal == "junk" else
+                                  "Need access to the staging logs.", reason)
+                    self.assertNotIn("## Suggested instructions", comment)
+                elif verdict == "needs changes":
+                    self.assertIn("review_retries = 0: it is never sent back", comment)
+                    self.assertIn("## Suggested instructions", comment)
+        self.assertEqual(len(self.agent_calls()), len(cases))  # never sent back: review_retries = 0
+        self.assertEqual(len(self.reviewer_calls()), 2 * len(cases))
+
+    def test_goldfish_review_sends_back_and_stops_as_one_reviewer_does(self):
+        """#249's sending back works on the combined verdict: a finding that comes back after its retry stops it."""
+        self.write_config(reviewer=True, review_mode="goldfish")
+        tid = self.new("ok GOAL=needs CODE=pass")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (2, 4))
+        self.assertIn("# Automated review feedback", self.agent_calls()[1]["prompt"])
+        self.assertIn("- hello.txt: the greeting is too short", self.agent_calls()[1]["prompt"])
+        second = self.reviewer_calls()[2]["prompt"]
+        self.assertEqual([c["report"] for c in self.reviewer_calls()], [False] * 4)  # the retry's report neither
+        self.assertIn("## Findings the work was sent back with", second)
+        self.assertNotIn("# Agent report", second)
+        last = self.comments(tid)[-1]
+        self.assertIn("a finding came back after the retry it was sent back with", last)
+        self.assertIn("1. hello.txt: the greeting is too short (it came back after a retry)", last)
+        self.assertEqual(self.review_line(last)["attempt"], 2)
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["reviews"], record["review_stop"], record["review_verdict"]),
+                         (["needs changes"] * 2, "repeated", "needs changes"))
+
+    def test_review_verdict_reaches_the_digest_and_the_list_and_a_run_without_one_clears_the_field(self):
+        self.write_config(reviewer=True, review_mode="goldfish", review_retries="0")
+        tid = self.new("ok GOAL=own CODE=needs")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        blocked = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]
+        self.assertEqual(blocked["digest"]["verdict"], "needs changes")
+        self.assertEqual(blocked["digest"]["findings"], "2 blocking, 1 minor (goldfish, attempt 1)")
+        self.assertIn('findings: "2 blocking, 1 minor (goldfish, attempt 1)"', self.task("show", tid, "--digest"))
+        listed = self.task("list", "--max-age", "0")
+        self.assertIn("waits_for,review}", listed)
+        self.assertIn('"needs changes (2 blocking, 1 minor)"', listed)
+        self.write_config()  # no reviewer now: the next run's card must not keep the last run's verdict
+        self.move(tid, "Ready")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIsNone(self.review_field(tid))
+        self.assertNotIn("needs changes", self.task("list", "--max-age", "0"))
+
+    def test_a_bad_review_mode_stops_the_start_before_the_agent_runs(self):
+        self.write_config(reviewer=True, review_mode="fish")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("review_mode", self.comments(tid)[-1])
+
+    def test_a_research_task_gets_the_one_reviewer_with_its_report_in_goldfish_mode_too(self):
+        self.write_config(reviewer=True, review_mode="goldfish")
+        tid = self.new("nochange REVIEW=boldpass", "Compare search libraries", "jyoka/app", "--research")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        prompt, = [c["prompt"] for c in self.reviewer_calls()]
+        self.assertIn("# Agent report", prompt)
+        self.assertNotIn("# Goldfish review", prompt)
+
+    def test_review_trial_reviews_a_commit_in_either_mode_and_writes_nothing(self):
+        """`task review --no-write`: what docs/lessons.md compares the modes with, on past cards' PRs."""
+        self.write_config()
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.write_config(reviewer=True)
+        before = (self.comments(tid), self.gh()["items"][f"PVTI_{tid}"]["values"])
+        report = self.root / "report.md"
+        report.write_text("## Report\n\nTRIAL-REPORT\n")
+        out = self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "goldfish",
+                        "--report-file", str(report))
+        self.assertIn("mode: goldfish", out)
+        self.assertIn("verdict: pass", out)
+        self.assertIn("written: nothing (--no-write)", out)
+        self.assertEqual([c["prompt"].count("+hello from mode ok") for c in self.reviewer_calls()], [1, 1])
+        self.assertFalse(any("TRIAL-REPORT" in c["prompt"] for c in self.reviewer_calls()))
+        self.assertTrue(all(c["cwd"].endswith(f"{tid}-review-trial") for c in self.reviewer_calls()))
+        out = self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "agent",
+                        "--report-file", str(report))
+        self.assertIn("mode: agent", out)
+        self.assertIn("TRIAL-REPORT", self.reviewer_calls()[-1]["prompt"])
+        self.assertEqual((self.comments(tid), self.gh()["items"][f"PVTI_{tid}"]["values"]), before)
+        trials = [json.loads(line) for line in
+                  (self.root / ".local/state/task-hub/review-trials.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["mode"], r["verdict"], [u["role"] for u in r["usage"]]) for r in trials],
+                         [("goldfish", "pass", ["Goal Auditor", "Codebase Auditor"]), ("agent", "pass", ["reviewer"])])
+        self.assertFalse((self.root / f".local/share/task-hub/worktrees/{tid}-review-trial").exists())
+        self.assertFalse((self.root / ".local/state/task-hub/metrics.jsonl").read_text().count("review-trial"))
+        for args, said in ((["--ref", f"task/{tid}"], "a trial only"), (["--no-write"], "a trial only"),
+                           (["--no-write", "--ref", f"task/{tid}", "--mode", "agent"], "--report-file"),
+                           (["--no-write", "--ref", f"task/{tid}", "--mode", "fish"], "--mode must be")):
+            with self.subTest(args):
+                self.assertIn(said, self.task("review", tid, *args, code=2))
 
     def test_unknown_reviewer_stops_the_start_before_the_agent_runs(self):
         self.write_config(reviewer="nosuch")
@@ -4605,6 +4832,24 @@ class TaskTest(unittest.TestCase):
         self.assertIn("Resumed once at review: the run process is gone.", reports[0])
         self.assertIn("Verdict: pass", reports[0])
         self.assertIn("== resumed at review", self.task("log", tid, "--full"))
+
+    def test_a_run_killed_during_a_goldfish_review_is_resumed_with_the_agents_report(self):
+        """The report was out of the worktree while the auditor ran (hide_report): the resumed run puts it back, and
+        hides it again from the auditors it starts."""
+        self.write_config(reviewer=True, review_mode="goldfish")
+        tid = self.new("ok GOAL=hang CODE=pass")
+        self.task("start", tid)
+        self.kill_run_during_review(tid)
+        wt = Path(self.reviewer_calls()[0]["cwd"])
+        self.assertFalse((wt / ".task-report.md").exists())
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 1)
+        self.assertEqual([c["report"] for c in self.reviewer_calls()], [False] * 3)
+        reports = [c for c in self.comments(tid) if c.startswith("<!-- task-hub report -->")]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("Added hello.txt. Ran the tests: 3 passed.", reports[0])
+        self.assertIn("Resumed once at review", reports[0])
 
     def test_a_run_killed_during_its_review_leaves_no_reviewer_edit_for_the_next_run(self):
         """lld.md 9, promise 2, when the run dies (kill -9, a crash) while its reviewer has changed the worktree, and

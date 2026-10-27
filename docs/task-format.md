@@ -15,6 +15,7 @@
 | カードの Agent | このタスクのエージェント。空欄 = そのマシンのデフォルト([agents.md](agents.md)) | あなた |
 | カードの Base branch | 作業を始めるブランチ(例: `feat/search`)。PR もこのブランチに向けて出ます。空欄 = リポジトリのデフォルトブランチ。GitHub に push 済みである必要があります | あなた(`/task` / `task new --base`) |
 | カードの Readiness | `task check` の判定 `GO` / `NO-GO`(任意。初めての `task check` が作ります。[下記](#ready-の前の確かめtask-check)) | task-hub |
+| カードの Review | 最後の実行の自動レビューの判定 `pass` / `needs changes` / `blocked`(任意。初めてのレビューが作ります。[下記](#判定の残し方review-欄と機械が読む-1-行)) | task-hub |
 | Issue のコメント | task-hub のレポート(下記)。人のコメントは、再実行のときにエージェントへの追加の指示として渡ります(下記) | task-hub / あなた |
 
 ### 開始の条件: Blocked by と Ready conditions
@@ -427,6 +428,92 @@ blocking がなく minor だけなら、レビューは通過です。判定が 
 人は中身を確かめて Ready に戻すだけで済みます。次の実行は前回のレポートを読むので、この下書きも受け取り、
 Goal やその後のコメントと食い違わない限りそれに従います。直したいときは、そのコメントを編集するか、コメントを足します。
 reviewer が `blocked`(人にしか出せない情報が要る)と判定したときは、下書きを書きません。
+
+### Goldfish のレビュー([runner] review_mode)
+
+```ini
+[runner]
+reviewer = agent
+review_mode = agent     ; agent(既定)/ goldfish
+```
+
+| `review_mode` | reviewer に渡すもの | 起動 |
+|---|---|---|
+| `agent`(既定) | Goal、人のコメント、差し戻した指摘、実装エージェントのレポート、差分 | reviewer 1 体 |
+| `goldfish` | Goal、人のコメント、差し戻した指摘、`task check` の判定のコメント(あれば)、差分。**レポートは渡さない** | 視点ごとに 1 体。それぞれ新しいコンテキストで、順に |
+
+`goldfish` は [Elephant-Goldfish Model](https://egm.dev/) の Goldfish の考え方です。実装した側の説明を読まないので、
+「テストを通した」のようなレポートの主張に引きずられません。主張は、レビュアーがコマンドを動かして自分で確かめます。
+レポートのファイル(`.task-report.md`)も、視点が動く間は worktree から外して `prompts/<番号>-report.md` に置き、終われば戻します。
+視点は [worker/REVIEW.md](../worker/REVIEW.md) の最後の部分に `## ` の見出しで書いてあり、見出しを足すと視点が増えます。
+
+| 視点 | 見るもの |
+|---|---|
+| Goal Auditor | 受け入れ条件と Goal の項目を 1 つずつ、証拠(ファイルと行、動かしたコマンドと出力)つきで met / not met にする |
+| Codebase Auditor | 回帰、リポジトリの決まり(AGENTS.md など)と慣習、新しい関数を壊す具体的な入力 |
+
+視点の結果は、次の規則で 1 つの判定にまとめます。まとめた判定で、上の差し戻しと止まる条件がそのまま動きます。
+
+1. どれかが `blocked`(または判定を書かなかった、ファイルを変えた)なら `blocked`
+2. そうでなく、どれかに blocking の指摘があれば `needs changes`
+3. そうでなければ `pass`。minor だけなら、1 体のときと同じく通過です
+
+同じ指摘(印、空白、大文字小文字、Markdown の飾りを除いて同じ文)が複数の視点から出たら 1 つにします。
+blocking と minor の両方に出た指摘は blocking として数えます。Issue のコメントには、まとめた判定と指摘のあとに、
+視点ごとの判定と所見(`### Goal Auditor: pass` など)が残ります。
+
+- 視点は同じ worktree で 1 体ずつ動かします。同時に動かさないのは、`[setup]` が入れたものと `[env]` のファイルを
+  使ってテストを動かせるようにするためと、起動ごとの使った量(worktree と時刻で見分けます)を分けて測るためです。
+  そのぶん時間は視点の数だけかかります。
+- `research` ラベルのタスクは、`goldfish` でも 1 体の reviewer がレポートを読みます。レポートが成果物だからです。
+- `metrics.jsonl` の `usage` の `role` は、視点の名前(`Goal Auditor` など)になります。`task stats` の役割ごとの行で、
+  視点ごとの時間と token を見られます。記録には `review_mode` と、最後のレビューの判定 `review_verdict` も入ります。
+- 値が `agent` と `goldfish` 以外なら、エージェントを動かす前にカードを Blocked にします。
+
+### 判定の残し方(Review 欄と機械が読む 1 行)
+
+最後のレビューの判定は、カードを読むだけで分かるように 2 か所に残します。
+
+- **Project の Review 欄**: 単一選択の欄に `pass` / `needs changes` / `blocked` を入れます。判定のないレビューも
+  `blocked` です。欄がなければ、初めてのレビューが選択肢つきで作ります(Readiness 欄と同じ作り方)。
+  レビューのなかった実行(reviewer がない、エージェントが自分で Blocked にした、変更がない)は、終わるときに欄を空にします。
+  前の実行の判定が残らないようにするためです。
+  欄を書けなくても、実行は止めません(ログに理由を書きます)。
+- **レポートのコメントの 1 行**: `## Automated review` の見出しのすぐ下に、GitHub では見えない 1 行を書きます。
+  `attempt` はその実行の何回目のレビューか(1 から)です。PR の本文にも同じ 1 行が入ります。
+
+```markdown
+## Automated review
+
+<!-- task-hub review: {"verdict": "needs changes", "blocking": 2, "minor": 1, "mode": "goldfish", "attempt": 1} -->
+Verdict: needs changes
+```
+
+読む側は次のとおりです。
+
+- `digest()`(イベント、通知、`task show --digest`、`task events --digest`)は、`verdict` をこの行から読みます。
+  指摘があれば `findings: 2 blocking, 1 minor (goldfish, attempt 1)` も足します。この行のない古いレポートは、
+  今までどおり `Verdict:` の行から読みます。
+- `task list` は、Project に Review 欄があれば `review` の列を出します。値は欄の判定です。このマシンで動いたカードは、
+  最後の Status イベントの digest から指摘の数を足します(`needs changes (2 blocking, 1 minor)`)。GitHub を読み足しません。
+
+### レビューを試す(task review --no-write)
+
+`[runner] review_mode` の 2 つを過去のカードで比べるためのコマンドです。カードのリポジトリのあるコミットのコードを、
+実行と同じ指示でレビューし、判定と使った量を表示します。GitHub には何も書きません。
+
+```sh
+task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode goldfish
+task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode agent --report-file report.md
+```
+
+- `--ref` のコミットを、使い捨ての worktree(`~/.local/share/task-hub/worktrees/<番号>-review-trial`)に取り出して
+  レビューします。終わったら消します。`[setup]` と `[env]` は使いません。
+- 差分は `--base` から `--ref` までです。`--base` を省くと、カードの Base branch(空ならデフォルトブランチ)から分かれた所です。
+- `--mode` を省くと `[runner] review_mode` です。`agent` には、そのときの実装エージェントのレポートを `--report-file` で渡します。
+  `--goal-file` を渡すと、Issue の本文の代わりにその文を Goal にします(実行のあとに Goal を編集したカード用)。
+- 結果は `~/.local/state/task-hub/review-trials.jsonl` に 1 行ずつ残ります。`metrics.jsonl` には入れません。
+  ログは `logs/<番号>-review-trial.log` です。
 
 ## PR
 

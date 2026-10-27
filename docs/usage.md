@@ -62,6 +62,7 @@ reviewer = agent        ; PR の前の自動レビュー。agent = worker と同
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
 review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
+review_mode = agent     ; reviewer に渡すもの。agent(既定。レポートも)/ goldfish(Goal とコードだけ。2 つの視点)
 readiness = off         ; Ready のカードを始める前に task check の GO を求めるか。off(既定)/ warn / require
 checker =               ; task check の Goldfish のエージェント。空か agent = カードの Agent 欄
 
@@ -104,7 +105,7 @@ user = task-agent       ; そのユーザー(これが既定)
 
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
-| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
+| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し))。判定は Project の Review 欄にも入る。`review_mode = goldfish` では、レポートを読まない 2 つの視点が別々に見る([task-format.md](task-format.md#goldfish-のレビューrunner-review_mode)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
 | `readiness` | `warn`: 今の Goal への `task check` の GO がない Ready のカードも始めるが、`readiness` イベントと `task` の出力で知らせる。`require`: GO がなければ始めず(`waits_for` に理由)、オートパイロットも Ready に移さない。どちらも `task list` に `readiness` の列が付く。`--research` のカードは対象外([task-format.md](task-format.md#開始の門-runner-readiness)) | `task check` の NO-GO を見て Goal を直すか、Backlog に戻すか(task-hub はカードを動かさない) |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
@@ -214,6 +215,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 | 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
 | 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | `task check` ごとの判定と、起動ごとの秒数とトークン数 | `~/.local/state/task-hub/checks.jsonl`(`task stats` の `checks:` 行)。ログは `logs/<番号>-check.log` |
+| `task review --no-write` ごとの判定と、起動ごとの秒数とトークン数 | `~/.local/state/task-hub/review-trials.jsonl`。ログは `logs/<番号>-review-trial.log` |
 | 最後に読んだ各カードの判定(`[runner] readiness` が `off` 以外のとき) | `~/.local/state/task-hub/readiness.json` |
 | worktree とリポジトリの clone | `~/.local/share/task-hub/` |
 | task-hub の新しい版を確かめた結果(1 日 1 回まで) | `~/.local/state/task-hub/update.json` |

@@ -71,6 +71,10 @@ SHARE_STATUS = {BACKLOG: "Todo", READY: IN_PROGRESS, IN_PROGRESS: IN_PROGRESS, I
 READINESS_FIELD = "Readiness"  # the Project's single-select field `task check` fills (made when missing)
 READINESS_VERDICTS = ["GO", "NO-GO"]  # its options; a blocked check clears it
 READINESS_MODES = ("off", "warn", "require")  # [runner] readiness: what starting a Ready card asks of its Goal
+REVIEW_FIELD = "Review"  # the Project's single-select field a run's last automated review fills (made when missing)
+REVIEW_VERDICTS = ["pass", "needs changes", "blocked"]  # its options; a run without a review clears it
+REVIEW_MODES = ("agent", "goldfish")  # [runner] review_mode: what the reviewer is given (build_review_prompt)
+REVIEW_LINE = "<!-- task-hub review: "  # the machine-readable line of the report's Automated review (review_line)
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
 WATCH_SECONDS = 60
@@ -140,6 +144,7 @@ STATE = Path.home() / ".local" / "state" / "task-hub"
 LOGS = STATE / "logs"
 RUNS = STATE / "runs"  # what this machine knows about each run: never on GitHub
 METRICS = STATE / "metrics.jsonl"  # one line per finished run on this machine, for `task stats`
+REVIEW_TRIALS = STATE / "review-trials.jsonl"  # one line per `task review --no-write`, never in METRICS either
 CHECKS = STATE / "checks.jsonl"  # one line per `task check`, for `task stats`: never in METRICS, whose readers count runs
 READINESS = STATE / "readiness.json"  # the last readiness verdict read of each card, so a check of the board reads
 #                                       an Issue's comments only when its Goal or card changed (readiness_gate)
@@ -323,9 +328,11 @@ STATUSES = StatusLifecycle.all
 
 class ReviewResult:
     """Automated review verdict and feedback. Please fix holds the blocking findings, Known issues the minor ones: a
-    review with only minor ones passes, and they go into the PR as known issues."""
-    def __init__(self, markdown=""):
+    review with only minor ones passes, and they go into the PR as known issues.
+    mode: [runner] review_mode it was made in; attempt: which review of the run it is (1: the first), for review_line."""
+    def __init__(self, markdown="", mode="agent", attempt=1):
         self.markdown = markdown or ""
+        self.mode, self.attempt = mode, attempt
         # models often decorate the word: **Pass**, `pass`, Pass.
         self.verdict = (section(self.markdown, "Verdict").splitlines() or [""])[0].strip(" *`_.").lower()
         self.review = section(self.markdown, "Review")
@@ -358,13 +365,25 @@ class ReviewResult:
         first = ((self.review or self.fix).splitlines() or ["no details"])[0]
         return f"{stop or 'automated review: ' + (self.verdict or 'no verdict')}: {first}"
 
+    @property
+    def field_verdict(self):
+        """The verdict as the Review field and review_line give it: pass, needs changes, or blocked (also for a
+        review without a verdict, which blocks the card as blocked does)."""
+        return self.verdict if self.verdict in REVIEW_VERDICTS else "blocked"
+
+    def review_line(self):
+        """The one line a program reads the review from (digest): an HTML comment, which GitHub does not show."""
+        return REVIEW_LINE + json.dumps({"verdict": self.field_verdict, "blocking": len(self.findings) if self.fix else 0,
+                                         "minor": len(list_items(self.minor)), "mode": self.mode,
+                                         "attempt": self.attempt}) + " -->"
+
     def issue_section(self):
         verdict = self.verdict or "missing verdict"
         body = self.review or self.markdown.strip() or "reviewer produced no details"
         body += f"\n\n### Please fix\n\n{self.fix}" * bool(self.fix)
         body += f"\n\n### Known issues\n\nMinor findings, left for later: they did not stop the review.\n\n" \
                 f"{self.minor}" * bool(self.minor)
-        return f"## Automated review\n\nVerdict: {verdict}\n\n{body}"
+        return f"## Automated review\n\n{self.review_line()}\nVerdict: {verdict}\n\n{body}"
 
     def suggested_instructions(self, stop, sent):
         """The draft of the next run's instructions, for the human to check before moving the card to Ready again."""
@@ -385,6 +404,46 @@ class ReviewResult:
             "say why in your report. The Known issues can wait."])
 
 
+def combine_reviews(found):
+    """One ReviewResult from each Goldfish auditor's ({name: ReviewResult}, in the order they ran): blocked when any
+    is blocked or wrote no verdict, else needs changes when any has a blocking finding, else pass (minor findings
+    only pass, as one reviewer's do). A finding more than one auditor made counts once: the same words (finding_key),
+    or the same place (finding_place) from another auditor, whose words are kept below the first as "Also". A minor
+    one that is also blocking counts as blocking."""
+    fix, minor = [], []
+    for kind in ("fix", "minor"):
+        for name, r in found.items():
+            for f in (r.findings if r.fix else []) if kind == "fix" else list_items(r.minor):
+                key, place = finding_key(f), finding_place(f)
+                same = next((e for e in fix + minor if e["key"] == key or place and e["place"] == place
+                             and name not in e["by"]), None)
+                if same is None:
+                    (fix if kind == "fix" else minor).append({"key": key, "place": place, "by": [name],
+                                                              "text": finding_text(f), "also": []})
+                elif same["key"] != key and name not in same["by"]:
+                    same["by"].append(name)
+                    same["also"].append(f"Also {name}: " + finding_text(f).replace("\n", "\n    "))
+    shown = lambda items: "\n".join("- " + e["text"] + "".join(f"\n  - {a}" for a in e["also"]) for e in items)
+    first = lambda r: ((r.review or r.fix).splitlines() or ["no details"])[0]
+    stuck = [(n, r) for n, r in found.items() if r.verdict not in ("pass", "needs changes")]
+    needs = [(n, r) for n, r in found.items() if r.needs_changes]
+    if stuck:
+        verdict, lead = "blocked", "; ".join(
+            f"{n}: {first(r)}" if r.verdict == "blocked" else f"{n} wrote no verdict pass, needs changes or blocked "
+            f"(it wrote {r.verdict or 'none'})" for n, r in stuck)
+    elif needs:
+        verdict, lead = "needs changes", "; ".join(f"{n}: {first(r)}" for n, r in needs)
+    else:
+        verdict, lead = "pass", f"{' and '.join(found)} passed it."
+    about = (f"Goldfish review: {plural(len(found), 'auditor', 'auditors')}, each in a fresh context, read the Goal "
+             "and the code, not the agent's report.")
+    parts = [f"## Verdict\n\n{verdict}", f"## Review\n\n{lead}\n\n{about}",
+             *(f"### {n}: {r.verdict or 'no verdict'}\n\n{r.review or 'no details'}" for n, r in found.items())]
+    parts += ["## Please fix\n\n" + shown(fix)] * bool(fix)
+    parts += ["## Known issues\n\n" + shown(minor)] * bool(minor)
+    return ReviewResult("\n\n".join(parts), mode="goldfish")
+
+
 AGAIN = re.compile(r"\(again\)\s*", re.I)
 
 
@@ -403,6 +462,12 @@ def list_items(text):
 
 def finding_text(finding):
     return re.sub(r"^([-*+]|\d+[.)])\s+", "", finding.strip())
+
+
+def finding_place(finding):
+    """Where a finding says it is, when it starts with it as worker/REVIEW.md asks (`path:line`, maybe bold), or ""."""
+    m = re.match(r"[*_]*`([^`\s]+:\d+)", finding_text(finding))
+    return m[1] if m else ""
 
 
 def finding_key(finding):
@@ -446,7 +511,7 @@ class AgentReport:
                            [f"<sub>task-hub | agent: {t['agent']}</sub>"])
 
 
-DIGEST_KEYS = ["verdict", "reason", "report", "review", "decision", "question", "answer", "goal_change", "pr"]
+DIGEST_KEYS = ["verdict", "findings", "reason", "report", "review", "decision", "question", "answer", "goal_change", "pr"]
 DIGEST_ITEM, DIGEST_TEXT, DIGEST_REVIEW_ITEMS = 120, 240, 3  # the caps keep one digest under ~1000 chars
 
 
@@ -478,7 +543,10 @@ def digest(report="", replan=""):
         m = re.search(r"\n\nPR: (\S+)\s*\Z", report)  # only the last line task-hub appends, not the agent's text
         pr, report = (m.group(1), report[:m.start()]) if m else ("", report)
         auto = section(report, "Automated review")
-        d["verdict"] = clip((re.findall(r"(?m)^Verdict: (.+)$", auto) or [""])[0], 40)
+        read = parse_review_line(auto)  # a report written before the line: its Verdict line only
+        d["verdict"] = clip(read.get("verdict") or (re.findall(r"(?m)^Verdict: (.+)$", auto) or [""])[0], 40)
+        if read.get("blocking") or read.get("minor"):  # a clean pass needs no line of its own
+            d["findings"] = f"{read['blocking']} blocking, {read['minor']} minor ({read['mode']}, attempt {read['attempt']})"
         d["reason"] = clip(section(report, "Blocked"), DIGEST_TEXT)
         lines = [l for l in section(report, "Please review").splitlines() if l.strip()]
         items = [l.strip() for l in lines if re.match(r"([-*+]|\d+[.)])\s", l)] or [l.strip() for l in lines]
@@ -496,6 +564,19 @@ def digest(report="", replan=""):
     return {k: d[k] for k in DIGEST_KEYS if d.get(k)}
 
 
+def parse_review_line(text):
+    """{verdict, blocking, minor, mode, attempt} from the last review line (ReviewResult.review_line) in text, or {}
+    when there is none or it does not read."""
+    found = re.findall(rf"(?m)^{re.escape(REVIEW_LINE)}(\{{.*\}}) -->[ \t]*$", text)
+    try:
+        read = json.loads(found[-1]) if found else {}
+    except ValueError:
+        return {}
+    ok = isinstance(read, dict) and read.get("verdict") in REVIEW_VERDICTS and read.get("mode") in REVIEW_MODES \
+        and all(isinstance(read.get(k), int) for k in ("blocking", "minor", "attempt"))
+    return {k: read[k] for k in ("verdict", "blocking", "minor", "mode", "attempt")} if ok else {}
+
+
 def digest_lines(d, skip=()):
     """The digest as indented `key: value` lines, one per Please review item."""
     return [f"  {k}: {q(v)}" for k in DIGEST_KEYS if k not in skip
@@ -509,7 +590,7 @@ def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
-                            "readiness": "off", "checker": ""},
+                            "readiness": "off", "checker": "", "review_mode": "agent"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
@@ -632,6 +713,15 @@ def review_retries():
         raise RuntimeError(f"[runner] review_retries in {home(CONFIG)} must be a whole number, 0 or more; "
                            f"got {value!r}")
     return int(value)
+
+
+def review_mode():
+    """[runner] review_mode: agent (the default: one reviewer reads the Goal, the agent's report, and the diff) or
+    goldfish (each auditor of worker/REVIEW.md reads the Goal and the code only, never the report)."""
+    mode = config()["runner"].get("review_mode", "").strip().lower() or "agent"
+    if mode not in REVIEW_MODES:
+        raise RuntimeError(f"[runner] review_mode in {home(CONFIG)} must be agent or goldfish; got {mode!r}")
+    return mode
 
 
 def pass_env():
@@ -863,7 +953,10 @@ ITEMS_QUERY = """query($id: ID!, $q: String!, $after: String) { node(id: $id) { 
     status: fieldValueByName(name: "@Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
     repo: fieldValueByName(name: "@Target repo") { ... on ProjectV2ItemFieldTextValue { text } }
     agent: fieldValueByName(name: "@Agent") { ... on ProjectV2ItemFieldTextValue { text } }
-    base: fieldValueByName(name: "@Base branch") { ... on ProjectV2ItemFieldTextValue { text } } } } } } }"""
+    base: fieldValueByName(name: "@Base branch") { ... on ProjectV2ItemFieldTextValue { text } }@review } } } } }"""
+# the optional Review field, in ITEMS_QUERY only when the Project has it
+ITEMS_REVIEW = """
+    review: fieldValueByName(name: "@Review") { ... on ProjectV2ItemFieldSingleSelectValue { name } }"""
 
 
 def graphql(query, **variables):
@@ -907,14 +1000,15 @@ def board(saved_ok=False):
     if missing:
         fail(f"the Project is missing: {', '.join(missing)}",
              f"add them in the Project's settings ({project.get('url', '')}); see docs/setup.md")
-    readiness = by_name.get(READINESS_FIELD.lower())  # optional: `task check` makes it when it is missing
+    # optional: `task check` makes Readiness when it is missing, a run's review Review
+    selects = {key: by_name.get(name.lower()) for key, name in (("readiness", READINESS_FIELD), ("review", REVIEW_FIELD))}
     _board.update(owner=owner, number=number, issues=issues, id=project["id"], url=project.get("url", ""),
                   status_field=status["id"], status_options=options,
                   text_fields={n: by_name[n.lower()]["id"] for n in TEXT_FIELDS},
                   names={n: by_name[n.lower()]["name"] for n in ["Status", *TEXT_FIELDS]},
-                  readiness={"id": readiness["id"], "type": readiness.get("dataType", ""),
-                             "options": {o["name"].lower(): o["id"] for o in readiness.get("options") or []}}
-                  if readiness else None)
+                  **{key: {"id": f["id"], "type": f.get("dataType", ""), "name": f["name"],
+                           "options": {o["name"].lower(): o["id"] for o in f.get("options") or []}}
+                     if f else None for key, f in selects.items()})
     write_cache(BOARD_META, json.dumps({"key": [owner, number, issues], "at": time.time(), "board": _board}))
     return _board
 
@@ -966,6 +1060,8 @@ def fetch_items(include_done, saved_ok=False):
     query = ITEMS_QUERY
     for n, spelled in b["names"].items():
         query = query.replace(f'"@{n}"', json.dumps(spelled))
+    query = query.replace("@review", ITEMS_REVIEW.replace('"@Review"', json.dumps(b["review"]["name"]))
+                          if b.get("review") else "")  # a Project without the field is asked nothing of it
     fetched_at = time.time()  # before the read: a board change during it makes this read stale
     items, after = [], None
     try:
@@ -1041,7 +1137,7 @@ def tasks(include_done=False, max_age=0):
              "fetched": fetched,
              "closed": content.get("state") == "CLOSED",
              "status": canonical(value("status")), "repo": value("repo"), "agent": value("agent"),
-             "base": value("base"), "url": content.get("url", ""),
+             "base": value("base"), "review": value("review"), "url": content.get("url", ""),
              "blockers": [{"ref": f"#{n['number']}" if n["repository"]["nameWithOwner"].lower() == issues.lower()
                            else f"{n['repository']['nameWithOwner']}#{n['number']}",
                            "number": str(n["number"]), "title": n.get("title", ""), "state": n.get("state", ""),
@@ -1346,6 +1442,7 @@ def issue(t):
             "link_project": project[1] if project else "",
             "own_comments": [c["body"] for c in data.get("comments", []) if c["body"].startswith((REPORT_MARK, REPLAN_MARK))],
             "readiness": latest_readiness(data.get("comments") or []),
+            "readiness_comment": latest_readiness_comment(data.get("comments") or []),
             "research": any(label.get("name", "").lower() == RESEARCH_LABEL for label in data.get("labels") or [])}
 
 
@@ -2069,6 +2166,7 @@ def launch(t):
             raise RuntimeError(f'unknown {key} "{name}" in the config')
     if helper_agent(t, "reviewer"):
         review_retries()
+        review_mode()
     check_sandbox()
     for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
         if name:  # before the worktree and before any credit is spent
@@ -2103,7 +2201,7 @@ def launch(t):
     else:
         comments_file(t).unlink(missing_ok=True)
     # the last run's: a resume reads them only from this run
-    for f in (retry_file(t), review_state_file(t), finish_file(t)):
+    for f in (retry_file(t), review_state_file(t), finish_file(t), held_report_file(t)):
         f.unlink(missing_ok=True)
     start_run(t, IN_PROGRESS)
 
@@ -2322,6 +2420,29 @@ def finish_file(t):
     """What finish is given besides the report (review_loop's outcome, the agent's exit code), for a run resumed
     during finishing: it was only in the memory of the run that stopped."""
     return DATA / "prompts" / f"{t['id']}-finish.json"
+
+
+def held_report_file(t):
+    """The agent's report while a Goldfish auditor runs (hide_report): out of the worktree the auditor inspects."""
+    return DATA / "prompts" / f"{t['id']}-report.md"
+
+
+def hide_report(t):
+    """Move the agent's report out of the worktree until unhide_report: a Goldfish auditor judges the Goal and the
+    code, never the report, and would find the report there with one `ls -a`."""
+    wt = Path(t["worktree"])
+    text = agent_file(wt / REPORT_FILE)
+    if text is not None:
+        write_atomic(held_report_file(t), text)
+        shared_unlink(wt / REPORT_FILE)
+
+
+def unhide_report(t):
+    """Put back the report hide_report moved out; also one a run cut short during a Goldfish review left there."""
+    held = held_report_file(t)
+    if held.exists():
+        shared_write(Path(t["worktree"]) / REPORT_FILE, held.read_text())
+        held.unlink()
 
 
 def comments_file(t):
@@ -3395,19 +3516,38 @@ def shown_path(path, wt):
     return path
 
 
-def build_review_prompt(t, report, diff, sent=()):
-    """sent: the findings earlier reviews of this run sent the agent back with."""
-    instructions, about_comments, about_sent = instruction_parts(WORKER_REVIEW)
+def build_review_prompt(t, goal, report, diff, sent=(), comments="", auditor=None, readiness=""):
+    """sent: the findings earlier reviews of this run sent the agent back with. comments: what people wrote since the
+    earlier run (comments_file). auditor: (name, what each auditor is told, its persona) for one Goldfish auditor
+    ([runner] review_mode = goldfish), which gets readiness (`task check`'s comment on the Goal, if any) and never the
+    agent's report; None: the one reviewer, which gets the report."""
+    instructions, about_comments, about_sent, _ = instruction_parts(WORKER_REVIEW, 4)
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
-    comments = comments_file(t).read_text().strip() if comments_file(t).exists() else ""
-    return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}",
+    if auditor:
+        name, about, persona = auditor
+        head = [instructions, "", f"# Goldfish review: {name}", "", about, "", persona]
+        given = ["", "# Readiness check of the Goal", "",
+                 clip_text(readiness.replace(READINESS_MARK, "").strip(), limit // 2)] if readiness else []
+    else:
+        head, given = [instructions], ["", "# Agent report", "", report.strip() or "(no report)"]
+    return "\n".join([*head, "", "# Task", "", f"Task {t['id']}: {t['title']}",
                       f"Repository: {t['repo']}", f"Branch: {t['branch']}", "", "## Goal", "",
-                      issue(t)["body"].strip(), *(["", about_comments, "", comments] if comments else []),
+                      goal.strip(), *(["", about_comments, "", comments] if comments else []),
                       *(["", about_sent, "", *sent] if sent else []),
-                      "", "# Agent report", "",
-                      report.strip() or "(no report)", "", "# Diff", "", "```diff", diff, "```", ""])
+                      *given, "", "# Diff", "", "```diff", diff, "```", ""])
+
+
+def review_auditors():
+    """worker/REVIEW.md's Goldfish part as (what each auditor is told, {auditor: its persona})."""
+    part = instruction_parts(WORKER_REVIEW, 4)[3]
+    about, _, personas = part.partition("\n## ")
+    named = dict((n.strip(), text.strip()) for n, text in re.findall(r"(?ms)^## ([^\n]+)\n(.*?)(?=^## |\Z)",
+                                                                     "## " + personas))
+    if not personas or not named:
+        raise RuntimeError(f"{home(WORKER_REVIEW)} names no Goldfish auditor (a `## ` heading in its fourth part)")
+    return about.strip(), named
 
 
 def run_review(t, report, say, usage=None, sent=()):
@@ -3424,16 +3564,51 @@ def run_review(t, report, say, usage=None, sent=()):
         if not t.get("research"):
             return None  # finish() blocks it as "changed no files"
         diff = "(no file changes: this is a research task, and the agent's report above is the deliverable)"
-    shared_unlink(wt / REVIEW_FILE)
     set_stage(t, "review")
-    snap = hold_snapshot(t)
-    code = run_agent_process(reviewer, build_review_prompt(t, report, diff, sent), wt, say, "reviewer", usage, t)
-    if release_snapshot(t, snap):
-        return ReviewResult("## Verdict\n\nblocked\n\n## Review\n\nReviewer changed files; its edits were undone. "
+    i = issue(t)
+    comments = comments_file(t).read_text().strip() if comments_file(t).exists() else ""
+    # a research task's report is its deliverable: a review without it would have nothing to judge
+    mode = "agent" if t.get("research") else review_mode()
+
+    def launch(prompt, label):
+        shared_unlink(wt / REVIEW_FILE)
+        if mode == "goldfish":  # out of the prompt, and out of the worktree the auditor inspects
+            hide_report(t)
+        try:
+            snap = hold_snapshot(t)
+            code = run_agent_process(reviewer, prompt, wt, say, label, usage, t)
+            return review_result(label, code, release_snapshot(t, snap), agent_file(wt / REVIEW_FILE))
+        finally:
+            unhide_report(t)
+    return review_by(mode, launch, t, i["body"], report, diff, sent, comments, i.get("readiness_comment", ""), say)
+
+
+def review_by(mode, launch, t, goal, report, diff, sent=(), comments="", readiness="", say=print):
+    """The review in mode: one reviewer given the agent's report (agent), or each Goldfish auditor of worker/REVIEW.md
+    in a fresh context of its own, one after another, never given the report, and their results combined (goldfish).
+    launch(prompt, label): one reviewer launch's ReviewResult (review_result)."""
+    if mode == "agent":
+        result = launch(build_review_prompt(t, goal, report, diff, sent, comments), "reviewer")
+    else:
+        about, auditors = review_auditors()
+        found = {}
+        for name, persona in auditors.items():  # in turn: the worktree, [setup] and the usage measured are the run's
+            found[name] = launch(build_review_prompt(t, goal, "", diff, sent, comments, (name, about, persona),
+                                                     readiness), name)
+            say(f"== {name}: {found[name].verdict or 'missing'}")
+        result = combine_reviews(found)
+    result.mode = mode
+    return result
+
+
+def review_result(label, code, edited, text):
+    """One reviewer launch's ReviewResult: blocked when it changed files (edited) or wrote no REVIEW_FILE (text None)."""
+    who = label[:1].upper() + label[1:]
+    if edited:
+        return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\n{who} changed files; its edits were undone. "
                             "Reviewers must only inspect the worktree.")
-    text = agent_file(wt / REVIEW_FILE)
     if text is None:
-        return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\nReviewer exited {code} without writing {REVIEW_FILE}.")
+        return ReviewResult(f"## Verdict\n\nblocked\n\n## Review\n\n{who} exited {code} without writing {REVIEW_FILE}.")
     return ReviewResult(text)
 
 
@@ -3472,8 +3647,10 @@ def review_loop(t, report, code, say, record, resume_at="", why=""):
         review = run_review(t, report, say, record["usage"], state["sent"])
         if review is None:
             return report, code, "", ""
+        review.attempt = attempt + 1
         say(f"== reviewer verdict: {review.verdict or 'missing'}")
         record["reviews"].append(review.verdict or "missing")
+        record["review_mode"], record["review_verdict"] = review.mode, review.field_verdict
         if review.passed:
             return report, code, review.issue_section(), ""
         if not review.needs_changes:
@@ -3777,10 +3954,14 @@ def parse_readiness(body):
 def latest_readiness(comments):
     """The verdict of the newest READINESS_MARK comment this account wrote, or {}: a comment anyone else wrote is no
     verdict, whatever it says, and a newest one that does not read is none (never the one before it)."""
-    for c in reversed(comments):
-        if (c.get("body") or "").startswith(READINESS_MARK) and c.get("viewerDidAuthor") is True:
-            return parse_readiness(c["body"])
-    return {}
+    body = latest_readiness_comment(comments)
+    return parse_readiness(body) if body else {}
+
+
+def latest_readiness_comment(comments):
+    """The newest READINESS_MARK comment this account wrote, or "" (latest_readiness)."""
+    return next((c["body"] for c in reversed(comments)
+                 if (c.get("body") or "").startswith(READINESS_MARK) and c.get("viewerDidAuthor") is True), "")
 
 
 def readiness_mode():
@@ -3856,22 +4037,35 @@ def readiness_gate(board_, mode, repos=(), read=True, errors=None):
 
 
 def set_readiness(t, verdict):
-    """The card's Readiness field: GO or NO-GO, cleared for a blocked check. The field is made, with both options,
-    when the Project has none; one of another type, or without the option, is the human's to fix."""
+    """The card's Readiness field: GO or NO-GO, cleared for a blocked check."""
+    set_select(t, "readiness", READINESS_FIELD, READINESS_VERDICTS, verdict)
+
+
+def set_review(t, verdict):
+    """The card's Review field: the verdict of its run's last automated review (pass, needs changes, blocked), cleared
+    for a run without one. A Project without the field gets it with the first verdict; none to clear: no call."""
+    if t.get("item") and (verdict or board().get("review")):
+        set_select(t, "review", REVIEW_FIELD, REVIEW_VERDICTS, verdict)
+
+
+def set_select(t, key, name, options, value):
+    """The card's single-select field name (board()[key]): value, or cleared for one not in options. The field is
+    made, with all options, when the Project has none; one of another type, or without the option, is the human's
+    to fix."""
     b = board()
-    if not b.get("readiness"):
-        gh("project", "field-create", b["number"], "--owner", b["owner"], "--name", READINESS_FIELD,
-           "--data-type", "SINGLE_SELECT", "--single-select-options", ",".join(READINESS_VERDICTS))
+    if not b.get(key):
+        gh("project", "field-create", b["number"], "--owner", b["owner"], "--name", name,
+           "--data-type", "SINGLE_SELECT", "--single-select-options", ",".join(options))
         forget_board()
         b = board()
-    field = b.get("readiness") or {}
+    field = b.get(key) or {}
     if field.get("type") != "SINGLE_SELECT":
-        raise RuntimeError(f'the Project\'s "{READINESS_FIELD}" field is {field.get("type") or "missing"}, not a '
-                           f"single select with the options {', '.join(READINESS_VERDICTS)}")
-    if verdict in READINESS_VERDICTS:
-        option = field["options"].get(verdict.lower())
+        raise RuntimeError(f'the Project\'s "{name}" field is {field.get("type") or "missing"}, not a '
+                           f"single select with the options {', '.join(options)}")
+    if value in options:
+        option = field["options"].get(value.lower())
         if not option:
-            raise RuntimeError(f'the Project\'s "{READINESS_FIELD}" field has no option "{verdict}"; add it in the '
+            raise RuntimeError(f'the Project\'s "{name}" field has no option "{value}"; add it in the '
                                f"Project's settings ({b.get('url', '')})")
         value = ["--single-select-option-id", option]
     else:
@@ -4080,6 +4274,96 @@ def cmd_check(a):
                             if result.verdict == "GO" else "blocked: fix the cause, then check again"))
 
 
+def cmd_review(a):
+    """`task review <id> --no-write --ref <commit>`: a trial of the automated review on a card's code at a commit (a
+    past PR's), in [runner] review_mode or --mode, as a run would review it: prints the verdict and what it used, and
+    writes nothing to GitHub. For comparing the modes on past cards (docs/lessons.md)."""
+    usage_ = f"usage: {COMMANDS['review'][3].split('  #')[0]}"
+    if not a["no_write"] or not a["ref"]:
+        fail("`task review` is a trial only: give --no-write and --ref (a run reviews its own work)", usage_, 2)
+    if a["mode"] and a["mode"] not in REVIEW_MODES:
+        fail(f"--mode must be agent or goldfish; got {a['mode']!r}", usage_, 2)
+    t = get(a["id"])
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", t.get("repo") or ""):
+        fail('the card has no valid "Target repo" (owner/name)')
+    try:
+        mode = a["mode"] or review_mode()
+    except RuntimeError as e:
+        fail(str(e))
+    if mode == "agent" and not a["report_file"]:
+        fail("--mode agent gives the reviewer the agent's report: give it with --report-file", usage_, 2)
+    t = {**t, "agent": t.get("agent") or config()["runner"]["agent"], "branch": f"task/{t['id']}"}
+    reviewer = helper_agent(t, "reviewer")
+    if not reviewer or not config().has_option("agents", reviewer):
+        fail(f'no reviewer: [runner] reviewer is {config()["runner"].get("reviewer", "") or "empty"}',
+             f"set it in {home(CONFIG)} (agent: the card's own agent)")
+    check_sandbox()
+    check_ready(reviewer)
+    i = issue(t)
+    texts = {}
+    for key in ("goal_file", "report_file"):
+        try:
+            texts[key] = read_agent_file(Path(a[key])) if a[key] else ""
+        except OSError as e:
+            fail(f"cannot read --{key.replace('_', '-')} {a[key]}: {e.strerror or e}", code=2)
+    goal = texts["goal_file"] or i["body"]
+    repo_dir = ensure_clone(t["repo"])
+    commit = git_shared(repo_dir, "rev-parse", "--verify", "-q", f"{a['ref']}^{{commit}}").stdout.strip()
+    base = a["base"] or git_shared(repo_dir, "merge-base", base_ref(t, repo_dir), commit or "HEAD").stdout.strip()
+    base = git_shared(repo_dir, "rev-parse", "--verify", "-q", f"{base}^{{commit}}").stdout.strip() if base else ""
+    if not commit or not base:
+        fail(f"{a['ref'] if not commit else a['base']} is not in {t['repo']}",
+             "give --ref (and --base) a commit or branch of the repo")
+    diff = git_shared(repo_dir, "diff", base, commit, "--").stdout
+    if not diff.strip():
+        fail(f"no change between {base[:12]} and {commit[:12]}")
+    LOGS.mkdir(parents=True, exist_ok=True)
+    log, wt = LOGS / f"{t['id']}-review-trial.log", DATA / "worktrees" / f"{t['id']}-review-trial"
+
+    def say(line):
+        with log.open("a") as f:
+            f.write(line + "\n")
+        if line.startswith("== "):
+            print(line, file=sys.stderr, flush=True)
+
+    def launch(prompt, label):
+        shared_unlink(wt / REVIEW_FILE)
+        snap = snapshot(wt)
+        code = run_agent_process(reviewer, prompt, wt, say, label, usage)
+        return review_result(label, code, restore(wt, snap), agent_file(wt / REVIEW_FILE))
+    for s in INTERRUPTS:  # a closed pane or kill stops the reviewer too, as Ctrl-C does
+        signal.signal(s, signal.default_int_handler)
+    began, usage = time.time(), []
+    with file_lock(RUNS / f"{t['id']}.review-trial.lock") as mine:
+        if not mine:
+            fail(f"another `task review {t['id']}` is running")
+        if wt.exists():  # left by a trial that was killed
+            git_shared(repo_dir, "worktree", "remove", "--force", wt)
+            shutil.rmtree(wt, ignore_errors=True)
+        git_shared(repo_dir, "worktree", "prune")
+        git_shared(repo_dir, "worktree", "add", "-q", "--detach", wt, commit, check=True)
+        say(f"== task review {t['id']}: {t['title']} | {t['repo']} {base[:12]}..{commit[:12]} | {mode} | "
+            f"reviewer {reviewer} | {now()}")
+        try:
+            ensure_internal_excludes(wt)
+            result = review_by(mode, launch, t, goal, texts["report_file"], diff,
+                               readiness=i.get("readiness_comment", ""), say=say)
+        finally:
+            git_shared(repo_dir, "worktree", "remove", "--force", wt)
+    used = run_used(usage)
+    spent = ", ".join([span(round(time.time() - began))] +
+                      [budget_text(k, used[k]) for k in ("tokens", "cost", "credits") if k in used])
+    blocking, minor = len(result.findings) if result.fix else 0, len(list_items(result.minor))
+    append_jsonl(REVIEW_TRIALS, {"id": t["id"], "title": t["title"], "repo": t["repo"], "reviewer": reviewer,
+                                 "mode": mode, "base": base, "commit": commit, "finished": now(),
+                                 "seconds": round(time.time() - began), "verdict": result.field_verdict,
+                                 "blocking": blocking, "minor": minor, "usage": usage}, say)
+    say(f"== verdict: {result.verdict or 'missing'}")
+    out("review:", f"  id: {t['id']}", f"  mode: {mode}", f"  verdict: {result.field_verdict}",
+        f"  blocking: {blocking}", f"  minor: {minor}", f"  used: {q(spent)}", f"  log: {home(log)}",
+        "  written: nothing (--no-write)", "comment:", result.issue_section())
+
+
 # ---------- one run (called in the herdr pane or background process) ----------
 
 INTERRUPTS = [s for s in (getattr(signal, "SIGHUP", None), signal.SIGTERM) if s]  # Windows has no SIGHUP
@@ -4144,6 +4428,10 @@ def run_task(t, say):
     for name in (REPORT_FILE, REVIEW_FILE, REPLAN_FILE):
         if not (name == REPORT_FILE and stage in ("review", "finishing")):  # there, the report is the agent's
             shared_unlink(wt / name)
+    if stage in ("review", "finishing"):
+        unhide_report(t)  # a run cut short while a Goldfish auditor ran had moved it out
+    else:
+        held_report_file(t).unlink(missing_ok=True)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
     if sandbox_mode() != "off":
         say(f"== sandbox: user {sandbox_user()} (the agent and git run as that user, see docs/sandbox.md)")
@@ -4152,7 +4440,8 @@ def run_task(t, say):
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
-              "retries": 0, "review_stop": "", "blocked_by": "", "replan": "", "usage": []}
+              "retries": 0, "review_stop": "", "review_mode": "", "review_verdict": "", "blocked_by": "", "replan": "",
+              "usage": []}
     if stage in ("", "preparing", "setup"):  # from the start: [setup] gives the same result each time it runs
         stage = ""
         stop, by = run_setup(t, wt, say), "setup"
@@ -4189,14 +4478,18 @@ def run_task(t, say):
         if stage == "finishing":  # what review_loop gave the run that was cut short
             kept = json.loads(finish_file(t).read_text())
             code, review, review_blocked = kept["code"], kept["review"], kept["blocked"]
+            record["review_verdict"] = kept.get("verdict") or ""
         else:
             resume_at = stage if stage in ("review", "retry") else ""
             report, code, review, review_blocked = review_loop(t, report, code, say, record, resume_at, why)
-            write_atomic(finish_file(t), json.dumps({"code": code, "review": review, "blocked": review_blocked}))
+            if not review:  # a review cut short by the agent's own Blocked, or none: no verdict for the field
+                record["review_verdict"] = ""
+            write_atomic(finish_file(t), json.dumps({"code": code, "review": review, "blocked": review_blocked,
+                                                     "verdict": record["review_verdict"]}))
         set_stage(t, "finishing")
         take_card(t)
         status = finish(t, report, code, say, auto_review=review, blocked_override=review_blocked,
-                        again=stage == "finishing")
+                        again=stage == "finishing", review_verdict=record["review_verdict"])
         record.update(pr_size(t, wt))
         shared_unlink(wt / REPORT_FILE)  # only once it is safely on GitHub
         if status == BLOCKED:
@@ -4245,10 +4538,11 @@ def take_card(t):
         t["status"] = item["status"]
 
 
-def finish(t, report, code, say, auto_review="", blocked_override="", again=False):
+def finish(t, report, code, say, auto_review="", blocked_override="", again=False, review_verdict=""):
     """Commit and push the agent's work, open or update the PR, report on the Issue, move the card.
     again: the run was cut short in finish and resumed. All of it gives the same result once more, but the report:
-    it is not written again when the Issue's last report is the same (but for the line on the resume)."""
+    it is not written again when the Issue's last report is the same (but for the line on the resume).
+    review_verdict: the run's last automated review for the Review field (set_review; "": none, cleared)."""
     parsed = AgentReport(report, auto_review=auto_review)
     wt = t["worktree"]
     git_shared(wt, "add", "-A", check=True)
@@ -4286,6 +4580,10 @@ def finish(t, report, code, say, auto_review="", blocked_override="", again=Fals
     else:
         comment(t, body)
     status = BLOCKED if parsed.blocked else IN_REVIEW
+    try:  # before the Status: the card must never move with the verdict of an earlier review on it
+        set_review(t, review_verdict)
+    except RuntimeError as e:  # the verdict is in the report anyway: the field must never cost the run
+        say(f"== could not set the Project's {REVIEW_FIELD} field: {e}")
     set_status(t, status, reason=parsed.blocked, digest_=digest(report=body), sha=head if status == IN_REVIEW else "")
     return status
 
@@ -5109,13 +5407,14 @@ def sync(started_here=False):
                             except (RuntimeError, OSError, ValueError) as e:  # blocked below, as a failed start
                                 why = f"could not resume it: {str(e)[:300]}"
                 # a report the run could not deliver (GitHub was unreachable) is posted now
-                kept = Path(t.get("worktree") or "/nonexistent") / REPORT_FILE
-                report = agent_file(kept) or ""
+                kept, held = Path(t.get("worktree") or "/nonexistent") / REPORT_FILE, held_report_file(t)
+                report = agent_file(kept) or (held.read_text() if held.exists() else "")  # held: died in a review
                 reason = stopped_reason(t, why) if t.get("started") else "no run here"
                 report_comment(t, blocked=f"{reason}, see `task log {t['id']}`"
                                if t.get("started") else "no run of this task on this machine",
                                report=report.strip())
                 shared_unlink(kept)
+                held.unlink(missing_ok=True)
                 set_status(t, BLOCKED, reason=reason)
             elif before == IN_PROGRESS:  # alive: tell once if it runs much longer than usual
                 slow = check_slow(t)
@@ -5850,15 +6149,35 @@ def cmd_list(a):
 
 def listed(board_):
     """The board as `task list` shows it: with [runner] readiness on, each Ready card's readiness as this machine last
-    read it (never read here: `task` or `task watch` reads it), and with require why it waits."""
+    read it (never read here: `task` or `task watch` reads it), and with require why it waits; each card's last
+    review (review_findings)."""
     readiness_gate(board_, readiness_mode(), autopilot_repos(), read=False)
+    review_findings(board_)
     return board_
 
 
+def review_findings(board_):
+    """Each card's Review field with what its review found, from the digest of its newest Status event on this machine
+    (digest reads it from the report's review line), when that review gave the verdict the field has: `needs changes
+    (2 blocking, 1 minor)`. A card that ran elsewhere shows the field alone."""
+    if not any(t.get("review") for t in board_):
+        return
+    newest = {}
+    for e in all_events():
+        if e["event"] in StatusLifecycle.all:
+            newest[e.get("id")] = e
+    for t in board_:
+        d = (newest.get(t["id"]) or {}).get("digest") or {}
+        if t.get("review") and d.get("findings") and d.get("verdict") == t["review"]:
+            t["review"] += f" ({d['findings'].split(' (')[0]})"
+
+
 def list_lines(board_):
-    """`task list`'s lines; the row of board_[i] is line i + 2. A readiness column only with [runner] readiness on."""
+    """`task list`'s lines; the row of board_[i] is line i + 2. A readiness column only with [runner] readiness on, a
+    review column only when the Project has the Review field (a run's review makes it)."""
     counts = {s: sum(t["status"] == s for t in board_) for s in STATUSES if s != DONE}
-    cols = ["id", "title", "status", "repo", "agent", "waits_for", *["readiness"] * (readiness_mode() != "off")]
+    cols = ["id", "title", "status", "repo", "agent", "waits_for", *["readiness"] * (readiness_mode() != "off"),
+            *["review"] * bool(board(saved_ok=True).get("review"))]
     return ["counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
             *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], cols)
               if board_ else ["tasks: 0 open tasks"]),
@@ -6886,6 +7205,12 @@ COMMANDS = {
               "([runner] readiness gates starting on it); --no-write prints the verdict and writes nothing (any card), "
               "--ref checks against that commit of the repo, --goal-file checks that text as the Goal (a past card's "
               "Goal before it was edited)"),
+    "review": (cmd_review, ["id"], {"no-write": False, "ref": True, "base": True, "mode": True, "goal-file": True,
+                                    "report-file": True},
+               "task review <id> --no-write --ref <commit> [--base <commit>] [--mode agent|goldfish] [--report-file path] "
+               "[--goal-file path]  # a trial of the automated review of a card's code at --ref (from --base, else "
+               "where it left the base branch), in [runner] review_mode or --mode: prints the verdict and writes "
+               "nothing; --mode agent needs the agent's report as --report-file"),
     "list": (cmd_list, [], {"watch": False, "max-age": True},
              "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
              f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "
