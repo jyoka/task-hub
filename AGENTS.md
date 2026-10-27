@@ -17,7 +17,7 @@ task-hub を使いはじめるために、このリポジトリを開いて「�
 
 ## 書き方
 
-- `bin/task` のコード、コメント、コマンドの出力は英語。周りのコードに合わせる。Python 3.10 以上の標準ライブラリだけ
+- `bin/task`(ランチャー)と `bin/task_hub.py`(本体)のコード、コメント、コマンドの出力は英語。周りのコードに合わせる。Python 3.10 以上の標準ライブラリだけ
 - README は英語の `README.md` と日本語の `README.ja.md` の 2 つで、同じ PR で両方を直す。`docs/` は日本語。書き方は [CONTRIBUTING.md の「README と docs の書き方」](CONTRIBUTING.md#readme-と-docs-の書き方)
 - README の構成は決まっている([CONTRIBUTING.md の「README の構成」](CONTRIBUTING.md#readme-の構成))。詳しいことは
   README に足さず、docs に置いてリンクする
@@ -46,5 +46,5 @@ CI のログは `macos-test-evidence` から読む。詳しくは CONTRIBUTING.m
 - 引数なしの `task`、`task watch`、`task start` を本物のボードに向けて動かさない(Ready のカードが始まる)。
   確かめるのはテストの偽物の GitHub で行う。本物で読むだけなら `task list`
 - `~/.local/lib/task-hub`(動かす用の clone)を編集しない。作業はこのリポジトリのブランチで行う
-- `rust/` は別の実験(task-rs)。頼まれない限り触らない。`bin/task` は Python 標準ライブラリだけのまま。
+- `rust/` は別の実験(task-rs)。頼まれない限り触らない。`bin/task` と `bin/task_hub.py` は Python 標準ライブラリだけのまま。
   task-rs は手元のファイルの形式(`board-cache.json` など)を読むので、形式を変えたら `rust/` も合わせる

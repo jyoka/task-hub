@@ -40,7 +40,8 @@ PR で送った変更は、このリポジトリと同じ [MIT ライセンス](
 ```
 AGENTS.md              エージェント向けの入口(CLAUDE.md はこれを読み込むだけ)
 LICENSE                MIT ライセンス
-bin/task               CLI(Python 3 の標準ライブラリだけ。git、gh、動いていれば herdr を使う)
+bin/task               CLI の入口(task_hub.py を読み込むだけのランチャー。版の VERSION もここ)
+bin/task_hub.py        CLI の本体(Python 3 の標準ライブラリだけ。git、gh、動いていれば herdr を使う)
 worker/PROMPT.md       worker の指示書(実行のたびに渡す)
 worker/REVIEW.md       reviewer の指示書(受け入れ条件を 1 つずつ、根拠付きで)
 worker/REPLAN.md       replanner の指示書(answered / human / goal-conflict、根拠付き)
@@ -84,7 +85,7 @@ PR(外の fork も含む)、main への push、Actions からの手動実行で�
 Windows の専用テストは、これまでどおり `windows` で動きます。
 Claude Code の mod の `claude plugin test claude/task-board` は、Claude CLI のある環境で必要なときに確かめます。
 
-`bin/task` は Python 3.10 以上の標準ライブラリだけで書いています。Python のテストにも追加のインストールは要りません。
+`bin/task` と `bin/task_hub.py` は Python 3.10 以上の標準ライブラリだけで書いています。Python のテストにも追加のインストールは要りません。
 手元で一部を確かめる例です。
 
 ```
@@ -126,7 +127,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
   足します
 - フェイクは本物より寛容です。GitHub やエージェントとのやりとりを変えたときは、本物で一度動かして確かめ、PR の本文に
   そう書きます([docs/lessons.md](docs/lessons.md))
-- Windows で動きが変わる部分(プロセス、パス、シェル)は、`bin/task` の `WINDOWS` で分けます
+- Windows で動きが変わる部分(プロセス、パス、シェル)は、`bin/task_hub.py` の `WINDOWS` で分けます
   ([docs/windows.md](docs/windows.md))
 
 ## README と docs の書き方
@@ -178,4 +179,4 @@ README は、初めて来た人が最初の画面で「何か」「なぜ使う�
 | なぜこの作りなのか | [docs/design.md](docs/design.md) |
 | 作って試して分かったこと | [docs/lessons.md](docs/lessons.md) |
 
-`bin/task` のコード、コメント、コマンドの出力は英語です。周りのコードの書き方に合わせてください。
+`bin/task` と `bin/task_hub.py` のコード、コメント、コマンドの出力は英語です。周りのコードの書き方に合わせてください。

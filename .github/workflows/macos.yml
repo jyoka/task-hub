@@ -68,7 +68,7 @@ jobs:
           CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           python3 -m pip install ruff
-          ruff check --select E9,F63,F7,F82 bin/task tests
+          ruff check --select E9,F63,F7,F82 bin/task bin/task_hub.py tests
           base="$CI_DIFF_BASE"
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
             base=$(git rev-parse HEAD^)

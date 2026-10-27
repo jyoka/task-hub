@@ -64,7 +64,7 @@ flowchart TB
         term["ターミナル<br/>task ..."]
     end
 
-    subgraph core["task-hub の本体: bin/task(Python 標準ライブラリだけ)"]
+    subgraph core["task-hub の本体: bin/task と bin/task_hub.py(Python 標準ライブラリだけ)"]
         cli["CLI<br/>コマンドの表 COMMANDS"]
         sync["同期と開始<br/>sync、launch"]
         board["ボードの読み書き<br/>board、tasks、set_status"]
@@ -141,7 +141,7 @@ flowchart TB
 
 | 部品 | 役割 | 書いてよいもの |
 |---|---|---|
-| `bin/task` | CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md))。In progress で `task _run` が死んだカードを、1 回だけ再開する(`relaunch`)。2 回目は Blocked | GitHub のボード、手元の状態、作業場所 |
+| `bin/task`(ランチャー)と `bin/task_hub.py`(本体) | `bin/task` は `task_hub.py` を読み込むだけ(バイトコードを `__pycache__` に残し、起動を速くする。[lld.md](lld.md) の 1 章)。本体は CLI、同期、開始、ボードの読み書き、通知、トリガーのカード([triggers.md](../triggers.md))。In progress で `task _run` が死んだカードを、1 回だけ再開する(`relaunch`)。2 回目は Blocked | GitHub のボード、手元の状態、作業場所 |
 | `task _run <番号>` | 1 回の実行(準備、エージェント、レビュー、PR、仕分け)。エージェントを自分のプロセスグループで動かし、止められたとき(Ctrl-C、SIGHUP、SIGTERM)はグループごと止める。出力も CPU もなく黙って止まったコマンドは watchdog が止める。記録の段階(`resume_stage`)から続ける。エージェントが外から kill されたとき、watchdog がエージェントを止めたときは、その場で 1 回だけ再開する。エージェントを起動する前に、前のエージェントが残したツールのコマンドのグループを止める(`stop_left_commands`) | そのタスクの worktree、実行の記録、GitHub のそのタスク |
 | つなぎ先(`task share`、`to_team`、つなぎ手) | 選んだタスクをチームの GitHub に写し、個人の Issue につなぎ先を記録する。そのあとも、task-hub が Status を変えたとき、実行を始めるとき、Report や仕分けを書いたとき、閉じたときにチームへ写す(失敗しても止めない)。つなぎ手は共有先の種類ごとの部品で、今はチームの GitHub(`TeamGitHub`)だけ | チームの Issue(本文、コメント、閉じる)とカード、個人の Issue のつなぎ先のコメント、開いている PR の `Closes` |
 | エージェントの CLI | Goal を実装し、テストし、レポートを書く。`{session}` を受けると、その ID で会話を保存する。再開のときは `[resume]` のコマンド(組み込みの pi と claude は既定のもの、なければ `[agents]` の新しいセッション)で、同じ `{session}` と「# Resumed」の節を足したプロンプトから続ける。pi と claude はツールのコマンドを `worker/group-shell` に通す(pi は `pi/task-groups.ts`、claude は `CLAUDE_CODE_SHELL_PREFIX`)ので、そのプロセスグループが `runs/<id>.groups/` に記録される | worktree のファイルと `.task-report.md` だけ |
@@ -395,7 +395,7 @@ flowchart TB
 | 止まらない | GitHub の失敗、通知の失敗、キャッシュの失敗で、実行や watch を止めない。予期せず止まった実行は 1 回だけ段階から再開する。同じ worktree で 2 つのエージェントを動かさない(再開の前に残ったエージェントと、そのツールのコマンドを止める) |
 | 壊れない | 手元の JSON は一時ファイルから置き換える。1 つのファイルに書くのは 1 者だけ([lessons.md](../lessons.md)) |
 | ベンダーに依らない | エージェントはコマンドのひな形。処理の流れにエージェント名の分岐はない |
-| 軽い | Python 標準ライブラリだけ。依存のインストールは要らない |
+| 軽い | Python 標準ライブラリだけ。依存のインストールは要らない。本体のバイトコードを `__pycache__` に残し、起動のたびにコンパイルしない |
 | 管理者権限なし | インストーラ(Mac、Windows)は UAC や sudo の要ることをしない。CI が Windows の標準のユーザーで確かめる |
 | トークン | 会話のエージェントを起こすのは出来事だけ。task-hub の指示書は合わせて約 4 KB |
 

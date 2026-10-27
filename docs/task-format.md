@@ -405,6 +405,12 @@ reviewer は指摘を 2 つに分けます([worker/REVIEW.md](../worker/REVIEW.m
 | blocking | `## Please fix` | 受け入れ条件を満たさない、使う人やリポジトリの決まりが頼っているものを壊す。差し戻す |
 | minor | `## Known issues` | 本物だが、マージしてよい(Goal の外の端の場合、動くもののテストがない、別のタスクにすべきもの)。差し戻さない |
 
+PR の CI でしか確かめられない受け入れ条件(「macos と Windows の CI が通る」など)は、reviewer が `deferred to CI`
+と書きます。それだけでは `blocked` にも `needs changes` にもしません。PR を作ると CI が走り、マージキューは CI が
+通るのを待ってからマージするからです。CI の通る・落ちるでは決まらない条件(CI の時間、ログの中身など)も
+`deferred to CI` です。ただしマージキューは確かめないので、reviewer は Review の欄に見る場所(ジョブの名前とログの行)
+を書きます。判定のまとめ方は変わりません。
+
 blocking がなく minor だけなら、レビューは通過です。判定が `needs changes` でも、`Please fix` が空で `Known issues`
 だけなら通過として扱います。カードは In review に進み、minor の指摘は PR の本文と Issue のコメントの
 「Known issues」に残ります。[オートパイロット](autopilot.md)の対象なら、この PR もマージキューに入ります。
@@ -449,7 +455,7 @@ review_mode = agent     ; agent(既定)/ goldfish
 
 | 視点 | 見るもの |
 |---|---|
-| Goal Auditor | 受け入れ条件と Goal の項目を 1 つずつ、証拠(ファイルと行、動かしたコマンドと出力)つきで met / not met にする |
+| Goal Auditor | 受け入れ条件と Goal の項目を 1 つずつ、証拠(ファイルと行、動かしたコマンドと出力)つきで met / not met にする。PR の CI でしか確かめられないものは `deferred to CI` |
 | Codebase Auditor | 回帰、リポジトリの決まり(AGENTS.md など)と慣習、新しい関数を壊す具体的な入力 |
 
 視点の結果は、次の規則で 1 つの判定にまとめます。まとめた判定で、上の差し戻しと止まる条件がそのまま動きます。

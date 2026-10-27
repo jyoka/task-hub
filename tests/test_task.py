@@ -35,6 +35,7 @@ import uuid
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
+TASK_HUB = BIN.parent / "task_hub.py"  # the code bin/task starts: the tests load it as a module
 DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
 PI_GROUPS = BIN.parent.parent / "pi" / "task-groups.ts"  # pi's bash through worker/group-shell (-e in the built-in pi)
 GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what pi's and Claude Code's tool commands run in
@@ -1621,7 +1622,7 @@ class TaskTest(unittest.TestCase):
 
     def test_builtin_claude_cannot_run_commands_in_the_background(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):  # a config without [agents] claude
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             cmd = task.agent_command("claude", "do it", session="S")
@@ -1637,7 +1638,7 @@ class TaskTest(unittest.TestCase):
         """durable-runs.md A: pi and claude go on with their saved conversation by default, codex and kiro start a
         new session. An [agents] command of your own never gets the built-in [resume] (another program or model)."""
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             for config, expected in (
@@ -1951,6 +1952,16 @@ class TaskTest(unittest.TestCase):
         line, = re.findall(r"^<!-- task-hub review: (\{.*\}) -->$", comment, re.M)
         return json.loads(line)
 
+    def assert_defers_to_ci(self, prompt):
+        """A criterion only the PR's CI can check is `deferred to CI`, never alone a reason to block or send back; one
+        the CI passing or failing does not decide (its time, its log) names where a person checks it."""
+        self.assertIn("Mark such a criterion `deferred to CI`, next to met and not met", prompt)
+        self.assertIn("Do not make it, alone, a reason for `blocked` or `needs changes`", prompt)
+        self.assertIn("the merge queue waits for the CI to pass before it merges", prompt)
+        self.assertIn("`deferred to CI` too, and not a reason for `blocked` either", prompt)
+        self.assertIn("say what a person looks at to check it: the CI job's name and the log line", prompt)
+        self.assertIn("met / not met / deferred to CI", prompt)
+
     def test_goldfish_auditors_get_the_goal_readiness_and_diff_but_never_the_agents_report(self):
         self.write_config(reviewer=True, review_mode="goldfish")
         tid = self.new("ok")
@@ -1976,9 +1987,11 @@ class TaskTest(unittest.TestCase):
             self.assertNotIn("Ran the tests: 3 passed", prompt)  # the report's claim: theirs to check, not to read
             self.assertNotIn("hello.txt: wording", prompt)  # its Please review
             self.assertIn("You get no report from the agent", prompt)
+            self.assert_defers_to_ci(prompt)
             self.assertFalse(c["report"])  # nor in the worktree it inspects
             self.assertEqual(c["cwd"], calls[0]["cwd"])  # the run's worktree, with what [setup] put in it
         self.assertIn("Go through every acceptance criterion", calls[0]["prompt"])
+        self.assertIn("unless only the pull request's CI can give it: mark that one `deferred to CI`", calls[0]["prompt"])
         self.assertNotIn("Go through every acceptance criterion", calls[1]["prompt"])
         self.assertIn("Look for regressions", calls[1]["prompt"])
         comment = self.comments(tid)[-1]
@@ -2003,6 +2016,7 @@ class TaskTest(unittest.TestCase):
                 self.assertNotIn("# Goldfish review", prompt)
                 self.assertNotIn("You get no report from the agent", prompt)
                 self.assertNotIn("# Readiness check of the Goal", prompt)
+                self.assert_defers_to_ci(prompt)
                 self.assertEqual(self.review_line(self.comments(tid)[-1])["mode"], "agent")
         self.assertEqual(len(self.reviewer_calls()), 2)
 
@@ -3001,7 +3015,7 @@ class TaskTest(unittest.TestCase):
 
     def load_bin(self):
         with unittest.mock.patch.dict(os.environ, self.env):
-            loader = importlib.machinery.SourceFileLoader("task_list_watch", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_list_watch", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_list_watch", loader))
             loader.exec_module(task)
         return task
@@ -3524,7 +3538,7 @@ class TaskTest(unittest.TestCase):
     def test_ntfy_config(self):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
 
@@ -3700,7 +3714,7 @@ class TaskTest(unittest.TestCase):
     def test_action_tokens(self):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             sha = "a" * 40
@@ -3729,7 +3743,7 @@ class TaskTest(unittest.TestCase):
 
     def test_intake_parse_and_auth(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
         secret = "s3cret-phone-0123456789"
@@ -4055,7 +4069,7 @@ class TaskTest(unittest.TestCase):
 
     def test_stream_json_lines_of_other_shapes_are_kept_short_or_left_out(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             lines = lambda d: task.stream_json_lines(d if isinstance(d, str) else json.dumps(d), self.root)
@@ -4165,7 +4179,7 @@ class TaskTest(unittest.TestCase):
 
     def test_json_steps_of_codex_pi_kiro_of_other_shapes_are_kept_short_or_left_out(self):
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
             def lines(fmt, *events):
@@ -4306,7 +4320,7 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn(" used ", self.task("log", tid, "--full"))
 
     def test_a_locked_kiro_database_is_skipped_without_stopping(self):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         wt = self.root / "wt"
@@ -4378,7 +4392,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([e for e in self.events_of(tid) if e["event"] == "over budget"], [])
 
     def test_the_usual_budget_is_a_multiple_of_the_agents_median_run(self):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         metrics = self.root / "metrics.jsonl"
@@ -4398,7 +4412,7 @@ class TaskTest(unittest.TestCase):
             self.assertEqual(limits["credits"][0], 20.0)  # no run of pi has credits
 
     def test_the_goals_budget_reads_limits_and_paid_apis_and_leaves_prose_to_the_agent(self):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         body = ("## Goal\n\nSay hello. #12 first.\n- 9h\n\n### Budget:\n\n10/26 に決めた予算です。\n"
@@ -5159,7 +5173,7 @@ class TaskTest(unittest.TestCase):
         nothing there. Where ps works, an agent silent with nothing under it is stopped after the grace, and one whose
         descendant keeps using CPU is not."""
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
             loader.exec_module(task)
         task.SILENT_SECONDS, task.SILENT_GRACE, task.SILENT_CHECK = 60.0, 30.0, 10.0
@@ -6253,7 +6267,7 @@ class TaskTest(unittest.TestCase):
 
     def load_bin(self):
         with unittest.mock.patch.dict(os.environ, self.env):
-            loader = importlib.machinery.SourceFileLoader("task_cache", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_cache", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_cache", loader))
             loader.exec_module(task)
         return task
@@ -6537,7 +6551,7 @@ class TaskTest(unittest.TestCase):
         saved["stage"] = "finishing"
         results = []
         with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
-            loader = importlib.machinery.SourceFileLoader("task_writer", str(BIN))
+            loader = importlib.machinery.SourceFileLoader("task_writer", str(TASK_HUB))
             task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_writer", loader))
             loader.exec_module(task)
 
@@ -6839,7 +6853,7 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn("checking...", reason)
 
     def test_a_reason_from_git_drops_sideband_padding_and_keeps_the_hook_message(self):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         url = "file:///var/folders/xy/" + "k" * 120 + "/T/tmpabc/origins/jyoka/app.git"
@@ -6978,7 +6992,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("[merge] queue must be on or off", self.task(code=1))
 
     def test_design_diagram_matches_the_transitions(self):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         design = (BIN.parent.parent / "docs" / "design.md").read_text()
@@ -7019,6 +7033,70 @@ class TaskTest(unittest.TestCase):
 
     def test_version(self):
         self.assertRegex(self.task("--version").strip(), r"^\d+\.\d+\.\d+$")
+
+    # --- start-up: bin/task and the bytecode of task_hub.py ---
+
+    def copy_bin(self, name="lib"):
+        """bin/task and bin/task_hub.py of this checkout in a folder of their own: this one's __pycache__ stays out."""
+        bindir = self.root / name / "bin"
+        bindir.mkdir(parents=True)
+        shutil.copy(BIN, bindir / "task")
+        shutil.copy(TASK_HUB, bindir / "task_hub.py")
+        return bindir.resolve()  # the launcher finds task_hub.py by its real path (/private/var on macOS)
+
+    def task_from(self, bindir, *args):
+        """`task` from bindir: what it printed, and Python's lines about task_hub.py's code (-v: where it came from)."""
+        env = {k: v for k, v in self.env.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+        # this Python, not the #! line's: the name of the bytecode file says which Python made it
+        r = subprocess.run([sys.executable, str(bindir / "task"), *args], env={**env, "PYTHONVERBOSE": "1"},
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(r.returncode, 0, f"{r.stdout}{r.stderr[-3000:]}")
+        return r.stdout, "\n".join(line for line in r.stderr.splitlines() if "task_hub" in line)
+
+    def test_task_starts_from_the_bytecode_it_keeps_in_pycache(self):
+        """Python keeps no bytecode for a script without .py, so bin/task is a launcher that imports task_hub.py: its
+        bytecode is kept in __pycache__ the first time, and every later `task` runs it from there, not compiling
+        task_hub.py again."""
+        tid = self.new("ok")
+        bindir = self.copy_bin()
+        pyc = importlib.util.cache_from_source(str(bindir / "task_hub.py"))
+        out, err = self.task_from(bindir, "--version")
+        self.assertEqual(out.strip(), self.task("--version").strip())
+        self.assertIn(f"created {pyc!r}", err)  # the first start compiles it, and keeps the bytecode
+        for args in (["--version"], ["list"], ["--version"]):
+            out, err = self.task_from(bindir, *args)
+            self.assertIn(f"code object from {pyc!r}", err, args)
+            self.assertNotIn(f"created {pyc!r}", err, args)
+        self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', self.task_from(bindir, "list")[0])
+        # a changed task_hub.py (`task update`, a branch) is compiled again: never the bytecode of the old one
+        (bindir / "task_hub.py").write_text((bindir / "task_hub.py").read_text() + "\nCHANGED = 1\n")
+        out, err = self.task_from(bindir, "list")
+        self.assertIn(f"created {pyc!r}", err)
+        self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', out)
+
+    def test_task_runs_where_its_pycache_cannot_be_written(self):
+        """A read-only clone, or [sandbox]'s agent user in a clone it may not write: no bytecode is kept, and every
+        `task` compiles task_hub.py again, as before the launcher."""
+        tid = self.new("ok")
+        cases = {"__pycache__ is a file": lambda b: (b / "__pycache__").write_text("")}
+        if os.name != "nt" and os.geteuid() != 0:  # the administrator writes anywhere
+            cases["a read-only folder"] = lambda b: b.chmod(0o555)
+        for name, block in cases.items():
+            with self.subTest(name):
+                bindir = self.copy_bin(name.replace(" ", "-"))
+                pyc = importlib.util.cache_from_source(str(bindir / "task_hub.py"))
+                block(bindir)
+                try:
+                    for _ in range(2):
+                        out, err = self.task_from(bindir, "--version")
+                        self.assertEqual(out.strip(), self.task("--version").strip())
+                        self.assertNotIn(f"code object from {pyc!r}", err)
+                        out, err = self.task_from(bindir, "list")
+                        self.assertIn(f'"{tid}",Add hello,Backlog,jyoka/app', out)
+                        self.assertNotIn(f"code object from {pyc!r}", err)
+                    self.assertFalse(Path(pyc).exists())
+                finally:
+                    bindir.chmod(0o755)  # so that the test's folder can be removed
 
     # --- open ---
 
@@ -7065,6 +7143,8 @@ class TaskTest(unittest.TestCase):
         (seed / "bin").mkdir(exist_ok=True)
         (seed / "bin/task").write_text(re.sub(r'(?m)^VERSION = ".*"$', f'VERSION = "{version}"', BIN.read_text()))
         (seed / "bin/task").chmod(0o755)
+        shutil.copy(TASK_HUB, seed / "bin/task_hub.py")
+        (seed / ".gitignore").write_text("__pycache__/\n")  # as this repo's: `task` keeps task_hub.py's bytecode there
         (seed / "kiro/hooks").mkdir(parents=True, exist_ok=True)
         (seed / "kiro/hooks/task-hub-events.json").write_text(json.dumps({"hook": hook}) + "\n")
         git("add", ".")
@@ -7292,6 +7372,7 @@ class TaskTest(unittest.TestCase):
         lib = self.root / "feedback-lib"
         (lib / "bin").mkdir(parents=True)
         shutil.copy(BIN, lib / "bin/task")
+        shutil.copy(TASK_HUB, lib / "bin/task_hub.py")
         subprocess.run(["git", "init", "-q", str(lib)], check=True)
         subprocess.run(["git", "-C", str(lib), "remote", "add", "origin", origin], check=True)
         r = subprocess.run([str(lib / "bin/task"), "feedback", *args], env=self.env, capture_output=True, text=True,
@@ -8396,7 +8477,7 @@ class SlowThresholdTableTest(unittest.TestCase):
     def test_slow_threshold_matches_the_task_board_table(self):
         cases = BIN.parent.parent / "claude" / "task-board" / "hooks" / "slow-threshold.cases.ts"
         table = json.loads(cases.read_text().split("export const CASES =", 1)[1])
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(task)
         with tempfile.TemporaryDirectory() as d:
@@ -8414,7 +8495,7 @@ class ScheduleTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        loader = importlib.machinery.SourceFileLoader("task_bin", str(BIN))
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
         cls.task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
         loader.exec_module(cls.task)
 

@@ -1,12 +1,29 @@
 # LLD: task-hub の詳細設計
 
 [hld.md](hld.md) の部品の中身です。関数、プロセス、ファイルの形式、外部の呼び出し、守るべき約束を書きます。
-関数名は `bin/task` のものです。行番号は変わるので書きません(`grep -n "^def <名前>" bin/task` で探します)。
+関数名は `bin/task_hub.py` のものです。行番号は変わるので書きません(`grep -n "^def <名前>" bin/task_hub.py` で探します)。
 
 ## 1. bin/task の構成
 
-1 ファイル(約 5,700 行、Python 3.10 以上の標準ライブラリだけ)を、見出しのコメント `# ---------- ... ----------` で
-分けています。上の層は下の層だけを呼びます。
+`task` のコマンドは 2 つのファイルでできています。どちらも Python 3.10 以上の標準ライブラリだけです。
+
+| ファイル | 中身 |
+|---|---|
+| `bin/task` | ランチャー(約 30 行)。リリースの版 `VERSION` を持つ。Windows で UTF-8 モードでなければ、`-X utf8` の子として自分を動かし直す。そのあと `task_hub.py` をモジュール `task_hub` として読み込み、`main` を呼ぶ |
+| `bin/task_hub.py` | 本体(約 7,300 行)。`VERSION` は `bin/task` の行から読む(`launcher_version`) |
+
+分けているのは起動を速くするためです。Python は、拡張子 `.py` のないスクリプトのバイトコードを残さず、起動のたびにソースから
+コンパイルします。モジュールとして読み込めば、バイトコードが `bin/__pycache__/task_hub.cpython-<版>.pyc` に残り、
+`task_hub.py` が変わらないかぎり次の起動から使われます(更新時刻と大きさで見る)。`__pycache__` に書けないとき(読み取りだけの clone、
+`[sandbox]` のエージェントのユーザー)は書かずに、毎回コンパイルします。`__pycache__/` は `.gitignore` にあります。
+
+- 実行のコマンドは今までどおり `<python> bin/task _run <番号>`(と `_fix`)です(`BIN`)。`alive`、task-rs、
+  `windows\uninstall.ps1` は、このコマンドの行で実行を見分けます。`task` の表示の `bin:` も `bin/task` です
+- `VERSION` を `bin/task` に置くのは、`task update` が更新のあとに `bin/task` の `VERSION` の行を読むからです(`lib_version`)。
+  ランチャーより前のリリースの `task update` も、新しい版を読めます
+- テストと `kiro/install-board` は `bin/task_hub.py` を `SourceFileLoader` でモジュールとして読み込みます
+
+`bin/task_hub.py` は 1 ファイルを、見出しのコメント `# ---------- ... ----------` で分けています。上の層は下の層だけを呼びます。
 
 ```mermaid
 flowchart TB
@@ -593,6 +610,7 @@ sequenceDiagram
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
 | `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `bin/__pycache__/task_hub.cpython-<版>.pyc`(clone の中) | Python の import(`bin/task` が `task_hub.py` を読み込むとき。書けなければ書かない) | Python の import(`task_hub.py` の更新時刻と大きさが同じときだけ使う) | `task_hub.py` のバイトコード。git は無視する(`.gitignore`)。消してもよい(次の `task` が作り直す) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
