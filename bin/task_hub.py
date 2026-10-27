@@ -7304,4 +7304,3 @@ def hint(e):
         return "GitHub limits GraphQL calls per hour; wait for the limit to reset and run again"
     if str(e).startswith("cannot read GitHub Project"):
         return "run `gh auth refresh -s project` and check [board] project in the config"
-
