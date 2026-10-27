@@ -6622,6 +6622,67 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["merged_order"], [url])
         self.assertEqual(self.status(tid), "Done")
 
+    def test_an_unstable_pr_whose_checks_are_still_running_waits_and_merges_once_they_pass(self):
+        # jyoka/tasks#246: the check passed seconds before, and GitHub still said UNSTABLE when the queue looked
+        self.queue_on()
+        tid, = self.in_review("first")
+        db = self.gh()
+        url = self.pr(tid)["url"]
+        db["checks"] = {url: [{"name": "test", "bucket": "pending", "link": "https://ci.example/1"}]}
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "UNSTABLE"  # GitHub: a check has not finished
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for its checks: test", self.task())
+        db = self.gh()
+        db["checks"][url][0]["bucket"] = "pass"  # passed, but GitHub has not counted it yet: UNSTABLE still
+        self.save_db(db)
+        self.assertIn("waiting for GitHub to count its finished checks (UNSTABLE)", self.task())
+        self.assertEqual(self.status(tid), "In review")  # still queued, not Blocked
+        self.assertEqual([e["event"] for e in self.events_of(tid)].count("ci-wait"), 1)  # once per commit
+        self.assertNotIn("merged_order", self.gh())
+        db = self.gh()
+        del db["prs"][f"jyoka/app task/{tid}"]["merge_state"]  # GitHub caught up: CLEAN
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [url])
+        self.assertEqual(self.queue_events(tid), ["queued", "ci-wait", "merged", "Done"])
+
+    def test_an_unstable_pr_with_a_failed_check_is_blocked_as_before(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        db = self.gh()
+        url = self.pr(tid)["url"]
+        db["checks"] = {url: [{"name": "test", "bucket": "fail", "link": "https://ci.example/1"}]}
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "UNSTABLE"
+        self.save_db(db)
+        self.task("merge", tid)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        reason = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertEqual(reason, "merge queue: check test failed: https://ci.example/1")
+        self.assertNotIn("merged_order", self.gh())
+
+    def test_an_unstable_pr_whose_checks_all_passed_is_blocked_after_ci_minutes(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        db = self.gh()
+        url = self.pr(tid)["url"]
+        db["checks"] = {url: [{"name": "test", "bucket": "pass", "link": "https://ci.example/1"}]}
+        db["prs"][f"jyoka/app task/{tid}"]["merge_state"] = "UNSTABLE"  # and GitHub never says otherwise
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for GitHub to count its finished checks (UNSTABLE)", self.task())
+        queue = self.root / ".local/state/task-hub/merge-queue.json"
+        q = json.loads(queue.read_text())
+        q["queue"][0]["since"] = "2026-01-01T00:00:00Z"  # the step began long ago: past ci_minutes
+        queue.write_text(json.dumps(q))
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        reason = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]["reason"]
+        self.assertEqual(reason, "merge queue: GitHub does not allow the merge (UNSTABLE: a check that is not "
+                                 f"required failed or has not finished): {url}")
+        self.assertNotIn("merged_order", self.gh())
+
     def test_nothing_merges_that_the_human_did_not_approve_and_a_conflict_is_told_once(self):
         self.queue_on()
         tid, = self.in_review("first")
