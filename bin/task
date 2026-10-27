@@ -4876,9 +4876,7 @@ def merge_ci(t, e, pr, settings):
     if pending:
         if waited >= limit:
             return merge_block(t, e, f"its checks did not finish in {limit // 60} min: {', '.join(pending)}")
-        if e.get("ci_wait") != pr["headRefOid"]:  # once per commit
-            queue_set(e, ci_wait=pr["headRefOid"])
-            emit(t, "ci-wait", pr=e["pr"], reason=f"waiting for {', '.join(pending)}")
+        ci_wait(t, e, pr, f"waiting for {', '.join(pending)}")
         return f"waiting for its checks: {', '.join(pending)}"
     state = pr.get("mergeStateStatus") or ""
     if pr.get("mergeable") == "CONFLICTING" or state in ("DIRTY", "BEHIND"):  # the base moved on meanwhile
@@ -4893,10 +4891,22 @@ def merge_ci(t, e, pr, settings):
         emit(t, "merged", pr=e["pr"], reason=f"merged into {pr['baseRefName']} by the merge queue")
         close_merged(t)
         return f"merged {e['pr']}"
+    if state == "UNSTABLE" and waited < limit:
+        # none of the checks read above (after the PR) failed or is running: GitHub has not yet counted the one that
+        # finished last (it lags seconds behind), so wait like for a running one; one that failed blocks above
+        ci_wait(t, e, pr, "waiting for GitHub to count its finished checks")
+        return "waiting for GitHub to count its finished checks (UNSTABLE)"
     if state in MERGE_WAIT and waited < limit:
         return f"waiting for GitHub to allow the merge ({state or 'UNKNOWN'})"
     return merge_block(t, e, f"GitHub does not allow the merge ({state or 'UNKNOWN'}: "
                              f"{MERGE_STATES.get(state, 'see the PR')}): {e['pr']}")
+
+
+def ci_wait(t, e, pr, reason):
+    """Tell that the queue waits for the PR's checks: once per commit of the PR."""
+    if e.get("ci_wait") != pr["headRefOid"]:
+        queue_set(e, ci_wait=pr["headRefOid"])
+        emit(t, "ci-wait", pr=e["pr"], reason=reason)
 
 
 def watch_conflict(t, pull, settings):

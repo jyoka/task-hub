@@ -416,7 +416,10 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 4. `gh pr view --json mergeable,mergeStateStatus` が `CLEAN`(`checks = required` なら、必須でないチェックが通っていない
    ときの `UNSTABLE` も)なら、チェックが通ったコミットのまま
    (`--match-head-commit`)`gh pr merge --merge` でマージし、カードを Done にして、次の PR に進みます。
-   その間に base が進んでいれば(`BEHIND`、`DIRTY`)、1 に戻ります
+   その間に base が進んでいれば(`BEHIND`、`DIRTY`)、1 に戻ります。
+   `UNSTABLE` で、チェックはどれも落ちても動いてもいないときは、待って次の確認で見直します。GitHub が最後に終わった
+   チェックを数えるのは数秒遅れるので、通った直後は `UNSTABLE` のままのことがあるからです。待つのは 3 と同じく
+   `ci_minutes` までで、過ぎても `UNSTABLE` なら Blocked にします
 
 競合を解いている間も、カードは wait for merge(または In review)のままです。`task list` には
 `wait for merge › conflict-fix` と出て、`task log <番号>` に経過が残ります。Blocked にしたときは、理由を
@@ -436,7 +439,7 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 | `queued` | キューに入った | キューの何番目か |
 | `updated` | base をマージして push した(競合を解いたときも) | 何をどこにマージしたか、解いたファイル |
 | `conflict-fix` | 競合を解くエージェントを始めた | 競合したファイル |
-| `ci-wait` | チェックを待ち始めた(コミットごとに 1 回) | 待っているチェック |
+| `ci-wait` | チェックを待ち始めた(コミットごとに 1 回) | 待っているチェック(GitHub がまだ `UNSTABLE` のときは `waiting for GitHub to count its finished checks`) |
 | `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
 | `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
 | `conflict` | キューにない In review の PR が競合した | 競合した base |
@@ -453,9 +456,10 @@ ci_minutes = 60     ; チェックを待つ長さ(分)。過ぎたら Blocked
 | `check <名前> failed: <リンク>` | リンクのチェックを直します。PR に push すれば、`task merge` でまた入れられます |
 | `its checks did not finish in N min: ...` | チェックが止まっていないか確かめます。長いなら `[merge] ci_minutes` を延ばします |
 | `GitHub does not allow the merge (BLOCKED: ...)` | 必須のレビューやブランチのルールが足りません。満たしてから `task merge` |
+| `GitHub does not allow the merge (UNSTABLE: ...)` | チェックはどれも落ちていないのに、`ci_minutes` を過ぎても GitHub が `UNSTABLE` のままでした。PR の画面でチェックを確かめてから `task merge` |
 | `its PR was closed without merging`、`its PR is a draft` | PR を開き直す、または Ready for review にしてから `task merge` |
 
-チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`)のときは、キューの同じリポジトリのほかの PR も待ちます。
+チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`、チェックが通った直後の `UNSTABLE`)のときは、キューの同じリポジトリのほかの PR も待ちます。
 別のリポジトリのキューは止まりません。
 
 ## 実行の結果を集計する
