@@ -94,6 +94,7 @@ drift_report =                  ; 文書とコードの食い違いを調べる 
 [merge]
 queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
 prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
+rerun = 1                 ; キューで落ちたチェックを同じコミットで 1 回だけ走らせ直す(既定)。0: すぐ Blocked
 
 [autopilot]
 repos = jyoka/app         ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
@@ -112,7 +113,7 @@ user = task-agent       ; そのユーザー(これが既定)
 | `[setup]` | 実行のたびに、worker の前に準備のコマンドを動かす。失敗や、コミットされてしまうファイルが残ったら Blocked | 何を準備するか |
 | `[sandbox]` | エージェントと、worktree への git を専用の Linux ユーザーで動かし、あなたの HOME(ほかのリポジトリ、鍵、`gh` のログイン)に届かせない([sandbox.md](sandbox.md)) | そのユーザーを用意し、GitHub のトークンをどこまで許すか |
 | `[triggers]` | `task watch` が CI の失敗、割り当てられた Issue、繰り返しの目標のカードを 1 回に 1 枚作る([triggers.md](triggers.md)) | Ready に移すかどうか(`ready` に書いた繰り返しの目標だけは Ready に入る)。`drift_report` に書いた目標は、文書とコードの食い違いを調べる research カードになる |
-| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
+| `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と、走らせ直しても落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
 | `[autopilot]` | 書いたリポジトリの Backlog のカードを、待ち先が終わったら Ready に移す。自動レビューが `pass` の PR をマージキューに入れる([autopilot.md](autopilot.md)) | どのリポジトリを任せるか。任せたくないカードには Goal に `Autopilot: off` |
 
 `reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。

@@ -139,6 +139,7 @@ SANDBOX_GROUP = "task-agents"  # what workenv_setting's setup_agent_user.sh give
 RULES_FILE = ".claude/settings.local.json"  # the Goal's Rules, as Claude Code permissions (docs/task-format.md)
 RULE_LEVELS = {"can": "allow", "ask": "ask", "never": "deny"}
 CI_MINUTES = 60  # [merge] ci_minutes by default: how long the merge queue waits for a PR's checks before it blocks the card
+MERGE_RERUNS = 1  # [merge] rerun by default: how often the merge queue runs a commit's failed checks again (0 or 1)
 
 WORKER_PROMPT = BIN.parent.parent / "worker" / "PROMPT.md"
 WORKER_REVIEW = BIN.parent.parent / "worker" / "REVIEW.md"
@@ -603,7 +604,8 @@ def config():
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
                             "readiness": "off", "checker": "", "review_mode": "agent"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
-                 "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES)},
+                 "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES),
+                           "rerun": str(MERGE_RERUNS)},
                  "ide": {"open": ""}, "notify": {"events": NOTIFY_EVENTS, "ntfy": "", "ntfy_token": ""},
                  "sandbox": {"mode": "off", "user": ""}, "autopilot": {"repos": ""}})
     try:
@@ -4894,7 +4896,8 @@ CONFLICT_MARKER = re.compile(r"(?m)^(<{7}|>{7})( |$)")
 
 def merge_config():
     """[merge]: queue (off by default), prefix (fix In review PRs that conflict before anyone approves them), checks
-    (all, or only the required ones), ci_minutes (how long to wait for them). A bad value stops before anything changes."""
+    (all, or only the required ones), ci_minutes (how long to wait for them), rerun (run a commit's failed checks again
+    once before blocking, or not). A bad value stops before anything changes."""
     m = config()["merge"]
 
     def switch(key):
@@ -4910,12 +4913,17 @@ def merge_config():
     if not re.fullmatch(r"\d+", minutes) or int(minutes) < 1:
         fail(f"[merge] ci_minutes must be a whole number, 1 or more; got {minutes!r}",
              f"fix it in {home(CONFIG)} (default {CI_MINUTES})")
+    rerun = m.get("rerun", "").strip() or str(MERGE_RERUNS)
+    if rerun not in ("0", "1"):
+        fail(f"[merge] rerun must be 0 or 1; got {rerun!r}",
+             f"fix it in {home(CONFIG)} (default {MERGE_RERUNS}: run a commit's failed checks again once; 0: never)")
     return {"queue": switch("queue"), "prefix": switch("prefix"), "required": checks == "required",
-            "ci_seconds": int(minutes) * 60}
+            "ci_seconds": int(minutes) * 60, "rerun": int(rerun)}
 
 
 def read_queue():
-    """The queue's entries: {id, repo, pr, queued, step, since, fixed, ci_wait}; none when the file is missing."""
+    """The queue's entries: {id, repo, pr, queued, step, since, fixed, ci_wait, rerun}; none when the file is missing.
+    rerun: {sha, checks: [{name, link}]}, the commit whose failed checks the queue ran again, and those checks."""
     q = read_json(MERGE_QUEUE).get("queue")
     return [e for e in q if isinstance(e, dict) and e.get("id") and e.get("pr")] if isinstance(q, list) else []
 
@@ -5175,11 +5183,10 @@ def merge_ci(t, e, pr, settings):
     """Wait for the PR's checks, then merge it when GitHub says it can."""
     checks = pr_checks(e["pr"], settings["required"])
     failed = [c for c in checks if c.get("bucket") in ("fail", "cancel")]
-    if failed:
-        return merge_block(t, e, "; ".join(f"check {c.get('name') or '?'} failed: {c.get('link') or e['pr']}"
-                                           for c in failed[:3]))
     waited, limit = seconds_since(e.get("since") or now()), settings["ci_seconds"]
     pending = [c.get("name") or "?" for c in checks if c.get("bucket") == "pending"]
+    if failed:
+        return ci_failed(t, e, pr, settings, failed, checks, waited < limit)
     pushed = git_shared(clone_dir(t["repo"]), "log", "-1", "--format=%ct", pr["headRefOid"]).stdout.strip()
     if not checks and pushed.isdigit() and time.time() - int(pushed) < CHECKS_GRACE:
         pending = ["(none reported yet)"]  # just pushed: GitHub may not have started them
@@ -5210,6 +5217,62 @@ def merge_ci(t, e, pr, settings):
         return f"waiting for GitHub to allow the merge ({state or 'UNKNOWN'})"
     return merge_block(t, e, f"GitHub does not allow the merge ({state or 'UNKNOWN'}: "
                              f"{MERGE_STATES.get(state, 'see the PR')}): {e['pr']}")
+
+
+def rerun_of(e):
+    """The entry's record of its failed checks run again ({sha, checks}); {} before any (or a hand-edited file)."""
+    return e["rerun"] if isinstance(e.get("rerun"), dict) else {}
+
+
+ACTIONS_RUN = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/actions/runs/(\d+)")
+
+
+def ci_failed(t, e, pr, settings, failed, checks, in_time):
+    """Some of the PR's checks failed. The first time on a commit ([merge] rerun = 1), run the failed jobs of their
+    GitHub Actions runs again and keep waiting: a flaky test should not stop the queue. Failed on that commit
+    again, or not rerunnable: block. checks: all that merge_ci read, failed among them."""
+    sha, rerun = pr["headRefOid"], rerun_of(e)
+    said = lambda twice=(): "; ".join(f"check {c.get('name') or '?'} failed{' twice' if c.get('name') in twice else ''}"
+                                      f": {c.get('link') or e['pr']}" for c in failed[:3])
+    if rerun.get("sha") == sha:
+        before = rerun.get("checks") or []
+        if {c.get("link") for c in failed} <= {c.get("link") for c in before}:
+            # GitHub still lists the results that were run again: the new attempt has not shown up yet
+            if in_time:
+                return "waiting for its failed checks to run again"
+            return merge_block(t, e, f"its failed checks did not run again in {settings['ci_seconds'] // 60} min: "
+                                     + said())
+        twice = {c.get("name") for c in before} & {c.get("name") for c in failed}
+        return merge_block(t, e, said(twice) + (" (ran again once on the same commit)" if twice else ""))
+    if not settings["rerun"]:
+        return merge_block(t, e, said())
+    runs = [ACTIONS_RUN.match(c.get("link") or "") for c in failed]
+    if not all(runs):  # a check from outside GitHub Actions: nothing the queue can run again
+        return merge_block(t, e, said())
+    ids = list(dict.fromkeys(m[1] for m in runs))
+    if settings["required"]:  # the jobs that are not required run in the same runs: read them too
+        checks = pr_checks(e["pr"], False)
+    # GitHub cannot run a workflow run again while one of its jobs still runs: wait for those first
+    pending = [c.get("name") or "?" for c in checks if c.get("bucket") == "pending"
+               and (m := ACTIONS_RUN.match(c.get("link") or "")) and m[1] in ids]
+    if pending and not in_time:
+        return merge_block(t, e, f"its checks did not finish in {settings['ci_seconds'] // 60} min: "
+                                 f"{', '.join(pending)}; {said()}")
+    if pending:
+        ci_wait(t, e, pr, f"waiting for {', '.join(pending)}")
+        return f"waiting for {', '.join(pending)} before running the failed checks again"
+    for run_id in ids:
+        try:
+            r = run(GH, "run", "rerun", run_id, "--failed", "--repo", e["repo"])
+        except FileNotFoundError:
+            raise RuntimeError(f"gh not found ({GH})") from None
+        if r.returncode != 0:  # no permission, a run too old: blocked, as without rerun
+            return merge_block(t, e, f"{said()}; rerun failed: {git_said(r)}")
+    queue_set(e, rerun={"sha": sha, "checks": [{"name": c.get("name"), "link": c.get("link")} for c in failed]},
+              since=now())  # the new attempt gets its own ci_minutes
+    names = ", ".join(c.get("name") or "?" for c in failed)
+    emit(t, "ci-rerun", pr=e["pr"], sha=sha, reason=f"{names} failed on {sha[:7]}; running the failed jobs again once")
+    return f"{names} failed; running the failed jobs again once (`gh run rerun --failed`)"
 
 
 def ci_wait(t, e, pr, reason):
@@ -7113,8 +7176,10 @@ def cmd_merge(a):
         fail("the merge queue is off", f"set  [merge]  queue = on  in {home(CONFIG)} (docs/operations.md)")
     if a.get("id") is None:
         q = read_queue()
-        out(*(table("queue", [{**e, "position": position(q[:n + 1], e)} for n, e in enumerate(q)],
-                    ["position", "id", "repo", "step", "pr"]) if q else ["queue: empty"]))
+        # rerun: the commit whose failed checks the queue ran again (once per commit)
+        out(*(table("queue", [{**e, "position": position(q[:n + 1], e),
+                               "rerun": str(rerun_of(e).get("sha") or "")[:7]} for n, e in enumerate(q)],
+                    ["position", "id", "repo", "step", "rerun", "pr"]) if q else ["queue: empty"]))
         return
     t = get(a["id"])
     queued = next((e for e in read_queue() if e["id"] == t["id"]), None)
