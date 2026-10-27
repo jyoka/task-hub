@@ -591,6 +591,10 @@ sequenceDiagram
   `agent_usage`(worktree のフォルダと時刻で数える)が分けられるようにするためです。`run_agent_process` には `t` を渡さず、
   実行の記録(`runs/<id>.json`)は作りません。プロセスは `HELPERS` に入り、Ctrl-C(と `INTERRUPTS`)で `at_once` が止めます。
   段ごとに `over_budget(save=False, what="task check: ")` で、そのエージェントの実行 1 回の予算と比べます
+- 批評のスレッドは、worktree を作る、消す(`git worktree prune`、`add`、`remove`)と `info/exclude` を書くところだけ、
+  `GOLDFISH_WORKTREES` のロックで 1 つずつ行います。Goldfish そのものは同時に動きます。同じ clone で `git worktree add` が
+  同時に動くと、相手が書きかけ、消しかけの `.git/worktrees/<名前>/commondir` を読んで失敗し、判定が `blocked` になるためです
+  (負荷の高い CI で起きた)
 - 段が `blocked`(ファイルを変えた、結果がない、git の失敗)になったら、そこで止めます
 - `ReadinessResult`: `## Verdict` の 1 行目を大文字にして `GO` / `NO-GO`。blocking がなく minor だけの NO-GO は GO、
   blocking のある GO は NO-GO。どちらでもなければ `blocked`。Blocking などの節が `none`、`- None.`、`Nothing blocking.` の

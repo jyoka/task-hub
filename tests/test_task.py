@@ -8271,12 +8271,24 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.agent_calls(), [])
 
     def test_check_runs_the_critics_at_once(self):
+        """The critics run at once, but make and remove their worktrees of the one clone in turn: two `git worktree`
+        commands at once fail on each other's half-written .git/worktrees (seen under load on CI)."""
+        git, log = shutil.which("git"), self.root / "git-worktree.txt"
+        (self.root / "fakebin" / "git").write_text(  # git, slower and timed for `git -C <dir> worktree ...`
+            f'#!/bin/sh\n[ "$3" = worktree ] || exec {shlex.quote(git)} "$@"\nexec python3 -c \'import subprocess, '
+            'sys, time\nbegan = time.time()\ntime.sleep(0.2)\ncode = subprocess.run(sys.argv[2:]).returncode\n'
+            'open(sys.argv[1], "a").write(f"{began} {time.time()} {sys.argv[6]}\\n")\nsys.exit(code)\' '
+            f'{shlex.quote(str(log))} {shlex.quote(git)} "$@"\n')
+        (self.root / "fakebin" / "git").chmod(0o755)
         tid = self.new("ok READY=slow")
-        began = time.time()
         self.assertIn("verdict: GO", self.task("check", tid))
+        # in turn, each critic would wait 10 s for the others to start
         critics = [c["at"] for c in self.goldfish_calls()[1:4]]
         self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other two to start")
-        self.assertLess(time.time() - began, 30)
+        ran = sorted(tuple(line.split()) for line in log.read_text().splitlines())
+        self.assertIn("add", [op for _, _, op in ran])
+        for (_, ended, op), (began, _, next_op) in zip(ran, ran[1:]):
+            self.assertLessEqual(float(ended), float(began), f"git worktree {op} and {next_op} ran at once")
 
     def test_check_sorts_the_verdict_by_blocking_and_minor_findings(self):
         # as #249's review: only minor findings is a GO; a GO with a blocking finding is a NO-GO; no verdict is blocked;
