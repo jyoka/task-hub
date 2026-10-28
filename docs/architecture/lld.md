@@ -10,7 +10,7 @@
 | ファイル | 中身 |
 |---|---|
 | `bin/task` | ランチャー(約 30 行)。リリースの版 `VERSION` を持つ。Windows で UTF-8 モードでなければ、`-X utf8` の子として自分を動かし直す。そのあと `task_hub.py` をモジュール `task_hub` として読み込み、`main` を呼ぶ |
-| `bin/task_hub.py` | 本体(約 7,300 行)。`VERSION` は `bin/task` の行から読む(`launcher_version`) |
+| `bin/task_hub.py` | 本体(約 7,800 行)。`VERSION` は `bin/task` の行から読む(`launcher_version`) |
 
 分けているのは起動を速くするためです。Python は、拡張子 `.py` のないスクリプトのバイトコードを残さず、起動のたびにソースから
 コンパイルします。モジュールとして読み込めば、バイトコードが `bin/__pycache__/task_hub.cpython-<版>.pyc` に残り、
@@ -35,7 +35,7 @@ flowchart TB
     runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
-    runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent"]
+    runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent、<br/>usage_limit、limit_stop、limit_resumed、limit_relaunch、agent_limits"]
     boardl["board<br/>gh、graphql、board、tasks、fetch_items、shared_items、set_status、<br/>set_text、move_to_top、archive_overflow、emit、notify、comment、issue"]
     config["config<br/>config、board_config、parallel、agent_command、check_ready、sandbox_mode、check_sandbox"]
     output["output(TOON)<br/>out、table、fail、q"]
@@ -134,6 +134,7 @@ classDiagram
 | `branch`、`worktree`、`pid`、`tab`、`workspace`、`log`、`pr`、`stage`、`started` | 手元(`runs/<id>.json`) | 実行の情報 |
 | `agent_pid`、`agent_started`、`head`、`snap`、`review_attempt`、`interrupted` | 手元(`runs/<id>.json`。`task _run` が書き、`launch` が空に戻す) | 今のエージェントのプロセス(グループ)と開始時刻、エージェントを起動する前の HEAD、reviewer か replanner の間の `snapshot`(`<tree> <HEAD>`)、レビューか差し戻しの何回目か(`0` から `[runner] review_retries` まで)、実行かエージェントが最後に止まった理由(`SIGHUP`、`SIGTERM`、`SIGINT`、`the agent was killed (SIGKILL)`、watchdog がエージェントを止めたときの `silent`、`the run process is gone`)。5 章 |
 | `resumes`、`resumed`、`resume_stage`、`resumed_at` | 手元(`runs/<id>.json`。`relaunch` と `task _run` が書き、`launch` が空に戻す) | この実行を再開した回数(`MAX_RESUMES` まで)、再開した段階(空白で区切る)、次の `task _run` が続ける段階(読んだら空にする)、`relaunch` が起動し直した時刻。4.3 |
+| `limit_until`、`limit_agent`、`limit_waits`、`resume_why` | 手元(`runs/<id>.json`。`limit_stop`、`limit_relaunch`、`task _run` が書き、`launch` が空に戻す) | 利用の上限で止まった実行が段階から続ける時刻(エージェントの言った時刻の 2 分後。ISO の時刻とオフセット。続けたら空)、上限に当たったエージェント、この実行が上限を待った回数(`MAX_LIMIT_WAITS` の 3 まで)、`limit_relaunch` が次の `task _run` に伝える再開のわけ(読んだら空にする)。4.3 の「利用の上限」 |
 | `session`、`session_role` | 手元(`runs/<id>.json`。`task _run` が実装エージェントの起動の前に書き、`launch` が空に戻す) | その起動の `{session}`(UUID)と段階(`agent`、`retry`)。再開は同じ段階なら同じ値をコマンドに渡す。4.3 |
 | `link` | 手元(`runs/<id>.json`。`launch` が `issue()` のつなぎ先のコメントから)。`task done` は自分で読む `issue()` から | チームの Issue(`org/app#12`)。`finish` が PR の本文に `Closes` を足す。`set_status`、`comment`、`sync` のマージの処理が `to_team` でチームに写す。つないでいなければ空 |
 | `link_project` | `link` と同じコメントの `Project: owner/number` | 共有時に選んだ Project。実行の記録にも保存し、後の設定変更で共有先を変えない |
@@ -175,6 +176,8 @@ flowchart LR
   `resumable` が通れば 1 回だけ `relaunch` で再開し、通らなければ Blocked にします(4.1)。`relaunch` は残ったエージェントの
   グループを先に止め(`stop_left_agent`)、`launch` と同じ起動の部分(`start_run`)で `task _run <id>` を始めます。
   コマンドの形は同じなので、`alive` と task-rs はそのまま実行と見なします
+- エージェントが利用の上限に当たったと言って終わったときは(4.3 の「利用の上限」)、`task _run` は段階を残して終わり、
+  カードは Blocked になります。上限が戻る時刻を過ぎた最初の同期が、`limit_relaunch` で同じ段階から `task _run <id>` を始めます
 - エージェントだけが外から kill されたとき(POSIX で終了コードが負、task-hub が止めたのではない)と、watchdog がエージェントを
   止めたとき(下)は、同じ `task _run` がその場で 1 回だけ起動し直します(`run_worker`)。Windows は終了コードでシグナルを見分けられないので、その場では再開しません
 - エージェントは自分のプロセスグループで動きます(`AGENT_GROUP`。POSIX は `start_new_session`、Windows は
@@ -262,7 +265,12 @@ sequenceDiagram
         S->>L: cleanup: タブ、worktree、手元のブランチ、記録
     end
     loop 開いているカード
-        alt In progress で、プロセスが消えて、resumable
+        alt limit_until があり、プロセスが消えて、[runner] limit_resume が on
+            S->>S: 時刻を過ぎ、枠が空いていれば limit_resumed(launch_lock、resumable(数えない))
+            S->>L: resume_stage、resume_why、resumed の出来事
+            S->>GH: limit_relaunch(start_run。Blocked から In progress へ)
+            Note over S,GH: 時刻の前で In progress なら(止まったときに GitHub に届かなかった)、コメントと Blocked
+        else In progress で、プロセスが消えて、resumable
             S->>L: launch_lock、stop_left_agent、resumes、resume_stage、resumed の出来事
             S->>S: relaunch(start_run。カードは In progress のまま、GitHub は 0)
         else In progress で、プロセスが消えて、resumable でない
@@ -290,7 +298,7 @@ sequenceDiagram
     opt [autopilot] repos
         S->>GH: autopilot_ready(4.9): Backlog を Ready に
     end
-    S->>S: Ready で待ち先がないものを番号順に、枠([runner] parallel)の数だけ
+    S->>S: Ready で待ち先がないものを番号順に、枠([runner] parallel)の数だけ。<br/>上限の間のエージェントのカードは waits_for に入るので始めない
     S->>S: launch
 ```
 
@@ -377,6 +385,53 @@ flowchart TB
 
 その場の再開の前に、kill されたエージェントのグループに残ったもの(エージェントが始めたテストやサブエージェント)を
 SIGKILL で止めます。止まらなければ再開しません。
+
+#### 利用の上限(`usage_limit`、`limit_stop`、`limit_relaunch`)
+
+`agent_process` は、`task _run` の中のエージェント(実装、差し戻し、reviewer、goldfish の各視点、replanner)の出力のうち、
+ツールの手順(`· ` の行)でない最後の `LIMIT_TAIL`(10)行を覚えます。起動が失敗で終わったとき(終了コードが 0 以外か、
+Claude Code の結果が error で `== claude ended with` の行がある)だけ、その行から戻る時刻を読みます(`usage_limit`、
+`limit_reset`)。うまく終わった起動では読みません(エージェントが作業の中で同じ文を引用することがあるため)。読む形は
+Claude Code のものです。
+
+| 形 | 例 |
+|---|---|
+| `LIMIT_TEXT` | `You've hit your session limit · resets 7:40am (Asia/Tokyo)`、`... · resets Nov 3, 9am (Asia/Tokyo)`、`Your limit will reset at 5pm (America/New_York)`、`resets 19:05 (UTC)` |
+| `LIMIT_EPOCH` | `Claude AI usage limit reached\|1793142000`(古い Claude Code。UNIX 時刻) |
+
+時刻だけのときは、言われた時刻から見て次のその時刻です(1 時間以内に過ぎたばかりなら今日の時刻のままにして、すぐに続けます)。
+タイムゾーンは `zoneinfo` で読みます。読めないゾーン(Windows はゾーンのデータを持たない)、ない日付、`LIMIT_DAYS`(8 日)より先、
+時刻のない文(`try again later`)は読めない形で、今までどおりの Blocked(`agent exited without a report` など)です。
+
+読めたら `run_agent_process` が使用量を記録してから `UsageLimit` を投げ、`run_task` がそれを受けて `limit_stop` を呼びます。
+
+1. `limit_until`(戻る時刻 + `LIMIT_MARGIN` の 120 秒)、`limit_agent`、`limit_waits` を記録に書き、段階(`agent`、`review`、
+   `retry`)は残す。`state/limits/<エージェント>.json` にも時刻を書く(`note_limit`)
+2. 出来事 `limit`(`agent`、`stage`、`until`、`reason` にエージェントの言った 1 行)
+3. Issue にコメントし、カードを Blocked にする。理由は `usage limit of <エージェント>; task-hub resumes it at <時刻>`
+   (このマシンのタイムゾーンの時刻)。replanner は動かさない。metrics の `blocked_by` は `limit`
+4. `task _run` は段階を空にせずに終わる。GitHub に届かなかったら、カードは In progress のまま残り、同期がコメントと Blocked を書く
+
+同期(4.1)は、`limit_until` のある Blocked(か In progress)のカードで実行が生きていなければ、時刻を過ぎて枠が空いているときに
+`limit_resumed` を呼びます。`resumable(counted=False)` が通れば `limit_relaunch` が `resume_stage` と `resume_why` を書き、
+`limit_until` を空にし、出来事 `resumed` を出して、`start_run` でカードを In progress にします。続け方は表の段階のとおりで、
+`agent` と `retry` は再開のコマンド(Claude Code なら `--resume` で同じ会話)に「# Resumed」の節と
+`It stopped during: <段階> (it hit the usage limit of <エージェント>, which has reset)` を付けて渡します。上限の待ちは
+`resumes`(`MAX_RESUMES`)に数えないので、そのあとで実行が落ちても 1 回は再開します。Issue のレポートには
+`Waited for the usage limit of <エージェント> once.` の 1 行が入ります。`resumable` が通らないか起動に失敗したら、
+`limit_until` と段階を空にし、`the usage limit of <エージェント> reset, but the run does not go on: <わけ>` をコメントして
+Blocked のまま(出来事 Blocked を出し直す)にします。`MAX_LIMIT_WAITS`(3)回待った実行がまた上限に当たったら、
+`usage limit of ... after waiting for it 3 times: not resumed` で人の Blocked です。
+
+replanner が上限に当たったときは、カードはすでにエージェント自身の Blocked なので、仕分けを飛ばし(metrics の `replan` は
+`limit`)、`note_limit` と出来事 `limit`(`stage` は `replanning`)だけを書きます。再開はしません。
+
+上限の間(`agent_limits` の時刻まで)、`tasks()` は、そのエージェントの Ready のカード(Agent 欄、なければ `[runner] agent`)の
+`waits_for` に `usage limit of <エージェント> (until <時刻>)` を足します。待ち先のあるカードと同じく始まりません。ほかの
+エージェントのカードは始まります。`task` と `task list` は `limit: the usage limit of <エージェント> holds until <時刻>; ...` の
+行を出し(`limit_lines`)、上限で待つ Blocked のカードの Status を `Blocked › usage limit, until <時刻>` と出します
+(`shown_status`)。`[runner] limit_resume = off` では、上限の文を読まず、待たせず、再開もしません(足す前と同じ)。
+on と off のほかの値は、同期の前に `fail` します。時刻はテストのために `TASK_NOW`(ISO の時刻)で動かせます(`clock`)。
 
 `finish` の判定:
 
@@ -652,10 +707,11 @@ sequenceDiagram
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`)。`[runner] limit_resume` は利用の上限で止まった実行を時刻のあとに再開するか(`on` が既定、`off`。ほかの値は `sync` の前に `fail`) |
 | `bin/__pycache__/task_hub.cpython-<版>.pyc`(clone の中) | Python の import(`bin/task` が `task_hub.py` を読み込むとき。書けなければ書かない) | Python の import(`task_hub.py` の更新時刻と大きさが同じときだけ使う) | `task_hub.py` のバイトコード。git は無視する(`.gitignore`)。消してもよい(次の `task` が作り直す) |
-| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
+| `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。`limit_until`、`limit_agent`、`limit_waits`、`resume_why` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
+| `state/limits/<エージェント>.json` | `note_limit`(`limit_stop`、replanner の上限。もっと遅い時刻がすでにあれば書かない) | `agent_limits`(`tasks()`、`task list`、`task`) | JSON `{"until": "2026-10-28T07:42:00+09:00", "said": "<エージェントの言った 1 行>"}`。時刻を過ぎたものは読まないだけで、消さない。task-rs は読まない |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait, rerun}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット、`rerun` は落ちたチェックを走らせ直したコミットとそのチェック(`{sha, checks: [{name, link}]}`) |
 | `state/repo-settings.json` | `repo_setting_lines`(読んだときだけ書く) | `repo_setting_lines` | `{repo: [delete_branch_on_merge, UNIX 時刻]}`。値は `true`、`false`、`null`(見えない、読めない)。1 日たったら読み直す |
@@ -708,6 +764,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `event` は Status の名前(Backlog、Ready、In progress、In review、wait for merge、Blocked、Done)、`replan`、`slow`、
 予算を超えた `over budget`(`reason` に何がどの予算を超えたか)、
 再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
+利用の上限で止まった `limit`(`agent`、`stage`、`until`、`reason` にエージェントの言った 1 行。カードの Blocked が通知されるので、
+既定の `[notify] events` には入れない)、
 マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`(既定の `[notify] events` には入れない)、
 `merged`、`conflict`、オートパイロットの `autopilot`
 (`action` は `ready` か `merge`)、マージしたあとの GitHub のブランチの `branch`(`action` は `deleted`、`kept`、`failed`。
@@ -721,8 +779,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
 `repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
-`goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行)、
-`replan`、`usage`(起動ごとのトークン、呼び出し、費用(pi の `cost`)、クレジット、モデル)、`files`、`added`、`removed`、
+`goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行、`limit` は利用の上限で止まった実行)、
+`replan`(replanner が上限に当たったら `limit`)、`usage`(起動ごとのトークン、呼び出し、費用(pi の `cost`)、クレジット、モデル)、`files`、`added`、`removed`、
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
 起動は、`usage` に `agent, resumed` のような役で入ります。`goldfish` のレビューの起動は、視点の名前(`Goal Auditor`、
@@ -899,6 +957,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 | 再開も止まった(2 回目) | Blocked。理由は `the run stopped unexpectedly again, after resuming once at <段階>`。残ったレポートはコメントに載せる |
 | `resumable` でない(段階、Ctrl-C、worktree がない、HEAD が動いた、`snap` や再開に要るプロンプトがない) | Blocked。理由は `the run stopped unexpectedly; not resumed: <わけ>` |
 | `relaunch` の失敗(残ったエージェントが止まらない、herdr のタブが開かない、ファイルが書けない) | Blocked。理由は `the run stopped unexpectedly; could not resume it: <わけ>`。同期の残りは止めない |
+| エージェントが利用の上限に当たった(読める形の文で、失敗で終わった) | 段階を残して Blocked(`usage limit of <エージェント>; task-hub resumes it at <時刻>`)。時刻のあとの同期が段階から再開する。上限の間は同じエージェントの Ready のカードを始めない。読めない形なら今までどおり |
+| 上限のあとの再開ができない(`resumable` でない、起動の失敗) | Blocked のまま。理由は `the usage limit of <エージェント> reset, but the run does not go on: <わけ>` |
+| 上限で止まったときに GitHub に届かなかった | カードは In progress のまま。次の同期が、時刻の前ならコメントと Blocked、時刻のあとなら再開 |
 | 再開のコマンドが何もせずに失敗した(会話が見つからないなど) | 同じ再開の中で 1 回だけ `[agents]` のコマンド(新しいセッション)で起動し直す |
 | 出来事 `resumed`、metrics の失敗 | 無視する(実行とコマンドを止めない) |
 | reviewer か replanner の途中で `task _run` が落ちた(kill -9、クラッシュ) | worktree に書き換えが残る。reviewer なら、再開が `snap` で戻してからレビューし直す。再開しないとき(replanner、2 回目)は、記録の `snap` が残っているので、次の `launch` が `ensure_worktree` で `restore` してから始める |
@@ -948,6 +1009,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     task-hub は判定でカードを動かさない
 20. `[runner] review_mode = goldfish` の視点は、実装エージェントのレポートをプロンプトでも worktree のファイル(`.task-report.md`)
     でも受け取らない。視点が動く間に実行が止まっても、レポートは失われず、再開した実行か `sync` が Issue に書く
+21. エージェントが読める形で利用の上限を言って失敗で終わったら、カードは Blocked で、理由に再開の時刻が入る。時刻を過ぎた最初の
+    同期が止まった段階から再開する。上限の間は同じエージェントの Ready のカードを始めず、時刻を過ぎたら始める。読めない形と
+    `[runner] limit_resume = off` は足す前と同じ Blocked
 
 ## 10. テストの仕組み
 

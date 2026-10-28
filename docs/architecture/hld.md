@@ -216,11 +216,15 @@ PR で続きます。前回の実行より後の人のコメントは、次の�
 replanner の途中で止まっても、その書き換えは記録から戻してから続けるので、PR には入りません。Issue のレポートは 1 つで、
 「Resumed once at <段階>」の 1 行が入ります([design.md](../design.md) の決定事項 7)。
 
+エージェントが利用の上限(Claude Code の 5 時間の枠など)に当たって失敗で終わったときは、その出力から戻る時刻を読み、
+カードを Blocked にして段階を残します。時刻を過ぎた最初の同期が、同じ段階から続けます。上限の間は、同じエージェントの
+Ready のカードを始めません(`[runner] limit_resume`、既定 on。決定事項 36、LLD の 4.3)。
+
 ### 4.2 出来事と通知
 
 ```mermaid
 flowchart LR
-    setstatus["set_status、emit<br/>(Status の変化、replan、slow、over budget)"] --> events[("events.jsonl")]
+    setstatus["set_status、emit<br/>(Status の変化、replan、slow、over budget、limit)"] --> events[("events.jsonl")]
     setstatus --> note["通知<br/>herdr、osascript、トースト"]
     events --> chief["/chief<br/>task events --next"]
     events --> kwf["Kiro の workflow<br/>task-events-watch"]

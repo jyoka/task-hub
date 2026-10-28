@@ -130,7 +130,9 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
-`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、
+`replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、
+エージェントが利用の上限に当たったときの `limit`(`agent`、`stage`、`until`。[利用の上限で止まった](#利用の上限で止まった))、
+止まった実行を続けたときの `resumed`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、
 `merged`、`conflict`。[マージキュー](#マージキュー))、マージしたあとの GitHub のブランチの `branch`([マージしたあとのブランチ](#マージしたあとのブランチ))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
@@ -634,6 +636,7 @@ OpenAI には API キーで残高を読む公式の API が見当たりません
 | タスク(ボード) | GitHub: Issue リポジトリと Project(非公開) |
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
+| エージェントの利用の上限が戻る時刻([利用の上限で止まった](#利用の上限で止まった)) | `~/.local/state/task-hub/limits/<エージェント>.json` |
 | マージキュー | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
 | 作業先のリポジトリの「マージしたらブランチを消す」設定(1 日 1 回読む) | `~/.local/state/task-hub/repo-settings.json` |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
@@ -663,6 +666,8 @@ OpenAI には API キーで残高を読む公式の API が見当たりません
 | `the run stopped unexpectedly again, after resuming once at <段階>` | `task _run` プロセスが予期せず止まり(クラッシュ、kill、Mac の再起動、herdr のペインを閉じた)、task-hub が 1 回だけ再開しましたが、再開した実行もまた止まりました。`task log <番号>` で止まったところを見てから Ready に戻します |
 | `the run stopped unexpectedly; not resumed: <わけ>` | `task _run` プロセスが止まりましたが、再開しませんでした。わけは、Ctrl-C で止めた(`it was stopped with Ctrl-C`)、worktree が消えた、worktree で誰かがコミットした(`HEAD moved`)、続けるのに要る記録やプロンプトがない、などです。直してから Ready に戻します |
 | `the run stopped unexpectedly; could not resume it: <わけ>` | 再開しようとしましたが、起動できませんでした(残ったエージェントが止まらない、herdr のタブが開かない、など)。わけを直してから Ready に戻します |
+| `usage limit of <エージェント>; task-hub resumes it at <時刻>` | エージェントが利用の上限に当たりました。何もしなくてかまいません。時刻を過ぎると task-hub が止まった段階から続けます([利用の上限で止まった](#利用の上限で止まった)) |
+| `the usage limit of <エージェント> reset, but the run does not go on: <わけ>`、`usage limit of <エージェント> (until <時刻>), after waiting for it 3 times: not resumed` | 上限は戻りましたが、続けられませんでした(worktree が消えた、誰かがコミットした、1 つの実行で 3 回より多く上限に当たった、など)。`task log <番号>` を見てから Ready に戻します |
 | `the run stopped unexpectedly` | 実行は終わっていましたが、カードを動かす前に GitHub に届きませんでした。残ったレポートはこのコメントに載っています。再開した実行が終わったあとでも、この理由です |
 | `no run of this task on this machine` | カードが手で In progress に移されましたが、このマシンでは何も動いていません。Ready に移してください |
 | `could not start: ...` | クローン、worktree の準備、カードの Target repo や Agent に問題があります。`gh auth status` とカードの欄を確認します |
@@ -672,6 +677,34 @@ OpenAI には API キーで残高を読む公式の API が見当たりません
 
 その後、カードを Ready に戻します(または `task start <番号>`)。再実行は同じブランチと PR で作業を続け、
 エージェントには前回の実行が止まった理由が伝えられます。
+
+## 利用の上限で止まった
+
+Claude Code などのエージェントは、利用の上限(5 時間の枠など)に当たると `You've hit your session limit · resets 7:40am (Asia/Tokyo)`
+のように言って止まります。task-hub はこの文から戻る時刻を読み、次のようにします。
+
+1. カードを Blocked にし、理由に `usage limit of claude; task-hub resumes it at 07:42 JST` のように再開の時刻を書きます。
+   時刻はエージェントの言った時刻の 2 分後を、このマシンのタイムゾーンで出します。出来事 `limit` も書きます
+2. 上限の間は、同じエージェントの Ready のカードを始めません。`task` と `task list` の `waits_for` に
+   `usage limit of claude (until 07:42 JST)` と出し、`limit: the usage limit of claude holds until 07:42 JST; ...` の行も出します。
+   上限で待つカードの Status は `Blocked › usage limit, until 07:42 JST` と出ます。ほかのエージェントのカードは始まります
+3. 時刻を過ぎた最初の確認(`task watch` なら 1 分以内)が、止まった段階から続けます。カードは In progress に戻り、
+   出来事 `resumed` を書きます。実装エージェントなら会話の続き(Claude Code の `--resume`)から、reviewer か Goldfish の視点なら
+   レビューのやり直しからです。Issue のレポートには `Waited for the usage limit of claude once.` の 1 行が入ります
+
+読むのは、実装エージェント、差し戻し、reviewer、Goldfish の各視点、replanner の出力のうち、失敗で終わった起動の最後の 10 行です。
+replanner が上限に当たったときは、カードはすでにエージェント自身の理由で Blocked なので、仕分けをせずに上限だけを記録します
+(新しいカードは時刻まで待ちます)。読む形は Claude Code の文で、ほかの形(時刻のない文、知らないタイムゾーン、Windows で
+タイムゾーンのデータがない)は今までどおり `agent exited without a report` などの Blocked です。上限の待ちは、予期せず止まった
+実行の 1 回だけの再開には数えません。1 つの実行が 3 回より多く上限に当たったら、読み違いの恐れがあるので人に渡します。
+
+上限の前でも急ぐなら、カードの Agent 欄をほかのエージェントに変えるか、`task start <番号>` で最初からやり直します
+(同じエージェントなら、時刻まで待ってから始まります)。この動きを止めるには、設定に書きます。
+
+```ini
+[runner]
+limit_resume = off   ; 既定は on。off では上限の文を読まず、今までどおりの Blocked にする
+```
 
 ## 作ったばかりのタスクが `task N not found on the board` になる
 
