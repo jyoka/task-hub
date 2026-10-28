@@ -467,6 +467,9 @@ if "PIRECORDS" in prompt:  # ... or the way pi does
 mode = re.findall(r"MODE:(\w+)", prompt)[-1]  # the latest goal wins (re-runs keep the old report below it)
 report = "## Report\n\nAdded hello.txt. Ran the tests: 3 passed.\n\n## Please review\n\n- hello.txt: wording\n"
 print(f"fake agent working, mode {mode}")
+if mode in ("limit", "limitodd") and "# Resumed" not in prompt:  # Claude Code at its 5-hour limit; odd: no time said
+    print("You've hit your session limit · " + ("resets 7:40am (Asia/Tokyo)" if mode == "limit" else "try again later"))
+    sys.exit(1)
 if mode == "crash":
     sys.exit(1)
 # works a bit, then keeps running until stopped; once resumed (# Resumed), as "ok". "frozen": resumed too
@@ -677,6 +680,11 @@ if forced == ["edithang"] and not hanging.exists():  # breaks the rule, then han
     Path(f"{hanging}.tmp").write_text(str(os.getpid()))
     Path(f"{hanging}.tmp").replace(hanging)
     time.sleep(60)
+limited = Path(os.environ["TASK_TEST_REVIEW_CALLS"]).parent / "reviewer-limited"
+if forced == ["limit"] and not limited.exists():  # at its usage limit the first time, then reviews as usual
+    limited.write_text("")
+    print("You've hit your session limit · resets 7:40am (Asia/Tokyo)")
+    sys.exit(1)
 if forced == ["leftover"]:  # ran the tests, which left an untracked file behind
     Path("coverage.out").write_text("tests ran\n")
     Path(".task-review.md").write_text("## Verdict\n\npass\n\n## Review\n\nran the tests\n")
@@ -1034,6 +1042,13 @@ def finish(text):
         print(text, flush=True)
 emit({"type": "system", "subtype": "hook_started", "hook_name": "SessionStart:startup"})
 emit({"type": "system", "subtype": "init", "cwd": cwd, "tools": ["Bash", "Read", "Edit"], "model": "claude-x"})
+if "MODE:limit" in prompt and "# Resumed" not in prompt:  # at its 5-hour limit: an error result, yet exit 0
+    limit = "You've hit your session limit · resets 7:40am (Asia/Tokyo)"
+    said(limit)
+    emit({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "result": limit})
+    if not stream:
+        print(limit, flush=True)
+    sys.exit(0)
 if "adversarial reviewer of one completed task-hub run" in prompt:
     if "USAGE" in prompt:
         subprocess.run([os.environ["TASK_TEST_TRANSCRIPT"], "reviewer"], check=True)
@@ -1471,6 +1486,11 @@ class TaskTest(unittest.TestCase):
                   f"run record: {record.read_text() if record.exists() else 'none'}\n"
                   f"logs: {sorted(f.name for f in (state / 'logs').glob('*'))}\n"
                   f"events: {self.events_of(tid)}")
+
+    def wait_ended(self, tid):
+        """Wait for the run's process to end: wait returns once the card moved, and the run still writes its record,
+        its stage and METRICS after that. Before a check reads them, or before the next step needs the run gone."""
+        self.wait_for(lambda: (pid := self.run_state(tid).get("pid")) and process_gone(int(pid)))
 
     def wait_for(self, check, timeout=20):
         """The replanner runs after the card is already Blocked."""
@@ -5769,6 +5789,151 @@ class TaskTest(unittest.TestCase):
         self.assertIn(f"resumed: task {tid} at agent (the run process is gone), once", self.task())
         self.assert_durable_went_on(tid, session)
 
+    # --- usage limits: a run stopped at its agent's limit goes on once it resets (operations.md) ---
+
+    def at_limit_clock(self, utc):
+        """The fake clock of the usage limits (TASK_NOW), in a machine set to Japan's time like the user's."""
+        self.env.update(TZ="Asia/Tokyo", TASK_NOW=utc)
+
+    def limit_events(self, tid, name):
+        return [e for e in self.events_of(tid) if e["event"] == name]
+
+    def test_a_run_at_its_agents_usage_limit_is_blocked_until_the_reset_then_goes_on_from_its_stage(self):
+        """tasks#281: Claude Code said `You've hit your session limit · resets 7:40am (Asia/Tokyo)` at 06:11. The card
+        is Blocked with when it goes on, and the first check of the board after 07:42 resumes the agent there."""
+        self.at_limit_clock("2026-10-27T21:11:00Z")  # 06:11 in Tokyo
+        tid = self.new("limit")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_ended(tid)
+        self.assertEqual(self.limit_events(tid, "Blocked")[-1]["reason"],
+                         "usage limit of fake; task-hub resumes it at 07:42 JST")
+        limit = self.limit_events(tid, "limit")
+        self.assertEqual([(e["agent"], e["stage"], e["until"]) for e in limit],
+                         [("fake", "agent", "2026-10-28T07:42:00+09:00")])
+        self.assertEqual(limit[0]["reason"], "You've hit your session limit · resets 7:40am (Asia/Tokyo)")
+        self.assertIn("usage limit of fake; task-hub resumes it at 07:42 JST", self.comments(tid)[-1])
+        state = self.run_state(tid)
+        self.assertEqual((state["stage"], state["limit_agent"], state["limit_waits"]), ("agent", "fake", "1"))
+        self.assertEqual(self.metrics(1)[-1]["blocked_by"], "limit")
+        self.assertEqual(self.limit_events(tid, "replan"), [])  # no Blocked of the agent's own
+
+        self.at_limit_clock("2026-10-27T22:41:00Z")  # 07:41: not yet
+        out = self.task()
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertIn("Blocked › usage limit, until 07:42 JST", out)
+        self.assertIn("limit: the usage limit of fake holds until 07:42 JST", out)
+        listed = self.task("list")
+        self.assertIn("Blocked › usage limit, until 07:42 JST", listed)
+        self.assertIn("limit: the usage limit of fake holds until 07:42 JST", listed)
+        self.assertEqual(len(self.agent_calls()), 1)
+
+        self.at_limit_clock("2026-10-27T22:42:00Z")  # 07:42
+        out = self.task()
+        self.assertIn(f"resumed: task {tid} at agent (the usage limit of fake reset)", out)
+        self.assertNotIn("limit: the usage limit", out)
+        self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)
+        calls = self.agent_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("# Resumed", calls[1]["prompt"])
+        self.assertIn("It stopped during: agent (it hit the usage limit of fake, which has reset)", calls[1]["prompt"])
+        self.assertEqual([(e["stage"], e["reason"]) for e in self.limit_events(tid, "resumed")],
+                         [("agent", "it hit the usage limit of fake, which has reset")])
+        report = self.comments(tid)[-1]
+        self.assertIn("Waited for the usage limit of fake once.", report)
+        self.assertNotIn("Resumed once", report)  # a limit's wait is no resume of MAX_RESUMES
+        state = self.run_state(tid)
+        self.assertEqual((state["resumes"], state["limit_until"], state["stage"]), ("", "", ""))
+
+    def test_builtin_claude_at_its_usage_limit_goes_on_in_its_own_session_after_the_reset(self):
+        """Claude Code's stream-json: the limit comes as an error result, and `claude -p` may still exit 0."""
+        self.fake_claude()
+        self.at_limit_clock("2026-10-27T21:11:00Z")
+        tid = self.new("limit", "Add hello", "jyoka/app", "--agent", "claude")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual(self.limit_events(tid, "Blocked")[-1]["reason"],
+                         "usage limit of claude; task-hub resumes it at 07:42 JST")
+        self.wait_ended(tid)  # a run still alive is not resumed (limit_resumed)
+        session = self.run_state(tid)["session"]
+        self.at_limit_clock("2026-10-27T22:42:00Z")
+        self.assertIn(f"resumed: task {tid} at agent (the usage limit of claude reset)", self.task())
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("== agent, resumed: claude ([resume])", self.task("log", tid, "--full"))
+        self.assertEqual(self.run_state(tid)["session"], session)  # its conversation, with --resume
+
+    def test_ready_cards_of_an_agent_at_its_usage_limit_wait_until_it_resets(self):
+        self.at_limit_clock("2026-10-27T21:11:00Z")
+        stopped = self.new("limit", "Stopped")
+        self.task("start", stopped)
+        self.assertEqual(self.wait(stopped), "Blocked")
+        self.wait_ended(stopped)
+        waiting = self.new("ok", "Waiting")
+        other = self.new("ok", "Other agent", "jyoka/app", "--agent", "other")
+        self.move(waiting, "Ready")
+        self.move(other, "Ready")
+        out = self.task()
+        self.assertEqual(self.status(waiting), "Ready")
+        self.assertIn("usage limit of fake (until 07:42 JST)", out)
+        self.assertIn("usage limit of fake (until 07:42 JST)", self.task("list"))
+        self.assertNotEqual(self.status(other), "Ready")  # another agent's card starts as usual
+        self.assertEqual(self.wait(other), "In review")
+
+        self.at_limit_clock("2026-10-27T22:43:00Z")
+        out = self.task()
+        self.assertIn(f"resumed: task {stopped} at agent", out)
+        self.assertEqual(self.status(waiting), "In progress")
+        self.assertEqual(self.wait(stopped), "In review")
+        self.assertEqual(self.wait(waiting), "In review")
+
+    def test_a_limit_line_without_a_time_read_here_is_blocked_as_before(self):
+        self.at_limit_clock("2026-10-27T21:11:00Z")
+        tid = self.new("limitodd")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("agent exited without a report (exit 1)", self.limit_events(tid, "Blocked")[-1]["reason"])
+        self.assertEqual(self.limit_events(tid, "limit"), [])
+        self.assertEqual(self.run_state(tid)["limit_until"], "")
+        nxt = self.new("ok", "Next")
+        self.task("start", nxt)  # nothing holds the agent back
+        self.assertEqual(self.wait(nxt), "In review")
+
+    def test_limit_resume_off_blocks_at_a_usage_limit_as_before(self):
+        cfg = self.root / ".config/task-hub/config.ini"
+        cfg.write_text(cfg.read_text().replace("[runner]\n", "[runner]\nlimit_resume = off\n"))
+        self.at_limit_clock("2026-10-27T21:11:00Z")
+        tid = self.new("limit")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertIn("agent exited without a report (exit 1)", self.limit_events(tid, "Blocked")[-1]["reason"])
+        self.assertEqual(self.limit_events(tid, "limit"), [])
+        nxt = self.new("ok", "Next")
+        self.task("start", nxt)
+        self.assertEqual(self.wait(nxt), "In review")
+        self.at_limit_clock("2026-10-27T22:43:00Z")
+        self.assertNotIn("resumed", self.task())
+        self.assertEqual(self.status(tid), "Blocked")
+        cfg.write_text(cfg.read_text().replace("limit_resume = off", "limit_resume = later"))
+        out = self.task(code=1)
+        self.assertIn("error: [runner] limit_resume must be on or off; got 'later'", out)
+
+    def test_a_reviewer_at_its_usage_limit_goes_on_from_the_review(self):
+        self.write_config(reviewer=True)
+        self.at_limit_clock("2026-10-27T21:11:00Z")
+        tid = self.new("ok REVIEW=limit")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual([(e["agent"], e["stage"]) for e in self.limit_events(tid, "limit")], [("reviewer", "review")])
+        self.wait_ended(tid)
+        self.assertEqual(self.run_state(tid)["stage"], "review")
+        self.at_limit_clock("2026-10-27T22:43:00Z")
+        self.assertIn(f"resumed: task {tid} at review (the usage limit of reviewer reset)", self.task())
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertEqual(len(self.agent_calls()), 1)  # the agent's work was done: only the review again
+        self.assertEqual(len(self.reviewer_calls()), 2)
+        self.assertIn("Verdict: pass", self.comments(tid)[-1])
+
     def test_ctrl_c_outside_the_agent_is_never_resumed(self):
         self.write_config(extra="\n[setup]\njyoka/app = echo setting up && sleep 3\n")
         tid = self.new("ok")
@@ -7818,6 +7983,7 @@ class TaskTest(unittest.TestCase):
         self.save_db(db)
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         self.task("done", tid)
         self.assertEqual({c["project"]: c["values"]["Status"] for c in self.team_cards()},
                          {"PVT_org/8": "Done", "PVT_org/7": "Todo"})
@@ -8899,6 +9065,55 @@ class ArchitectureBriefTest(unittest.TestCase):
         for name in ("README.md", "README.ja.md"):
             with self.subTest(name):
                 self.assertIn("(docs/architecture-brief.md)", (self.ROOT / name).read_text())
+
+
+class UsageLimitTest(unittest.TestCase):
+    """When an agent's usage limit resets, read from what it said (bin/task limit_reset, usage_limit)."""
+
+    @classmethod
+    def setUpClass(cls):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
+        cls.task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(cls.task)
+
+    def reset(self, text, seen="2026-10-28T06:11:00+09:00"):
+        at = self.task.limit_reset(text, datetime.datetime.fromisoformat(seen))
+        return at and at.isoformat()
+
+    def test_claude_codes_forms(self):
+        for text, seen, expected in (
+                ("You've hit your session limit · resets 7:40am (Asia/Tokyo)", None, "2026-10-28T07:40:00+09:00"),
+                ("You've hit your limit · resets 12:40pm (Asia/Tokyo)", None, "2026-10-28T12:40:00+09:00"),
+                ("5-hour limit reached ∙ resets 12am (Asia/Tokyo)", None, "2026-10-29T00:00:00+09:00"),
+                ("You've hit your weekly limit · resets Nov 3, 9am (Asia/Tokyo)", None, "2026-11-03T09:00:00+09:00"),
+                ("You've hit your weekly limit · resets Jan 2 at 9am (UTC)", "2026-12-30T10:00:00+00:00",
+                 "2027-01-02T09:00:00+00:00"),
+                ("Claude usage limit reached. Your limit will reset at 5pm (America/New_York).", None,
+                 "2026-10-27T17:00:00-04:00"),
+                ("You've hit your session limit · resets 19:05 (Asia/Tokyo)", None, "2026-10-28T19:05:00+09:00"),
+                # a time of day just passed is today's (the run goes on at once); one long passed is tomorrow's
+                ("You've hit your session limit · resets 5:40am (Asia/Tokyo)", None, "2026-10-28T05:40:00+09:00"),
+                ("You've hit your session limit · resets 4am (Asia/Tokyo)", None, "2026-10-29T04:00:00+09:00"),
+                ("Claude AI usage limit reached|1793142000", None, "2026-10-27T23:00:00+00:00")):
+            with self.subTest(text):
+                self.assertEqual(self.reset(text, seen or "2026-10-28T06:11:00+09:00"), expected)
+
+    def test_what_is_not_read_is_none(self):
+        for text in ("You've hit your session limit · try again later",
+                     "You've hit your session limit · resets 7:40am (Mars/Olympus)",
+                     "You've hit your session limit · resets 13pm (Asia/Tokyo)",
+                     "You've hit your session limit · resets Feb 30, 9am (Asia/Tokyo)",
+                     "Done. The rate limiter resets its window every minute.",
+                     "Claude AI usage limit reached|1893456000"):  # years off
+            with self.subTest(text):
+                self.assertIsNone(self.reset(text))
+
+    def test_only_a_failing_launch_and_its_last_lines_count(self):
+        seen = datetime.datetime.fromisoformat("2026-10-28T06:11:00+09:00")
+        said = ["working", "You've hit your session limit · resets 7:40am (Asia/Tokyo)"]
+        self.assertIsNone(self.task.usage_limit(said, failed=False, seen=seen))  # an agent quoting the line
+        reset, line = self.task.usage_limit(said, failed=True, seen=seen)
+        self.assertEqual((reset.isoformat(), line), ("2026-10-28T07:40:00+09:00", said[1]))
 
 
 class SlowThresholdTableTest(unittest.TestCase):

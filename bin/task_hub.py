@@ -15,6 +15,7 @@ whose PR is approved but not merged yet; the merged PR moves them to Done as usu
 With [merge] queue = on, an approved PR (`task merge`, or that column) is kept up to date with its base, its
 conflicts fixed by an agent, and merged once its checks pass: one PR at a time per repo.
 """
+import collections
 import configparser
 import contextlib
 import datetime
@@ -193,7 +194,7 @@ INSTALL_MANIFEST = STATE / "install-manifest.json"  # kiro/install.sh's record o
 RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "workspace", "tab", "worktree", "log", "pr",
             "research", "stage", "link", "link_project", "agent_pid", "agent_started", "head", "snap", "review_attempt",
             "interrupted", "resumes", "resumed", "resume_stage", "resumed_at", "session", "session_role", "budget",
-            "paid_api", "over_budget"]
+            "paid_api", "over_budget", "limit_until", "limit_agent", "limit_waits", "resume_why"]
 # stage: where the run is (docs/design.md); never on GitHub or in EVENTS.
 # link: the team's Issue (`task share`) as launch read it, so finish adds its Closes without asking GitHub again.
 # agent_pid, agent_started: the agent running now (its own process group, agent_process), so what is left of it can be
@@ -207,11 +208,27 @@ RUN_KEYS = ["repo", "title", "agent", "base", "branch", "started", "pid", "works
 # of the task's agent's last launch, session_role: that launch's stage (agent, retry), so a resume there goes on with
 # its conversation. launch empties them all (RUN_FRESH).
 # budget: the Goal's Budget limits as launch read them ({"tokens": 3000000, ...}), paid_api: the paid APIs it names,
-# space-separated (check_balance). over_budget: the measures this run has had an `over budget` event for
+# space-separated (check_balance). over_budget: the measures this run has had an `over budget` event for.
+# limit_until: when the run, stopped at its agent's usage limit, goes on from its stage (an ISO time with its offset;
+# empty once it is on its way again), limit_agent: the agent whose limit it was, limit_waits: how often this run
+# waited for a limit (MAX_LIMIT_WAITS). resume_why: why limit_relaunch started it again, for the next `_run` to tell
+# its agent (read and emptied with resume_stage; empty: interrupted says why)
 RUN_FRESH = ("agent_pid", "agent_started", "head", "snap", "review_attempt", "interrupted", "resumes", "resumed",
-             "resume_stage", "resumed_at", "session", "session_role", "over_budget")
+             "resume_stage", "resumed_at", "session", "session_role", "over_budget", "limit_until", "limit_agent",
+             "limit_waits", "resume_why")
 MAX_RESUMES = 1  # a run that stops unexpectedly is resumed this often, then Blocked (decision 7); no setting
 RESUME_STAGES = ("preparing", "setup", "agent", "review", "retry", "finishing")  # the stages a run can go on from
+LIMITS = STATE / "limits"  # <agent>.json: until when that agent's usage limit holds back its runs (note_limit)
+LIMIT_MARGIN = 120  # seconds after the time the agent said its limit resets: a run goes on, or a card starts, then
+MAX_LIMIT_WAITS = 3  # a run that hits a usage limit again after this many waits is Blocked for the human; no setting
+LIMIT_TAIL = 10  # the agent's last lines of text that may say it hit its limit (usage_limit)
+LIMIT_DAYS = 8  # a reset further off than this is a misreading: Blocked as before
+# Claude Code: "You've hit your session limit · resets 7:40am (Asia/Tokyo)", "... · resets Oct 31, 9am (Asia/Tokyo)"
+LIMIT_TEXT = re.compile(r"(?i)\blimit\b.{0,60}?\breset(?:s|s at| at)?\s+(?:(?P<month>jan|feb|mar|apr|may|jun|jul|aug|sep|"
+                        r"oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?(?P<hour>\d{1,2})"
+                        r"(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]\.?m\.?)?\s*\((?P<zone>[A-Za-z][\w+-]*(?:/[\w+-]+)*)\)")
+LIMIT_EPOCH = re.compile(r"(?i)\busage limit reached\|(\d{10})\b")  # older Claude Code: the reset as UNIX time
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 GH = os.environ.get("TASK_GH", "gh")
 # the last open cards read from GitHub (raw items), so `task list` in every pane shares one read (docs/operations.md).
 # A board change task-hub makes stamps BOARD_STALE; a cache read before that stamp is never used
@@ -310,6 +327,7 @@ class StatusLifecycle:
         (None, BACKLOG),  # cmd_new
         *{(s, READY) for s in startable_explicitly},  # cmd_start; Ready -> Ready changes only the Agent field
         (READY, IN_PROGRESS),  # launch
+        (BLOCKED, IN_PROGRESS),  # sync: the usage limit a run stopped at reset (limit_relaunch)
         (READY, BLOCKED), (IN_PROGRESS, BLOCKED),  # sync: launch failed; cmd_run: setup failed, finish raised; pid gone
         (IN_PROGRESS, IN_REVIEW),  # finish
         (IN_REVIEW, WAIT_FOR_MERGE), (BLOCKED, WAIT_FOR_MERGE), (BLOCKED, IN_REVIEW),  # cmd_merge: approved
@@ -614,7 +632,7 @@ def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
-                            "readiness": "off", "checker": "", "review_mode": "agent"},
+                            "readiness": "off", "checker": "", "review_mode": "agent", "limit_resume": "on"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES),
                            "rerun": str(MERGE_RERUNS)},
@@ -1187,6 +1205,13 @@ def tasks(include_done=False, max_age=0):
         t["waits_for"] = ", ".join([f"{x['ref']} ({why})" for x, why in
                                     ((x, waiting_reason(x, statuses)) for x in t["blockers"]) if why]
                                    + [f"#{n} ({statuses[n]}, only in the body: link it)" for n in unlinked] + own)
+    # a Ready card of an agent at its usage limit would only stop at it (note_limit): it waits like one held back
+    held = agent_limits() if any(t["status"] == READY for t in result) and limit_resume() else {}
+    for t in result:
+        agent = t["agent"] or config()["runner"]["agent"] if t["status"] == READY else ""
+        if agent in held:
+            t["waits_for"] = ", ".join(filter(None, [t["waits_for"],
+                                                     f"usage limit of {agent} (until {shown_time(held[agent])})"]))
     # the card changed last first, as on the board: what just moved is at the top of its column
     return sorted(result, key=lambda t: (t["updated"], int(t["id"])), reverse=True)
 
@@ -1245,7 +1270,11 @@ def waiting_reason(blocker, statuses):
 
 
 def shown_status(t):
-    """The Status, with the stage of the run that is still going: "In progress › review"."""
+    """The Status, with the stage of the run that is still going: "In progress › review", or, of a run stopped at a
+    usage limit (limit_stop), when it goes on: "Blocked › usage limit, until 07:42 JST"."""
+    if t["status"] == BLOCKED and t.get("limit_until") and not t.get("running") and limit_resume():
+        with contextlib.suppress(ValueError):
+            return f"{t['status']} › usage limit, until {shown_time(datetime.datetime.fromisoformat(t['limit_until']))}"
     return f"{t['status']} › {t['stage']}" if t.get("running") and t.get("stage") else t["status"]
 
 
@@ -1449,7 +1478,10 @@ def resumed_line(t):
     no notification of its own); "" for a run never resumed."""
     stages = (t.get("resumed") or "").split()
     why = interrupted_text(t.get("interrupted") or "the run process is gone")
-    return f"Resumed once at {', '.join(stages)}: {why}." if stages else ""
+    waits = int(t.get("limit_waits") or 0)
+    return " ".join([f"Resumed once at {', '.join(stages)}: {why}."] * bool(stages)
+                    + [f"Waited for the usage limit of {t.get('limit_agent')} {'once' if waits == 1 else f'{waits} times'}."]
+                    * bool(waits and not t.get("limit_until")))
 
 
 def issue(t):
@@ -2310,15 +2342,16 @@ def start_logged(cmd, cwd, log_path):
 
 # ---------- resuming a run that stopped unexpectedly (docs/architecture/designs/durable-runs.md) ----------
 
-def resumable(t):
+def resumable(t, counted=True):
     """Why the run (In progress on the board, its `_run` gone) cannot be resumed; "" when it can. relaunch then
-    starts it again from its stage; anything else is Blocked, as before (decision 7)."""
+    starts it again from its stage; anything else is Blocked, as before (decision 7).
+    counted: False for a run stopped at a usage limit (limit_relaunch), whose waits are no resumes (MAX_RESUMES)."""
     stage, wt = t.get("stage") or "", Path(t.get("worktree") or "/nonexistent")
     if stage not in RESUME_STAGES:
         return f"a run does not go on from its stage {stage}" if stage else "the run had ended"
     if t.get("interrupted") == "SIGINT":
         return "it was stopped with Ctrl-C"
-    if int(t.get("resumes") or 0) >= MAX_RESUMES:
+    if counted and int(t.get("resumes") or 0) >= MAX_RESUMES:
         return f"it was resumed {MAX_RESUMES} time(s) already"
     if not (wt / ".git").exists():
         return f"its worktree {home(wt)} is gone"
@@ -2369,6 +2402,208 @@ def note_resume(t, stage, why):
     t["resumed"] = " ".join([*(t.get("resumed") or "").split(), stage])
     t["interrupted"] = why
     save_run(t)
+
+
+# ---------- usage limits: a run stopped at its agent's usage limit goes on once it resets (docs/operations.md) ----------
+
+class UsageLimit(Exception):
+    """The run's agent said it hit its usage limit (usage_limit): the run stops at its stage (limit_stop)."""
+
+    def __init__(self, agent, reset, said):
+        super().__init__(said)
+        self.agent, self.reset, self.said = agent, reset, said
+
+
+def clock():
+    """Now, as an aware UTC time, for the usage limits. TASK_NOW (an ISO time) sets it, for the tests."""
+    given = os.environ.get("TASK_NOW")
+    if given:
+        return datetime.datetime.fromisoformat(given.replace("Z", "+00:00")).astimezone(datetime.timezone.utc)
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def limit_resume(strict=False):
+    """[runner] limit_resume: on (the default) or off, when a usage limit is an agent's failure like any other.
+    strict: a bad value stops (sync, before anything changes); elsewhere it counts as on, as sync started the run."""
+    value = config()["runner"].get("limit_resume", "").strip().lower() or "on"
+    if strict and value not in ("on", "off"):
+        fail(f"[runner] limit_resume must be on or off; got {value!r}",
+             f"set  [runner]  limit_resume = on  (or off) in {home(CONFIG)}")
+    return value != "off"
+
+
+def limit_reset(text, seen):
+    """When text says the usage limit resets, as an aware time, or None when it says no such thing in a form read
+    here (LIMIT_TEXT, LIMIT_EPOCH), names a zone not known here (Windows has no zone data of its own), or a time
+    over LIMIT_DAYS off. seen: when it was said. A time of day is its next one, but for one under an hour ago."""
+    m = LIMIT_EPOCH.search(text)
+    if m:
+        at = datetime.datetime.fromtimestamp(int(m[1]), datetime.timezone.utc)
+        return at if at - seen < datetime.timedelta(days=LIMIT_DAYS) else None
+    m = LIMIT_TEXT.search(text)
+    if not m:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(m["zone"])
+    except Exception:  # ZoneInfoNotFoundError, or a name that is no zone's
+        return None
+    hour, minute, ampm = int(m["hour"]), int(m["minute"] or 0), (m["ampm"] or "").lower().replace(".", "")
+    if (ampm and not 1 <= hour <= 12) or hour > 23 or minute > 59:
+        return None
+    if ampm:
+        hour = hour % 12 + 12 * (ampm == "pm")
+    local = seen.astimezone(zone)
+    try:
+        at = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if m["month"]:
+            at = at.replace(month=MONTHS.index(m["month"][:3].lower()) + 1, day=int(m["day"]))
+            if at < local - datetime.timedelta(days=1):  # said in December, of a reset in January
+                at = at.replace(year=at.year + 1)
+        elif at < local - datetime.timedelta(hours=1):
+            at += datetime.timedelta(days=1)
+    except ValueError:  # Feb 30
+        return None
+    return at if at - seen < datetime.timedelta(days=LIMIT_DAYS) else None
+
+
+def usage_limit(lines, failed, seen=None):
+    """(the reset, the line that says it) when the agent ended failing and one of its last lines of text (LIMIT_TAIL,
+    never a tool step) says it hit its usage limit; None otherwise. A launch that ends well is never one: an agent
+    may well quote such a line in its work."""
+    if not failed:
+        return None
+    for line in reversed(lines):
+        reset = limit_reset(line, seen or clock())
+        if reset:
+            return reset, cut(line.strip())
+    return None
+
+
+def shown_time(at):
+    """A time as a person here reads it: in this machine's zone, with the date when it is not today."""
+    local = at.astimezone()
+    return local.strftime("%H:%M %Z" if local.date() == clock().astimezone().date() else "%Y-%m-%d %H:%M %Z")
+
+
+def limit_reason(agent, until):
+    return f"usage limit of {agent}; task-hub resumes it at {shown_time(until)}"
+
+
+def note_limit(agent, until, said):
+    """Hold back the new runs of the agent until then (agent_limits); a later time already noted stays."""
+    if not re.fullmatch(r"[\w.-]+", agent):  # no file name: only the run that hit it waits
+        return
+    held = agent_limits().get(agent)
+    if not held or held < until:
+        write_atomic(LIMITS / f"{agent}.json", json.dumps({"until": until.isoformat(), "said": said}))
+
+
+def agent_limits():
+    """{agent: until} of the usage limits that still hold (note_limit), each an aware time."""
+    held = {}
+    for f in LIMITS.glob("*.json") if LIMITS.exists() else []:
+        try:
+            until = datetime.datetime.fromisoformat(json.loads(f.read_text())["until"])
+        except (OSError, ValueError, KeyError, TypeError):  # cut short, or written by hand: holds nothing
+            continue
+        if until > clock():
+            held[f.stem] = until
+    return held
+
+
+def limit_lines():
+    """What `task` and `task list` say of the usage limits that hold now."""
+    if not limit_resume():
+        return []
+    return [f"limit: the usage limit of {agent} holds until {shown_time(until)}; its Ready cards wait, and the runs it "
+            "stopped go on then" for agent, until in sorted(agent_limits().items())]
+
+
+def limit_stop(t, limit, say, record, began):
+    """The run's agent hit its usage limit: the run ends here with its card Blocked, its stage kept, and the first
+    check of the board after the reset (sync) starts it again from that stage (limit_relaunch). After MAX_LIMIT_WAITS
+    waits, or at a stage no run goes on from, the card is Blocked for the human instead."""
+    stage, until, waits = t.get("stage") or "", max(limit.reset, clock()) + datetime.timedelta(seconds=LIMIT_MARGIN), \
+        int(t.get("limit_waits") or 0)
+    note_limit(limit.agent, until, limit.said)
+    goes_on = stage in RESUME_STAGES and waits < MAX_LIMIT_WAITS
+    if goes_on:
+        reason = limit_reason(limit.agent, until)
+        t.update(limit_until=until.isoformat(), limit_agent=limit.agent, limit_waits=str(waits + 1))
+        save_run(t)
+    else:
+        reason = (f"usage limit of {limit.agent} (until {shown_time(until)}), after waiting for it "
+                  f"{plural(waits, 'time', 'times')}: not resumed")
+    say(f"== {limit.agent}: {limit.said}")
+    say(f"== {reason}")
+    emit(t, "limit", agent=limit.agent, stage=stage, until=until.isoformat(), reason=limit.said)
+    try:
+        take_card(t)
+        report_comment(t, blocked=reason)
+        set_status(t, BLOCKED, reason=reason)
+    except RuntimeError as e:  # the card stays In progress, and the next check of the board blocks it (sync)
+        say(f"== could not report it: {e}")
+    if not goes_on:
+        set_stage(t, "")
+    record_run({**record, **resume_record(t), "finished": now(), "seconds": round(time.time() - began),
+                "status": BLOCKED, "blocked_by": "limit"}, say)
+    say(f"== task {t['id']} is now {BLOCKED}" + (f"; it goes on at {shown_time(until)}." if goes_on else
+                                                 f". This pane stays open; `task done {t['id']}` closes it."))
+
+
+def limit_due(t):
+    """Whether the run stopped at a usage limit (limit_stop) may go on now: its time has come, and no later limit of
+    that agent holds (another run may have hit one since, a weekly one say)."""
+    try:
+        due = datetime.datetime.fromisoformat(t["limit_until"]) <= clock()
+    except (KeyError, ValueError, TypeError):  # written by hand: now
+        due = True
+    return due and (t.get("limit_agent") or t.get("agent")) not in agent_limits()
+
+
+def limit_relaunch(t):
+    """Start a run stopped at its agent's usage limit again, from its stage, once the limit reset; its card goes back
+    to In progress. The caller holds launch_lock and has checked that the run is not alive, as for relaunch."""
+    stop_left_agent(t)
+    why = f"it hit the usage limit of {t.get('limit_agent') or t.get('agent')}, which has reset"
+    t.update(resume_stage=t["stage"], resume_why=why, resumed_at=now(), pid="", limit_until="")
+    save_run(t)
+    emit(t, "resumed", stage=t["stage"], reason=why)
+    try:
+        start_run(t, IN_PROGRESS if t.get("status") != IN_PROGRESS else "")
+    except BaseException:  # sync blocks it for the human: limit_until is gone, so it is not tried again
+        t.update(resume_stage="", resume_why="", resumed_at="")
+        save_run(t)
+        raise
+
+
+def limit_resumed(t):
+    """sync's part for a run stopped at a usage limit that has reset: limit_relaunch, or Blocked for the human when
+    the run cannot go on from its stage (resumable). Its lines for the output; t["status"] is the card's new one."""
+    with launch_lock(t["id"]) as mine:
+        run_ = {**t, **load_run(t["id"])}
+        # another task-hub on this machine is starting it, or it moved on since the board was read: the next check
+        if not mine or alive(run_) or run_.get("limit_until") != t.get("limit_until"):
+            return []
+        agent = run_.get("limit_agent") or run_.get("agent")
+        why = resumable(run_, counted=False)
+        if not why:
+            try:
+                limit_relaunch(run_)
+                t["status"] = IN_PROGRESS
+                return [f"resumed: task {t['id']} at {run_['stage']} (the usage limit of {agent} reset)"]
+            except (RuntimeError, OSError, ValueError) as e:  # blocked below, as a failed start
+                why = f"could not resume it: {str(e)[:300]}"
+        run_.update(limit_until="", stage="")
+        save_run(run_)
+    reason = f"the usage limit of {agent} reset, but the run does not go on: {why}"
+    report_comment(t, blocked=f"{reason}, see `task log {t['id']}`")
+    if t["status"] == BLOCKED:
+        emit(t, BLOCKED, reason=reason)  # Blocked still, now for the human
+    else:
+        set_status(t, BLOCKED, reason=reason)
+    return [f"error: task {t['id']}: {reason}"]
 
 
 def stop_left_agent(t):
@@ -2865,6 +3100,9 @@ def run_agent_process(agent, prompt, wt, say, label, usage=None, t=None, resume=
                 over_budget(t, usage, say)
             except Exception as e:  # like the measuring itself: the budget must never cost the run, for now
                 say(f"== could not check the budget: {e}")
+    if t is not None and t.get("agent_limit") and limit_resume():
+        reset, said = t.pop("agent_limit")
+        raise UsageLimit(agent, reset, said)
     return code
 
 
@@ -2939,6 +3177,8 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
         # never saved either: whether task-hub itself stopped it (Ctrl-C) or the Watchdog did, and how many tool calls
         # it showed
         t["agent_stopped"], t["agent_silenced"], t["agent_steps"], t["agent_group"] = False, False, 0, 0
+        t["agent_limit"] = None  # never saved either: the usage limit it said it hit (usage_limit)
+    tail = collections.deque(maxlen=LIMIT_TAIL)  # its last lines of text, never its tool steps
     try:
         if t is not None:
             stop_left_commands(t, say)  # never two writers in one worktree: a cut-short agent's long test, say
@@ -2977,8 +3217,11 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
                 dog.heard()
                 for shown in steps.read(line.rstrip("\n")):
                     say(shown)
-                    if t is not None and shown.startswith("· "):  # tool_step's form
-                        t["agent_steps"] += 1
+                    if shown.lstrip().startswith("· "):  # tool_step's form (indented: a subagent's)
+                        if t is not None and shown.startswith("· "):
+                            t["agent_steps"] += 1
+                    else:
+                        tail.append(shown)
             if dog.watch():  # it stopped the agent: what left its group may hold the output open, so not read on
                 if t is not None:
                     t["interrupted"], t["agent_silenced"] = "silent", True
@@ -2986,10 +3229,14 @@ def agent_process(agent, prompt, wt, say, t=None, resume=False, session=None):
                 break
         for shown in steps.close():
             say(shown)
+            tail.append(shown)
         if dog.stopped is not None:
             return dog.stopped
         code = proc.wait()
-        return 1 if code == 0 and steps.failed else code
+        code = 1 if code == 0 and steps.failed else code
+        if t is not None:  # claude -p may end an error result with exit 0: its result line says so
+            t["agent_limit"] = usage_limit(tail, code != 0 or any(s.startswith("== claude ended with") for s in tail))
+        return code
     except (KeyboardInterrupt, Interrupted) as e:  # Ctrl-C in the pane stops the agent; still push what it did
         code = stop_agent(proc) if proc else 130
         if t is not None:
@@ -4457,9 +4704,10 @@ def run_task(t, say):
     wt = Path(t["worktree"])
     if sandbox_mode() != "off":
         os.chdir(DATA)  # nothing of task-hub's own (gh, herdr) runs in the folder the agent writes
-    stage, why = t.get("resume_stage") or "", t.get("interrupted") or "the run process is gone"
+    stage, why = t.get("resume_stage") or "", t.get("resume_why") or t.get("interrupted") or "the run process is gone"
+    waited = bool(t.get("resume_why"))  # limit_relaunch: after a usage limit, no resume of MAX_RESUMES
     if stage:  # read once: whatever starts `_run` again next must say so again
-        t["resume_stage"] = ""
+        t["resume_stage"] = t["resume_why"] = ""
         save_run(t)
     for name in (REPORT_FILE, REVIEW_FILE, REPLAN_FILE):
         if not (name == REPORT_FILE and stage in ("review", "finishing")):  # there, the report is the agent's
@@ -4472,7 +4720,7 @@ def run_task(t, say):
     if sandbox_mode() != "off":
         say(f"== sandbox: user {sandbox_user()} (the agent and git run as that user, see docs/sandbox.md)")
     if stage:
-        say(f"== resumed at {stage}, once: it was cut short there ({why})")
+        say(f"== resumed at {stage}: {why}" if waited else f"== resumed at {stage}, once: it was cut short there ({why})")
     began = time.time()
     record = {"id": t["id"], "title": t["title"], "repo": t["repo"], "agent": t["agent"],
               "reviewer": helper_agent(t, "reviewer"), "started": now(), "reviews": [], "retried": False,
@@ -4501,7 +4749,10 @@ def run_task(t, say):
         t["head"] = git_shared(wt, "rev-parse", "HEAD").stdout.strip()
         set_stage(t, "agent")
     if stage in ("", "agent"):
-        code = run_worker(t, prompt_file(t).read_text(), "agent", "agent", say, record, why if stage else "")
+        try:
+            code = run_worker(t, prompt_file(t).read_text(), "agent", "agent", say, record, why if stage else "")
+        except UsageLimit as e:
+            return limit_stop(t, e, say, record, began)
         say(f"== agent exited with code {code}")
     else:  # the agent's exit code is gone with the run that was cut short: its report is what counts
         code = 0
@@ -4517,7 +4768,10 @@ def run_task(t, say):
             record["review_verdict"] = kept.get("verdict") or ""
         else:
             resume_at = stage if stage in ("review", "retry") else ""
-            report, code, review, review_blocked = review_loop(t, report, code, say, record, resume_at, why)
+            try:
+                report, code, review, review_blocked = review_loop(t, report, code, say, record, resume_at, why)
+            except UsageLimit as e:  # a reviewer, a Goldfish auditor, or the agent's retry
+                return limit_stop(t, e, say, record, began)
             if not review:  # a review cut short by the agent's own Blocked, or none: no verdict for the field
                 record["review_verdict"] = ""
             write_atomic(finish_file(t), json.dumps({"code": code, "review": review, "blocked": review_blocked,
@@ -4537,6 +4791,14 @@ def run_task(t, say):
             except RuntimeError as e:  # the run itself is already on GitHub
                 record["replan"] = "failed"
                 say(f"== replanner failed: {e}")
+            except UsageLimit as e:  # the card is Blocked for the human already: only its new runs wait
+                record["replan"] = "limit"
+                if t.get("snap"):  # what it changed before it stopped
+                    release_snapshot(t, t["snap"].split())
+                until = max(e.reset, clock()) + datetime.timedelta(seconds=LIMIT_MARGIN)
+                note_limit(e.agent, until, e.said)
+                say(f"== replanner: {e.agent}: {e.said}; not triaged")
+                emit(t, "limit", agent=e.agent, stage="replanning", until=until.isoformat(), reason=e.said)
     except RuntimeError as e:
         status = BLOCKED
         record["blocked_by"] = "finish error"
@@ -5534,6 +5796,7 @@ def sync(started_here=False):
     merge = merge_config()
     autopilot = autopilot_config()
     readiness = readiness_mode()
+    limits = limit_resume(strict=True)
     lines, changed, errors = [], [], []
     open_ = tasks()
     queued = {e["id"] for e in read_queue()} if merge["queue"] else set()
@@ -5566,10 +5829,21 @@ def sync(started_here=False):
                 lines.append(f"cleanup: task {t['id']}: {left}; trying again at the next check")
             else:
                 changed.append({"id": t["id"], "title": t.get("title", ""), "now": "cleaned up (card is Done)"})
+    busy = sum(t["status"] == IN_PROGRESS for t in open_)
     for t in open_:
         before = t["status"]
         try:
-            if before == IN_PROGRESS and not alive(t):
+            if limits and t.get("limit_until") and before in (BLOCKED, IN_PROGRESS) and not alive(t):
+                # stopped at its agent's usage limit (limit_stop): from its stage once it reset, in a free slot
+                if limit_due(t) and (busy < slots or before == IN_PROGRESS):
+                    lines += limit_resumed(t)
+                    busy += t["status"] == IN_PROGRESS and before == BLOCKED
+                elif before == IN_PROGRESS:  # it could not move its card when it stopped (GitHub was unreachable)
+                    reason = limit_reason(t.get("limit_agent") or t["agent"],
+                                          datetime.datetime.fromisoformat(t["limit_until"]))
+                    report_comment(t, blocked=reason)
+                    set_status(t, BLOCKED, reason=reason)
+            elif before == IN_PROGRESS and not alive(t):
                 why = resumable(t) if t.get("started") else "no run here"
                 why = why and f"not resumed: {why}"
                 if not why:  # once (MAX_RESUMES): it goes on from its stage, and the card stays In progress
@@ -5639,6 +5913,7 @@ def sync(started_here=False):
     waiting = [t for t in board_ if t["status"] == READY and t["waits_for"]]
     if waiting:  # never started, so they take no slot; each starts once what it waits for is done
         lines += table("waiting", waiting, ["id", "title", "waits_for"])
+    lines += limit_lines()
     # started in the order they were made, whatever order the board is shown in
     ready = sorted((t for t in board_ if t["status"] == READY and not t["waits_for"]), key=lambda t: int(t["id"]))
     if ready and free <= 0:
@@ -6312,6 +6587,7 @@ def cmd_home(_):
         f"description: runs coding agents on the tasks of a GitHub Project, max {parallel()} at once",
         f"board: {board()['url']}",
         "counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()), *lines)
+    active = [{**t, "status": shown_status(t)} if t.get("limit_until") else t for t in active]  # when it goes on
     out(*table("tasks", active, ["id", "title", "status", "agent", "waits_for"]) if active else ["tasks: 0 open tasks"])
     needs_you = StatusLifecycle.needs_user_count(counts)
     out("help[3]:",
@@ -6370,7 +6646,8 @@ def list_lines(board_):
     return ["counts: " + ", ".join(f"{s}={n}" for s, n in counts.items()),
             *(table("tasks", [{**t, "status": shown_status(t)} for t in board_], cols)
               if board_ else ["tasks: 0 open tasks"]),
-            f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)"]
+            f"needs_you: {StatusLifecycle.needs_user_count(counts)} (Backlog to approve, In review, Blocked)",
+            *limit_lines()]
 
 
 CLEAR_SCREEN, MARK, UNMARK = "\033[H\033[2J", "\033[1;33m", "\033[0m"  # ANSI: home + clear, bold yellow, reset
