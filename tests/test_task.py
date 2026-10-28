@@ -64,6 +64,8 @@ def pr_of(url):  # (its "repo head" key, the PR)
     return next((k, p) for k, p in db["prs"].items() if p["url"] == url)
 def bare(key):
     return os.environ["TASK_CLONE_URL"].format(repo=key.split(" ")[0]).removeprefix("file://")
+def head_sha(key, pr):  # the PR's head commit: the branch's, until it merged (GitHub keeps it when the branch goes)
+    return pr.get("head_sha") or git("-C", bare(key), "rev-parse", "--verify", "-q", key.split(" ", 1)[1]).stdout.strip()
 def merge_state(key, pr):  # GitHub's mergeStateStatus, worked out from the real branches in the bare repo
     if pr.get("merge_state"):
         return pr["merge_state"]
@@ -264,7 +266,7 @@ elif cmd == ["pr", "view"]:
     key, pr = pr_of(a[2])
     out = {"body": pr["body"], "state": pr["state"], "url": pr["url"], "isDraft": pr.get("isDraft", False),
            "headRefName": key.split(" ", 1)[1], "baseRefName": pr.get("base") or "main",
-           "headRefOid": git("-C", bare(key), "rev-parse", key.split(" ", 1)[1]).stdout.strip()}
+           "headRefOid": head_sha(key, pr)}
     if "mergeStateStatus" in (opt("--json") or ""):
         state = merge_state(key, pr) if pr["state"] == "OPEN" else "UNKNOWN"
         out.update(mergeStateStatus=state, mergeable="CONFLICTING" if state == "DIRTY" else "MERGEABLE")
@@ -289,7 +291,7 @@ elif cmd == ["pr", "merge"]:  # a real merge commit on the base branch of the ba
         if r.returncode:
             fail(f"merge failed: {r.stderr}")
     shutil.rmtree(work)
-    pr.update(state="MERGED", merged=True)
+    pr.update(state="MERGED", merged=True, head_sha=head_sha(key, pr))
     db.setdefault("merged_order", []).append(pr["url"])
 elif cmd == ["pr", "close"]:
     key, pr = pr_of(a[2])
@@ -306,15 +308,36 @@ elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/(issues|pulls)/\d+/(
     else:
         pr = next(p for p in db["prs"].values() if p["url"] == f"https://github.com/{repo}/pull/{number}")
         out = pr.get({"issues": "comments", "pulls": "line_comments"}[where] if what == "comments" else "reviews", [])
+elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+", a[1]):  # REST: a repo's settings
+    if a[1].split("/", 1)[1] in db.get("broken_repos", []):
+        fail("HTTP 404: Not Found")
+    out = {"delete_branch_on_merge": db.get("delete_branch_on_merge", {}).get(a[1].split("/", 1)[1], True)}
+elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/git/ref/heads/.+", a[1]):  # REST: a branch's commit
+    repo, branch = re.fullmatch(r"repos/([\w.-]+/[\w.-]+)/git/ref/heads/(.+)", a[1]).groups()
+    sha = git("-C", bare(f"{repo} {branch}"), "rev-parse", "--verify", "-q", f"refs/heads/{branch}").stdout.strip()
+    if not sha:
+        fail("gh: Not Found (HTTP 404)")
+    out = {"ref": f"refs/heads/{branch}", "object": {"sha": sha, "type": "commit"}}
+elif a[:3] == ["api", "-X", "DELETE"] and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/git/refs/heads/.+", a[3]):
+    repo, branch = re.fullmatch(r"repos/([\w.-]+/[\w.-]+)/git/refs/heads/(.+)", a[3]).groups()
+    if db.get("branch_delete_fails"):  # what GitHub says instead, e.g. a rule of the branch
+        fail(db["branch_delete_fails"])
+    if git("-C", bare(f"{repo} {branch}"), "update-ref", "-d", f"refs/heads/{branch}").returncode:
+        fail("gh: Reference does not exist (HTTP 422)")
+    db.setdefault("deleted_branches", []).append(f"{repo} {branch}")
 elif a[0] == "api" and "/pulls/" in a[1]:  # REST: repos/<owner>/<name>/pulls/<number>
     repo, number = a[1].split("/", 1)[1].rsplit("/pulls/", 1)
     if repo in db.get("broken_repos", []):
         fail("HTTP 404: Not Found")
     key, pr = pr_of(f"https://github.com/{repo}/pull/{number}")
-    out = {"merged": pr.get("merged", False), "head": {"ref": key.split(" ", 1)[1], "sha": git(
-        "-C", bare(key), "rev-parse", key.split(" ", 1)[1]).stdout.strip()}, "base": {"ref": pr.get("base") or "main"}}
+    out = {"merged": pr.get("merged", False), "head": {"ref": key.split(" ", 1)[1], "sha": head_sha(key, pr)},
+           "base": {"ref": pr.get("base") or "main"}}
     if pr["state"] == "OPEN" and os.path.isdir(bare(key)):
         out["mergeable_state"] = merge_state(key, pr).lower()
+elif a[0] == "api" and "/pulls?base=" in a[1]:  # REST: the open PRs into a branch
+    repo, base = re.fullmatch(r"repos/([\w.-]+/[\w.-]+)/pulls\?base=([^&]+)&.*", a[1]).groups()
+    out = [{"url": p["url"]} for k, p in db["prs"].items() if k.split(" ")[0] == repo and p["state"] == "OPEN"
+           and (p.get("base") or "main") == base][:1]
 elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?head=<owner>:<branch>&state=...
     repo = a[1].split("/", 1)[1].split("/pulls?")[0]
     head = a[1].split("head=")[1].split("&")[0].split(":", 1)[1]
@@ -322,7 +345,7 @@ elif a[0] == "api" and "/pulls?" in a[1]:  # REST: repos/<owner>/<name>/pulls?he
     # newest first: the current PR, then the branch's older ones ("older_prs", newest first)
     prs = [p for p in [db["prs"].get(f"{repo} {head}"), *db.get("older_prs", {}).get(f"{repo} {head}", [])] if p]
     out = [{"merged_at": p.get("merged_at") or ("2026-09-23T00:00:00Z" if p.get("merged") else None),
-            "body": p.get("body", "")}
+            "body": p.get("body", ""), "head": {"ref": head, "sha": head_sha(f"{repo} {head}", p)}}
            for p in prs if state == "all" or p["state"] != "OPEN"][:1]
 elif a[0] == "api" and "/compare/" in a[1]:  # REST: repos/<owner>/<name>/compare/<base>...<head>, from the origin
     import subprocess, urllib.parse
@@ -7154,6 +7177,129 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.pr(tid)["state"], "OPEN")
         self.write_config("[merge]\nqueue = yes please\n")
         self.assertIn("[merge] queue must be on or off", self.task(code=1))
+
+    # --- the task's branch on GitHub goes once its PR is merged ---
+
+    def branch_on_origin(self, tid):
+        return self.on_origin(f"refs/heads/task/{tid}", "rev-parse", "--verify", "-q").strip()
+
+    def branch_events(self, tid):
+        return [(e["action"], e["reason"]) for e in self.events_of(tid) if e["event"] == "branch"]
+
+    def merge_on_github(self, tid, **changes):
+        db = self.gh()
+        db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True, **changes)
+        self.save_db(db)
+
+    def test_the_merge_queue_deletes_the_merged_branch_on_github(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.task("merge", tid)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.branch_on_origin(tid), "")
+        self.assertEqual(self.gh()["deleted_branches"], [f"jyoka/app task/{tid}"])
+        self.assertEqual(self.branch_events(tid), [("deleted", f"deleted task/{tid} on GitHub: its PR was merged")])
+
+    def test_a_branch_github_refuses_to_delete_leaves_the_merge_done_and_says_why(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        db = self.gh()
+        db["branch_delete_fails"] = "gh: Cannot delete this branch: a rule of the repository protects it (HTTP 422)"
+        self.save_db(db)
+        self.task("merge", tid)
+        out = self.task()
+        self.assertIn("merged", out)
+        self.assertNotIn("Traceback", out)
+        self.assertEqual((self.status(tid), self.pr(tid)["state"]), ("Done", "MERGED"))
+        self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
+        self.assertFalse(self.run_file(tid).exists())  # cleaned up as after any merge
+        self.assertNotEqual(self.branch_on_origin(tid), "")
+        self.assertEqual(self.branch_events(tid), [("failed", f"could not delete task/{tid} on GitHub: gh: Cannot delete "
+                                                              "this branch: a rule of the repository protects it (HTTP 422)")])
+
+    def test_a_pr_merged_on_github_has_its_branch_deleted_but_an_open_one_keeps_it(self):
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.task()
+        self.assertEqual(self.status(tid), "In review")  # its PR is open: the branch is its work
+        self.assertNotEqual(self.branch_on_origin(tid), "")
+        self.assertEqual(self.branch_events(tid), [])
+        self.merge_on_github(tid)
+        self.assertIn("Done", self.task())
+        self.assertEqual(self.branch_on_origin(tid), "")
+        self.assertEqual(self.branch_events(tid), [("deleted", f"deleted task/{tid} on GitHub: its PR was merged")])
+
+    def test_a_branch_that_moved_on_or_that_an_open_pr_is_based_on_is_kept(self):
+        moved, base = self.new("ok", "Moved on"), self.new("ok", "A base")
+        for tid in (moved, base):
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+        merged_head = self.branch_on_origin(moved)
+        self.merge_on_github(moved, head_sha=merged_head)
+        seed = self.root / "seed-moved"  # someone pushed to the branch after the merge
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{moved}", str(self.root / "origins" / "jyoka/app.git"),
+                        str(seed)], check=True, capture_output=True)
+        (seed / "more.txt").write_text("more\n")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", "more"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", f"task/{moved}"], check=True, capture_output=True)
+        tip = self.branch_on_origin(moved)
+        self.merge_on_github(base)
+        db = self.gh()  # a PR stacked on the other branch: deleting that would close it
+        db["prs"]["jyoka/app feat/on-top"] = {"url": "https://github.com/jyoka/app/pull/99", "state": "OPEN",
+                                              "isDraft": False, "body": "", "base": f"task/{base}"}
+        self.save_db(db)
+        self.task()
+        self.assertEqual((self.status(moved), self.status(base)), ("Done", "Done"))
+        self.assertEqual(self.branch_on_origin(moved), tip)
+        self.assertNotEqual(self.branch_on_origin(base), "")
+        self.assertEqual(self.gh().get("deleted_branches", []), [])
+        self.assertEqual(self.branch_events(moved), [("kept", f"kept task/{moved} on GitHub: it is at {tip[:7]}, not at "
+                                                              f"the merged PR's {merged_head[:7]}")])
+        self.assertEqual(self.branch_events(base), [("kept", f"kept task/{base} on GitHub: an open PR is based on it")])
+
+    def test_a_card_done_by_github_or_by_hand_after_a_merge_has_its_branch_deleted(self):
+        by_github, by_hand = self.new("ok", "Closed by GitHub"), self.new("ok", "Done by hand")
+        for tid in (by_github, by_hand):
+            self.task("start", tid)
+            self.assertEqual(self.wait(tid), "In review")
+        for tid in (by_github, by_hand):  # no sync between them and the checks below: the merge watch never saw them
+            self.merge_on_github(tid)
+        # its "Closes ..." closed the Issue, and GitHub's "Item closed" moved the card to Done
+        db = self.gh()
+        db["issues"][by_github]["state"] = "CLOSED"
+        self.save_db(db)
+        self.move(by_github, "Done")
+        out = self.task("done", by_hand)
+        self.assertIn(f"branch: deleted task/{by_hand} on GitHub", out)
+        self.assertIn("cleaned up", self.task())
+        for tid in (by_github, by_hand):
+            self.assertEqual(self.status(tid), "Done")
+            self.assertEqual(self.branch_on_origin(tid), "")
+            self.assertEqual(self.branch_events(tid), [("deleted", f"deleted task/{tid} on GitHub: its PR was merged")])
+
+    def test_a_repo_that_keeps_merged_branches_is_told_once_a_day(self):
+        db = self.gh()
+        db["delete_branch_on_merge"] = {"jyoka/app": False}
+        self.save_db(db)
+        self.assertNotIn("settings:", self.task())  # nothing to merge yet: no repo is asked
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        told = 'settings: jyoka/app keeps merged branches (GitHub\'s "Automatically delete head branches" is off)'
+        self.assertIn(told, self.task())
+        self.assertNotIn("settings:", self.task())  # asked once a day
+        cache = self.root / ".local/state/task-hub/repo-settings.json"
+        self.assertEqual(json.loads(cache.read_text())["jyoka/app"][0], False)
+        cache.write_text(json.dumps({"jyoka/app": [False, time.time() - 25 * 3600]}))  # a day later
+        self.assertIn(told, self.task())
+        db = self.gh()
+        db["delete_branch_on_merge"] = {"jyoka/app": True}  # turned on
+        self.save_db(db)
+        cache.write_text(json.dumps({"jyoka/app": [False, time.time() - 25 * 3600]}))
+        self.assertNotIn("settings:", self.task())
 
     def test_design_diagram_matches_the_transitions(self):
         loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))

@@ -103,6 +103,12 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
 
    足りないものがあると、`task` がそれを名前で教えてくれます。
 
+   作業先のリポジトリでは、Settings の General にある **Automatically delete head branches**(マージしたら head の
+   ブランチを消す)をオンにしておくとよいです。必須ではありません。task-hub は、カードを Done にするときにマージ済みの
+   PR の `task/<番号>` を GitHub から消します([operations.md](operations.md#マージしたあとのブランチ))。オンにしておくと、
+   task-hub を通さずにマージしたほかのブランチも残りません。オフのリポジトリは、`task` が 1 日に 1 回
+   `settings: <repo> keeps merged branches ...` の 1 行で知らせます。
+
 3. **設定ファイル** `~/.config/task-hub/config.ini` を作ります:
 
    ```ini

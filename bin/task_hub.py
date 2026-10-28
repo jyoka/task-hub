@@ -4666,10 +4666,93 @@ def find_pr(t):
     return prs[0] if prs else None
 
 
+def merged_pull(t):
+    """The task's PR as REST gives it, to see whether its branch on GitHub can go: this machine's run's, else the
+    newest of the task's branch; None without one."""
+    m = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", t.get("pr") or "")
+    if m:
+        return gh_json("api", f"repos/{m[1]}/pulls/{m[2]}")
+    owner = t["repo"].split("/")[0]
+    prs = gh_json("api", f"repos/{t['repo']}/pulls?head={owner}:task/{t['id']}&state=all&sort=created"
+                         "&direction=desc&per_page=1")
+    return prs[0] if prs else None
+
+
+def delete_merged_branch(t, pull=None):
+    """Delete the task's branch on GitHub once its PR is merged: GitHub does it only when the repo's "Automatically
+    delete head branches" is on. Only task/<id>, only while it is at the merged PR's head commit (a commit pushed since
+    stays), and not while an open PR is based on it (deleting it would close that PR). pull: the merged PR as REST
+    gives it ({merged, head: {ref, sha}}); None reads it. Never raises: the merge stands whatever happens here, and
+    why the branch stayed goes in the events (`branch`). Returns what it did, as one line ("" for nothing)."""
+    branch, repo = f"task/{t['id']}", t.get("repo") or ""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        return ""
+    try:
+        if pull is None:
+            pull = merged_pull(t)
+        head = (pull or {}).get("head") or {}
+        if not (pull or {}).get("merged") and not (pull or {}).get("merged_at"):
+            return ""  # open, or closed without merging: the branch is still someone's work
+        if head.get("ref") != branch or not head.get("sha") or \
+                ((head.get("repo") or {}).get("full_name") or repo).lower() != repo.lower():  # a fork's is not ours
+            return ""
+        try:
+            tip = gh_json("api", f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+        except RuntimeError as e:
+            if re.search(r"\b404\b|Not Found", str(e)):
+                return ""  # gone already: GitHub's setting, or someone deleted it
+            raise
+        why = (f"it is at {tip[:7]}, not at the merged PR's {head['sha'][:7]}" if tip != head["sha"] else
+               "an open PR is based on it" if gh_json(
+                   "api", f"repos/{repo}/pulls?base={quote(branch, safe='/')}&state=open&per_page=1") else "")
+        if why:
+            reason = f"kept {branch} on GitHub: {why}"
+            emit(t, "branch", action="kept", pr=t.get("pr", ""), reason=reason)
+            return reason
+        gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:  # no permission, a rule of the branch, GitHub down
+        reason = f"could not delete {branch} on GitHub: {e}"
+        emit(t, "branch", action="failed", pr=t.get("pr", ""), reason=reason)
+        return reason
+    reason = f"deleted {branch} on GitHub: its PR was merged"
+    emit(t, "branch", action="deleted", pr=t.get("pr", ""), reason=reason)
+    return reason
+
+
+REPO_SETTINGS = STATE / "repo-settings.json"  # {repo: [delete_branch_on_merge, when asked]}: each repo once a day
+REPO_SETTINGS_MAX_AGE = 24 * 3600
+
+
+def repo_setting_lines(repos):
+    """One line for each repo whose GitHub keeps merged branches ("Automatically delete head branches" off). Each repo
+    is asked once a day (REPO_SETTINGS), so the line comes once a day too. task-hub deletes task/<id> itself
+    (delete_merged_branch); the setting covers branches merged in other ways. Never raises: it is only advice."""
+    cache_ = read_json(REPO_SETTINGS)
+    lines, asked = [], False
+    for repo in sorted(repos):
+        cached = cache_.get(repo)
+        if isinstance(cached, list) and len(cached) == 2 and isinstance(cached[1], (int, float)) \
+                and 0 <= time.time() - cached[1] < REPO_SETTINGS_MAX_AGE:
+            continue
+        try:
+            value = (gh_json("api", f"repos/{repo}") or {}).get("delete_branch_on_merge")
+        except (RuntimeError, ValueError, AttributeError):  # asked again tomorrow, not at every check
+            value = None
+        cache_[repo], asked = [value, time.time()], True
+        if value is False:  # None: not said (GitHub shows it only to who may change it)
+            lines.append(f'settings: {repo} keeps merged branches (GitHub\'s "Automatically delete head branches" is '
+                         f"off); task-hub deletes task/<id> itself, but turn it on: https://github.com/{repo}/settings")
+    if asked:
+        with contextlib.suppress(OSError):
+            write_atomic(REPO_SETTINGS, json.dumps(cache_, indent=1))
+    return lines
+
+
 def cleanup(t):
     """Close this task's herdr tab or workspace, remove its worktree and its local branch (only ones task-hub made).
 
-    The branch on GitHub stays: it is the PR's. The local one would only pile up in task-hub's clone.
+    The branch on GitHub is the PR's: delete_merged_branch deletes it when the card is Done because its PR was
+    merged, before this. The local one would only pile up in task-hub's clone.
     Returns "" when done, else what is left: the run record then stays, so the next check tries again.
     """
     t = {**t, **load_run(t["id"])}  # remove the saved run's resources, even if the card's settings changed
@@ -5049,12 +5132,14 @@ def merge_block(t, e, reason):
     return f"blocked: {reason}"
 
 
-def close_merged(t):
+def close_merged(t, pull=None):
     """Its PR was merged: close the Issue (GitHub's "Closes ..." works only for PRs into the default branch, and can
-    miss even those), move the card to Done, clean up."""
+    miss even those), move the card to Done, delete its branch on GitHub, clean up. pull: the merged PR (REST's
+    shape), when the caller has it."""
     gh("issue", "close", t["id"], "--repo", board()["issues"])
     to_team(t, "the close", lambda team, n: team.close(n))  # GitHub did not close it either
     set_status(t, DONE)
+    delete_merged_branch(t, pull)
     cleanup(t)
 
 
@@ -5229,7 +5314,7 @@ def merge_ci(t, e, pr, settings):
         gh("pr", "merge", e["pr"], "--merge", "--match-head-commit", pr["headRefOid"])
         queue_drop(t["id"])
         emit(t, "merged", pr=e["pr"], reason=f"merged into {pr['baseRefName']} by the merge queue")
-        close_merged(t)
+        close_merged(t, {"merged": True, "head": {"ref": pr["headRefName"], "sha": pr["headRefOid"]}})
         return f"merged {e['pr']}"
     if state == "UNSTABLE" and waited < limit:
         # none of the checks read above (after the PR) failed or is running: GitHub has not yet counted the one that
@@ -5475,6 +5560,7 @@ def sync(started_here=False):
                 move_to_top(card)
                 to_team(t, f"the Status {DONE}", lambda team, n: team.move(n, DONE, share_config(team.repo)))
                 emit(t, DONE, pr=t.get("pr", ""))
+                delete_merged_branch(t)  # only when its PR was merged (its "Closes ..." closed the Issue)
             left = cleanup(t)
             if left:
                 lines.append(f"cleanup: task {t['id']}: {left}; trying again at the next check")
@@ -5520,7 +5606,7 @@ def sync(started_here=False):
             elif StatusLifecycle.needs_merge_watch(t):
                 merged, pull = pr_merged(t)
                 if merged:
-                    close_merged(t)
+                    close_merged(t, pull)  # None (found by its branch): read again by the branch
                 elif merge["queue"] and pull and t["id"] not in queued:
                     lines += watch_conflict(t, pull, merge)
         except RuntimeError as e:
@@ -5528,6 +5614,10 @@ def sync(started_here=False):
             continue
         if t["status"] != before:
             changed.append({"id": t["id"], "title": t["title"], "now": t["status"]})
+    # the repos whose PRs task-hub merges or watches for a merge: does their GitHub delete merged branches too?
+    merging = {r.lower(): r for r in autopilot} | {t["repo"].lower(): t["repo"] for t in open_
+                                                    if StatusLifecycle.needs_merge_watch(t)}
+    lines += repo_setting_lines(set(merging.values()))
     if autopilot:
         autopilot_merge(open_, autopilot, lines, changed, errors)
     if merge["queue"]:
@@ -7173,12 +7263,16 @@ def cmd_done(a):
     if i["state"] != "CLOSED":
         gh("issue", "close", t["id"], "--repo", board()["issues"])
     to_team(t, "the close", lambda team, n: team.close(n))
+    status = t["status"]
     set_status(t, DONE)
+    # merged on GitHub before the merge watch saw it: its branch there goes, as the watch's close would delete it
+    branch = delete_merged_branch(t) if StatusLifecycle.needs_merge_watch({**t, "status": status}) or \
+        status == BLOCKED else ""
     try:
         archived = archive_lines(archive_overflow())
     except RuntimeError as e:  # the next card that gets Done tries again
         archived = [f"error: archiving old Done cards: {e}"]
-    out("task:", f"  id: {t['id']}", f"  status: {DONE}",
+    out("task:", f"  id: {t['id']}", f"  status: {DONE}", *([f"  branch: {branch}"] if branch else []),
         *([f"cleanup: {left}; `task` or `task watch` tries again"] if left else []), *archived)
 
 

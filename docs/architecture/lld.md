@@ -30,7 +30,7 @@ flowchart TB
     commands["commands<br/>cmd_home、cmd_list、cmd_start、cmd_new、cmd_done、cmd_merge、cmd_share、cmd_watch、<br/>cmd_show、cmd_log、cmd_open、cmd_events、cmd_stats、cmd_update、cmd_feedback"]
     mergeq["merge queue<br/>merge_config、read_queue、change_queue、merge_queue、merge_step、merge_update、merge_ci、<br/>watch_conflict、launch_fix、cmd_fix、fix_conflicts、close_merged"]
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
-    sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ"]
+    sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ<br/>delete_merged_branch、repo_setting_lines"]
     readiness["readiness<br/>cmd_check、readiness_check、goldfish、at_once、ReadinessResult、readiness_gate、<br/>set_readiness、latest_readiness、goal_hash"]
     runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
@@ -228,7 +228,7 @@ flowchart LR
 | `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
 | `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
 | `task merge [<id>] [--cancel]` | `merge_config`、`get`、`enqueue`(`queue_entry`。PR がなければ `find_pr`)、`change_queue`、`set_status(wait for merge)`(列があるとき。Blocked からは列がなければ In review) | 読む、Status | merge-queue、events |
-| `task done <id>` | `cleanup`、`issue`、`set_status(Done)`、`archive_overflow` | Issue を閉じる、Status、アーカイブ。つないだタスクはチームの Issue も閉じ、カードを Done に | runs を消す、events |
+| `task done <id>` | `cleanup`、`issue`、`set_status(Done)`、`delete_merged_branch`(In review、wait for merge、Blocked のカード)、`archive_overflow` | Issue を閉じる、Status、マージ済みの PR のブランチを消す、アーカイブ。つないだタスクはチームの Issue も閉じ、カードを Done に | runs を消す、events |
 | `task share <id> --to` | `get`、`issue`、`share_config`、`TeamGitHub`、`share_pr` | 読む、チームの Project を読む、チームの Issue とコメントとカード、個人の Issue につなぎ先のコメント、開いている PR の本文 | なし(つなぎ先は GitHub のコメント) |
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
@@ -258,7 +258,8 @@ sequenceDiagram
     loop runs/*.json のうち、開いた列にないカード
         S->>GH: Done を含めて 1 回だけ読む
         S->>L: Done の出来事(GitHub が動かした分)
-        S->>L: cleanup: タブ、worktree、ブランチ、記録
+        S->>GH: delete_merged_branch(同じ Done の出来事を書いたときだけ)
+        S->>L: cleanup: タブ、worktree、手元のブランチ、記録
     end
     loop 開いているカード
         alt In progress で、プロセスが消えて、resumable
@@ -270,9 +271,10 @@ sequenceDiagram
             S->>L: check_slow(長引いたら slow を 1 回)
         else In review、wait for merge
             S->>GH: PR がマージ済みか(REST)
-            S->>GH: Issue を閉じる、Done
+            S->>GH: Issue を閉じる、Done、delete_merged_branch
         end
     end
+    S->>GH: repo_setting_lines(In review、wait for merge のカードと [autopilot] のリポジトリ。1 日 1 回)
     opt [autopilot] repos
         S->>S: autopilot_merge(4.9)
     end
@@ -513,7 +515,32 @@ stateDiagram-v2
   あとに `queued` になった項目は、読んだボードが古いだけなので外さず、次の確認に回します
 - `merge_block` は Issue に `<!-- task-hub merge -->` のコメントを書き、カードを Blocked(理由は `merge queue: ...`)に
   してから、最後にキューから外します(GitHub の失敗のときは残して、次に試し直す)
-- マージしたら、`sync` のマージの確認と同じ `close_merged`(Issue を閉じる、Done、`cleanup`)を呼びます
+- マージしたら、`sync` のマージの確認と同じ `close_merged`(Issue を閉じる、Done、`delete_merged_branch`、`cleanup`)を
+  呼びます。キューは、マージした PR の `headRefName` と `headRefOid` を `delete_merged_branch` に渡します
+
+#### マージしたあとの GitHub のブランチ(`delete_merged_branch`)
+
+カードを Done にするところから呼び、マージ済みの PR の `task/<id>` を GitHub から消します。GitHub の設定
+「Automatically delete head branches」に頼らないためです。呼ぶのは `close_merged`(マージキュー、`sync` のマージの確認)、
+`sync` の後片付け(GitHub が Done にしたカードに Done の出来事を書いたとき。1 実行に 1 回)、`task done`(In review、
+wait for merge、Blocked のカードだけ)です。
+
+1. PR を読みます。呼び出し元が持っていればそれを使い(キューの `pr_view`、マージの確認の REST)、なければ
+   `merged_pull`(手元の記録の PR の REST、なければ `task/<id>` の最新の PR)。マージしていなければ何もしません
+2. PR の head が `task/<id>` で、作業先のリポジトリのもの(フォークでない)か確かめます
+3. `git/ref/heads/task/<id>` でブランチの先頭を読みます。404 ならもうない(GitHub の設定が消した)ので何もしません
+4. 先頭が PR の head のコミットと違えば残します(マージのあとに足されたコミットを失わないため)。
+   `pulls?base=task/<id>&state=open` に PR があっても残します(消すと GitHub がその PR を閉じるため)
+5. `DELETE git/refs/heads/task/<id>` で消します
+
+どこで失敗しても例外を出しません。マージと Done はそのままで、出来事 `branch`(`action` は `deleted`、`kept`、`failed`、
+`reason` に何をしたか)を書きます。読んでから消すまでの間に push されたコミットは見分けられません(GitHub の ref の削除に
+「このコミットのときだけ」の条件はない)。
+
+`repo_setting_lines` は、`sync` の中で、In review と wait for merge のカードのリポジトリと `[autopilot] repos` の
+リポジトリの `delete_branch_on_merge` を `gh api repos/<repo>` で読みます。リポジトリごとに 1 日 1 回
+(`state/repo-settings.json`)で、`false` なら `settings: <repo> keeps merged branches ...` を 1 行返します。値がない
+(GitHub は変えられる人にしか見せない)、読めないときは何も言わず、次の日にまた読みます
 - `merge_ci` は `pr_view`(`mergeStateStatus`)を読んでから `pr_checks` を読みます。チェックが通った直後は、
   あとで読んだチェックは通っているのに、先に読んだ状態は `UNSTABLE` のままのことがあります(GitHub が数えるのが
   数秒遅れる。jyoka/tasks#246)。そこで `checks = all` の `UNSTABLE` は、落ちたチェックがなければ(落ちていれば
@@ -631,6 +658,7 @@ sequenceDiagram
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
 | `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait, rerun}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット、`rerun` は落ちたチェックを走らせ直したコミットとそのチェック(`{sha, checks: [{name, link}]}`) |
+| `state/repo-settings.json` | `repo_setting_lines`(読んだときだけ書く) | `repo_setting_lines` | `{repo: [delete_branch_on_merge, UNIX 時刻]}`。値は `true`、`false`、`null`(見えない、読めない)。1 日たったら読み直す |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
@@ -682,7 +710,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
 マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`(既定の `[notify] events` には入れない)、
 `merged`、`conflict`、オートパイロットの `autopilot`
-(`action` は `ready` か `merge`)のどれかです。`conflict` と
+(`action` は `ready` か `merge`)、マージしたあとの GitHub のブランチの `branch`(`action` は `deleted`、`kept`、`failed`。
+既定の `[notify] events` には入れない)のどれかです。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
 `ci-rerun` の `sha` は走らせ直したコミットです。
 空の欄は書きません。
@@ -759,6 +788,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `gh repo view`(既定のブランチ) | GraphQL(gh) | 1 前後 | `[triggers] ci` のリポジトリごと、1 日 1 回 |
 | `gh issue list`(割り当て、ラベル) | GraphQL(gh) | 1 前後 | `[triggers] issues` のリポジトリごとに 1〜2、5 分に 1 回まで |
 | PR がマージ済みか | REST | 1 回 | In review と wait for merge のカードごと、同期ごと |
+| マージしたあとのブランチ(`delete_merged_branch`): PR(呼び出し元が持っていなければ)、`git/ref/heads/task/<id>`、`pulls?base=task/<id>&state=open`、`DELETE git/refs/heads/task/<id>` | REST | 2〜4 回 | マージ済みの PR のカードを Done にするときだけ(1 枚に 1 回)。ブランチがもうなければ 1〜2 回 |
+| リポジトリの設定(`gh api repos/<repo>` の `delete_branch_on_merge`) | REST | 1 回 | In review、wait for merge のカードと `[autopilot]` のリポジトリごと、1 日 1 回 |
 | 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり。research のカード(`task new --research`、`[triggers] drift_report`)は作る前に `gh label create --force` も |
 | `git fetch`、`push` | git | - | 開始、終わり |
