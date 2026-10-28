@@ -25,6 +25,11 @@ Ready に移す前に `task check <番号>` を動かすと、文脈を持たな
 PR 同士が競合します)。`/task` と `/chief` はこの基準で分け方を提案し、分けたタスクには「PR #23 follow-up (1/3): ...」
 のような共通の接頭辞を付けます。
 
+新しいプロダクトを作るときや、作業先リポジトリに `docs/architecture.md` がないとき、`/chief` はカードに分ける前に
+Architecture Brief の下書きを作って確かめます。Brief は、アーキテクチャの 7 つの関門(基盤リソース、IaC、パッケージング、
+実行と編成、CI/CD、設定と秘密情報、可観測性)をどう決めたか、今はやらないなら理由と見直すきっかけを書く文書です。
+Brief を書くこと自体を最初のカードにします([architecture-brief.md](architecture-brief.md))。
+
 ### 前後関係
 
 前のタスクのコードや結論が必要なタスクには、GitHub の「Blocked by」を付けます。

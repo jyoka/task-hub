@@ -152,7 +152,7 @@ flowchart TB
 | Slackトリアージ | スレッドからタスクの案を作る | 人が「登録」を押したときの `task new` だけ |
 | `task intake` | ntfy のトピックを購読し、合言葉の付いた文を Backlog のカードにする。In review の通知のボタン(Merge、Reject)の文も受ける | Backlog のカードの登録、トークンの合ったボタンの PR をマージキューに入れる、または PR を閉じてカードを Blocked にする、ntfy への返事だけ(Ready には動かさない) |
 | マージキュー(`[merge] queue`、既定はオフ) | 人が承認した PR(`task merge`、wait for merge の列)を、リポジトリごとに 1 つずつ base に追いつかせ、チェックを待ってマージする。競合は `task _fix` がエージェントに解かせる。キューにない In review の PR の競合は知らせるだけ | `merge-queue.json`、PR のブランチへのマージコミットの push、承認した PR のマージ、止めたときの Blocked とコメント |
-| `task check <番号>` | Ready の前の Goal の確かめ。文脈のない Goldfish(Comprehension、3 視点の批評を同時に、Readiness)が、Goal と base ブランチのコードだけを読んで GO / NO-GO を出す。`[runner] readiness`(既定 off)が `require` なら、`sync` は今の Goal への GO がない Ready のカードを始めない | Issue の判定のコメント、カードの Readiness 欄(なければ作る)、Goldfish ごとの使い捨ての worktree(変えたら戻して blocked) |
+| `task check <番号>` | Ready の前の Goal の確かめ。文脈のない Goldfish(Comprehension、4 視点の批評を同時に、Readiness)が、Goal と base ブランチのコードだけを読んで GO / NO-GO を出す。`[runner] readiness`(既定 off)が `require` なら、`sync` は今の Goal への GO がない Ready のカードを始めない | Issue の判定のコメント、カードの Readiness 欄(なければ作る)、Goldfish ごとの使い捨ての worktree(変えたら戻して blocked) |
 | `task _fix <番号> <base>` | 1 回の競合の解消(base のマージを始め、エージェントがファイルを直し、task-hub がマージコミットを作って push) | そのタスクの worktree、PR のブランチ、Issue のコメント、カード(Blocked のときだけ) |
 
 ## 4. データの流れ

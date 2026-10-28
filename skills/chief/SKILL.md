@@ -102,7 +102,35 @@ you need (a `digest: none` line, or an In review with neither `review:` nor `rep
 
 When several events arrive together, send one message, most urgent first.
 
+## Architecture Brief first
+
+Before you split work into tasks, do this when either holds:
+
+- The user starts a new product or project: a new repository, or a new app or service that will be deployed (not a
+  change to one that already runs).
+- The repository a task would change has no `docs/architecture.md`. Check it, read only, with
+  `gh api repos/<owner/name>/contents/docs/architecture.md --silent`: exit 0 means it is there, a 404 means it is not.
+
+The Brief records that the seven architecture gates were thought through before anyone builds screens: 0 base
+resources, 1 IaC, 2 packaging, 3 run and orchestration, 4 CI/CD, 5 config and secrets, 6 observability. Not every
+gate needs building; every gate needs a decision, or "not now" with the reason and when it will be needed.
+
+1. Read the template and the table of what each stage (POC, beta, production) needs at least, in task-hub's
+   `docs/architecture-brief.md` (from this skill's folder `../../docs/architecture-brief.md`; usually
+   `~/.local/lib/task-hub/docs/architecture-brief.md`).
+2. Draft the Brief from what the user said: the stage, and for each gate the decision or "not now", the reason, what
+   would make them look again, and the route and its cost (free or open source, or a paid managed service and why it
+   is worth paying for). Mark what you guessed. Do not invent prices: write that the pricing page must be checked.
+3. Show the draft and ask the user to confirm or correct it. Propose no tasks until they answer.
+4. Propose the Brief as the first task: one that writes `docs/architecture.md` in the repository with the confirmed
+   text in its Goal. Pass `--blocked-by` it to the tasks that build on its decisions (deploy, data stores, secrets),
+   not to the rest. Then go on below.
+5. If the user does not want a Brief now, go on below, and do not ask again for that repository in this conversation.
+
 ## When the user describes work
+
+When the work is a new product, or its repository has no `docs/architecture.md`, do "Architecture Brief first"
+(above) before this.
 
 One task is one concern the user can review, merge, and revert on its own: a pull request they can
 review in 10 to 15 minutes (a few hundred changed lines, not counting generated files).

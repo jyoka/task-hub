@@ -141,7 +141,7 @@ Goldfish に渡すのは、カードのタイトル、Goal(Issue の本文)、�
 | 段 | エージェント | すること |
 |---|---|---|
 | 1. Comprehension Check | 1 体 | Goal を自分の言葉で言い直し、2 通りに読める箇所を両方の読み方つきで挙げる |
-| 2. 敵対的レビュー | 3 体を同時に | Design Critic(決まっていない設計)、Naive Reader(初めて読む人に通じない言葉や前提)、Codebase Auditor(Goal とコードの食い違い、Ready conditions、リポジトリの決まり)。互いの結果は見ない |
+| 2. 敵対的レビュー | 4 体を同時に | Design Critic(決まっていない設計)、Naive Reader(初めて読む人に通じない言葉や前提)、Codebase Auditor(Goal とコードの食い違い、Ready conditions、リポジトリの決まり)、Architect(関門に触れる変更と Architecture Brief の食い違い。[architecture-brief.md](architecture-brief.md#task-check-の-architect))。互いの結果は見ない |
 | 3. Implementation Readiness | 1 体 | 1 と 2 の結果を Goal とコードで確かめ直し、まとめて GO / NO-GO を決める。NO-GO なら Goal に足す文言案を書く |
 
 2 の視点は、READINESS.md の 3 つ目の部分の `## ` 見出しです。見出しを足すと、視点が増えます。
@@ -175,7 +175,7 @@ Goal: 3f2a9c0d41b7e865
 
 ## Readiness
 
-Checked ... by 5 Goldfish (claude) that read only this Goal and owner/app at main (1a2b3c4d5e6f): 6 min, 1.2M tokens.
+Checked ... by 6 Goldfish (claude) that read only this Goal and owner/app at main (1a2b3c4d5e6f): 6 min, 1.2M tokens.
 
 (Readiness エージェントの要約)
 
