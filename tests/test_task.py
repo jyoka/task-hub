@@ -1485,6 +1485,11 @@ class TaskTest(unittest.TestCase):
                   f"logs: {sorted(f.name for f in (state / 'logs').glob('*'))}\n"
                   f"events: {self.events_of(tid)}")
 
+    def wait_ended(self, tid):
+        """Wait for the run's process to end: wait returns once the card moved, and the run still writes its record,
+        its stage and METRICS after that. Before a check reads them, or before the next step needs the run gone."""
+        self.wait_for(lambda: (pid := self.run_state(tid).get("pid")) and process_gone(int(pid)))
+
     def wait_for(self, check, timeout=20):
         """The replanner runs after the card is already Blocked."""
         end = time.time() + timeout
@@ -5798,6 +5803,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("limit")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_ended(tid)
         self.assertEqual(self.limit_events(tid, "Blocked")[-1]["reason"],
                          "usage limit of fake; task-hub resumes it at 07:42 JST")
         limit = self.limit_events(tid, "limit")
@@ -5825,6 +5831,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn(f"resumed: task {tid} at agent (the usage limit of fake reset)", out)
         self.assertNotIn("limit: the usage limit", out)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)
         calls = self.agent_calls()
         self.assertEqual(len(calls), 2)
         self.assertIn("# Resumed", calls[1]["prompt"])
@@ -5846,6 +5853,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertEqual(self.limit_events(tid, "Blocked")[-1]["reason"],
                          "usage limit of claude; task-hub resumes it at 07:42 JST")
+        self.wait_ended(tid)  # a run still alive is not resumed (limit_resumed)
         session = self.run_state(tid)["session"]
         self.at_limit_clock("2026-10-27T22:42:00Z")
         self.assertIn(f"resumed: task {tid} at agent (the usage limit of claude reset)", self.task())
@@ -5858,6 +5866,7 @@ class TaskTest(unittest.TestCase):
         stopped = self.new("limit", "Stopped")
         self.task("start", stopped)
         self.assertEqual(self.wait(stopped), "Blocked")
+        self.wait_ended(stopped)
         waiting = self.new("ok", "Waiting")
         other = self.new("ok", "Other agent", "jyoka/app", "--agent", "other")
         self.move(waiting, "Ready")
@@ -5914,6 +5923,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertEqual([(e["agent"], e["stage"]) for e in self.limit_events(tid, "limit")], [("reviewer", "review")])
+        self.wait_ended(tid)
         self.assertEqual(self.run_state(tid)["stage"], "review")
         self.at_limit_clock("2026-10-27T22:43:00Z")
         self.assertIn(f"resumed: task {tid} at review (the usage limit of reviewer reset)", self.task())
@@ -7971,6 +7981,7 @@ class TaskTest(unittest.TestCase):
         self.save_db(db)
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         self.task("done", tid)
         self.assertEqual({c["project"]: c["values"]["Status"] for c in self.team_cards()},
                          {"PVT_org/8": "Done", "PVT_org/7": "Todo"})
