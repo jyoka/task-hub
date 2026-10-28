@@ -65,6 +65,7 @@ review_retries = 2      ; needs changes で worker に差し戻す回数(既定 
 review_mode = agent     ; reviewer に渡すもの。agent(既定。レポートも)/ goldfish(Goal とコードだけ。2 つの視点)
 readiness = off         ; Ready のカードを始める前に task check の GO を求めるか。off(既定)/ warn / require
 checker =               ; task check の Goldfish のエージェント。空か agent = カードの Agent 欄
+limit_resume = on       ; エージェントが利用の上限で止まったら、戻る時刻に再開する(既定 on。off で今までどおりの Blocked)
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)

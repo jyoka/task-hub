@@ -440,6 +440,19 @@
       同じく、欄は見るためのもので、`digest()` は 1 行のほうを読みます。欄は、ほかのマシンで動いたカードの判定も
       `task list` に出すために使います。
     - 既定をどちらにするかはユーザーが決めます。比べた結果は lessons.md にあります。
+36. **エージェントの利用の上限で止まった実行は、上限が戻る時刻に task-hub が段階から再開します(`[runner] limit_resume`、
+    タスク 316)。既定は on です。** 2026-10-28 06:11、jyoka/tasks#281 の Goldfish のレビューの 2 つの視点が Claude Code の
+    `You've hit your session limit · resets 7:40am (Asia/Tokyo)` で止まり、Blocked になりました。人が 7:41 に `task start` で
+    戻すまで止まったままで、その間も autopilot は Ready のカードを始め、どれもすぐに止まりました。
+    - 戻る時刻はエージェントの出力から読みます。使った量を前もって数えて上限の前に止めることはしません(エージェントの
+      CLI と契約ごとに数え方が違い、外からは正確に分からないため)。読むのは失敗で終わった起動の最後の行だけです。
+      うまく終わった起動の文は、エージェントが作業で引用したものかもしれないためです
+    - カードは Blocked にします。In progress のままにすると、枠を使い、人には動いているように見えるためです。理由に
+      再開の時刻を書くので、通知を見た人は何もしなくてよいと分かります。出来事 `limit` は通知に入れません(Blocked で知らせるため)
+    - 再開は同期が起こし、決定事項 31 の段階の記録をそのまま使います。上限の待ちは `MAX_RESUMES` に数えません。予期しない
+      停止とは別のもので、待つだけで直るためです。それでも 1 つの実行が 3 回より多く待つなら、読み違いの恐れがあるので人に渡します
+    - 上限の間は、同じエージェントの Ready のカードを始めません(`waits_for` に入れる)。ほかのエージェントのカードは始めます
+    - 読む形は Claude Code のものだけです。ほかのエージェントの文は、読めなければ今までどおりの Blocked です
 
 ### 1 タスクあたりの時間とトークンの上限(第 1 段階まで実装)
 
@@ -489,6 +502,7 @@ stateDiagram-v2
     Blocked --> Ready: task start
     Ready --> Ready: task start --agent
     Ready --> InProgress: launch
+    Blocked --> InProgress: usage limit reset
     Ready --> Blocked: launch failed
     InProgress --> Blocked: setup failed, finish, run stopped
     InProgress --> InReview: finish
@@ -517,6 +531,8 @@ In progress の中には段階があります(0.6)。ステートチャートの
 `preparing` と `setup` は最初から、`agent` と `retry` はエージェントを再開のコマンドで、`review` は記録の `snap`
 (`<tree> <HEAD>`)で worktree を戻してから reviewer を新しく、`finishing` は `finish` をもう一度(Issue のレポートは
 同じ本文なら書かない)です。`replanning` と `conflict-fix` では再開しません(カードはもう In progress にないため)。
+エージェントが利用の上限に当たった実行は、カードを Blocked にして `stage` を残し、上限が戻る時刻のあとの同期が同じ段階から
+続けます(決定事項 36)。
 
 | 段階 | 中身 | 書くところ |
 |---|---|---|
