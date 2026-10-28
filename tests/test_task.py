@@ -734,7 +734,9 @@ mode = forced.read_text().strip() if forced.exists() else mode
 with open(os.environ["TASK_TEST_GOLDFISH_CALLS"], "a") as f:
     f.write(repr({"role": role, "cwd": os.getcwd(), "prompt": prompt, "at": time.time(),
                   "head": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
-                  "files": sorted(os.listdir("."))}) + "\n")
+                  "files": sorted(os.listdir(".")),
+                  "brief": Path("docs/architecture.md").read_text() if Path("docs/architecture.md").exists() else None})
+          + "\n")
 out = Path(".task-readiness.md")
 if role == "comprehension":
     out.write_text("## Restatement\n\nSay hello in hello.txt.\n\n## Ambiguities\n\n- \"hello\": hello / Hello\n")
@@ -748,10 +750,10 @@ elif role != "readiness":
     if mode == "hang":  # the human stops the check while the critics run
         Path(os.environ["TASK_TEST_GOLDFISH_CALLS"] + f".{os.getpid()}.pid").write_text(str(os.getpid()))
         time.sleep(120)
-    if mode == "slow":  # the critics must run at once: each waits until all three have started
+    if mode == "slow":  # the critics must run at once: each waits until all four have started
         calls = Path(os.environ["TASK_TEST_GOLDFISH_CALLS"])
         for _ in range(100):
-            if calls.read_text().count("'role': '") - 1 >= 3:
+            if calls.read_text().count("'role': '") - 1 >= 4:
                 break
             time.sleep(0.1)
     blocking = "- \"Say hello\": no file named\n" if mode == "nogo" else "none"
@@ -8540,11 +8542,12 @@ class TaskTest(unittest.TestCase):
         self.assertIn("verdict: NO-GO", out)
         calls = self.goldfish_calls()
         self.assertEqual([c["role"] for c in calls][0], "comprehension")
-        self.assertEqual(sorted(c["role"] for c in calls[1:4]), ["Codebase Auditor", "Design Critic", "Naive Reader"])
-        self.assertEqual(calls[4]["role"], "readiness")
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(sorted(c["role"] for c in calls[1:5]),
+                         ["Architect", "Codebase Auditor", "Design Critic", "Naive Reader"])
+        self.assertEqual(calls[5]["role"], "readiness")
+        self.assertEqual(len(calls), 6)
         # each in a fresh worktree of its own at the base branch, with only the Goal and the code
-        self.assertEqual(len({c["cwd"] for c in calls}), 5)
+        self.assertEqual(len({c["cwd"] for c in calls}), 6)
         main = subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "rev-parse", "main"],
                               capture_output=True, text=True).stdout.strip()
         self.assertEqual({c["head"] for c in calls}, {main})
@@ -8553,11 +8556,11 @@ class TaskTest(unittest.TestCase):
             self.assertNotIn("EARLIER-REPORT", c["prompt"])
             self.assertNotIn("OTHER-CARD-GOAL", c["prompt"])
             self.assertIn("README.md", c["files"])
-        for c in calls[1:4]:  # the critics see neither each other nor the Comprehension Check
+        for c in calls[1:5]:  # the critics see neither each other nor the Comprehension Check
             self.assertNotIn("## Restatement", c["prompt"])
             self.assertNotIn("wording could be clearer", c["prompt"])
-        readiness = calls[4]["prompt"]
-        for name in ("Design Critic", "Naive Reader", "Codebase Auditor"):
+        readiness = calls[5]["prompt"]
+        for name in ("Design Critic", "Naive Reader", "Codebase Auditor", "Architect"):
             self.assertIn(f"# Critic: {name}", readiness)
             self.assertIn(f"- {name}: wording could be clearer", readiness)
         self.assertIn("Say hello in hello.txt.", readiness)
@@ -8575,7 +8578,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual((self.status(tid), self.status(other)), ("Backlog", "Backlog"))  # never moved
         self.assertEqual([e.get("decision") for e in self.events_of(tid) if e["event"] == "readiness"], ["NO-GO"])
         check, = [json.loads(line) for line in (self.root / ".local/state/task-hub/checks.jsonl").read_text().splitlines()]
-        self.assertEqual((check["id"], check["verdict"], check["blocking"], len(check["usage"])), (tid, "NO-GO", 1, 5))
+        self.assertEqual((check["id"], check["verdict"], check["blocking"], len(check["usage"])), (tid, "NO-GO", 1, 6))
         self.assertFalse((self.root / ".local/state/task-hub/metrics.jsonl").exists(), "a check is no run")
         self.assertIn("checks: 1 `task check` runs (GO 0, NO-GO 1, blocked 0)", self.task("stats"))
         self.assertEqual(self.agent_calls(), [])
@@ -8593,8 +8596,8 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok READY=slow")
         self.assertIn("verdict: GO", self.task("check", tid))
         # in turn, each critic would wait 10 s for the others to start
-        critics = [c["at"] for c in self.goldfish_calls()[1:4]]
-        self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other two to start")
+        critics = [c["at"] for c in self.goldfish_calls()[1:5]]
+        self.assertLess(max(critics) - min(critics), 5, "each critic waits for the other three to start")
         ran = sorted(tuple(line.split()) for line in log.read_text().splitlines())
         self.assertIn("add", [op for _, _, op in ran])
         for (_, ended, op), (began, _, next_op) in zip(ran, ran[1:]):
@@ -8626,7 +8629,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(comment.split("\n")[1], "Verdict: blocked")
         self.assertNotIn("### Blocking", comment)
         self.assertIsNone(self.readiness_field(tid), "a blocked check leaves no GO on the card")
-        self.assertNotIn("readiness", [c["role"] for c in self.goldfish_calls()[5:]], "the check stops at the stage")
+        self.assertNotIn("readiness", [c["role"] for c in self.goldfish_calls()[6:]], "the check stops at the stage")
         self.assertEqual(self.worktrees_left(), [])
         clone = self.root / ".local/share/task-hub/repos/jyoka/app"
         self.assertEqual((clone / "README.md").read_text(), "app\n")
@@ -8644,7 +8647,7 @@ class TaskTest(unittest.TestCase):
                                 stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         self.addCleanup(proc.kill)
         pids = lambda: [int(f.read_text()) for f in self.root.glob("goldfish-calls.txt.*.pid") if f.read_text()]
-        self.wait_for(lambda: len(pids()) == 3)
+        self.wait_for(lambda: len(pids()) == 4)
         proc.send_signal(signal.SIGTERM)  # a closed pane, or kill: as Ctrl-C
         try:
             output, _ = proc.communicate(timeout=60)
@@ -8683,6 +8686,42 @@ class TaskTest(unittest.TestCase):
         for flags in (["--ref", "main"], ["--goal-file", str(goal)]):  # a trial's verdict never goes on the Issue
             self.assertIn("go with --no-write only", self.task("check", backlog, *flags, code=1))
         self.assertEqual(self.readiness_comments(backlog), [])
+
+    def test_check_has_an_architect_that_reads_the_brief_of_the_ref_and_keeps_its_own_sorting(self):
+        """Task 317: the fourth critic holds the Goal against the repository's Architecture Brief (docs/architecture.md)
+        at the commit the agent will start from, and the Readiness agent keeps the Architect's blocking and minor."""
+        tid = self.new("ok READY=go", "Add a resident worker")
+        bare, seed = self.root / "origins/jyoka/app.git", self.root / "clone-brief"
+        subprocess.run(["git", "clone", "-q", str(bare), str(seed)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed), "checkout", "-qb", "brief"], check=True)
+        (seed / "docs").mkdir()
+        (seed / "docs/architecture.md").write_text("# Architecture Brief\n\n- 段階: 本番\n")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(seed), "commit", "-qm", "brief"], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "brief"], check=True, capture_output=True)
+        for ref, brief in (("main", None), ("origin/brief", "# Architecture Brief\n\n- 段階: 本番\n")):
+            with self.subTest(ref):
+                calls = len(self.goldfish_calls())
+                self.assertIn("verdict: GO", self.task("check", tid, "--no-write", "--ref", ref))
+                by_role = {c["role"]: c for c in self.goldfish_calls()[calls:]}
+                architect = by_role["Architect"]
+                self.assertEqual(architect["brief"], brief)
+                prompt = architect["prompt"]
+                self.assertIn("# Adversarial review: Architect", prompt)
+                self.assertIn("docs/architecture.md", prompt)
+                self.assertIn("Blocking, and only this: the Brief's stage is production, and it has no decision for gate "
+                              "3, 5, or 6", prompt)
+                self.assertIn("Minor: there is no `docs/architecture.md`.", prompt)
+                self.assertIn("Minor: the change adds a paid managed service, and the Brief gives no reason to pay", prompt)
+                self.assertIn("When the change touches no gate", prompt)
+                self.assertIn("Say hello. MODE:ok READY=go", prompt)
+                for name in ("Design Critic", "Naive Reader", "Codebase Auditor"):  # a persona of its own each
+                    self.assertNotIn("Architecture Brief", by_role[name]["prompt"])
+                    self.assertNotIn("# Adversarial review: Architect", by_role[name]["prompt"])
+                readiness = by_role["readiness"]["prompt"]
+                self.assertIn("# Critic: Architect", readiness)
+                self.assertIn("- Architect: wording could be clearer", readiness)
+                self.assertIn("Keep the Architect's sorting", readiness)
 
     def test_readiness_is_read_back_and_a_goal_edit_makes_a_go_stale(self):
         self.write_config(readiness="require")
@@ -8790,6 +8829,76 @@ class TaskTest(unittest.TestCase):
         self.assertGreater(self.gh().get("issue_view_calls", 0), before)  # the run's own reads, nothing more is asked
         self.write_config(readiness="sometimes")
         self.assertIn("[runner] readiness must be off, warn or require", self.task(code=1))
+
+
+class ArchitectureBriefTest(unittest.TestCase):
+    """Task 317: the Architecture Brief's template and stage table (docs/architecture-brief.md), the Architect critic
+    of `task check` (worker/READINESS.md), and /chief's step that drafts a Brief first, held to each other."""
+    ROOT = BIN.parent.parent
+    GATES = ["基盤リソース", "IaC", "パッケージング", "実行と編成", "CI/CD", "設定と秘密情報", "可観測性"]
+
+    def doc(self):
+        return (self.ROOT / "docs/architecture-brief.md").read_text()
+
+    def test_template_asks_four_things_of_every_gate(self):
+        template = self.doc().split("## Brief のテンプレート", 1)[1].split("```markdown", 1)[1].split("```", 1)[0]
+        self.assertIn("段階: POC / ベータ / 本番", template)
+        sections = re.split(r"(?m)^## ", template)[1:]
+        self.assertEqual([s.split("\n", 1)[0] for s in sections], [f"{n}. {g}" for n, g in enumerate(self.GATES)])
+        for s in sections:
+            with self.subTest(s.split("\n", 1)[0]):
+                self.assertEqual(re.findall(r"(?m)^- ([^:]+):", s), ["決定", "理由", "見直すきっかけ", "路線とコスト"])
+        self.assertIn("今はやらない", template)
+        self.assertIn("払う理由", template)
+
+    def test_stage_table_has_each_gate_with_a_minimum_per_stage_and_both_routes(self):
+        table = self.doc().split("## 規模の段階と最低要件", 1)[1].split("\n## ", 1)[0]
+        lines = [line for line in table.splitlines() if line.startswith("| ") and "---" not in line]
+        head = next(line for line in lines if line.startswith("| 関門 |"))  # the one after the stages' own table
+        rows = [r for r in lines if re.match(r"\| \d\. ", r)]
+        self.assertEqual([c.strip() for c in head.strip("|").split("|")],
+                         ["関門", "POC", "ベータ", "本番", "無料・オープンソースの路線", "マネージド有料の路線"])
+        self.assertEqual([r.split("|")[1].strip() for r in rows], [f"{n}. {g}" for n, g in enumerate(self.GATES)])
+        for r in rows:
+            cells = [c.strip() for c in r.strip().strip("|").split("|")]
+            self.assertEqual(len(cells), 6, r)
+            self.assertTrue(all(cells), r)
+        self.assertIn("単一インスタンスで可。落ちたときの影響と復旧手順を 1 行で書く", rows[3])
+        self.assertIn("複数台、ヘルスチェック、自動フェイルオーバー", rows[3])
+
+    def test_architect_critic_names_the_gates_and_what_is_blocking(self):
+        loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
+        task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+        loader.exec_module(task)
+        _, _, critics, _, readiness = task.readiness_parts()
+        self.assertEqual(list(critics), ["Design Critic", "Naive Reader", "Codebase Auditor", "Architect"])
+        architect = critics["Architect"]
+        self.assertEqual(re.findall(r"(?m)^(\d)\. ", architect), [str(n) for n in range(7)])
+        blocking = [line for line in architect.splitlines() if line.startswith("- Blocking")]
+        self.assertEqual(len(blocking), 1)
+        self.assertIn("production", blocking[0])
+        minor = " ".join(line for line in architect.splitlines() if line.startswith("- Minor"))
+        for case in ("there is no `docs/architecture.md`", "contradicts a decision in the Brief",
+                     "adds a paid managed service"):
+            self.assertIn(case, minor)
+        self.assertIn("gate 3, 5, or 6", readiness)
+        # the doc says the same
+        self.assertIn("| 段階が本番なのに、関門 3、5、6 のどれかに決定がない(空か「今はやらない」) | blocking |", self.doc())
+
+    def test_chief_drafts_a_brief_before_splitting_new_work(self):
+        skill = (self.ROOT / "skills/chief/SKILL.md").read_text()
+        self.assertLess(skill.index("## Architecture Brief first"), skill.index("## When the user describes work"))
+        step = skill.split("## Architecture Brief first", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("The user starts a new product or project", step)
+        self.assertIn("has no `docs/architecture.md`", step)
+        self.assertIn("Propose no tasks until they answer", step)
+        self.assertIn("Propose the Brief as the first task", step)
+        self.assertTrue((self.ROOT / "skills/chief" / "../../docs/architecture-brief.md").resolve().is_file())
+
+    def test_both_readmes_link_the_brief(self):
+        for name in ("README.md", "README.ja.md"):
+            with self.subTest(name):
+                self.assertIn("(docs/architecture-brief.md)", (self.ROOT / name).read_text())
 
 
 class SlowThresholdTableTest(unittest.TestCase):

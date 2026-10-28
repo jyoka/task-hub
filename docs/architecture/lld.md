@@ -617,7 +617,7 @@ sequenceDiagram
     G->>G: worktree add --detach <ref>、snapshot
     G->>A: run_agent_process(t なし)
     G->>G: restore(変えていたら blocked)、.task-readiness.md、worktree remove
-    C->>G: 批評の役ごとに 1 体(at_once で同時に)
+    C->>G: 批評の役ごとに 1 体(at_once で同時に。Architect は作業先の docs/architecture.md も読む)
     C->>G: readiness(1 と 2 の結果を足したプロンプト)
     C->>C: ReadinessResult(blocking / minor で判定を直す)
     C->>GH: READINESS_MARK のコメント
@@ -941,7 +941,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     落ちたエージェントが `group-shell` を通して動かしていたツールのコマンドは、次のエージェントを起動する前に止まる。
     番号が別のプロセスに渡ったグループは止めない
 18. 再開しても、reviewer と replanner の書き換えは結果に残らず、Issue のレポートは 1 つ
-19. `task check` の Goldfish は Goal とコードだけを受け取り(過去のレポート、ほかのカードは渡さない)、3 段(批評は 3 体を同時に)を
+19. `task check` の Goldfish は Goal とコードだけを受け取り(過去のレポート、ほかのカードは渡さない)、3 段(批評は 4 体を同時に)を
     それぞれ自分の worktree で動く。ファイルを変えた Goldfish の変更は戻り、判定は `blocked`。判定のコメントの `Verdict:` と Goal の
     ハッシュは読み戻され、Readiness 欄に GO / NO-GO が入る。Goal を編集すると前の GO は `stale`。`[runner] readiness = require` では
     今の Goal への GO がない Ready のカードは始まらず、オートパイロットも Ready に移さない。`off`(既定)では何も読まず、何も変わらない。

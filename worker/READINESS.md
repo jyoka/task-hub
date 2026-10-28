@@ -15,6 +15,8 @@ conversation the Goal was written in, the card's earlier reports, or other cards
 The personas follow the Elephant-Goldfish Model's `/egm-review` (Comprehension, the Design Critic, Naive Reader and
 Codebase Auditor critics, Readiness): https://github.com/google/elephant-goldfish-model (Apache License 2.0). The
 wording here is task-hub's own; the EGM plugin is not needed.
+The Architect critic is task-hub's own: it holds the Goal against the repository's Architecture Brief
+(docs/architecture-brief.md, whose gates it repeats, since a Goldfish reads nothing outside the repository).
 
 ---
 
@@ -98,6 +100,37 @@ and works as the Goal assumes; that its Ready conditions hold; that the change f
 (AGENTS.md, CLAUDE.md, CONTRIBUTING.md and the like); and what else in the code the change would touch that the
 Goal does not mention.
 
+## Architect
+
+Hold the Goal against the repository's Architecture Brief, `docs/architecture.md`. The Brief names a stage (POC,
+beta, or production) and, for each of seven gates, a decision or "not now", the reason, what would make them look
+again, and the route and its cost (free or open source, or a paid managed service and why it is worth paying for):
+
+0. Base resources: network, servers, storage, databases, permissions.
+1. IaC: whether the resources are written as code.
+2. Packaging: containers, where images are kept.
+3. Run and orchestration: where it runs, who restarts it when it goes down, scaling, redundancy and failover.
+4. CI/CD: automated test, build, and deploy.
+5. Config and secrets: where API keys and the like are kept and how they are injected.
+6. Observability: logs, metrics, traces, alerts, what happens when it goes down.
+
+First decide whether the change the Goal asks for touches a gate: for example a new service or data store, a new
+secret or a new place for one, a change of where or on what plan or how many instances it is deployed, a resident
+process or background worker, or work that needs much more memory or CPU than the service has now. Quote the Goal's
+words that touch it, and name the gate. When the change touches no gate (wording on a screen, a small UI fix, a
+refactor inside one module), write `none` under both headings, whatever the Brief says or lacks.
+
+When it touches a gate, find only these:
+
+- Blocking, and only this: the Brief's stage is production, and it has no decision for gate 3, 5, or 6 (the item
+  is missing, empty, or "not now" (今はやらない): production needs all three). Name the gates that lack one.
+- Minor: there is no `docs/architecture.md`. Say which gates the change touches, so a Brief can be written for them.
+- Minor: the change contradicts a decision in the Brief, or touches a gate the Brief does not cover (for example a
+  single instance whose Brief says nothing of what happens when it runs out of memory or goes down). Quote the Brief.
+- Minor: the change adds a paid managed service, and the Brief gives no reason to pay for it.
+
+Do not raise anything else: other gaps in the Brief, and design points the other critics look for, are not yours.
+
 ## `.task-readiness.md`
 
 Use exactly these headings. Write `none` under a heading with nothing in it.
@@ -122,6 +155,9 @@ critic's findings. They were written by other agents with the same rules as you,
 against the Goal and the code before you keep it. Merge findings that say the same thing, drop the ones that do
 not hold, and sort the rest again as blocking or minor. An ambiguity from the Comprehension Check is blocking
 when its two readings lead to different code that the acceptance criteria would not tell apart.
+Keep the Architect's sorting when its finding holds: its only blocking finding is a production-stage Brief with no
+decision for gate 3, 5, or 6, where "not now" (今はやらない) counts as no decision, since production needs all three;
+a missing Brief, a change the Brief does not cover, and no reason to pay for a managed service stay minor.
 
 Say `GO` when nothing blocking is left: minor findings do not stop it. Say `NO-GO` when anything blocking is left,
 and for each blocking finding propose the wording to add to the Goal that would settle it.

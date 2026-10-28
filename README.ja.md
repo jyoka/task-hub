@@ -43,7 +43,7 @@ flowchart LR
 - **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)。`[runner] review_mode = goldfish` にすると、実装エージェントのレポートを読まない 2 つの視点が、Goal とほかのコードへの影響を別々に確かめます。判定は Project の Review 欄にも入ります([詳しく](docs/task-format.md#goldfish-のレビューrunner-review_mode))
 - **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Elephant-Goldfish Model](https://egm.dev/) の Goldfish)が GO / NO-GO を判定します。NO-GO なら Goal に足す文言案も付きます。`[runner] readiness = require` にすると、今の Goal への GO がない Ready のカードは始まりません([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
+- **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Elephant-Goldfish Model](https://egm.dev/) の Goldfish)が GO / NO-GO を判定します。NO-GO なら Goal に足す文言案も付きます。そのうち Architect は、新しいプロダクトがアーキテクチャの 7 つの関門の決定を書く Architecture Brief と、カードを突き合わせます([詳しく](docs/architecture-brief.md))。`[runner] readiness = require` にすると、今の Goal への GO がない Ready のカードは始まりません([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
 - **知らせてくれる**: In review、Blocked、長引いている実行、予算を超えた実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません。[知らせ方の比較](docs/notifications.md))
 - **費用を測る**: エージェントの起動ごとのトークン、費用、クレジットを、CLI 自身の記録から読みます(Claude Code、pi、Kiro)。カードごとに予算を決められ、有料 API を使うカードはエージェントの起動前に残高を確かめます([Budget](docs/task-format.md#budget-予算と有料-api))
 - **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
@@ -158,6 +158,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
 | | [autopilot.md](docs/autopilot.md) オートパイロット(選んだリポジトリの承認とマージを task-hub がする) | | |
 | | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
+| | [architecture-brief.md](docs/architecture-brief.md) Architecture Brief(新しいプロダクトで決める 7 つの関門) | | |
 
 ## バグ報告と要望
 

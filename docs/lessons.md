@@ -298,6 +298,25 @@ goldfish の blocking には、#249 の数え方で誤検出が 1 件ありま�
 - goldfish を使うなら、カードごとに選べるとよい(例: 変更が大きいカード、レポートの主張が多いカードだけ)。今の設定は
   マシン全体の `[runner] review_mode` だけです(推測。別のカードにする)。
 
+## Architect の批評を aica 相当の例で試す (2026-10-28、タスク 317)
+
+`task check` に足した Architect([architecture-brief.md](architecture-brief.md#task-check-の-architect))を、
+本物の Goldfish(claude)で 3 つの例にかけました。GitHub はテストの偽物、作業先は aica に似せた小さなリポジトリです
+(Render の Web サービス 1 つ。`render.yaml` は `plan: starter`(512MB)、`numInstances: 1`)。コマンドは `task check <番号> --no-write` です。
+
+| 例 | Brief | カードの Goal | Architect | 判定 |
+|---|---|---|---|---|
+| aica 相当 | なし | 約 1GB を使う文字起こしのモデルを同じプロセスに常駐させる | minor: Brief がない。関門 3(512MB の 1 台でメモリ不足)、2、0 に触れる | NO-GO(blocking はメモリの食い違いで、ほかの批評から) |
+| Brief がそろっている | POC、7 つの関門すべて | 送信ボタンの文言を変える | Blocking も Minor も `none` | GO |
+| 本番なのに欠けている | 本番、関門 3 が空、関門 6 が「今はやらない」 | aica 相当と同じ | blocking: 関門 3 と 6 に決定がない | NO-GO |
+
+わかったことです。
+
+- **Readiness が Architect の blocking を下げることがある。** 1 回目の「本番なのに欠けている」では、Readiness が関門 6 を
+  「『今はやらない』は決定なので minor」と下げました。READINESS.md の Readiness の段に、「今はやらない」は本番では決定がないのと
+  同じ、と書き足したあとは、関門 3 と 6 の両方が blocking に残りました。上の表は直したあとの結果です。
+- 時間は 1 回 45 秒〜2.5 分でした(Goldfish 6 体)。関門に触れないカードでも Architect の 1 体分は動きます。
+
 ## task-hub のシンプルさのルール
 
 1. このプロジェクトで示されたユーザーのニーズがない機能は作りません。「役に立つかもしれない」では不十分です。
