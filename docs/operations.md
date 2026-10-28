@@ -131,7 +131,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの
 `replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、
-`merged`、`conflict`。[マージキュー](#マージキュー))です。`reason`(Blocked の 1 行、`slow` では
+`merged`、`conflict`。[マージキュー](#マージキュー))、マージしたあとの GitHub のブランチの `branch`([マージしたあとのブランチ](#マージしたあとのブランチ))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
 GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
@@ -473,6 +473,7 @@ rerun = 1           ; 既定は 1: 落ちたチェックを同じコミットで
 | `merged` | マージした(すぐあとに `Done` も出る) | マージ先 |
 | `Blocked` | 止めた(いつもの Status の出来事) | `merge queue: ...` |
 | `conflict` | キューにない In review の PR が競合した | 競合した base |
+| `branch` | マージした PR の `task/<番号>` を GitHub から消した、または残した(`action` が `deleted`、`kept`、`failed`) | 何をしたか、残したわけ |
 
 どれも `task events`、`/chief`(`--only` に足したもの)、ntfy(`[notify] events` に足したもの)から見えます。通知の既定には
 `conflict` と(いつもの)`Blocked`、`Done` が入っています(`ci-rerun` は入っていません)。
@@ -493,6 +494,34 @@ rerun = 1           ; 既定は 1: 落ちたチェックを同じコミットで
 
 チェックを待つ間や、GitHub がまだ計算中(`UNKNOWN`、チェックが通った直後の `UNSTABLE`)のときは、キューの同じリポジトリのほかの PR も待ちます。
 別のリポジトリのキューは止まりません。
+
+### マージしたあとのブランチ
+
+カードを Done にするとき、マージ済みの PR の `task/<番号>` を GitHub から消します。リポジトリの設定
+「Automatically delete head branches」がオフでも、ブランチが残らないようにするためです。消すのは次のときです。
+
+- マージキューがマージしたとき
+- 人が GitHub でマージした PR を、マージの確認(`task` の同期)が見つけて Done にしたとき
+- PR の「Closes ...」で Issue が閉じ、GitHub がカードを Done にしたあと、同期が後片付けするとき(このマシンで動かしたカード)
+- In review、wait for merge、Blocked のカードを `task done` したとき(PR がマージ済みなら)
+
+次のときは消しません。マージは成功のままで、理由を出来事 `branch` に残します。
+
+| `reason` | わけ |
+|---|---|
+| `kept task/<番号> on GitHub: it is at <コミット>, not at the merged PR's <コミット>` | マージのあとにコミットが足されました。消すとそのコミットが失われます |
+| `kept task/<番号> on GitHub: an open PR is based on it` | そのブランチに向けた開いている PR があります。消すと GitHub がその PR を閉じます |
+| `could not delete task/<番号> on GitHub: <gh のことば>` | 権限がない、ブランチのルールで守られているなど。手で消します |
+
+マージしていない PR、開いている PR のブランチは消しません。消したときは `action: deleted` の `branch` を書きます。
+すでにない(GitHub の設定が消した)ときは何も書きません。`branch` は `[notify] events` の既定には入れていません。
+
+設定がオフのリポジトリは、`task` と `task watch` が 1 日に 1 回、次の 1 行で知らせます。対象は、In review か
+wait for merge のカードのあるリポジトリと、`[autopilot] repos` のリポジトリです。
+
+```
+settings: <repo> keeps merged branches (GitHub's "Automatically delete head branches" is off); task-hub deletes task/<id> itself, but turn it on: https://github.com/<repo>/settings
+```
 
 ## 実行の結果を集計する
 
@@ -606,6 +635,7 @@ OpenAI には API キーで残高を読む公式の API が見当たりません
 | 設定 | `~/.config/task-hub/config.ini` |
 | 実行中の情報 | `~/.local/state/task-hub/runs/<番号>.json`(このマシンだけ) |
 | マージキュー | `~/.local/state/task-hub/merge-queue.json`(このマシンだけ) |
+| 作業先のリポジトリの「マージしたらブランチを消す」設定(1 日 1 回読む) | `~/.local/state/task-hub/repo-settings.json` |
 | ログ | `~/.local/state/task-hub/logs/<番号>.log` |
 | 実行ごとの記録(`task stats` が集計) | `~/.local/state/task-hub/metrics.jsonl` |
 | トリガーが作ったものの記録([triggers.md](triggers.md)) | `~/.local/state/task-hub/triggers.json` |
