@@ -181,7 +181,7 @@ archives the oldest Done cards.
 | `task watch` | Starts Ready cards automatically (every minute) |
 | `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards, and handles the Merge and Reject buttons of In review notifications ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task check <id> [--no-write]` | Checks the Goal before Ready: GO or NO-GO on the Issue and in the Project's Readiness field (`[runner] readiness` can require a GO to start) |
-| `task review <id> --no-write --ref <commit>` | Tries the automated review on a card's code at a commit and prints the verdict, to compare `[runner] review_mode` on past cards. Writes nothing |
+| `task review <id> --no-write --ref <commit>` | Tries the automated review on a card's code at a commit and prints the verdict, to compare `[runner] review_mode` and cheaper reviews on past cards. Writes nothing |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
