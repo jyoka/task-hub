@@ -1051,3 +1051,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 - `tests/bench.py`: 弱い PC 向けの計測。使い捨ての HOME と偽物の `gh` で、1 度に 1 プロセスずつ動かす([benchmark.md](../benchmark.md))。テストではない
 - `tests/durable_bench.py`: 止まった実行の再開の A、B、C を、本物のエージェントとモデルで比べる実験。使い捨ての HOME、偽物の `gh`、手元の bare リポジトリで、
   同じ課題を同じ落とし方(T1〜T4 × K1〜K3)で 63 回動かし、1 回ごとに 1 行の JSON を残す([durable-runs-comparison.md](../durable-runs-comparison.md))。テストではない
+- `tests/media.py`: README と LP の画像を撮る。使い捨ての HOME、偽物の `gh`、ゲートで待つ偽物のエージェントで、架空のカードを
+  Ready からマージまで動かし、mod の盤は `claude plugin test`、Kiro の盤は node で、それぞれのコードに描かせる。Chrome で撮り、
+  ffmpeg で GIF、WebM、AVIF にして `assets/media/` に置く([media.md](../media.md))。テストではない。`tests/test_media.py` が、
+  置いた画像の大きさと写してはいけないものを確かめ、カードを 2 回動かして同じ文字になることを確かめる
