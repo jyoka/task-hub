@@ -47,6 +47,10 @@ python3 tests/media.py
 WebM は LP の `<video>` 用。README には 2026-10-29 に置いた(一番上の動く画像と、「特長」の画面 4 枚の表)。
 `prefers-reduced-motion` のときは、動く画像の代わりに `list-*.png` を出す。下は短い例。README の alt は、絵の中身を書いた長い文にしている。
 
+LP([`site/`](../site/))は、ここの画像をそのまま読む(`site/assets` は `assets/` へのリンク)。撮り直すと LP の絵も変わる。
+機能のカードの絵は、画面の一部を CSS で拡大して切り出している(`site/site.css` の `.crop-*`。画像の大きさを px で書いてある)。
+画像の大きさや写る位置が変わったら、切り出す所も直す。`python3 tests/run.py test_site` が、LP の読む画像が全部あることを確かめる。
+
 ```html
 <picture>
   <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="assets/media/list-dark.png">

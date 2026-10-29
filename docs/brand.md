@@ -59,9 +59,10 @@ GitHub の About は運営者が変える。案は A の英語をそのまま使
 | `README.ja.md` の太字 | 日本語 |
 | バナー(6 節) | 両方 |
 | GitHub の About | 英語(運営者が変える) |
-| LP の見出し、フッター、`llms.txt` | 日本語と英語(LP のカードで作る) |
+| LP の見出し、フッター、`llms.txt`([`site/`](../site/)) | 日本語と英語 |
 
 [`tests/test_brand.py`](../tests/test_brand.py) が、2 つの README の太字、この文書、2 枚のバナーの文が同じかを確かめる。
+LP の見出し、フッター、`site/llms.txt` は [`tests/test_site.py`](../tests/test_site.py) が確かめる。
 
 ### 英語の言葉
 
@@ -259,7 +260,7 @@ CONTRIBUTING.md、SECURITY.md、AGENTS.md と、docs/ の全部。手順や決�
 `tests/test_brand.py` の `test_the_public_docs_name_no_private_board_or_work` が、README の 2 つ、CONTRIBUTING.md、
 SECURITY.md、AGENTS.md、docs/ の全部の `.md` に、上の種類の名前が戻っていないかを確かめる。探す名前は、テストの
 `PRIVATE` にある。この文書には名前を書かない(書くと、この文書が名前を出すことになるため)。
-LP はまだない。LP のカードで、同じ確かめを LP にも足す。
+LP([`site/`](../site/))は、`tests/test_site.py` が同じ確かめをする。
 
 ### 残した所: docs の外
 
@@ -279,5 +280,6 @@ LP はまだない。LP のカードで、同じ確かめを LP にも足す。
 - README の絵のカード: 済み(2026-10-29)。バナー、1 文の下の動く画像、「特長」の画面 4 枚の表を置き、
   [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` を直した。
   分解の絵は README には置かず、LP に任せた(4 節)
-- LP のカード: 1 文を見出し、フッター、`llms.txt` で同じ文のまま使う。機能のカード 8 枚(3 節)、分解の絵(4 節)、`tokens.css` を使う。
-  外から読み込まない、`prefers-reduced-motion` で止まる、スマホの幅で崩れないを、テストで確かめる
+- LP のカード: 済み(2026-10-29)。[`site/`](../site/) に置いた。公開はしていない。開き方、確かめ方、GitHub Pages に出す手順は
+  [site/README.md](../site/README.md)。`tests/test_site.py` が、1 文、機能のカード 8 枚と 8 つの層がこの文書と同じこと、外から読み込まないこと、
+  `prefers-reduced-motion` で動かない作りを確かめる。スクロールの動きとスマホの幅は、手元の Chrome で確かめた
