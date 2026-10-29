@@ -46,6 +46,10 @@ python3 tests/media.py
 ダークとライトは `<picture>` で出し分ける。動く画像は AVIF を出し、AVIF を出せないブラウザーには GIF を出す。
 WebM は LP の `<video>` 用。置くのは README の絵のカードと LP のカード。
 
+LP([`site/`](../site/))は、ここの画像をそのまま読む(`site/assets` は `assets/` へのリンク)。撮り直すと LP の絵も変わる。
+機能のカードの絵は、画面の一部を CSS で拡大して切り出している(`site/site.css` の `.crop-*`。画像の大きさを px で書いてある)。
+画像の大きさや写る位置が変わったら、切り出す所も直す。`python3 tests/run.py test_site` が、LP の読む画像が全部あることを確かめる。
+
 ```html
 <picture>
   <source type="image/avif" srcset="assets/media/flow.avif">

@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Nothing loads from outside. The policy is a meta tag so that it holds on GitHub Pages too -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>task-hub: Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</title>
+<meta name="description" content="Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/brand/tokens.css">
+<link rel="stylesheet" href="site.css">
+<script src="site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main"><span data-lang="en">Skip to content</span><span data-lang="ja">本文へ</span></a>
+
+<header class="bar">
+  <a class="bar-name" href="#top"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="9.5" y="4" width="5" height="11" rx="1"/><rect x="16" y="4" width="5" height="7" rx="1"/></svg>task-hub</a>
+  <nav class="bar-nav" aria-label="On this page" data-ja-aria-label="ページの中">
+    <a href="#layers"><span data-lang="en">Layers</span><span data-lang="ja">分解</span></a>
+    <a href="#features"><span data-lang="en">Features</span><span data-lang="ja">できること</span></a>
+    <a href="#start"><span data-lang="en">Start</span><span data-lang="ja">始める</span></a>
+    <a href="#compare"><span data-lang="en">Compare</span><span data-lang="ja">比べる</span></a>
+  </nav>
+  <div class="bar-tools">
+    <button type="button" id="lang-toggle" class="chip" lang="ja">日本語</button>
+    <button type="button" id="theme-toggle" class="chip" title="Switch the theme" data-ja-title="見た目を切り替える"><span class="theme-to-dark"><span data-lang="en">Dark</span><span data-lang="ja">ダーク</span></span><span class="theme-to-light"><span data-lang="en">Light</span><span data-lang="ja">ライト</span></span></button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- 1. The headline: the name, the one sentence (docs/brand.md section 1), and who it is for (section 2) -->
+<section class="hero" id="top">
+  <h1 class="hero-name">task-hub</h1>
+  <p class="hero-line" id="sentence"><span data-lang="en">Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</span><span data-lang="ja">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。</span></p>
+  <div class="hero-text">
+    <p><span data-lang="en">You move a card to Ready and merge the PR.</span><span data-lang="ja">人がするのは、カードを Ready に移すことと、PR をマージすることだけ。</span></p>
+    <p><span data-lang="en">task-hub and your agents do the rest: implement, test, review in a fresh context, open the PR, and sort out why a task stopped.</span><span data-lang="ja">その間の実装、テスト、新しい文脈のレビュー、PR、止まった理由の仕分けは、task-hub とエージェントが進める。</span></p>
+    <p><span data-lang="en">Each card leaves its report and review verdict on the Issue. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.</span><span data-lang="ja">どのカードも、Issue にレポートとレビューの判定が残る。非対話モードを持つエージェント CLI なら、どれでも動かせる(Claude Code、Codex、Pi、Kiro など)。</span></p>
+  </div>
+  <div class="hero-actions">
+    <a class="button primary" data-cta="start" href="https://github.com/jyoka/task-hub#get-started" data-ja-href="https://github.com/jyoka/task-hub/blob/main/README.ja.md#はじめる"><span data-lang="en">Get started</span><span data-lang="ja">はじめる</span></a>
+    <a class="button" data-cta="demo" href="#demo"><span data-lang="en">See it work</span><span data-lang="ja">動きを見る</span></a>
+    <a class="button" data-cta="github" href="https://github.com/jyoka/task-hub">GitHub</a>
+  </div>
+  <figure class="demo" id="demo">
+    <div class="shot">
+      <video id="demo-video" controls muted loop playsinline preload="metadata" width="1200" height="680" aria-label="A card moves from Ready to a merged PR: the terminal on the left, the board on the right." data-ja-aria-label="カードが Ready からマージされた PR になるまで。左にターミナル、右にボード">
+        <source src="assets/media/flow.webm" type="video/webm">
+      </video>
+    </div>
+    <figcaption><span data-lang="en">15 seconds. Card #12 goes from Ready to a merged PR, with one send-back from the review. The marks at the top say who acted: You, task-hub, or Agent. Also as a <a href="assets/media/flow.gif">GIF</a>.</span><span data-lang="ja">15 秒。カード #12 が Ready からマージされた PR になるまで。レビューで 1 回差し戻される。上の印は、誰がしたか(You、task-hub、Agent)。<a href="assets/media/flow.gif">GIF</a> もある。</span></figcaption>
+  </figure>
+</section>
+
+<!-- 2. The layers (docs/brand.md section 4). site.js moves them; without motion, the eight layers stand in a column -->
+<section class="layers" id="layers" aria-labelledby="layers-title">
+  <div class="section-head">
+    <h2 id="layers-title"><span data-lang="en">One card, layer by layer.</span><span data-lang="ja">1 枚のカードを、層ごとに見る。</span></h2>
+    <p><span class="when-motion"><span data-lang="en">Scroll to split the life of one card into eight layers.</span><span data-lang="ja">スクロールすると、1 枚のカードの一生が 8 つの層に分かれます。</span></span><span class="when-still"><span data-lang="en">The life of one card, split into eight layers.</span><span data-lang="ja">1 枚のカードの一生を、8 つの層に分けて並べました。</span></span> <span data-lang="en">The color says who does the work. Every picture is task-hub's own screen, with a made-up card run against a fake GitHub.</span><span data-lang="ja">色は、誰がするかを表します。絵はどれも task-hub が自分で撮った画面で、架空のカードを偽物の GitHub で動かしたものです。</span></p>
+    <ul class="legend" aria-label="Who does the work" data-ja-aria-label="誰がするか">
+      <li class="actor-you"><span data-lang="en">You</span><span data-lang="ja">あなた</span></li>
+      <li class="actor-task-hub"><span data-lang="en">task-hub's code</span><span data-lang="ja">task-hub のコード</span></li>
+      <li class="actor-agent"><span data-lang="en">Agent (LLM)</span><span data-lang="ja">エージェント(LLM)</span></li>
+    </ul>
+  </div>
+  <div class="layers-track">
+    <div class="layers-stage">
+      <div class="layers-side">
+        <div class="layers-readout" aria-live="polite">
+          <p class="layer-count"><span class="layer-now">01</span> / 08</p>
+          <div class="layer-text"></div>
+        </div>
+        <dl class="example-card" aria-label="The example card (made up)" data-ja-aria-label="例のカード(架空)">
+          <div><dt><span data-lang="en">Card</span><span data-lang="ja">カード</span></dt><dd><code>you/tasks#12</code> <span data-lang="en">Add a search box to the notes list</span><span data-lang="ja">メモの一覧に検索欄を付ける</span></dd></div>
+          <div><dt><span data-lang="en">Repository</span><span data-lang="ja">作業先</span></dt><dd><code>you/notes-app</code></dd></div>
+          <div><dt><span data-lang="en">Acceptance</span><span data-lang="ja">受け入れ条件</span></dt><dd><span data-lang="en">Finds notes by title or body, ignoring case (<code>milk</code> finds <code>Buy Milk</code>). Has tests.</span><span data-lang="ja">題名か本文から探せる。大文字と小文字を区別しない(<code>milk</code> で <code>Buy Milk</code> が見つかる)。テストがある。</span></dd></div>
+          <div><dt><span data-lang="en">Review</span><span data-lang="ja">レビュー</span></dt><dd><span class="verdict-changes">needs changes</span> → <span class="verdict-pass">pass</span></dd></div>
+        </dl>
+      </div>
+      <div class="layers-scene">
+        <ol class="layers-stack">
+          <li class="layer actor-you" data-layer="1">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/1-card-light.png" width="1020" height="1030" loading="lazy" alt="The board in Claude Code: #12 waits in Ready, at the pier." data-ja-alt="Claude Code の盤。#12 が「待ち」(Ready)で、桟橋にいる">
+                <img class="on-dark" src="assets/media/layers/1-card-dark.png" width="1020" height="1030" loading="lazy" alt="The board in Claude Code: #12 waits in Ready, at the pier." data-ja-alt="Claude Code の盤。#12 が「待ち」(Ready)で、桟橋にいる">
+              </div>
+              <figcaption>
+                <span class="layer-num">01 / 08</span>
+                <strong class="layer-name"><span data-lang="en">GitHub Project card</span><span data-lang="ja">GitHub Project のカード</span></strong>
+                <span class="layer-line"><span data-lang="en">You move the card from Backlog to Ready: the go-ahead.</span><span data-lang="ja">あなたが Backlog から Ready に移す。始めてよい、という合図。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: #12 waits in Ready on the board.</span><span data-lang="ja">この例: ボードの Ready の列に #12 がいる。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-task-hub" data-layer="2">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/2-runner-light.png" width="1800" height="566" loading="lazy" alt="task list: #12 is In progress, agent." data-ja-alt="task list。#12 が In progress › agent">
+                <img class="on-dark" src="assets/media/layers/2-runner-dark.png" width="1800" height="566" loading="lazy" alt="task list: #12 is In progress, agent." data-ja-alt="task list。#12 が In progress › agent">
+              </div>
+              <figcaption>
+                <span class="layer-num">02 / 08</span>
+                <strong class="layer-name"><span data-lang="en">task-hub runner</span><span data-lang="ja">task-hub の runner</span></strong>
+                <span class="layer-line"><span data-lang="en"><code>task watch</code> reads the board every minute and starts the card in a free slot.</span><span data-lang="ja"><code>task watch</code> が 1 分ごとにボードを読み、空いた枠でカードを始める。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: <code>task list</code> shows #12 as <code>In progress › agent</code>.</span><span data-lang="ja">この例: <code>task list</code> で #12 が <code>In progress › agent</code>。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-task-hub" data-layer="3">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/3-worktree-light.png" width="1800" height="440" loading="lazy" alt="In the worktree: the branch is task/12." data-ja-alt="worktree の中。ブランチは task/12">
+                <img class="on-dark" src="assets/media/layers/3-worktree-dark.png" width="1800" height="440" loading="lazy" alt="In the worktree: the branch is task/12." data-ja-alt="worktree の中。ブランチは task/12">
+              </div>
+              <figcaption>
+                <span class="layer-num">03 / 08</span>
+                <strong class="layer-name"><span data-lang="en">Worktree</span><span data-lang="ja">worktree</span></strong>
+                <span class="layer-line"><span data-lang="en">One branch and one working folder per card, apart from every other card.</span><span data-lang="ja">カードごとのブランチと作業場所。ほかのカードと混ざらない。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: the branch <code>task/12</code>.</span><span data-lang="ja">この例: ブランチ <code>task/12</code>。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-agent" data-layer="4">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/4-agent-light.png" width="1800" height="944" loading="lazy" alt="The report the agent wrote, .task-report.md." data-ja-alt="エージェントが書いたレポート .task-report.md">
+                <img class="on-dark" src="assets/media/layers/4-agent-dark.png" width="1800" height="944" loading="lazy" alt="The report the agent wrote, .task-report.md." data-ja-alt="エージェントが書いたレポート .task-report.md">
+              </div>
+              <figcaption>
+                <span class="layer-num">04 / 08</span>
+                <strong class="layer-name"><span data-lang="en">Local coding agent</span><span data-lang="ja">手元のエージェント</span></strong>
+                <span class="layer-line"><span data-lang="en">Edits files, runs the tests, and writes a report. It never touches git.</span><span data-lang="ja">ファイルを編集し、テストを動かし、レポートを書く。git には触らない。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: the search box change and <code>.task-report.md</code>.</span><span data-lang="ja">この例: 検索欄の変更と <code>.task-report.md</code>。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-agent layer-review" data-layer="5">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/5-review-light.png" width="1800" height="944" loading="lazy" alt="task log 12: the first review says needs changes, the agent tries again, and the second review says pass." data-ja-alt="task log 12。1 回目のレビューは needs changes、やり直して、2 回目は pass">
+                <img class="on-dark" src="assets/media/layers/5-review-dark.png" width="1800" height="944" loading="lazy" alt="task log 12: the first review says needs changes, the agent tries again, and the second review says pass." data-ja-alt="task log 12。1 回目のレビューは needs changes、やり直して、2 回目は pass">
+                <span class="verdict-mark" aria-hidden="true"><span class="verdict-changes">needs changes</span><span class="verdict-arrow">→</span><span class="verdict-pass">pass</span></span>
+              </div>
+              <figcaption>
+                <span class="layer-num">05 / 08</span>
+                <strong class="layer-name"><span data-lang="en">Fresh-context review</span><span data-lang="ja">新しい文脈のレビュー</span></strong>
+                <span class="layer-line"><span data-lang="en">Another agent checks each acceptance criterion and sends the work back if one fails.</span><span data-lang="ja">別のエージェントが、受け入れ条件を 1 つずつ確かめる。足りなければ差し戻す。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: the first review says <code>needs changes</code> (it was case-sensitive), the second says <code>pass</code>.</span><span data-lang="ja">この例: 1 回目は <code>needs changes</code>(大文字と小文字を区別していた)、2 回目は <code>pass</code>。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-task-hub" data-layer="6">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/6-pr-light.png" width="1800" height="650" loading="lazy" alt="task show 12 --digest: the verdict pass and the PR." data-ja-alt="task show 12 --digest。判定 pass と PR">
+                <img class="on-dark" src="assets/media/layers/6-pr-dark.png" width="1800" height="650" loading="lazy" alt="task show 12 --digest: the verdict pass and the PR." data-ja-alt="task show 12 --digest。判定 pass と PR">
+              </div>
+              <figcaption>
+                <span class="layer-num">06 / 08</span>
+                <strong class="layer-name"><span data-lang="en">PR</span><span data-lang="ja">PR</span></strong>
+                <span class="layer-line"><span data-lang="en">task-hub pushes, opens the PR, and writes the report and the verdict on the Issue.</span><span data-lang="ja">task-hub が push して PR を開き、レポートと判定を Issue に書く。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: the PR on <code>you/notes-app</code>. The card is In review.</span><span data-lang="ja">この例: <code>you/notes-app</code> の PR。カードは In review。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-task-hub" data-layer="7">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/7-merge-queue-light.png" width="1800" height="944" loading="lazy" alt="task merge 12, then task list with #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列に #12 がいる task list">
+                <img class="on-dark" src="assets/media/layers/7-merge-queue-dark.png" width="1800" height="944" loading="lazy" alt="task merge 12, then task list with #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列に #12 がいる task list">
+              </div>
+              <figcaption>
+                <span class="layer-num">07 / 08</span>
+                <strong class="layer-name"><span data-lang="en">Merge queue</span><span data-lang="ja">マージの順番待ち</span></strong>
+                <span class="layer-line"><span data-lang="en">Brings the approved PR up to date with its base and waits for its checks, one per repository at a time.</span><span data-lang="ja">承認した PR を base に追いつかせ、チェックを待つ。1 つのリポジトリで 1 度に 1 本。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: <code>task merge 12</code> and the <code>wait for merge</code> column.</span><span data-lang="ja">この例: <code>task merge 12</code> と、<code>wait for merge</code> の列。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+          <li class="layer actor-you" data-layer="8">
+            <figure>
+              <div class="layer-shot shot">
+                <img class="on-light" src="assets/media/layers/8-merge-light.png" width="1800" height="524" loading="lazy" alt="task events: merged, Done, and the branch deleted." data-ja-alt="task events。merged、Done、ブランチの削除">
+                <img class="on-dark" src="assets/media/layers/8-merge-dark.png" width="1800" height="524" loading="lazy" alt="task events: merged, Done, and the branch deleted." data-ja-alt="task events。merged、Done、ブランチの削除">
+              </div>
+              <figcaption>
+                <span class="layer-num">08 / 08</span>
+                <strong class="layer-name"><span data-lang="en">Merge</span><span data-lang="ja">マージ</span></strong>
+                <span class="layer-line"><span data-lang="en">The PR goes in, the Issue closes, and the worktree is cleaned up. Cards waiting on it start.</span><span data-lang="ja">PR が入り、Issue が閉じ、worktree が片付く。待っていたカードが始まる。</span></span>
+                <span class="layer-line"><span data-lang="en">Here: the card is Done. Under <code>[autopilot]</code>, task-hub merges instead of you.</span><span data-lang="ja">この例: カードは Done。<code>[autopilot]</code> では、あなたの代わりに task-hub がマージする。</span></span>
+              </figcaption>
+            </figure>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </div>
+  <p class="section-foot"><span data-lang="en">An LLM does only three jobs: implement, review, and sort out why a task stopped. Code decides when to start, when to notify, and when to clean up.</span><span data-lang="ja">LLM を使うのは、実装、レビュー、止まった理由の仕分けの 3 か所だけ。いつ始めるか、いつ知らせるか、いつ片付けるかは、コードが決める。</span></p>
+</section>
+
+<!-- 3. Features: the eight cards of docs/brand.md section 3. Each picture opens the docs for its feature -->
+<section class="features" id="features" aria-labelledby="features-title">
+  <div class="section-head">
+    <h2 id="features-title"><span data-lang="en">What it does</span><span data-lang="ja">できること</span></h2>
+    <p><span data-lang="en">The pictures are screens task-hub took of itself. Click one to open the docs for that feature (in Japanese).</span><span data-lang="ja">絵は task-hub が自分で撮った画面です。押すと、その機能の docs が開きます。</span></p>
+  </div>
+  <ul class="cards">
+    <li class="card">
+      <a class="card-shot shot crop crop-list" href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md#見え方と手元に残るもの">
+        <img class="on-light" src="assets/media/list-light.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
+        <img class="on-dark" src="assets/media/list-dark.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
+      </a>
+      <h3><span data-lang="en">One PR per task</span><span data-lang="ja">1 タスク 1 PR</span></h3>
+      <p><span data-lang="en">Each card gets one branch, one worktree, and one PR.</span><span data-lang="ja">1 枚のカードに、1 つのブランチ、1 つの worktree、1 つの PR。</span></p>
+      <p><span data-lang="en">Up to 5 run at the same time, on branches named <code>task/&lt;id&gt;</code>.</span><span data-lang="ja">最大 5 つを並べて動かし、ブランチは <code>task/&lt;番号&gt;</code>。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot shot crop crop-review" href="https://github.com/jyoka/task-hub/blob/main/docs/task-format.md#goldfish-のレビューrunner-review_mode">
+        <img class="on-light" src="assets/media/review-light.png" width="1800" height="1406" loading="lazy" alt="The first review says needs changes; the final verdict is pass." data-ja-alt="1 回目のレビューは needs changes、最後の判定は pass">
+        <img class="on-dark" src="assets/media/review-dark.png" width="1800" height="1406" loading="lazy" alt="The first review says needs changes; the final verdict is pass." data-ja-alt="1 回目のレビューは needs changes、最後の判定は pass">
+      </a>
+      <h3><span data-lang="en">Pre-PR review</span><span data-lang="ja">PR の前のレビュー</span></h3>
+      <p><span data-lang="en">An agent in a fresh context checks each acceptance criterion.</span><span data-lang="ja">新しい文脈のエージェントが、受け入れ条件を 1 つずつ確かめる。</span></p>
+      <p><span data-lang="en">It sends the work back 2 times at most by default. With <code>review_mode = goldfish</code>, two viewpoints that skip the report check it.</span><span data-lang="ja">差し戻しは既定で 2 回まで。<code>review_mode = goldfish</code> では、レポートを読まない 2 つの視点が見る。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/task-format.md#ready-の前の確かめtask-check" aria-label="Docs: Goal check" data-ja-aria-label="docs: Goal の確認">
+        <code>task check 12</code>
+        <span class="type-row"><span class="tag tag-ok">GO</span><span class="tag tag-warn">NO-GO</span></span>
+      </a>
+      <h3><span data-lang="en">Goal check</span><span data-lang="ja">Goal の確認</span></h3>
+      <p><span data-lang="en"><code>task check &lt;id&gt;</code> has agents that know only the Goal and the code say GO or NO-GO.</span><span data-lang="ja"><code>task check &lt;番号&gt;</code> で、Goal とコードだけを知るエージェントが GO / NO-GO を出す。</span></p>
+      <p><span data-lang="en">A NO-GO comes with wording to add. With <code>readiness = require</code>, a card without a GO does not start.</span><span data-lang="ja">NO-GO には Goal に足す文言が付く。<code>readiness = require</code> なら、GO のないカードは始まらない。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#利用の上限で止まった" aria-label="Docs: Stop recovery" data-ja-aria-label="docs: 止まった後の再開">
+        <span class="type-row"><span class="tag tag-error">crash</span><span aria-hidden="true">→</span><span class="tag tag-cyan">resume ×1</span></span>
+        <span class="type-row"><span class="tag tag-warn">usage limit</span><span aria-hidden="true">→</span><span class="tag tag-cyan">wait, resume</span></span>
+      </a>
+      <h3><span data-lang="en">Stop recovery</span><span data-lang="ja">止まった後の再開</span></h3>
+      <p><span data-lang="en">A run that stops on a crash or a restart resumes once, from where it stopped.</span><span data-lang="ja">クラッシュや再起動で止まった実行を、止まった所から 1 回だけ再開する。</span></p>
+      <p><span data-lang="en">A run that hits the usage limit waits for the reset time, then goes on from the same place.</span><span data-lang="ja">利用の上限で止まったら、戻る時刻を書いて待ち、戻ったら同じ所から続ける。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot shot crop crop-claude" href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md#blocked-の仕分けreplanner">
+        <img class="on-light" src="assets/media/claude-board-light.png" width="1020" height="1156" loading="lazy" alt="The board in Claude Code: the reason #14 is Blocked, and #12 in review with its verdict and PR." data-ja-alt="Claude Code の盤。#14 が Blocked の理由と、In review の #12 の判定と PR">
+        <img class="on-dark" src="assets/media/claude-board-dark.png" width="1020" height="1156" loading="lazy" alt="The board in Claude Code: the reason #14 is Blocked, and #12 in review with its verdict and PR." data-ja-alt="Claude Code の盤。#14 が Blocked の理由と、In review の #12 の判定と PR">
+      </a>
+      <h3><span data-lang="en">Blocked triage</span><span data-lang="ja">Blocked の仕分け</span></h3>
+      <p><span data-lang="en">An agent sorts out why a task stopped and comments on the Issue.</span><span data-lang="ja">止まった理由をエージェントが仕分けて、Issue にコメントする。</span></p>
+      <p><span data-lang="en">Add the answer to the Goal, move the card to Ready, and the same PR continues.</span><span data-lang="ja">Goal に答えを足して Ready に戻すと、同じ PR で続く。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot shot crop crop-queue" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#マージキュー">
+        <img class="on-light" src="assets/media/layers/7-merge-queue-light.png" width="1800" height="944" loading="lazy" alt="task merge 12, then #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列の #12">
+        <img class="on-dark" src="assets/media/layers/7-merge-queue-dark.png" width="1800" height="944" loading="lazy" alt="task merge 12, then #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列の #12">
+      </a>
+      <h3><span data-lang="en">Merge queue</span><span data-lang="ja">マージキュー</span></h3>
+      <p><span data-lang="en"><code>task merge</code> approves a PR; the queue brings it up to date with its base, waits for its checks, and merges it.</span><span data-lang="ja"><code>task merge</code> で承認した PR を、base に追いつかせ、チェックを待ってマージする。</span></p>
+      <p><span data-lang="en">An agent fixes conflicts. One PR per repository at a time.</span><span data-lang="ja">衝突はエージェントが直す。1 つのリポジトリで 1 度に 1 本。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot shot crop crop-kiro" href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md#エージェントの変更と追加">
+        <img class="on-light" src="assets/media/kiro-board-light.png" width="1040" height="826" loading="lazy" alt="The board in the Kiro sidebar and status bar." data-ja-alt="Kiro のサイドバーの盤とステータスバー">
+        <img class="on-dark" src="assets/media/kiro-board-dark.png" width="1040" height="826" loading="lazy" alt="The board in the Kiro sidebar and status bar." data-ja-alt="Kiro のサイドバーの盤とステータスバー">
+      </a>
+      <h3><span data-lang="en">Agent choice</span><span data-lang="ja">エージェントの選択</span></h3>
+      <p><span data-lang="en">Any agent CLI with a non-interactive mode works.</span><span data-lang="ja">非対話モードを持つエージェント CLI なら、どれでも動かせる。</span></p>
+      <p><span data-lang="en">task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR.</span><span data-lang="ja">git、PR、Issue のコメントは task-hub がコードで行うので、どのエージェントでも同じ形の PR になる。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#通知llm-なし" aria-label="Docs: Alerts and cost" data-ja-aria-label="docs: 通知と費用">
+        <span class="type-row"><span class="tag tag-warn">In review</span><span class="tag tag-error">Blocked</span></span>
+        <code>task stats</code>
+      </a>
+      <h3><span data-lang="en">Alerts and cost</span><span data-lang="ja">通知と費用</span></h3>
+      <p><span data-lang="en">In review, Blocked, long runs, and runs over budget show as OS notifications and on ntfy. No LLM is used.</span><span data-lang="ja">In review、Blocked、長い実行、予算超えを、OS の通知と ntfy で知らせる。LLM は使わない。</span></p>
+      <p><span data-lang="en">Tokens and cost per launch come from the agent CLI's own records (<code>task stats</code>).</span><span data-lang="ja">起動ごとのトークンと費用を、エージェント CLI の記録から読む(<code>task stats</code>)。</span></p>
+    </li>
+  </ul>
+</section>
+
+<!-- 4. Start in three steps (the README's Get started) and the commands of the first day -->
+<section class="start" id="start" aria-labelledby="start-title">
+  <div class="section-head">
+    <h2 id="start-title"><span data-lang="en">Start in three steps</span><span data-lang="ja">3 手で始める</span></h2>
+    <p><span data-lang="en">You need macOS (Windows: <a href="https://github.com/jyoka/task-hub/blob/main/docs/windows.md">docs/windows.md</a>), Python 3.10 or later, git, <code>gh</code> logged in, and at least one agent CLI logged in.</span><span data-lang="ja">要るのは macOS(Windows は <a href="https://github.com/jyoka/task-hub/blob/main/docs/windows.md">docs/windows.md</a>)、Python 3.10 以上、git、ログイン済みの <code>gh</code>、ログイン済みのエージェント CLI 1 つ以上です。</span></p>
+  </div>
+  <ol class="steps">
+    <li>
+      <span class="step-num">1</span>
+      <strong><span data-lang="en">Install</span><span data-lang="ja">入れる</span></strong>
+      <pre><code>git clone https://github.com/jyoka/task-hub.git ~/.local/lib/task-hub
+ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task</code></pre>
+      <p><span data-lang="en">A clone of its own, apart from any clone you develop in. <code>~/.local/bin</code> must be on your PATH. <code>task update</code> keeps it current.</span><span data-lang="ja">開発用とは別の、動かす用の clone。<code>~/.local/bin</code> を PATH に入れておく。更新は <code>task update</code>。</span></p>
+    </li>
+    <li>
+      <span class="step-num">2</span>
+      <strong><span data-lang="en">Let <code>gh</code> use Projects</span><span data-lang="ja"><code>gh</code> に Project の権限</span></strong>
+      <pre><code>gh auth refresh -s project</code></pre>
+      <p><span data-lang="en">task-hub reads and moves the cards through <code>gh</code>.</span><span data-lang="ja">task-hub は <code>gh</code> でカードを読み、動かす。</span></p>
+    </li>
+    <li>
+      <span class="step-num">3</span>
+      <strong><span data-lang="en">Configure, then <code>task</code></span><span data-lang="ja">設定して <code>task</code></span></strong>
+      <pre><code>; ~/.config/task-hub/config.ini
+[board]
+project = &lt;owner&gt;/&lt;project number&gt;
+issues = &lt;owner&gt;/&lt;repository that holds the Issues&gt;
+
+[runner]
+agent = claude
+reviewer = agent</code></pre>
+      <pre><code>task list   # <span data-lang="en">check the config</span><span data-lang="ja">設定を確かめる</span>
+task        # <span data-lang="en">start Ready cards</span><span data-lang="ja">Ready のカードを始める</span></code></pre>
+      <p><span data-lang="en"><code>reviewer = agent</code> turns on the review before the PR. Prepare the Project's columns and fields with <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>.</span><span data-lang="ja"><code>reviewer = agent</code> で PR の前のレビューが動く。Project の列と欄の用意は <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>。</span></p>
+    </li>
+  </ol>
+  <h3 class="table-title"><span data-lang="en">Commands for the first day</span><span data-lang="ja">最初の日に要るコマンド</span></h3>
+  <div class="table-wrap">
+    <table class="ops">
+      <thead>
+        <tr><th scope="col"><span data-lang="en">To do this</span><span data-lang="ja">したいこと</span></th><th scope="col"><span data-lang="en">Run</span><span data-lang="ja">コマンド</span></th></tr>
+      </thead>
+      <tbody>
+        <tr><td><span data-lang="en">See the open cards (read only)</span><span data-lang="ja">開いているカードを見る(読むだけ)</span></td><td><code>task list</code></td></tr>
+        <tr><td><span data-lang="en">Register a task from a chat with your agent</span><span data-lang="ja">エージェントとの会話からタスクを登録する</span></td><td><code>/task</code>, <code>/chief</code> <span data-lang="en">(the skills; the names differ per agent: <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md#task-と-chief-スキルのインストール">setup.md</a>)</span><span data-lang="ja">(スキル。呼び方はエージェントごとに違う: <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md#task-と-chief-スキルのインストール">setup.md</a>)</span></td></tr>
+        <tr><td><span data-lang="en">Register a task from the terminal</span><span data-lang="ja">ターミナルからタスクを登録する</span></td><td><code>task new --title ... --repo owner/name --goal ...</code></td></tr>
+        <tr><td><span data-lang="en">Approve a Backlog card, or run a Blocked card again</span><span data-lang="ja">Backlog のカードを承認する、Blocked のカードをもう一度動かす</span></td><td><code>task start &lt;id&gt;</code></td></tr>
+        <tr><td><span data-lang="en">Start Ready cards on their own, every minute</span><span data-lang="ja">Ready のカードを 1 分ごとに自動で始める</span></td><td><code>task watch</code></td></tr>
+        <tr><td><span data-lang="en">Read the report and the verdict</span><span data-lang="ja">レポートと判定を読む</span></td><td><code>task show &lt;id&gt;</code></td></tr>
+        <tr><td><span data-lang="en">See the end of the run's output on this machine</span><span data-lang="ja">このマシンでの実行の出力の終わりを見る</span></td><td><code>task log &lt;id&gt;</code> <span data-lang="en">(<code>--full</code> for all of it)</span><span data-lang="ja">(全部は <code>--full</code>)</span></td></tr>
+        <tr><td><span data-lang="en">See every flag</span><span data-lang="ja">全部のフラグを見る</span></td><td><code>task help</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="section-foot"><span data-lang="en">More in the <a href="https://github.com/jyoka/task-hub#get-started">README</a>, <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>, and <a href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md">docs/usage.md</a> (in Japanese).</span><span data-lang="ja">詳しくは <a href="https://github.com/jyoka/task-hub/blob/main/README.ja.md#はじめる">README の「はじめる」</a>、<a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>、<a href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md">docs/usage.md</a> にあります。</span></p>
+</section>
+
+<!-- 5. Compare. The other columns hold only what the kind of tool decides; what was not checked is "-" -->
+<section class="compare" id="compare" aria-labelledby="compare-title">
+  <div class="section-head">
+    <h2 id="compare-title"><span data-lang="en">Compare</span><span data-lang="ja">比べる</span></h2>
+    <p><span data-lang="en">Two kinds of tools close to task-hub: cloud agents you assign a GitHub Issue to, and board apps that run agents on your machine. task-hub keeps the board on GitHub and runs the agents on your Mac.</span><span data-lang="ja">task-hub に近い道具は 2 種類あります。GitHub の Issue を割り当てるクラウドのエージェントと、手元でエージェントを動かすボードのアプリです。task-hub は、ボードを GitHub に置き、エージェントを手元の Mac で動かします。</span></p>
+  </div>
+  <div class="table-wrap">
+    <table class="vs">
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          <th scope="col"><span data-lang="en">Cloud agents you assign a GitHub Issue to</span><span data-lang="ja">GitHub の Issue を割り当てるクラウドのエージェント</span></th>
+          <th scope="col"><span data-lang="en">Board apps for local agents</span><span data-lang="ja">手元のエージェントのボードのアプリ</span></th>
+          <th scope="col">task-hub</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><span data-lang="en">Where the agent runs</span><span data-lang="ja">エージェントが動く所</span></th>
+          <td data-label="Cloud agents" data-label-ja="クラウドのエージェント"><span data-lang="en">The provider's cloud</span><span data-lang="ja">提供元のクラウド</span></td>
+          <td data-label="Board apps" data-label-ja="ボードのアプリ"><span data-lang="en">Your machine</span><span data-lang="ja">手元のマシン</span></td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">Your Mac, with the agent CLIs you already log in to</span><span data-lang="ja">手元の Mac。ログイン済みのエージェント CLI を使う</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span data-lang="en">Where the tasks live</span><span data-lang="ja">タスクの置き場</span></th>
+          <td data-label="Cloud agents" data-label-ja="クラウドのエージェント"><span data-lang="en">GitHub Issues</span><span data-lang="ja">GitHub の Issue</span></td>
+          <td class="unknown" data-label="Board apps" data-label-ja="ボードのアプリ">-</td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">Cards on a GitHub Project. Move one to Ready from your phone</span><span data-lang="ja">GitHub Project のカード。スマートフォンからも Ready に移せる</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span data-lang="en">Review before the PR</span><span data-lang="ja">PR の前のレビュー</span></th>
+          <td class="unknown" data-label="Cloud agents" data-label-ja="クラウドのエージェント">-</td>
+          <td class="unknown" data-label="Board apps" data-label-ja="ボードのアプリ">-</td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">With <code>reviewer = agent</code>, an agent in a fresh context checks each acceptance criterion and sends the work back, 2 times at most by default</span><span data-lang="ja"><code>reviewer = agent</code> なら、新しい文脈のエージェントが受け入れ条件を 1 つずつ確かめ、差し戻す(既定で 2 回まで)</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span data-lang="en">A task that stopped</span><span data-lang="ja">止まったタスク</span></th>
+          <td class="unknown" data-label="Cloud agents" data-label-ja="クラウドのエージェント">-</td>
+          <td class="unknown" data-label="Board apps" data-label-ja="ボードのアプリ">-</td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">Resumes once after a crash. An agent sorts out why a task is Blocked and comments on the Issue</span><span data-lang="ja">クラッシュの後に 1 回再開する。Blocked の理由をエージェントが仕分けて Issue にコメントする</span></td>
+        </tr>
+        <tr>
+          <th scope="row"><span data-lang="en">Up to the merge</span><span data-lang="ja">マージまで</span></th>
+          <td class="unknown" data-label="Cloud agents" data-label-ja="クラウドのエージェント">-</td>
+          <td class="unknown" data-label="Board apps" data-label-ja="ボードのアプリ">-</td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">With <code>[merge] queue = on</code> (off by default), <code>task merge</code> puts the PR in a merge queue, one PR per repository at a time</span><span data-lang="ja"><code>[merge] queue = on</code>(既定は off)なら、<code>task merge</code> で PR をマージキューに入れる。1 つのリポジトリで 1 度に 1 本</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="section-foot"><span data-lang="en">A "-" is a cell we have not checked, so it says nothing. See each tool's own docs for what it does.</span><span data-lang="ja">「-」は、確かめていないので書いていない所です。ほかの道具の機能は、その道具の docs を見てください。</span></p>
+</section>
+
+</main>
+
+<!-- 6. Footer -->
+<footer class="foot">
+  <p class="foot-line"><span data-lang="en">Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</span><span data-lang="ja">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。</span></p>
+  <nav class="foot-links" aria-label="Docs" data-ja-aria-label="docs">
+    <a href="https://github.com/jyoka/task-hub#readme" data-ja-href="https://github.com/jyoka/task-hub/blob/main/README.ja.md">README</a>
+    <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md"><span data-lang="en">Setup</span><span data-lang="ja">セットアップ</span></a>
+    <a href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md"><span data-lang="en">Usage</span><span data-lang="ja">使い方</span></a>
+    <a href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md"><span data-lang="en">Operations</span><span data-lang="ja">運用</span></a>
+    <a href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md"><span data-lang="en">Agents</span><span data-lang="ja">エージェント</span></a>
+    <a href="https://github.com/jyoka/task-hub/blob/main/docs/architecture/hld.md"><span data-lang="en">How it works</span><span data-lang="ja">しくみ</span></a>
+    <a href="llms.txt">llms.txt</a>
+  </nav>
+  <p class="foot-meta"><span data-lang="en">MIT license. The docs are in Japanese. The data in the pictures is made up.</span><span data-lang="ja">MIT ライセンス。docs は日本語です。絵の中のデータは、どれも架空です。</span></p>
+</footer>
+</body>
+</html>

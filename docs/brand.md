@@ -59,9 +59,10 @@ GitHub の About は運営者が変える。案は A の英語をそのまま使
 | `README.ja.md` の太字 | 日本語 |
 | バナー(6 節) | 両方 |
 | GitHub の About | 英語(運営者が変える) |
-| LP の見出し、フッター、`llms.txt` | 日本語と英語(LP のカードで作る) |
+| LP の見出し、フッター、`llms.txt`([`site/`](../site/)) | 日本語と英語 |
 
 [`tests/test_brand.py`](../tests/test_brand.py) が、2 つの README の太字、この文書、2 枚のバナーの文が同じかを確かめる。
+LP の見出し、フッター、`site/llms.txt` は [`tests/test_site.py`](../tests/test_site.py) が確かめる。
 
 ### 英語の言葉
 
@@ -251,7 +252,7 @@ rg -n -i "aica|求人|AIprogramming|ai-CA_RA|voice-(agent|resume)|LINE のトー
 | `README.ja.md` の「使い方」の例 | `Issue jyoka/tasks#12` | `Issue you/tasks#12` |
 
 `tests/test_brand.py` が、2 つの README に、運営者のボード、private のリポジトリ、仕事の名前が戻っていないかを確かめる。
-LP はまだない。LP のカードで、同じ確かめを LP にも足す。
+LP([`site/`](../site/))は、`tests/test_site.py` が同じ確かめをする。
 
 ### 残した所: docs(公開の前に直すか、運営者が決める)
 
@@ -298,5 +299,6 @@ LP はまだない。LP のカードで、同じ確かめを LP にも足す。
   何をどこに使うかと撮り直し方は [media.md](media.md)
 - README の絵のカード: バナーを README の一番上に置き(6 節の `<picture>`)、「しくみ」に分解の絵を置く。README の構成が変わるので、
   [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` も直す
-- LP のカード: 1 文を見出し、フッター、`llms.txt` で同じ文のまま使う。機能のカード 8 枚(3 節)、分解の絵(4 節)、`tokens.css` を使う。
-  外から読み込まない、`prefers-reduced-motion` で止まる、スマホの幅で崩れないを、テストで確かめる
+- LP のカード: 済み(2026-10-29)。[`site/`](../site/) に置いた。公開はしていない。開き方、確かめ方、GitHub Pages に出す手順は
+  [site/README.md](../site/README.md)。`tests/test_site.py` が、1 文、機能のカード 8 枚と 8 つの層がこの文書と同じこと、外から読み込まないこと、
+  `prefers-reduced-motion` で動かない作りを確かめる。スクロールの動きとスマホの幅は、手元の Chrome で確かめた
