@@ -116,9 +116,10 @@ issues = <owner>/<repository that holds the Issues>
 
 [runner]
 agent = claude
-reviewer = agent
 ```
 
+Each run is reviewed before its PR by the same agent in a fresh context. To turn that off, add `reviewer = off`
+under `[runner]`.
 [docs/setup.md](docs/setup.md) tells you how to prepare the GitHub Project (columns and fields), install the
 skills, and keep `task watch` running.
 

@@ -96,6 +96,7 @@ READINESS_VERDICTS = ["GO", "NO-GO"]  # its options; a blocked check clears it
 READINESS_MODES = ("off", "warn", "require")  # [runner] readiness: what starting a Ready card asks of its Goal
 REVIEW_FIELD = "Review"  # the Project's single-select field a run's last automated review fills (made when missing)
 REVIEW_VERDICTS = ["pass", "needs changes", "blocked"]  # its options; a run without a review clears it
+DEFAULT_REVIEWER = "agent"  # [runner] reviewer left out: the task's own agent, in a fresh context (off: none)
 REVIEW_MODES = ("agent", "goldfish")  # [runner] review_mode: what the reviewer is given (build_review_prompt)
 REVIEW_LINE = "<!-- task-hub review: "  # the machine-readable line of the report's Automated review (review_line)
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
@@ -178,7 +179,9 @@ READINESS = STATE / "readiness.json"  # the last readiness verdict read of each 
 EVENTS = STATE / "events.jsonl"
 ASKED = STATE / "asked"  # the herdr workspace each task was asked for in, so its tab opens there
 LIB = BIN.parent.parent  # the clone `task` runs from (~/.local/lib/task-hub, docs/setup.md)
-UPDATE = STATE / "update.json"  # the newest v* tag seen on origin, when origin was asked, and which one was notified
+# the newest v* tag seen on origin, when origin was asked, and which one was notified; also when the default reviewer
+# was noted (review_default_notice)
+UPDATE = STATE / "update.json"
 # origin is asked at most once a day (again after an hour when it could not be reached), for at most UPDATE_TIMEOUT
 UPDATE_EVERY, UPDATE_RETRY, UPDATE_TIMEOUT = 24 * 3600, 3600, 5
 EASY_SETUP_FIRST = (0, 12, 0)  # the first release the easy setup's installers put their clone on (docs/release.md)
@@ -630,7 +633,8 @@ def digest_lines(d, skip=()):
 @cache
 def config():
     c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read_dict({"runner": {"agent": "claude", "reviewer": "", "replanner": "", "pass_env": "",
+    # no reviewer here: left out, it is DEFAULT_REVIEWER (helper_agent), and review_default_notice tells it apart
+    c.read_dict({"runner": {"agent": "claude", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
                             "readiness": "off", "checker": "", "review_mode": "agent", "limit_resume": "on"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
@@ -736,9 +740,10 @@ def windows_command(argv):
 
 
 def helper_agent(t, key):
-    """The agent for [runner] reviewer or replanner: "" = off, "agent" = the task's own agent, else that name."""
-    name = config()["runner"].get(key, "").strip()
-    return t["agent"] if name == "agent" else name
+    """The agent for [runner] reviewer or replanner: "" = none (off, or written empty), "agent" = the task's own agent,
+    else that name. A reviewer left out of the config is DEFAULT_REVIEWER: the review is on unless turned off."""
+    name = config()["runner"].get(key, DEFAULT_REVIEWER if key == "reviewer" else "").strip()
+    return "" if name.lower() == "off" else t["agent"] if name == "agent" else name
 
 
 def parallel():
@@ -4578,8 +4583,8 @@ def cmd_review(a):
     t = {**t, "agent": t.get("agent") or config()["runner"]["agent"], "branch": f"task/{t['id']}"}
     reviewer = helper_agent(t, "reviewer")
     if not reviewer or not config().has_option("agents", reviewer):
-        fail(f'no reviewer: [runner] reviewer is {config()["runner"].get("reviewer", "") or "empty"}',
-             f"set it in {home(CONFIG)} (agent: the card's own agent)")
+        fail(f'no reviewer: [runner] reviewer is {config()["runner"].get("reviewer", "").strip() or "empty"}',
+             f"set it in {home(CONFIG)}, or leave it out (agent: the card's own agent)")
     check_sandbox()
     check_ready(reviewer)
     i = issue(t)
@@ -5952,7 +5957,19 @@ def sync(started_here=False):
             lines.append(f"readiness: task {t['id']} {why} (`task check {t['id']}`)")
     if started:
         lines += table("started", started, ["id", "agent", "where"])
+        lines += review_default_notice()
     return lines, board_
+
+
+def review_default_notice():
+    """Once per machine, at the first start that the default reviewer reviews (no [runner] reviewer in the config):
+    up to 0.15.0 a config without it had no automated review, so the human hears why runs take longer now."""
+    if config().has_option("runner", "reviewer") or read_update().get("review_default_noted"):
+        return []
+    write_update(review_default_noted=now())
+    return ["note: the automated review is on by default now: [runner] reviewer is not set, so each run is reviewed "
+            "by the card's own agent in a fresh context before its PR. To turn it off, set  [runner]  reviewer = off  "
+            f"in {home(CONFIG)} (shown once; see docs/setup.md)"]
 
 
 # ---------- autopilot: the human's two decisions, made by task-hub for the listed repos (docs/autopilot.md) ----------
@@ -5968,9 +5985,11 @@ def autopilot_config():
     if repos and not merge_config()["queue"]:
         fail("[autopilot] merges through the merge queue, which is off",
              f"set  [merge]  queue = on  in {home(CONFIG)} (see docs/autopilot.md)")
-    if repos and not config()["runner"].get("reviewer", "").strip():
-        fail("[autopilot] merges only what the automated review passed, and no reviewer is set",
-             f"set  [runner]  reviewer = agent  in {home(CONFIG)} (see docs/autopilot.md)")
+    if repos and not helper_agent({"agent": config()["runner"]["agent"]}, "reviewer"):
+        fail("[autopilot] merges only what the automated review passed, and no reviewer is set "
+             f"([runner] reviewer is {config()['runner'].get('reviewer', '').strip() or 'empty'})",
+             f"remove that line from {home(CONFIG)} (the default reviews with the card's own agent), "
+             "or set  [runner]  reviewer = agent  (see docs/autopilot.md)")
     return repos
 
 

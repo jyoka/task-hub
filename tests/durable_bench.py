@@ -319,7 +319,7 @@ class Box:
                  f" --model {o.model} --thinking {o.thinking} --auth {shlex.quote(str(o.pi_dir / 'auth.json'))}"
                  " {prompt}")
         return ("[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n"
-                f"[runner]\nagent = {METHODS[self.trial['method']]}\n\n"
+                f"[runner]\nagent = {METHODS[self.trial['method']]}\nreviewer = off\n\n"
                 f"[agents]\npi-a = {a}\npi-c = {c}\ndurable = {b}\n\n"
                 f"[resume]\npi-a = {a}\ndurable = {b}\n\n"  # C: no [resume], a new session
                 "[notify]\nevents =\n")

@@ -1400,7 +1400,9 @@ class TaskTest(unittest.TestCase):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
-                       + (f"reviewer = {'reviewer' if reviewer is True else reviewer}\n" if reviewer else "")
+                       # reviewer: None leaves it out (the default review), False writes off, True the fake reviewer
+                       + ("" if reviewer is None else "reviewer = off\n" if reviewer is False else
+                          f"reviewer = {'reviewer' if reviewer is True else reviewer}\n")
                        + (f"replanner = {replanner}\n" if replanner else "")
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
                        + (f"parallel = {parallel}\n" if parallel else "")
@@ -1867,6 +1869,35 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
         self.assertIn("## Blocked\n\nNeed the Stripe test key.", self.comments(tid)[-1])
+
+    def test_automated_review_runs_when_the_config_does_not_set_a_reviewer(self):
+        """The default: no [runner] reviewer line, and the card's own agent reviews it in a fresh context."""
+        self.write_config(reviewer=None)
+        tid = self.new("ok")
+        out = self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("## Automated review", self.comments(tid)[-1])
+        self.assertIn("reviewed by the agent itself", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["reviewer"], "fake")
+        self.assertEqual(self.metrics(1)[-1]["reviews"], ["pass"])
+        # told once that the review is on by default now, and how to turn it off
+        self.assertIn("note: the automated review is on by default", out)
+        self.assertIn("reviewer = off", out)
+        other = self.new("ok", "second")
+        self.assertNotIn("note: the automated review", self.task("start", other))
+        self.assertEqual(self.wait(other), "In review")
+
+    def test_reviewer_off_or_empty_turns_the_automated_review_off(self):
+        for n, value in enumerate(("off", "OFF", ""), 1):
+            with self.subTest(value=value):
+                self.write_config(reviewer=value)
+                tid = self.new("ok", f"no review {value!r}")
+                out = self.task("start", tid)
+                self.assertEqual(self.wait(tid), "In review")
+                self.assertNotIn("## Automated review", self.comments(tid)[-1])
+                self.assertEqual((self.metrics(n)[-1]["reviews"], self.metrics(n)[-1]["reviewer"]), ([], ""))
+                self.assertNotIn("note: the automated review", out)
+        self.assertEqual(self.reviewer_calls(), [])
 
     def test_automated_review_can_send_one_retry_before_in_review(self):
         self.write_config(reviewer=True)
@@ -8538,6 +8569,16 @@ class TaskTest(unittest.TestCase):
         self.assertIn("automated review passed", merge["reason"])
         self.assertEqual(self.queue_events(tid), ["queued", "merged", "Done"])
 
+    def test_autopilot_merges_with_the_default_review_when_no_reviewer_is_written(self):
+        self.autopilot(reviewer=None)
+        tid = self.new("ok")
+        self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn("reviewed by the agent itself", self.comments(tid)[-1])
+        self.task()
+        self.assertEqual(self.status(tid), "Done")
+        self.assertEqual(self.autopilot_events(tid), ["ready", "merge"])
+
     def test_autopilot_leaves_a_blocked_review_and_a_cancelled_merge_to_the_human(self):
         self.autopilot()
         blocked = self.new("ok REVIEW=blocked", "the reviewer stops it")
@@ -8673,7 +8714,8 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         for repos, merge, reviewer, why in [("app", "queue = on\n", True, "owner/name"),
                                             ("jyoka/app", "", True, "the merge queue, which is off"),
-                                            ("jyoka/app", "queue = on\n", False, "no reviewer is set")]:
+                                            ("jyoka/app", "queue = on\n", False, "no reviewer is set"),
+                                            ("jyoka/app", "queue = on\n", "", "no reviewer is set")]:
             self.autopilot(repos, merge, reviewer)
             self.assertIn(why, self.task(code=1))
             self.env["TASK_WATCH_ONCE"] = "1"

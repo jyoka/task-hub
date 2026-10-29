@@ -300,6 +300,7 @@ sequenceDiagram
     end
     S->>S: Ready で待ち先がないものを番号順に、枠([runner] parallel)の数だけ。<br/>上限の間のエージェントのカードは waits_for に入るので始めない
     S->>S: launch
+    S->>S: review_default_notice: reviewer を省略した設定で初めて始めたときだけ、note: の 1 行(state/update.json)
 ```
 
 ### 4.2 開始(`launch`)
@@ -635,7 +636,8 @@ wait for merge、Blocked のカードだけ)です。
 ### 4.9 オートパイロット(`autopilot_merge`、`autopilot_ready`、`[autopilot] repos` があるときだけ)
 
 `sync` の最初に `autopilot_config` が `repos`(小文字の owner/name の集合)を返します。書き間違い、`[merge] queue` が
-オフ、`[runner] reviewer` が空なら `fail` します(`cmd_watch` も始めるときに呼ぶ)。
+オフ、`[runner] reviewer` が `off` か空なら `fail` します(`cmd_watch` も始めるときに呼ぶ)。`reviewer` を省略したときは
+既定の `agent` なので止めません。
 
 - `autopilot_merge`: カードごとの確認のあと、`merge_queue` の前に呼びます。`repos` の In review のカードで、
   `autopilot_off` でない、`events.jsonl` でカードの最後の Status の出来事が `In review` で、その digest の `verdict` が
@@ -707,7 +709,7 @@ sequenceDiagram
 
 | ファイル | 書く者 | 読む者 | 形式 |
 |---|---|---|---|
-| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`)。`[runner] limit_resume` は利用の上限で止まった実行を時刻のあとに再開するか(`on` が既定、`off`。ほかの値は `sync` の前に `fail`) |
+| `~/.config/task-hub/config.ini` | 人、インストーラ | すべて | INI(`[board]`、`[runner]`、`[agents]`、`[resume]`(再開のときのエージェントのコマンド。なければ `[agents]`)、`[env]`、`[setup]`、`[balance]`(有料 API の名前ごとの残高の確認のコマンド)、`[check]`、`[ide]`、`[notify]`(`events`、`ntfy`、`ntfy_token`)、`[share]`、`[intake]`(`topic`、`secret`、`repo`)、`[triggers]`、`[autopilot]`(`repos`)、`[sandbox]`)。`[share]` は `task share` の共有先ごとのチームの Project、`<repo>.title`、`<repo>.field.<欄>`、`status.<列>`、`<repo>.status.<列>`([usage.md](../usage.md#チームのボードに出すtask-share))。`[runner] parallel` は同時に動かすタスクの数(既定 5、1 未満や数でない値は `sync` の前に `fail`)。`[runner] limit_resume` は利用の上限で止まった実行を時刻のあとに再開するか(`on` が既定、`off`。ほかの値は `sync` の前に `fail`)。`[runner] reviewer` と `replanner` は `helper_agent` が読む(`off` か空はなし、`agent` はカードのエージェント、ほかはその名前)。`reviewer` だけは省略すると `DEFAULT_REVIEWER`(`agent`)で、自動レビューが既定で入る。`config()` の既定の値には入れず、省略と空を分ける |
 | `bin/__pycache__/task_hub.cpython-<版>.pyc`(clone の中) | Python の import(`bin/task` が `task_hub.py` を読み込むとき。書けなければ書かない) | Python の import(`task_hub.py` の更新時刻と大きさが同じときだけ使う) | `task_hub.py` のバイトコード。git は無視する(`.gitignore`)。消してもよい(次の `task` が作り直す) |
 | `state/runs/<id>.json` | `launch`、`task _run`(順番に)、`relaunch`(実行が生きていないとき)、`cleanup` が消す | すべて(Kiro の拡張は `worktree`、`base`、`branch`、`log`、`repo` を読む) | JSON(`RUN_KEYS`)。`link` は共有先の Issue、`link_project` は共有時に選んだ Project(古い記録では空)。`agent_pid`、`agent_started`(`started` と同じ形の UTC)、`head`、`snap`、`review_attempt`、`interrupted`、`resumes`(数の文字列)、`resumed`、`resume_stage`、`resumed_at`、`session`、`session_role` は 1 章の表のとおり。`budget` は Goal の `Budget` の予算(`{"tokens": 3000000, "seconds": 7200, "cost": 5.0}` のような辞書。なければ空)、`paid_api` は `paid api:` の名前(空白区切り)、`over_budget` は出来事 `over budget` を出した測るもの(空白区切り)。`limit_until`、`limit_agent`、`limit_waits`、`resume_why` は 1 章の表のとおり。古い記録にない欄は空として読む。task-rs は知らない欄を読み飛ばす(task-rs の `alive` は `resumed_at` を見ないので、再開の直後の数秒は「動いていない」と出る。表示だけ) |
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
@@ -728,7 +730,7 @@ sequenceDiagram
 | `state/board-cache.stale` | `gh()`(ボードを変える呼び出しのあと) | `cached_items` | UNIX 時刻 |
 | `state/board-meta.json` | `board()` | `task list` だけ | `{key, at, board}` |
 | `state/asked/<id>.json` | `task new`、`task`、`task start` | `task_workspace` | herdr の workspace |
-| `state/update.json` | `UpdateCheck` | `task list`、`task watch` | 新しい版 |
+| `state/update.json` | `UpdateCheck`、`review_default_notice` | `task list`、`task watch`、`sync` | 新しい版。`review_default_noted`: 既定の自動レビューを知らせた時刻(`reviewer` を省略した設定で、最初にカードを始めた `sync` が 1 回だけ `note:` の行を出す) |
 | `state/triggers.json` | `check_triggers`(`task watch` だけ) | `check_triggers` | `{checked_at, seen: {キー: {at, issue}}, default_branch: {repo: [名前, UNIX 時刻]}}` |
 | `state/intake.json` | `cmd_intake`(文を 1 つ扱う前に) | `cmd_intake`(つなぎ直すとき、起動したとき) | `{since}`。最後に扱った ntfy の文の id(ntfy の `since=` に渡す) |
 | `state/action.key` | `action_key`(初めて要るとき。0600。一時ファイルから `os.link` で置くので、2 つのプロセスが同時に作っても 1 つ) | `action_token`(`task _run` の通知、`task intake`) | 64 文字の 16 進。ボタンのトークンの HMAC-SHA256 の鍵。どこにも送らない |
@@ -996,7 +998,7 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 16. `[autopilot]` は、書いたリポジトリの一度も Backlog から出ていないカードだけを Ready に移し、最後の実行の自動レビューが
     `pass` で、その後に変わっていない PR だけをレビューごとに 1 回マージキューに入れる。待ち先のあるカード、`Autopilot: off`
     のカード、前に動いたカード、閉じた Issue、人がキューから外した PR、レビューのあとに変わった PR、draft、Blocked のカードは
-    動かさない。`[merge] queue` か `reviewer` がなければ何もせずに止まる。
+    動かさない。`[merge] queue` がオフか、`reviewer` が `off` か空なら何もせずに止まる(省略は既定のレビューなので動く)。
     `[autopilot]` がなければ何も変わらない
 17. 予期せず止まった実行は 1 回だけ自動で再開し、2 回目は Blocked にする。Ctrl-C で止めた実行は再開しない。同じ worktree で 2 つのエージェントは動かない。
     落ちたエージェントが `group-shell` を通して動かしていたツールのコマンドは、次のエージェントを起動する前に止まる。

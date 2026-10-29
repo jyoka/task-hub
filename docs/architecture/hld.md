@@ -182,7 +182,7 @@ sequenceDiagram
     Run->>Run: [setup]、Goal の paid api があれば [balance] で残高を確かめる(足りなければ Blocked)
     Run->>Agent: プロンプト(Goal、前回のレポート、前回より後の人のコメント)
     Agent-->>Run: ファイルの変更と .task-report.md
-    Run->>Agent: reviewer(新しいコンテキスト。goldfish なら視点ごとに 1 体、レポートなし)
+    Run->>Agent: reviewer(既定で入る。新しいコンテキスト。goldfish なら視点ごとに 1 体、レポートなし)
     Agent-->>Run: .task-review.md(pass / needs changes)
     Run->>GH: commit、push、PR、Issue にコメント、Review 欄、In review にする
     You->>GH: PR をマージする
@@ -194,6 +194,8 @@ sequenceDiagram
 `[merge] queue = on` のときは、最後の「あなたが PR をマージする」が「`task merge` でキューに入れる」になります。
 その先は 4.5 のとおり task-hub がマージします。
 
+自動レビューは既定で入ります。`[runner] reviewer` を省略すると `agent`(タスクと同じエージェントを新しいコンテキストで)
+になり、`reviewer = off`(または空)のときだけレビューせずに PR を出します。
 reviewer が `needs changes` と判定すると、実装エージェントに差し戻し、もう一度レビューします(`[runner] review_retries`
 回まで。既定 2)。差し戻した指摘がまた出たときや、差し戻しの変更が小さくならないときは、回数が残っていても止めて
 Blocked にし、次の実行への修正指示の下書きを Issue に書きます。minor の指摘だけなら In review に進み、PR に

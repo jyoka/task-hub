@@ -110,7 +110,7 @@ issues = <you>/tasks
 [runner]
 agent = kiro                  ; 実行は kiro-cli(kiro-cli chat --no-interactive --trust-all-tools --output-format stream-json)
 reviewer = agent              ; 自動レビューもタスクと同じ kiro で、実装を見ていない新しいコンテキストで動かす
-replanner = agent             ; Blocked の仕分けも kiro。クレジットを節約したいなら、どちらも空にする
+replanner = agent             ; Blocked の仕分けも kiro。クレジットを節約したいなら、どちらも off にする
 pass_env = KIRO_API_KEY       ; herdr のペインで動く実行にも渡す変数の名前
 
 [check]
@@ -122,8 +122,8 @@ open = kiro {path}            ; task open <番号> で worktree を Kiro IDE で
 
 - **`reviewer` と `replanner`**: Kiro しかないマシンでは、別のベンダーのモデルで見直すことはできないので、`agent`
   (タスクと同じ kiro を、新しいコンテキストで起動)にします。どちらも kiro-cli を 1 回ずつ余分に動かし、
-  クレジットを使います。費用を抑えたいときは、空にするか行ごと消すと、そのしくみは動きません
-  ([agents.md](agents.md#自動レビュー))。
+  クレジットを使います。費用を抑えたいときは `off` にすると、そのしくみは動きません。`reviewer` は行ごと消すと
+  既定の `agent` になり、レビューは動きます(`replanner` は消すと動きません。[agents.md](agents.md#自動レビュー))。
 - **`[check]`**: `[runner] agent`、`reviewer`、`replanner` のエージェントを、タスクを始める前(worktree を作る前、
   クレジットを使う前)に確かめます。0 以外で終わると、そのコマンドと出力の最後の数行を理由に Blocked にします。
   **`KIRO_API_KEY` だけで(ブラウザでのログインなしに)使うときに `kiro-cli whoami` が 0 で終わるかは確かめていません。**

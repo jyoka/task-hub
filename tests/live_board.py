@@ -44,7 +44,7 @@ def main():
     agent.write_text(AGENT, encoding="utf-8")
     (home / ".config" / "task-hub" / "config.ini").write_text(
         f"[board]\nproject = {os.environ['TASK_HUB_LIVE_PROJECT']}\nissues = {os.environ['TASK_HUB_LIVE_ISSUES']}\n\n"
-        f"[runner]\nagent = live\nparallel = 1\n\n[agents]\nlive = {Path(sys.executable).as_posix()} {agent.as_posix()} {{prompt}}\n",
+        f"[runner]\nagent = live\nparallel = 1\nreviewer = off\n\n[agents]\nlive = {Path(sys.executable).as_posix()} {agent.as_posix()} {{prompt}}\n",
         encoding="utf-8")
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "GH_TOKEN": os.environ["TASK_HUB_LIVE_TOKEN"],
            "TASK_HERDR": "0", "TASK_NO_UPDATE_NOTIFIER": "1", "GIT_AUTHOR_NAME": "task-hub ci",
