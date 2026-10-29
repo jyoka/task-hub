@@ -118,13 +118,18 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
 
    [runner]
    agent = claude             ; このマシンのデフォルトエージェント
-   reviewer = agent           ; 任意: 実装後の自動レビュー。agent = タスクと同じエージェント、名前で固定も可
+   reviewer = agent           ; 実装後の自動レビュー。省略すると agent(既定)。名前で固定も可。off で外す
    replanner = agent          ; 任意: エージェントが Blocked で止まったときの仕分け(コメントだけ)
    ```
 
-   `reviewer` を空にするか省略すると、自動レビューは行いません。有効にすると、エージェントの作業後、PR を出す前に
-   reviewer が差分を読み、必要なら実装エージェントに差し戻します。回数は `review_retries` で決め、既定は 2 回です
-   (止まる条件は [task-format.md](task-format.md#自動レビューの差し戻し))。
+   自動レビューは既定で入っています。`reviewer` を省略すると `agent`(タスクと同じエージェントを新しいコンテキストで)
+   になり、エージェントの作業後、PR を出す前に reviewer が差分を読み、必要なら実装エージェントに差し戻します。
+   回数は `review_retries` で決め、既定は 2 回です(止まる条件は [task-format.md](task-format.md#自動レビューの差し戻し))。
+   外すときは `reviewer = off` と書きます。`reviewer =` と空で書いても外れます(0.15.0 までと同じ)。
+
+   0.15.0 までは、`reviewer` を省略すると自動レビューをしませんでした。省略したまま更新すると、レビューが入ります。
+   その最初の開始のとき、`task` と `task watch` の出力に `note: the automated review is on by default now` の 1 行が
+   1 回だけ出ます。今までどおりレビューなしにしたいなら、`reviewer = off` を書きます。
 
    テストに API キーなどが要るリポジトリは、`[env]` に書いたファイルを実行のたびに worktree のルートへコピーできます
    (task-hub は自分用の clone で作業するので、手元のチェックアウトの `.env` はそのままでは届きません):

@@ -63,7 +63,7 @@ task new --title "検索 API を使う画面" --repo owner/app --blocked-by 12 -
 ```ini
 [runner]
 agent = claude          ; このマシンのデフォルトの worker
-reviewer = agent        ; PR の前の自動レビュー。agent = worker と同じエージェントを新しいコンテキストで
+reviewer = agent        ; PR の前の自動レビュー。agent(既定。省略も同じ)= worker と同じエージェントを新しいコンテキストで。off で外す
 replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコメントする
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
 review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
@@ -120,7 +120,7 @@ user = task-agent       ; そのユーザー(これが既定)
 
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
-| `reviewer` | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し))。判定は Project の Review 欄にも入る。`review_mode = goldfish` では、レポートを読まない 2 つの視点が別々に見る([task-format.md](task-format.md#goldfish-のレビューrunner-review_mode)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
+| `reviewer`(既定で有効) | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し))。判定は Project の Review 欄にも入る。`review_mode = goldfish` では、レポートを読まない 2 つの視点が別々に見る([task-format.md](task-format.md#goldfish-のレビューrunner-review_mode)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
 | `readiness` | `warn`: 今の Goal への `task check` の GO がない Ready のカードも始めるが、`readiness` イベントと `task` の出力で知らせる。`require`: GO がなければ始めず(`waits_for` に理由)、オートパイロットも Ready に移さない。どちらも `task list` に `readiness` の列が付く。`--research` のカードは対象外([task-format.md](task-format.md#開始の門-runner-readiness)) | `task check` の NO-GO を見て Goal を直すか、Backlog に戻すか(task-hub はカードを動かさない) |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
@@ -130,7 +130,8 @@ user = task-agent       ; そのユーザー(これが既定)
 | `[merge] queue` | 承認した PR を 1 つずつ base に追いつかせ(競合はエージェントが解く)、チェックが通ったらマージする。解けない競合と、走らせ直しても落ちたチェックは Blocked | どの PR をマージしてよいか(`task merge`) |
 | `[autopilot]` | 書いたリポジトリの Backlog のカードを、待ち先が終わったら Ready に移す。自動レビューが `pass` の PR をマージキューに入れる([autopilot.md](autopilot.md)) | どのリポジトリを任せるか。任せたくないカードには Goal に `Autopilot: off` |
 
-`reviewer` と `replanner` には `codex` などのエージェント名も書けます。空か省略なら、その自動化は行いません。
+`reviewer` と `replanner` には `codex` などのエージェント名も書けます。`off` か空なら、その自動化は行いません。
+省略したときは、`reviewer` は `agent`(自動レビューをする)、`replanner` は空(しない)です。
 
 ## チームのボードに出す(task share)
 
@@ -196,7 +197,7 @@ task-hub が定義している役割は 5 つです。どれも Claude Code の 
 | 役割 | どこで動くか | 仕事 | 書いてよいもの | 指示書 |
 |---|---|---|---|---|
 | **worker** | task-hub が起動(タスクごと) | Goal を実装し、テストし、レポートを書く | worktree のファイル、`.task-report.md` | [worker/PROMPT.md](../worker/PROMPT.md) |
-| **reviewer**(任意) | task-hub が起動(worker の後、PR の前) | Goal の受け入れ条件を 1 つずつ、PR 全体と照らし合わせる | `.task-review.md` だけ | [worker/REVIEW.md](../worker/REVIEW.md) |
+| **reviewer**(既定で有効。`reviewer = off` で外す) | task-hub が起動(worker の後、PR の前) | Goal の受け入れ条件を 1 つずつ、PR 全体と照らし合わせる | `.task-review.md` だけ | [worker/REVIEW.md](../worker/REVIEW.md) |
 | **replanner**(任意) | task-hub が起動(worker が自分で Blocked と書いたとき) | 止まった理由を「リポジトリから答えられる / 人に聞く / Goal が矛盾」に仕分ける | 何も書けない(コメントの本文を返すだけ) | [worker/REPLAN.md](../worker/REPLAN.md) |
 | **/task** | あなたのエージェントの会話 | 今の会話を Backlog のタスクとして登録する | ボードへの登録だけ | [skills/task](../skills/task/SKILL.md) |
 | **/chief**(総指揮) | あなたのエージェントの会話(herdr のペイン) | ボードを見張って知らせる。作業を分けて提案し、「うん」で登録・開始する。名指しで頼まれたら開始・`task done`・マージを実行する | 登録・開始・`task done`・マージ(どれもあなたが頼んだときだけ。自分からはしない) | [skills/chief](../skills/chief/SKILL.md) |

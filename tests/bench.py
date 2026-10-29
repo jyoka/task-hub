@@ -216,7 +216,7 @@ class Sandbox:
         self.home = root / "home"
         cfg = self.home / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True)
-        cfg.write_text("[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n\n"
+        cfg.write_text("[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\nreviewer = off\n\n"
                        "[agents]\nfake = fake-agent {prompt}\n", encoding="utf-8")
         self.state = self.home / ".local" / "state" / "task-hub"
         self.state.mkdir(parents=True)

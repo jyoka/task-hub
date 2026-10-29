@@ -28,11 +28,12 @@ repos = you/app               ; カンマ区切り。owner/name。大文字と�
 queue = on                    ; 必須。マージはマージキューを通す
 
 [runner]
-reviewer = agent              ; 必須。自動レビューが pass(minor だけを含む)のものだけをマージする
+reviewer = agent              ; 省略しても同じ(既定)。自動レビューが pass(minor だけを含む)のものだけをマージする
 ```
 
-- `repos` を書いたのに `[merge] queue = on` か `[runner] reviewer` がないと、`task` と `task watch` は何もせずに
-  `error:` で止まります。レビューなしでマージしないためです
+- `repos` を書いたのに `[merge] queue = on` でないか、`[runner] reviewer` が `off` か空だと、`task` と `task watch` は
+  何もせずに `error:` で止まります。レビューなしでマージしないためです。`reviewer` を省略したときは、既定の
+  自動レビュー(タスクと同じエージェントを新しいコンテキストで)が入るので止まりません
 - `task watch` と `task` の確認のたびに動きます(1 分に 1 回)。決めるのはボードの読み取りと `events.jsonl` です。
   GitHub への問い合わせが増えるのは、キューに入れる前に PR を 1 回読むとき(`gh pr view`、レビューごとに 1 回)だけです
 

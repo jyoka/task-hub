@@ -170,7 +170,7 @@ class WindowsTest(unittest.TestCase):
         agent = agent or f"{(self.root / 'agent.exe').as_posix()} {{prompt}}"
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text("[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n\n"
+        cfg.write_text("[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\nreviewer = off\n\n"
                        f"[agents]\nfake = {agent}\n" + extra, encoding="utf-8")
 
     def origin(self, repo):

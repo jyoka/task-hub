@@ -209,7 +209,7 @@ issues = <GitHub のユーザー名>/tasks              ; タスクの Issue を
 
 [runner]
 agent = kiro                ; 使うエージェント(kiro、claude、codex)
-reviewer = agent            ; 実装のあと、同じエージェントがレビューする。いらなければこの行を消す
+reviewer = agent            ; 実装のあと、同じエージェントがレビューする(省略しても同じ)。いらなければ off にする
 
 [check]
 kiro = kiro-cli whoami      ; 始める前にログインを確かめる。失敗したら、クレジットを使う前に止まる

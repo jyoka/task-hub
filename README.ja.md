@@ -113,9 +113,9 @@ issues = <owner>/<Issue を置くリポジトリ>
 
 [runner]
 agent = claude
-reviewer = agent
 ```
 
+実行は PR の前に、同じエージェントが新しいコンテキストでレビューします。外すときは `[runner]` に `reviewer = off` を書きます。
 GitHub Project の準備(列と欄)、スキルのインストール、常駐のさせ方は [docs/setup.md](docs/setup.md) にあります。
 
 ## 使い方

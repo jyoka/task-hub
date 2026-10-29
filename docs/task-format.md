@@ -380,7 +380,7 @@ task-hub は worktree の中で git が無視しないファイルをすべて�
 Python の `__pycache__/` と `*.pyc`、設定の `[env]` でコピーしたファイルは、リポジトリに `.gitignore` がなくてもコミットしません(clone の `.git/info/exclude` に
 書きます。すでに追跡されているファイルには影響しません)。
 
-`[runner] reviewer` が設定されている場合、task-hub は PR を作る前に reviewer を実行します。reviewer が
+task-hub は PR を作る前に reviewer を実行します(既定。`[runner] reviewer = off` なら実行しません)。reviewer が
 `needs changes` と判定したら、実装エージェントに自動で差し戻します。流れは次の「自動レビューの差し戻し」にあります。
 
 | エージェントの結果 | task-hub の処理 | カードの列 |
