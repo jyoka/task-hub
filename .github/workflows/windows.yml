@@ -19,21 +19,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: |
+      # docs only (tests/ci/scope.py, as in macos.yml): nothing here reads the docs, so this job only says so and
+      # passes, under its own name. Compared with the default branch: this workflow runs on the push of a PR's branch
+      - name: What the change touches
+        id: scope
+        shell: bash
+        env:
+          CI_DIFF_BASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref_name != github.event.repository.default_branch && format('origin/{0}', github.event.repository.default_branch) || '' }}
+        run: python tests/ci/scope.py "$CI_DIFF_BASE"
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
       # one by one, not side by side as on macOS: run side by side (tests/run.py -j 4), a test failed here that
       # passes one by one, and which one is not known yet (CONTRIBUTING.md, テスト)
-      - run: python -m unittest tests.test_windows -v
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: python -m unittest tests.test_windows -v
         env:
           TASK_TEST_WINDOWS_INSTALL: "1"
-      - run: python -m unittest tests.test_run -v  # tests/run.py: its lock and its low priority on Windows
-      - run: python -m unittest tests.test_install.SteeringTest -v  # 「セットアップして」 runs the Windows scripts too
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: python -m unittest tests.test_run -v  # tests/run.py: its lock and its low priority on Windows
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: python -m unittest tests.test_install.SteeringTest -v  # 「セットアップして」 runs the Windows scripts too
       # the Kiro board extension on Windows: `task list` through task.cmd, and the .vsix built with tar.exe
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           node-version: "24"
       - name: board extension
+        if: steps.scope.outputs.docs_only != 'true'
         working-directory: kiro/board-extension
         shell: pwsh
         run: |
@@ -55,9 +69,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: What the change touches  # as in the job test
+        id: scope
+        shell: bash
+        env:
+          CI_DIFF_BASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref_name != github.event.repository.default_branch && format('origin/{0}', github.event.repository.default_branch) || '' }}
+        run: python tests/ci/scope.py "$CI_DIFF_BASE"
       - name: the installer, the diagnosis and the uninstaller, as a standard user
+        if: steps.scope.outputs.docs_only != 'true'
         run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Command "python -m unittest tests.test_windows.SetupTest tests.test_windows.InstallBoardTest -v"
       - name: a task at the user's own logon (task watch, Slack triage's key), as a standard user
+        if: steps.scope.outputs.docs_only != 'true'
         run: powershell -ExecutionPolicy Bypass -File tests\ci\as-standard-user.ps1 -Minutes 3 -Command "powershell -NoProfile -ExecutionPolicy Bypass -File tests\ci\register-own-task.ps1"
 
   # Before a release, by hand (Actions → windows → Run workflow, with "live"): one card on a real test board to a PR

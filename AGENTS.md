@@ -35,6 +35,7 @@ claude plugin test claude/task-board       # Claude Code の mod
 
 作業中は変えたところに関係する短いテストだけを手元で動かす。
 全部のテストは GitHub Actions の `macos` で動かす(PR、main への push、手動実行)。
+docs だけの PR では、docs を読むテストだけを動かす(線と足し方は CONTRIBUTING.md の「docs だけの PR」)。
 手元の Mac では、頼まれない限り全部のテストや Rust のビルドを動かさない。
 CI のログは `macos-test-evidence` から読む。詳しくは CONTRIBUTING.md の「テスト」。
 テストは低い優先度で動き、並べる数は `-j 4` のように変えられる。

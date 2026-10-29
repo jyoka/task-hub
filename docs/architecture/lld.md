@@ -1044,6 +1044,11 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   管理者でない標準のユーザーで動かす(`tests/ci/as-standard-user.ps1`。タスク スケジューラでそのユーザーとして)
 - `tests/live_board.py`: テストではない。本物の GitHub の試験用ボードで、カードを 1 枚 PR まで進めて片付ける
   (windows.yml の `live`。ボタンで動かす。[release.md](../release.md#windows-を本物のボードで確かめる))
+- `tests/ci/scope.py`: CI のジョブの最初のステップ。PR が変えたファイル(base との分かれ目から。名前の変更は前と後の両方)が
+  全部 docs(一番上の Markdown、`docs/`、`site/`、`assets/`)なら `docs_only=true` を `$GITHUB_OUTPUT` に書く。base がない
+  (main への push、手動実行)か変更がなければ `false`。`true` のとき、`macos` の `test` は `DOCS_TESTS`(docs を読むテスト)
+  だけを動かし、`windows` の `test` と `standard-user` は判定だけで通る。止めるのはステップだけで、ジョブの名前と結果は
+  いつも返るので、マージキューの `pr_checks` と `ci-wait` は変えていない。`tests/test_ci.py` が判定と workflow の作りを確かめる
 - `tests/test_run.py`: `tests/run.py` そのもの(既定の並べる数、低い優先度、全部のテストのロック、出力の文字コードで書けない失敗の表示)。Windows の CI でも動く
 - `claude/task-board/hooks/*.test.tsx`(`claude plugin test`)、`kiro/board-extension/test`(`npm test`。偽物の `vscode` と
   一時的な git リポジトリで、Goal、変更、ログのコマンドを動かす)。`kiro/board-extension/test/host/check.mjs` は、VSIX を

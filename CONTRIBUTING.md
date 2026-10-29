@@ -64,6 +64,7 @@ tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windo
 tests/bench.py         弱い PC 向けの計測(テストではない。頼まれたときとリリースの前に動かす。docs/benchmark.md)
 tests/durable_bench.py 止まった実行の再開の A・B・C を本物のモデルで比べる実験(テストではない。頼まれたときだけ。docs/durable-runs-comparison.md)
 tests/media.py         README と LP の画像を、架空のカードを動かして撮る(テストではない。画面が変わったときに動かす。docs/media.md)
+tests/ci/              CI だけが使うスクリプト(scope.py: docs だけの PR か決める。as-standard-user.ps1 など: Windows の標準のユーザー)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
@@ -77,6 +78,7 @@ docs/                  セットアップ、エージェント、設計、形式
 全部のテストは GitHub Actions の `macos` で動かします。使うのは GitHub の Mac です。
 手元の Mac では、変えたところに関係する短いテストだけを動かします。
 PR(外の fork も含む)、main への push、Actions からの手動実行で動きます。
+docs だけの PR では、docs を読むテストだけを動かします([docs だけの PR](#docs-だけの-pr))。
 同じ PR やブランチで新しい実行が始まると、古い実行は取り消します。
 
 - Python の全部のテスト(CLI、インストーラ、Rust TUI の PTY テストも含む)
@@ -124,6 +126,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_brand.py` | 伝え方の土台([docs/brand.md](docs/brand.md)): 1 文が README の太字、brand.md、バナーで同じ。`tokens.css` の意味の色のコントラスト比が 4.5 以上(`python3 tests/test_brand.py --table` で表を出す)。README に運営者の私的な名前が出ない。README の構成(見出しの順がこの文書の「README の構成」の表と同じ、バナーと動く画像の置き方、特長の表の 4 枚とリンク先、alt、長さ) |
 | `tests/test_site.py` | LP([site/README.md](site/README.md)): ブラウザを使わずに読む。リンクと画像の先があり、外から読み込まず、`prefers-reduced-motion` で動かない作り。1 文、機能のカード 8 枚、8 つの層が brand.md と同じ。運営者の私的な名前が出ない |
 | `tests/test_media.py` | `assets/media/` の画像([docs/media.md](docs/media.md)): 全部あり、大きさが上限の内で、写る文字とメタデータに運営者のボード、手元のパス、日付、メールアドレスがない。画像の元の架空のカードが、2 回動かして同じ文字になる |
+| `tests/test_ci.py` | CI で動かすテストの決め方(`tests/ci/scope.py`): docs だけの変更が docs と数えられ、ほかのファイルが 1 つでもあれば全部になる。workflow の必須のジョブが、docs だけでも名前を変えずに結果を返す作り |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `tests/test_durable_bench.py` | `tests/durable_bench.py` の 63 回の試行の組み合わせと、`--report` の表(モデルは呼ばない) |
 | `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
@@ -137,6 +140,41 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
   そう書きます([docs/lessons.md](docs/lessons.md))
 - Windows で動きが変わる部分(プロセス、パス、シェル)は、`bin/task_hub.py` の `WINDOWS` で分けます
   ([docs/windows.md](docs/windows.md))
+
+### docs だけの PR
+
+docs だけの PR では、全部のテストを動かさず、docs を読むテストだけを動かします。
+全部のテストは 4 並びで約 19 分かかり、ほとんどは README の直しに関係しないためです。
+docs を読むテストは、手元の Mac の 2 並びで 20 秒ほどです(2026-10-30)。
+
+「docs だけ」は、変わったファイルが全部、次のどれかに入るときです。
+
+- リポジトリの一番上の Markdown(`README.md`、`README.ja.md`、`CONTRIBUTING.md`、`SECURITY.md`、`AGENTS.md` など)
+- `docs/`、`site/`、`assets/` の中のファイル
+
+1 つでもほかのファイル(コード、テスト、workflow、`LICENSE`、`.gitignore` など)があれば、全部のテストを動かします。
+`worker/`、`skills/`、`claude/`、`kiro/`、`.claude/`、`.kiro/` の Markdown も docs に数えません。
+task-hub とエージェントが読むプロンプトと指示で、テストもそれを確かめるためです。
+決めているのは `tests/ci/scope.py` です。名前を変えたファイルは、前と後の両方を数えます。
+比べる相手は、PR の base(`windows` は push のたびに動くので、既定のブランチ)との分かれ目です。
+マージの順番が main を取り込んだあとも、PR が変えたファイルだけを数えます。
+
+docs だけのときに動くもの:
+
+- `macos / test`: docs を読むテスト(`python3 tests/ci/scope.py --tests` の名前。README のコマンドの表、
+  `test_brand`、`test_site`、`test_media`、docs の図や例を読むテスト)と、差分の空白の確認
+- `windows / test`、`windows / standard-user`: docs を読むテストはないので、判定だけして通ります
+
+ジョブの名前(`test`、`standard-user`)は変わりません。止めるのはジョブの中のステップだけです。
+ブランチの決まりとマージの順番(`task merge` の `ci-wait`)が待つチェックは、docs だけでも結果を返します。
+ジョブごと飛ばしたり、workflow を `paths` で外したりはしません。チェックが返らず、ずっと待つことになるためです
+(`tests/test_ci.py` が確かめます)。
+
+main への push と Actions からの手動実行では、これまでどおり全部のテストを動かします。
+docs だけの PR も、マージした後の main で全部のテストを通します。
+
+README、`docs/`、`site/`、`assets/` を読むテストを足したら、`tests/ci/scope.py` の `DOCS_TESTS` にも足します。
+足さないと、docs だけの PR ではそのテストが動かず、マージした後の main で初めて落ちます。
 
 ## README と docs の書き方
 

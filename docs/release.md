@@ -40,6 +40,9 @@ task-hub の変更は、1 コミットごとではなく 1 リリースごとに
    画面を見ないと分からないこと([windows.md の 10 章](windows.md#10-実機で確かめること要確認事項))は、
    Windows を毎日使う人に 10 分ほど試してもらいます。
 2. **main にタグを付けて push します。** タグを付ける前に、main の `VERSION` が新しい版になっていることを確かめます。
+   main の最後のコミットの `macos` と `windows` が緑であることも確かめます。docs だけの PR は docs を読むテストだけで
+   マージされ、全部のテストはマージした後の main で動くためです
+   ([CONTRIBUTING.md の「docs だけの PR」](../CONTRIBUTING.md#docs-だけの-pr))。
 
    ```
    git fetch origin
@@ -86,7 +89,7 @@ Windows の PC を借りなくても、GitHub Actions の Windows で、本物�
 
 **押すとき**: GitHub の Actions → windows → Run workflow で、「live」に印を付けて Run workflow を押します。
 `live` のジョブが緑なら成功です。カードを 1 枚作って PR まで進め、終わると PR を閉じてブランチを消し、カードを Done にします。
-ふだんのテスト(`test`)と、管理者でないユーザーでのテスト(`standard-user`)も、同じときに動きます。
+ふだんのテスト(`test`)と、管理者でないユーザーでのテスト(`standard-user`)も、同じときに全部動きます。
 
 ## リリースノートの型
 
