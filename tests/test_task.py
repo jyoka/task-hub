@@ -559,6 +559,13 @@ if mode == "pycache":  # the test run left bytecode behind, in a repo without a 
     Path("stray.pyc").write_bytes(b"\x00bytecode")
 if mode == "reviewcrash" and "# Automated review feedback" in prompt:  # the retry dies without a report
     sys.exit(1)
+if "FIRSTFILE" in prompt and "# Automated review feedback" not in prompt:  # work its retry leaves as it is
+    Path("first.txt").write_text("from the first run only\n")
+if "# Automated review feedback" in prompt and "BIGRETRY" in prompt:  # a retry that changes many lines, or files
+    Path("big.txt").write_text("".join(f"line {n}\n" for n in range(400)))
+if "# Automated review feedback" in prompt and "WIDERETRY" in prompt:
+    for n in range(11):
+        Path(f"wide{n}.txt").write_text("one line\n")
 if mode == "reviewfix" and "# Automated review feedback" in prompt:
     Path("hello.txt").write_text("fixed after review\n")
 elif mode in ("grow", "shrink"):  # each retry after review adds more lines than the one before (grow), or fewer
@@ -693,7 +700,7 @@ if forced == ["blocked"]:
     Path(".task-review.md").write_text("## Verdict\n\nblocked\n\n## Review\n\nNeed access to the staging logs.\n")
     sys.exit(0)
 if forced == ["moving"]:  # a new finding each round: one more than the findings it was sent back with
-    n = prompt.count("\n- round ")
+    n = max(map(int, re.findall(r"\n- round (\d+)", prompt)), default=0)
     Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
                                        f"## Please fix\n\n- round {n + 1}: hello.txt is not done\n")
     sys.exit(0)
@@ -1396,7 +1403,7 @@ class TaskTest(unittest.TestCase):
     # --- helpers ---
 
     def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries="",
-                     readiness="", review_mode=""):
+                     readiness="", review_mode="", re_review=""):
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
@@ -1408,6 +1415,7 @@ class TaskTest(unittest.TestCase):
                        + (f"parallel = {parallel}\n" if parallel else "")
                        + (f"review_retries = {review_retries}\n" if review_retries else "")
                        + (f"review_mode = {review_mode}\n" if review_mode else "")
+                       + (f"re_review = {re_review}\n" if re_review else "")
                        + (f"readiness = {readiness}\n" if readiness else "") + "checker = goldfish\n\n"
                        f"[agents]\nfake = {self.root}/agent {{prompt}}\ngoldfish = {self.root}/goldfish {{prompt}}\n"
                        f"other = {self.root}/agent --other {{prompt}}\nreviewer = {self.root}/reviewer {{prompt}}\n"
@@ -1916,6 +1924,120 @@ class TaskTest(unittest.TestCase):
         self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Agent report")[0])
         self.assertNotIn("## Findings the work was sent back with", self.reviewer_calls()[0]["prompt"])
 
+    # --- [runner] re_review: after a retry, the earlier findings and the change since only (jyoka/tasks#404) ---
+
+    def test_the_review_after_a_retry_reads_the_findings_and_the_change_since_only(self):
+        self.write_config(reviewer=True)  # re_review = delta by default
+        tid = self.new("reviewfix FIRSTFILE")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        first, second = (c["prompt"] for c in self.reviewer_calls())
+        self.assertIn("You are the adversarial reviewer", first)  # the first review reads the whole PR
+        self.assertIn("+from the first run only", first)
+        self.assertIn("You are the re-reviewer", second)
+        self.assertNotIn("You are the adversarial reviewer", second)
+        self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Agent report")[0])
+        diff = second.split("# Diff since the earlier review", 1)[1]
+        self.assertIn("-hello from mode reviewfix\n+fixed after review", diff)  # the retry's change, from the tree
+        self.assertRegex(diff, r"The earlier review saw the git tree [0-9a-f]{40}: `git diff [0-9a-f]{40}`")
+        self.assertNotIn("from the first run only", second)  # the first run's work the first review passed
+        self.assertIn("# Agent report\n\n## Report", second)  # agent mode: the retry's report and its test results
+        comment = self.comments(tid)[-1]
+        self.assertEqual(self.review_line(comment), {"verdict": "pass", "blocking": 0, "minor": 0, "mode": "agent",
+                                                     "attempt": 2, "scope": "delta"})
+        self.assertIn("Scope: the findings sent back and the change since the earlier review (2 changed lines in "
+                      "1 file), not the whole pull request", comment)
+        self.assertIn("Scope: the findings sent back", self.pr(tid)["body"])
+        record = self.metrics(1)[-1]
+        self.assertEqual((record["reviews"], record["review_scopes"]), (["needs changes", "pass"], ["full", "delta"]))
+
+    def test_the_review_after_a_retry_gets_the_earlier_minor_findings_and_stops_on_again(self):
+        self.write_config(reviewer=True)
+        tid = self.new("grow REVIEW=again")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        second = self.reviewer_calls()[1]["prompt"]
+        self.assertIn("You are the re-reviewer", second)
+        self.assertIn("## Known issues of the earlier review\n\n- no newline check", second)
+        self.assertIn("- the greeting is too short", second.split("## Known issues of the earlier review")[0])
+        last = self.comments(tid)[-1]  # (again) still stops sending back, and the human gets the card
+        self.assertIn("a finding came back after the retry it was sent back with", last)
+        self.assertEqual(self.review_line(last)["scope"], "delta")
+        self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "delta"])
+
+    def test_a_third_review_checks_the_findings_of_the_review_before_it_only(self):
+        self.write_config(reviewer=True)
+        tid = self.new("shrink REVIEW=moving")  # a new finding each round, and each retry changes less
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        first, second, third = (c["prompt"] for c in self.reviewer_calls())
+        self.assertIn("- round 1: hello.txt is not done", second)
+        self.assertIn("- round 2: hello.txt is not done", third)
+        self.assertNotIn("- round 1:", third)  # the second review found it fixed; its fix is not in this change
+        self.assertIn("automated review did not pass after 2 retries", self.comments(tid)[-1])
+        self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "delta", "delta"])
+
+    def test_a_big_change_since_the_earlier_review_is_reviewed_in_full(self):
+        self.write_config(reviewer=True)
+        for word, size in (("BIGRETRY", "402 changed lines in 2 files"), ("WIDERETRY", "13 changed lines in 12 files")):
+            with self.subTest(word):
+                tid = self.new(f"reviewfix FIRSTFILE {word}")
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), "In review")
+                second = self.reviewer_calls()[-1]["prompt"]
+                self.assertIn("You are the adversarial reviewer", second)  # the whole PR again, as before
+                self.assertNotIn("You are the re-reviewer", second)
+                self.assertIn("+from the first run only", second)
+                self.assertIn("## Findings the work was sent back with", second)
+                comment = self.comments(tid)[-1]
+                self.assertEqual(self.review_line(comment)["scope"], "full")
+                self.assertIn(f"Scope: the whole pull request: the change since the earlier review ({size}) is "
+                              "past the line of a re-review", comment)
+                self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "full"])
+
+    def test_re_review_full_reads_the_whole_pull_request_after_a_retry_as_before(self):
+        self.write_config(reviewer=True, re_review="full")
+        tid = self.new("reviewfix FIRSTFILE")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        second = self.reviewer_calls()[1]["prompt"]
+        self.assertIn("You are the adversarial reviewer", second)
+        self.assertNotIn("You are the re-reviewer", second)
+        self.assertIn("+from the first run only", second)
+        self.assertIn("## Findings the work was sent back with", second)
+        comment = self.comments(tid)[-1]
+        self.assertEqual(self.review_line(comment)["scope"], "full")
+        self.assertNotIn("Scope:", comment)
+        self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "full"])
+
+    def test_goldfish_mode_re_reviews_with_one_reviewer_that_never_gets_the_report(self):
+        self.write_config(reviewer=True, review_mode="goldfish")
+        tid = self.new("reviewfix FIRSTFILE")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        calls = self.reviewer_calls()
+        self.assertEqual(len(calls), 3)  # the 2 auditors, then 1 re-reviewer
+        second = calls[2]["prompt"]
+        self.assertIn("You are the re-reviewer", second)
+        self.assertNotIn("# Goldfish review", second)
+        self.assertNotIn("# Agent report", second)
+        self.assertIn("You get no report from the agent", second)
+        self.assertFalse(calls[2]["report"])  # nor in the worktree it inspects
+        self.assertNotIn("from the first run only", second)
+        comment = self.comments(tid)[-1]
+        self.assertIn("Added hello.txt", comment)  # the report, put back
+        self.assertEqual(self.review_line(comment), {"verdict": "pass", "blocking": 0, "minor": 0,
+                                                     "mode": "goldfish", "attempt": 2, "scope": "delta"})
+        self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "delta"])
+
+    def test_a_bad_re_review_stops_the_start_before_the_agent_runs(self):
+        self.write_config(reviewer=True, re_review="half")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(self.agent_calls(), [])
+        self.assertIn("re_review", self.comments(tid)[-1])
+
     def test_automated_review_stops_when_the_same_finding_comes_back(self):
         """reviewfail: the retry does not fix it, and the reviewer gives the same finding word for word."""
         self.write_config(reviewer=True)
@@ -2083,7 +2205,8 @@ class TaskTest(unittest.TestCase):
         comment = self.comments(tid)[-1]
         self.assertIn("Added hello.txt. Ran the tests: 3 passed.", comment)  # put back for the Issue and the PR
         self.assertEqual(self.review_line(comment),
-                         {"verdict": "pass", "blocking": 0, "minor": 0, "mode": "goldfish", "attempt": 1})
+                         {"verdict": "pass", "blocking": 0, "minor": 0, "mode": "goldfish", "attempt": 1,
+                          "scope": "full"})
         self.assertIn("Goldfish review: 2 auditors, each in a fresh context", comment)
         self.assertEqual(self.review_field(tid), "pass")
         self.assertEqual([u["role"] for u in self.metrics(1)[-1]["usage"]], ["agent", "Goal Auditor", "Codebase Auditor"])
@@ -2127,7 +2250,8 @@ class TaskTest(unittest.TestCase):
                 self.assertEqual(self.wait(tid), status)
                 comment = self.comments(tid)[-1]
                 self.assertEqual(self.review_line(comment), {"verdict": verdict, "blocking": blocking,
-                                                             "minor": minor, "mode": "goldfish", "attempt": 1})
+                                                             "minor": minor, "mode": "goldfish", "attempt": 1,
+                                                             "scope": "full"})
                 self.assertIn(f"Verdict: {verdict}\n", comment)
                 self.assertEqual(self.review_field(tid), verdict)
                 fix = comment.split("### Please fix\n\n", 1)[1].split("\n\n#", 1)[0] if blocking else ""
@@ -2151,8 +2275,9 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(len(self.reviewer_calls()), 2 * len(cases))
 
     def test_goldfish_review_sends_back_and_stops_as_one_reviewer_does(self):
-        """#249's sending back works on the combined verdict: a finding that comes back after its retry stops it."""
-        self.write_config(reviewer=True, review_mode="goldfish")
+        """#249's sending back works on the combined verdict: a finding that comes back after its retry stops it.
+        re_review = full: the auditors read the whole PR again after the retry, as before."""
+        self.write_config(reviewer=True, review_mode="goldfish", re_review="full")
         tid = self.new("ok GOAL=needs CODE=pass")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
@@ -2241,6 +2366,39 @@ class TaskTest(unittest.TestCase):
                            (["--no-write", "--ref", f"task/{tid}", "--mode", "fish"], "--mode must be")):
             with self.subTest(args):
                 self.assertIn(said, self.task("review", tid, *args, code=2))
+
+    def test_review_trial_takes_other_instructions_earlier_findings_and_setup(self):
+        """What docs/lessons.md tries cheaper reviews with: a short review, and a second one of only the change."""
+        self.write_config()
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.write_config("\n[setup]\njyoka/app = echo trial-setup-ran\n", reviewer=True)
+        files = {name: self.root / f"{name}.md" for name in ("report", "light", "sent")}
+        files["report"].write_text("")
+        files["light"].write_text("LIGHT-INSTRUCTIONS: read the Goal and the diff only.\n")
+        files["sent"].write_text("- FINDING-ONE: hello.txt is wrong\n  - its detail\n- FINDING-TWO: no test\n")
+        out = self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "agent",
+                        "--report-file", str(files["report"]), "--instructions-file", str(files["light"]),
+                        "--sent-file", str(files["sent"]), "--setup")
+        self.assertIn("verdict: pass", out)
+        prompt = self.reviewer_calls()[-1]["prompt"]
+        self.assertIn("LIGHT-INSTRUCTIONS", prompt)
+        self.assertNotIn("You are the adversarial reviewer", prompt)  # worker/REVIEW.md's first part
+        self.assertIn("Findings the work was sent back with", prompt)
+        self.assertIn("- FINDING-ONE: hello.txt is wrong\n  - its detail\n- FINDING-TWO: no test", prompt)
+        log = (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log").read_text()
+        self.assertIn("trial-setup-ran", log)
+        trial = json.loads((self.root / ".local/state/task-hub/review-trials.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((trial["instructions"], trial["sent"], trial["setup"]), (str(files["light"]), 2, True))
+        self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "agent",
+                  "--report-file", str(files["report"]))  # without them: the run's own review
+        self.assertIn("You are the adversarial reviewer", self.reviewer_calls()[-1]["prompt"])
+        self.assertNotIn("Findings the work was sent back with", self.reviewer_calls()[-1]["prompt"])
+        self.assertEqual(log, (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log").read_text()
+                         [:len(log)])
+        self.assertNotIn("trial-setup-ran", (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log")
+                         .read_text()[len(log):])
 
     def test_unknown_reviewer_stops_the_start_before_the_agent_runs(self):
         self.write_config(reviewer="nosuch")

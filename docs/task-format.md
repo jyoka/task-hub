@@ -427,7 +427,8 @@ blocking がなく minor だけなら、レビューは通過です。判定が 
 
 2 回目からのレビューには、それまでに差し戻した指摘を渡します。reviewer は直っていないものを同じ文で `(again)`
 を付けて書き直します。task-hub は、印のある指摘と、空白や大文字小文字、Markdown の飾りを除いて同じ文の指摘を、
-「また出た」と数えます。
+「また出た」と数えます。2 回目からのレビューは、既定では前の指摘と、その後に変わった所だけを見ます
+([差し戻しの後のレビュー](#差し戻しの後のレビューrunner-re_review))。
 
 `needs changes` のまま止まったときは、Issue のレポートと PR の本文の自動レビューの節のあとに `## Suggested instructions` を書きます。
 最後のレビューの blocking の指摘を番号付きで並べ、また出たものには印を付けた、次の実行への修正指示の下書きです。
@@ -476,6 +477,54 @@ blocking と minor の両方に出た指摘は blocking として数えます。
   視点ごとの時間と token を見られます。記録には `review_mode` と、最後のレビューの判定 `review_verdict` も入ります。
 - 値が `agent` と `goldfish` 以外なら、エージェントを動かす前にカードを Blocked にします。
 
+### 差し戻しの後のレビュー([runner] re_review)
+
+```ini
+[runner]
+re_review = delta       ; delta(既定)/ full
+```
+
+差し戻しの後のレビューで、何を読むかを決めます。
+
+| `re_review` | 差し戻しの後のレビューが読むもの | 起動 |
+|---|---|---|
+| `delta`(既定) | Goal、人のコメント、前のレビューが差し戻した指摘(blocking)、前のレビューの Known issues(minor)、実装エージェントのレポート(テストの結果を含む。`review_mode = goldfish` では渡さない)、**前のレビューが見た作業の木からの差分だけ** | `review_mode` によらず 1 体 |
+| `full` | 1 回目と同じく PR の全部(上の表)と、差し戻した指摘 | 1 回目と同じ |
+
+`delta` のレビュアーが確かめるのは 2 つです。各指摘が直ったかと、直したことで新しい穴ができていないかです。指示は
+[worker/REVIEW.md](../worker/REVIEW.md) の 5 つ目の部分(`goldfish` では 6 つ目も)にあります。直っていない指摘は、
+1 回目と同じく `(again)` を付けて書き直します。差し戻しの止まり方は変わりません。3 回目のレビューが確かめるのは、
+2 回目のレビューが差し戻した指摘です。それより前の指摘は、2 回目が直ったと確かめていて、その後の差分にも入らないからです。
+差分がプロンプトの上限で切れたときのために、前のレビューが見た git の tree の番号も渡し、レビュアーが `git diff` で全部を見られるようにします。前のレビューの Known issues は、
+まだ残っているものをレビュアーが同じ文で書き直します。PR に残る Known issues は最後のレビューのものだからです。
+
+次のときは、`delta` でも PR の全部を読みます。
+
+- 前のレビューの後の変更が大きいとき: **変えた行数(足した行と消した行の和)が 300 を超えるか、変えたファイルが 10 を超える**
+- `research` ラベルのタスク(レポートが成果物なので)
+- 前のレビューが見た作業の木を読めないとき(記録がない、長く待つ間に git の掃除で消えた)。`Scope:` の行に
+  `the change since the earlier review cannot be read` と書きます
+
+この線と既定は、過去のカードでの試行の結果から決めました([lessons.md](lessons.md#レビューの-token-を減らす-3-つの方法を過去のカードで試す-2026-10-29タスク-404))。
+
+- 差し戻された 6 枚で、変わった所だけのレビューは 6 枚とも元の 2 回目と同じ判定でした。直していない版は、2 枚とも `(again)` で差し戻しました。
+- 費用の重みをかけた token は元の 22%、時間は 12% でした。元の 2 回目は goldfish の 2 体で、試行は 1 体です。
+- 試行の差分は、6 枚のうち 5 枚が 6〜176 行、3〜5 ファイルでした。残りの 1 枚は main を取り込んだ 936 行、27 ファイルで、今の線では全部を読みます。
+- どれも 1 回ずつの結果です。測り直しで線や既定は変わりえます。全部の読み直しでしか見つからない穴(直しが、変えていない所を壊す)が
+  あったカードはなく、変わった所だけでそれを見逃すかは測れていません。気になるときは `re_review = full` で今までのレビューに戻せます。
+
+どの読み方をしたかは、あとからたどれるように次のところに残します。
+
+- レポートのコメントと PR の本文の `## Automated review`: `Verdict:` の次の行に `Scope:` の行を書きます。`delta` なら
+  `Scope: the findings sent back and the change since the earlier review (<行数> changed lines in <数> files), not the whole pull request`、
+  変更が大きくて全部を読んだなら `Scope: the whole pull request: the change since the earlier review (...) is past the line of a re-review (...)` です。
+  1 回目のレビューと、`full` での差し戻しの後のレビューには書きません。
+- 機械が読む 1 行の `scope`: `delta` か `full`(下の「判定の残し方」)
+- `metrics.jsonl` の `review_scopes`: 実行の中のレビューごとの `delta` か `full`。`reviews`(判定)と同じ順です
+- `usage` の `role` は、`delta` のレビューでは `re-reviewer` です
+
+値が `delta` と `full` 以外なら、エージェントを動かす前にカードを Blocked にします。
+
 ### 判定の残し方(Review 欄と機械が読む 1 行)
 
 最後のレビューの判定は、カードを読むだけで分かるように 2 か所に残します。
@@ -486,12 +535,13 @@ blocking と minor の両方に出た指摘は blocking として数えます。
   前の実行の判定が残らないようにするためです。
   欄を書けなくても、実行は止めません(ログに理由を書きます)。
 - **レポートのコメントの 1 行**: `## Automated review` の見出しのすぐ下に、GitHub では見えない 1 行を書きます。
-  `attempt` はその実行の何回目のレビューか(1 から)です。PR の本文にも同じ 1 行が入ります。
+  `attempt` はその実行の何回目のレビューか(1 から)、`scope` は何を読んだか(`full` は PR の全部、`delta` は前の指摘と
+  その後の変更だけ。[差し戻しの後のレビュー](#差し戻しの後のレビューrunner-re_review))です。PR の本文にも同じ 1 行が入ります。
 
 ```markdown
 ## Automated review
 
-<!-- task-hub review: {"verdict": "needs changes", "blocking": 2, "minor": 1, "mode": "goldfish", "attempt": 1} -->
+<!-- task-hub review: {"verdict": "needs changes", "blocking": 2, "minor": 1, "mode": "goldfish", "attempt": 1, "scope": "full"} -->
 Verdict: needs changes
 ```
 
@@ -505,8 +555,9 @@ Verdict: needs changes
 
 ### レビューを試す(task review --no-write)
 
-`[runner] review_mode` の 2 つを過去のカードで比べるためのコマンドです。カードのリポジトリのあるコミットのコードを、
-実行と同じ指示でレビューし、判定と使った量を表示します。GitHub には何も書きません。
+`[runner] review_mode` の 2 つや、レビューを安くする方法([lessons.md](lessons.md#レビューの-token-を減らす-3-つの方法を過去のカードで試す-2026-10-29タスク-404))を
+過去のカードで比べるためのコマンドです。カードのリポジトリのあるコミットのコードを、実行と同じ指示でレビューし、
+判定と使った量を表示します。GitHub には何も書きません。
 
 ```sh
 task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode goldfish
@@ -518,6 +569,13 @@ task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode agent --report-fil
 - 差分は `--base` から `--ref` までです。`--base` を省くと、カードの Base branch(空ならデフォルトブランチ)から分かれた所です。
 - `--mode` を省くと `[runner] review_mode` です。`agent` には、そのときの実装エージェントのレポートを `--report-file` で渡します。
   `--goal-file` を渡すと、Issue の本文の代わりにその文を Goal にします(実行のあとに Goal を編集したカード用)。
+- 試すための口が 3 つあります。どれも既定の動きは変えません。
+  - `--instructions-file`: `worker/REVIEW.md` の最初の部分(レビューの指示)の代わりに、そのファイルの文を渡します。
+    返し方の形(`.task-review.md` の見出し)は、渡す文に書いておきます
+  - `--sent-file`: 前のレビューが差し戻した指摘(1 行目が `- ` の項目を 1 件と数える)を、実行の 2 回目のレビューと同じく渡します。
+    `--base` を前のレビューが見たコミットにすると、その後の変更だけの差分になります
+  - `--setup`: 実行と同じく、`[env]` のファイルを置き、`[setup]` を動かしてからレビューします。テストに準備が要るリポジトリ用です
+- モデルは `[agents]` のコマンドのままです。claude なら、環境変数 `ANTHROPIC_MODEL=claude-sonnet-5-5` を付けて動かすと替わります。
 - 結果は `~/.local/state/task-hub/review-trials.jsonl` に 1 行ずつ残ります。`metrics.jsonl` には入れません。
   ログは `logs/<番号>-review-trial.log` です。
 

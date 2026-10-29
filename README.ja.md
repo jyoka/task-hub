@@ -117,6 +117,8 @@ agent = claude
 ```
 
 実行は PR の前に、同じエージェントが新しいコンテキストでレビューします。外すときは `[runner]` に `reviewer = off` を書きます。
+差し戻しの後のレビューは、前の指摘と、その後に変わった所だけを確かめます。`re_review = full` なら PR の全部を読み直します
+([詳しく](docs/task-format.md#差し戻しの後のレビューrunner-re_review))。
 GitHub Project の準備(列と欄)、スキルのインストール、常駐のさせ方は [docs/setup.md](docs/setup.md) にあります。
 
 ## 使い方
@@ -171,7 +173,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task check <番号> [--no-write]` | Ready の前に Goal を確かめる。GO / NO-GO を Issue と Project の Readiness 欄に書く(`[runner] readiness` で開始に GO を求められる) |
-| `task review <番号> --no-write --ref <コミット>` | カードのコードのあるコミットで自動レビューを試し、判定を表示する。過去のカードで `[runner] review_mode` を比べる用。何も書かない |
+| `task review <番号> --no-write --ref <コミット>` | カードのコードのあるコミットで自動レビューを試し、判定を表示する。過去のカードで `[runner] review_mode` や安いレビューを比べる用。何も書かない |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |

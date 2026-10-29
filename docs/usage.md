@@ -68,6 +68,7 @@ replanner = agent       ; worker 自身の Blocked を仕分けて Issue にコ�
 parallel = 5            ; 同時に動かすタスクの数(既定 5)。性能の低い PC では 1 か 2 にする
 review_retries = 2      ; needs changes で worker に差し戻す回数(既定 2。0 で差し戻さない)
 review_mode = agent     ; reviewer に渡すもの。agent(既定。レポートも)/ goldfish(Goal とコードだけ。2 つの視点)
+re_review = delta       ; 差し戻しの後のレビュー。delta(既定。前の指摘とその後の変更だけを 1 体で)/ full(PR の全部を読み直す)
 readiness = off         ; Ready のカードを始める前に task check の GO を求めるか。off(既定)/ warn / require
 checker =               ; task check の Goldfish のエージェント。空か agent = カードの Agent 欄
 limit_resume = on       ; エージェントが利用の上限で止まったら、戻る時刻に再開する(既定 on。off で今までどおりの Blocked)
@@ -120,7 +121,7 @@ user = task-agent       ; そのユーザー(これが既定)
 
 | 設定 | 有効にすると | 人が決めること |
 |---|---|---|
-| `reviewer`(既定で有効) | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し))。判定は Project の Review 欄にも入る。`review_mode = goldfish` では、レポートを読まない 2 つの視点が別々に見る([task-format.md](task-format.md#goldfish-のレビューrunner-review_mode)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
+| `reviewer`(既定で有効) | 受け入れ条件を 1 つずつ根拠付きで確かめる。blocking の指摘があれば `review_retries` 回まで差し戻し、同じ指摘がまた出るか変更が収束しなければ早めに止める。通らなければドラフト PR で Blocked にし、次の実行への修正指示の下書きを Issue に書く。minor の指摘だけなら In review に進み、PR に「Known issues」として残す([task-format.md](task-format.md#自動レビューの差し戻し))。判定は Project の Review 欄にも入る。`review_mode = goldfish` では、レポートを読まない 2 つの視点が別々に見る([task-format.md](task-format.md#goldfish-のレビューrunner-review_mode))。差し戻しの後のレビューは、既定(`re_review = delta`)では前の指摘とその後の変更だけを読む。変更が 300 行か 10 ファイルを超えるときと `re_review = full` では全部を読み直す。どちらで読んだかは、レビューの節の `Scope:` の行と `metrics.jsonl` に残る([task-format.md](task-format.md#差し戻しの後のレビューrunner-re_review)) | マージするかどうか。Blocked なら下書きを確かめて Ready に戻すかどうか |
 | `readiness` | `warn`: 今の Goal への `task check` の GO がない Ready のカードも始めるが、`readiness` イベントと `task` の出力で知らせる。`require`: GO がなければ始めず(`waits_for` に理由)、オートパイロットも Ready に移さない。どちらも `task list` に `readiness` の列が付く。`--research` のカードは対象外([task-format.md](task-format.md#開始の門-runner-readiness)) | `task check` の NO-GO を見て Goal を直すか、Backlog に戻すか(task-hub はカードを動かさない) |
 | `replanner` | リポジトリから答えられるものは根拠付きで答え(task-hub が根拠を実物と照合)、答えられないものは質問を 1 行にまとめる。コメントするだけで、カードは動かさない | Ready に戻すかどうか |
 | `[env]` | 書いたリポジトリにだけ、ファイルをコピーで渡す | どのリポジトリに秘密情報を渡すか |
