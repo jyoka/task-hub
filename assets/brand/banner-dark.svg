@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
   <title id="title">task-hub</title>
-  <desc id="desc">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。 Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</desc>
+  <desc id="desc">AI に任せて、離れていい。確かめてから届くから。 Hand work to AI agents and walk away. Nothing reaches you unchecked.</desc>
   <rect width="1280" height="640" fill="#121417"/>
   <g font-family="system-ui, -apple-system, &quot;Hiragino Sans&quot;, &quot;Yu Gothic UI&quot;, &quot;Noto Sans JP&quot;, sans-serif">
     <g transform="translate(80 80)">
@@ -9,11 +9,10 @@
       <rect x="24" y="0" width="9" height="13" rx="2" fill="#4cc27f"/>
       <text x="50" y="26" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="30" fill="#e8eaed">task-hub</text>
     </g>
-    <text x="80" y="236" font-size="38" font-weight="700" fill="#e8eaed">Ready に移した GitHub Project の</text>
-    <text x="80" y="290" font-size="38" font-weight="700" fill="#e8eaed">カードを、手元のエージェントが</text>
-    <text x="80" y="344" font-size="38" font-weight="700" fill="#e8eaed">レビュー済みの PR にする。</text>
-    <text x="80" y="414" font-size="22" fill="#a0a8b2">Your local coding agents turn each GitHub Project card</text>
-    <text x="80" y="446" font-size="22" fill="#a0a8b2">you move to Ready into a reviewed PR.</text>
+    <text x="80" y="246" font-size="50" font-weight="700" fill="#e8eaed">AI に任せて、離れていい。</text>
+    <text x="80" y="314" font-size="50" font-weight="700" fill="#e8eaed">確かめてから届くから。</text>
+    <text x="80" y="398" font-size="24" fill="#a0a8b2">Hand work to AI agents and walk away.</text>
+    <text x="80" y="434" font-size="24" fill="#a0a8b2">Nothing reaches you unchecked.</text>
     <g font-size="16">
       <rect x="80" y="536" width="14" height="14" rx="4" fill="#7aa7ff"/>
       <text x="102" y="548" fill="#a0a8b2">You</text>

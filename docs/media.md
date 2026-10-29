@@ -19,10 +19,10 @@ python3 tests/media.py
 | ファイル | 中身 | 合う機能のカード([brand.md](brand.md) の 3 節) |
 |---|---|---|
 | `flow.gif`、`flow.webm`、`flow.avif` | 動く画像(15 秒)。カード #12 を Ready に移してから、エージェントが作り、レビューで 1 回差し戻され、PR になり、マージキューでマージされるまで。左にターミナル、右に Claude Code の mod の盤。上の印は誰がしたか(You、task-hub、Agent) | 全体。README の一番上(太字の 1 文の下) |
-| `list-dark.png`、`list-light.png` | `task list`。#12 が In review(判定 `pass`)、#13 が実行中、#14 が Blocked、#15 が Backlog | 1 タスク 1 PR |
-| `review-dark.png`、`review-light.png` | 1 回目のレビュー(`.task-review.md` の `needs changes` と `Please fix`)と、最後の判定(`task show 12 --digest` の `pass` と PR) | PR の前のレビュー |
-| `claude-board-dark.png`、`claude-board-light.png` | Claude Code の mod の盤。船の絵、要対応(Blocked の理由、In review の判定と PR)、実行中(経過時間と普段の時間) | Blocked の仕分け、エージェントの選択 |
-| `kiro-board-dark.png`、`kiro-board-light.png` | Kiro の拡張のサイドバーの盤とステータスバー | Blocked の仕分け、エージェントの選択 |
+| `list-dark.png`、`list-light.png` | `task list`。#12 が In review(判定 `pass`)、#13 が実行中、#14 が Blocked、#15 が Backlog | カードごとの作業場所 |
+| `review-dark.png`、`review-light.png` | 1 回目のレビュー(`.task-review.md` の `needs changes` と `Please fix`)と、最後の判定(`task show 12 --digest` の `pass` と PR) | 届ける前の確かめ |
+| `claude-board-dark.png`、`claude-board-light.png` | Claude Code の mod の盤。船の絵、要対応(Blocked の理由、In review の判定と PR)、実行中(経過時間と普段の時間) | Blocked の仕分け |
+| `kiro-board-dark.png`、`kiro-board-light.png` | Kiro の拡張のサイドバーの盤とステータスバー | README の「ボードを横に」(LP の機能のカードでは使わない) |
 | `layers/1-card-*.png` 〜 `layers/8-merge-*.png` | 分解の絵の素材。[brand.md](brand.md) の 4 節の 8 層の順に 1 枚ずつ(下の表) | LP の分解の絵 |
 | `text.json` | 各画像に写っている文字。`tests/test_media.py` が画像を読まずに検査するのに使う。撮り直したときの差分で、何が変わったかも分かる | - |
 
