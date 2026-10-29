@@ -518,12 +518,72 @@ re_review = delta       ; delta(既定)/ full
 - レポートのコメントと PR の本文の `## Automated review`: `Verdict:` の次の行に `Scope:` の行を書きます。`delta` なら
   `Scope: the findings sent back and the change since the earlier review (<行数> changed lines in <数> files), not the whole pull request`、
   変更が大きくて全部を読んだなら `Scope: the whole pull request: the change since the earlier review (...) is past the line of a re-review (...)` です。
-  1 回目のレビューと、`full` での差し戻しの後のレビューには書きません。
+  1 回目のレビューと、`full` での差し戻しの後のレビューには書きません(文書だけの PR の軽い確かめは、下の節の 1 行を書きます)。
 - 機械が読む 1 行の `scope`: `delta` か `full`(下の「判定の残し方」)
-- `metrics.jsonl` の `review_scopes`: 実行の中のレビューごとの `delta` か `full`。`reviews`(判定)と同じ順です
+- `metrics.jsonl` の `review_scopes`: 実行の中のレビューごとの `delta` か `full`(文書だけの PR の軽い確かめなら `light`。
+  [docs だけの変更の軽い確かめ](#docs-だけの変更の軽い確かめrunner-light_review))。`reviews`(判定)と同じ順です
 - `usage` の `role` は、`delta` のレビューでは `re-reviewer` です
 
 値が `delta` と `full` 以外なら、エージェントを動かす前にカードを Blocked にします。
+
+### docs だけの変更の軽い確かめ([runner] light_review)
+
+```ini
+[runner]
+light_review = docs     ; docs(既定)/ off
+```
+
+PR が変えたファイルが全部文書のとき、PR の全部を読むレビューを、軽い確かめに替えます。
+
+| `light_review` | 文書だけの PR のレビューが読むもの | 起動 |
+|---|---|---|
+| `docs`(既定) | Goal、人のコメント、差し戻した指摘(あれば)、**PR の差分**。実装エージェントのレポートは渡さず、worktree からも外す | `review_mode` によらず 1 体 |
+| `off` | ほかの PR と同じ(上の表) | ほかの PR と同じ |
+
+軽い確かめのレビュアーは、テスト、ビルド、文書に書かれたコマンドを動かしません。ほかのファイルを開くのは、次を確かめるときだけです。
+指示は [worker/REVIEW.md](../worker/REVIEW.md) の 7 つ目の部分にあります。返し方と、blocking と minor の分け方は、ほかのレビューと同じです。
+
+1. Goal の受け入れ条件を 1 つずつ。Goal の節が丸ごとない、のような抜けも見ます。差分から確かめられない条件は
+   `not checkable from the diff` とし、それだけでは差し戻しません
+2. 足したリンクと変えたリンク: 先のファイルと、アンカーの見出しがあるか。名前を変えたり消したりしたファイルへのリンクが、ほかの文書に残っていないか
+3. 文書に書いたコマンド、オプション、設定、パス: リポジトリにある綴りか(コードを検索して確かめる)。例がそのまま動く書き方か
+4. 食い違い: もう一方の言語の版(`README.md` と `README.ja.md` など)や、一緒に直す決まりの文書が、同じことを言っているか。
+   既定や数や名前が、変えていない所の記述と合っているか
+
+差分がプロンプトの上限(20,000 字。Windows は 12,000 字)で切れたときは、変えたファイルそのものを読んで残りを確かめます。
+
+**文書とするもの**(`is_doc`): 拡張子が `.md`、`.markdown`、`.rst`、`.adoc` のファイルです。ただし、エージェントやプログラムが
+指示として読むものは文書としません。
+
+- 名前が `AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`SKILL.md`(大文字小文字を問わない)
+- `.` で始まるフォルダ(`.claude/`、`.github/`、`.kiro/` など)の下
+- `worker/`、`skills/`、`prompts/`、`agents/`、`commands/`、`steering/` という名前のフォルダの下(どの深さでも)
+
+PR の分かれた所からの全部のファイル(足した、変えた、消した、名前を変えた前と後)が文書のときだけ、軽い確かめにします。
+画像や `.txt` が 1 つでも混ざれば、全部を読むレビューです。`research` ラベルのタスクも、レポートが成果物なので全部を読みます。
+差し戻しの後のレビューは、[差し戻しの後のレビュー](#差し戻しの後のレビューrunner-re_review)の `delta` が先です。
+`delta` にならず PR の全部を読み直すときに、PR が文書だけなら軽い確かめにします。
+
+この既定と線は、過去のカードでの試行の結果から決めました([lessons.md](lessons.md#レビューの-token-を減らす-3-つの方法を過去のカードで試す-2026-10-29タスク-404))。
+
+- docs だけの 3 枚は、元のレビューと同じ判定でした(Goal の節が丸ごとない穴を 1 件見つけ、2 枚は pass)。
+  費用の重みをかけた token は、試した 7 枚で元の 19%、時間は 8% でした。
+- 小さなコードの直し(200 行)では、動かして初めて分かる穴を見逃しました。そのため、コードを 1 つでも含む変更には使いません。行数の線は引けませんでした。
+- どれも 1 回ずつの結果で、docs だけの変更は 3 枚だけです。docs だけの変更で見逃しがないとは、まだ言えません。
+  測り直しで、既定と、文書とするものの線は変わりえます。気になるときは `light_review = off` で今までのレビューに戻せます。
+- 試行との違い: 試行の指示は「ほかのファイルを開かない」でした。ここでは、リンクの先、もう一方の言語の版、コマンドのコード、
+  文書の決まりを確かめるために、そのファイルだけを開いてよいことにしています。文書で起きやすい穴を確かめる 2〜4 の指示も足しました。
+  この違いの分の結果は測っていません。
+
+どの読み方をしたかは、あとからたどれるように次のところに残します。
+
+- レポートのコメントと PR の本文の `## Automated review`: `Verdict:` の次の行に
+  `Scope: a light review of the Goal and the diff: every changed file is a document (<数> files)` と書きます
+- 機械が読む 1 行の `scope`: `light`
+- `metrics.jsonl` の `review_scopes`: そのレビューの位置に `light`
+- `usage` の `role` は `light reviewer` です
+
+値が `docs` と `off` 以外なら、エージェントを動かす前にカードを Blocked にします。
 
 ### 判定の残し方(Review 欄と機械が読む 1 行)
 
@@ -536,7 +596,8 @@ re_review = delta       ; delta(既定)/ full
   欄を書けなくても、実行は止めません(ログに理由を書きます)。
 - **レポートのコメントの 1 行**: `## Automated review` の見出しのすぐ下に、GitHub では見えない 1 行を書きます。
   `attempt` はその実行の何回目のレビューか(1 から)、`scope` は何を読んだか(`full` は PR の全部、`delta` は前の指摘と
-  その後の変更だけ。[差し戻しの後のレビュー](#差し戻しの後のレビューrunner-re_review))です。PR の本文にも同じ 1 行が入ります。
+  その後の変更だけ。[差し戻しの後のレビュー](#差し戻しの後のレビューrunner-re_review)。`light` は文書だけの PR の Goal と差分。
+  [docs だけの変更の軽い確かめ](#docs-だけの変更の軽い確かめrunner-light_review))です。PR の本文にも同じ 1 行が入ります。
 
 ```markdown
 ## Automated review

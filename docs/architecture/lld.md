@@ -32,7 +32,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ<br/>delete_merged_branch、repo_setting_lines"]
     readiness["readiness<br/>cmd_check、readiness_check、goldfish、at_once、ReadinessResult、readiness_gate、<br/>set_readiness、latest_readiness、goal_hash"]
-    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_scope、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
+    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_scope、light_scope、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent、<br/>usage_limit、limit_stop、limit_resumed、limit_relaunch、agent_limits"]
@@ -104,7 +104,7 @@ classDiagram
         minor: Known issues
         mode: agent / goldfish
         attempt: その実行の何回目のレビューか
-        scope: full / delta(review_scope)
+        scope: full / delta / light(review_scope、light_scope)
         scope_note: Scope の行
         field_verdict: Review 欄の値
         review_line(): 機械が読む 1 行
@@ -347,7 +347,7 @@ flowchart TB
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
-    review -- "あり" --> rv["run_review → review_scope<br/>full: review_by。snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews<br/>delta(差し戻しの後、変更が線の内): build_re_review_prompt で 1 体"]
+    review -- "あり" --> rv["run_review → review_scope<br/>full: review_by。snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews<br/>delta(差し戻しの後、変更が線の内): build_re_review_prompt で 1 体<br/>light(full のうち PR が文書だけ。light_scope、is_doc): build_light_review_prompt で 1 体(レポートを外す)"]
     rv -- "pass、minor(Known issues)だけ" --> finish
     rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
@@ -781,7 +781,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ### 実行の集計(metrics.jsonl の 1 行)
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
-`review_scopes`(`reviews` と同じ順に、各レビューが読んだもの。`full` は PR の全部、`delta` は前の指摘とその後の変更だけ)、
+`review_scopes`(`reviews` と同じ順に、各レビューが読んだもの。`full` は PR の全部、`delta` は前の指摘とその後の変更だけ、`light` は文書だけの PR の Goal と差分)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
 `repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
 `goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行、`limit` は利用の上限で止まった実行)、
@@ -789,7 +789,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
 起動は、`usage` に `agent, resumed` のような役で入ります。`goldfish` のレビューの起動は、視点の名前(`Goal Auditor`、
-`Codebase Auditor`)の役で入ります。`delta` のレビューの起動は `re-reviewer` の役で入ります。
+`Codebase Auditor`)の役で入ります。`delta` のレビューの起動は `re-reviewer`、`light` のレビューの起動は `light reviewer` の役で入ります。
 
 `task review --no-write` の結果は `review-trials.jsonl` に 1 行ずつ入ります(`id`、`title`、`repo`、`reviewer`、`mode`、
 `base`、`commit`、`finished`、`seconds`、`verdict`、`blocking`、`minor`、`usage`、`instructions`(`--instructions-file` の
@@ -862,7 +862,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
-| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。差し戻しの後の `re_review = delta` のレビューは、どちらでも 1 体。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。差し戻しの後の `re_review = delta` のレビューは、どちらでも 1 体。文書だけの PR の `light_review = docs` のレビューも、どちらでも 1 体。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
 | `task check` の書き込み: `gh issue comment`、`gh project item-edit`(Readiness 欄。blocked は `--clear`)、欄がなければ `gh project field-create` を 1 回 | gh(GraphQL) | 判定ごとに 2〜3 | `task check` だけ(`--no-write` は 0) |
 | Review 欄(`set_review`): `gh project item-edit`(判定、レビューがなければ `--clear`)、欄がなければ `gh project field-create` を 1 回。`ITEMS_QUERY` は欄があるときだけ `review` も読む(同じ呼び出し) | gh(GraphQL) | 実行の終わりに 1〜2。欄がなくレビューもない実行は 0 | `finish` ごと |
 | `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn` か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
@@ -1023,6 +1023,11 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 22. エージェントが読める形で利用の上限を言って失敗で終わったら、カードは Blocked で、理由に再開の時刻が入る。時刻を過ぎた最初の
     同期が止まった段階から再開する。上限の間は同じエージェントの Ready のカードを始めず、時刻を過ぎたら始める。読めない形と
     `[runner] limit_resume = off` は足す前と同じ Blocked
+23. PR の全部を読むレビュー(1 回目と、delta にならなかった差し戻しの後)は、`[runner] light_review = docs`(既定)で、PR が
+    分かれた所から変えたファイル(`pr_files`。名前を変えた前と後も)が全部文書(`is_doc`)なら、1 体が Goal と差分だけを読む
+    (`build_light_review_prompt`。worker/REVIEW.md の 7 つ目の部分。レポートは渡さず worktree からも外す)。
+    文書でないファイルが 1 つでもあるとき、`research` のタスク、`off` では今までどおり。軽くしたことは、レビューの節の
+    `Scope:` の行、機械が読む 1 行の `scope`(`light`)、`metrics.jsonl` の `review_scopes` に必ず残る
 
 ## 10. テストの仕組み
 

@@ -207,6 +207,10 @@ Project の Review 欄と、レポートのコメントの機械が読む 1 行�
 1 体で読みます。差分が大きいとき(300 行か 10 ファイルを超える)と `re_review = full` では、PR の全部を読み直します。
 どちらで読んだかは、レビューの節の `Scope:` の行、機械が読む 1 行の `scope`、`metrics.jsonl` の `review_scopes` に残ります
 ([task-format.md](../task-format.md#差し戻しの後のレビューrunner-re_review))。
+PR の全部を読むレビューのうち、PR が変えたファイルが全部文書(Markdown など。エージェントが読む指示のファイルは除く)のものは、
+既定(`[runner] light_review = docs`)では軽い確かめにします。1 体が Goal と差分だけを読み、テストもコマンドも動かしません。
+`light_review = off` では、ほかの PR と同じレビューです。これも `Scope:` の行、`scope`(`light`)、`review_scopes` に残ります
+([task-format.md](../task-format.md#docs-だけの変更の軽い確かめrunner-light_review))。
 
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
