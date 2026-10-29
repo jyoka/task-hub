@@ -2,7 +2,7 @@
 
 [English](README.md) | 日本語
 
-**GitHub Project のカードを Ready に移すと、手元のコーディングエージェントが実装して PR を出す。**
+**Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。**
 
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -97,7 +97,7 @@ Ready のカードを自動で始めるには、`task watch` を動かしてお�
 例: 「ログインを直す」を頼んで、マージするまで。
 
 ```
-あなた      /task(または /chief に話す)            → Issue jyoka/tasks#12、Backlog
+あなた      /task(または /chief に話す)            → Issue you/tasks#12、Backlog
 あなた      カードを Ready に移す                    → task-hub が開始                 In progress
 worker      編集し、テストし、レポートを書く
 reviewer    受け入れ条件を PR 全体と照らし合わせる   → pass(needs changes なら差し戻し。2 回まで)
@@ -153,7 +153,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) 運用とトラブル | [architecture/lld.md](docs/architecture/lld.md) 詳細設計 | [architecture/feature-design.md](docs/architecture/feature-design.md) 機能の設計 |
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) エージェント | [design.md](docs/design.md) なぜこの作りか | [release.md](docs/release.md) リリース |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
-| [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | |
+| [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | [brand.md](docs/brand.md) 伝え方と見た目 |
 | | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
 | | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
 | | [autopilot.md](docs/autopilot.md) オートパイロット(選んだリポジトリの承認とマージを task-hub がする) | | |

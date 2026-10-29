@@ -1,0 +1,143 @@
+/*
+ * task-hub の見た目の決まり(docs/brand.md の「5. 見た目」)。README の絵、LP、バナーはこの値を使う。
+ * 外から読み込むもの(Web フォント、CDN)は使わない。字は、見る人の OS に入っている字を使う。
+ * 意味の色は、どれも地(--bg)と板(--panel)に対してコントラスト比 4.5 以上
+ * (tests/test_brand.py が測る。表は python3 tests/test_brand.py --table)。
+ *
+ * 使い方: <link rel="stylesheet" href="assets/brand/tokens.css"> を読み、var(--bg) などで使う。
+ * ダークとライトは OS の設定(prefers-color-scheme)に従う。<html data-theme="dark"> か
+ * data-theme="light" を書くと、OS の設定より優先する。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* 色: 地と線と字 */
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --line: #d5d9de;
+  --text: #1b1f24;
+  --muted: #5c6570;
+
+  /* 色: 意味のある色。--on-accent は --accent の上の字 */
+  --accent: #1f5fbf;
+  --on-accent: #ffffff;
+  --cyan: #0b6e7d;
+  --violet: #6b3fb0;
+  --ok: #1a7a3e;
+  --warn: #8a5800;
+  --error: #b42318;
+
+  /* 色: 意味のある色の薄い地(印や枠の中) */
+  --accent-bg: #e9f0fb;
+  --cyan-bg: #e4f3f5;
+  --violet-bg: #f1ebfa;
+  --ok-bg: #e7f4ec;
+  --warn-bg: #fbf1df;
+  --error-bg: #fcebea;
+
+  /* ボードの列の色。今の画面(claude/task-board の STATUS_COLORS、Kiro の拡張)と同じ意味 */
+  --status-backlog: var(--muted);
+  --status-ready: var(--accent);
+  --status-progress: var(--cyan);
+  --status-review: var(--warn);
+  --status-blocked: var(--error);
+  --status-merge: var(--ok);
+  --status-done: var(--ok);
+
+  /* 分解の絵の層の色(docs/brand.md の「4. 分解の絵の台本」)。色は「誰がするか」を表す */
+  --actor-you: var(--accent);       /* あなた: Ready に移す、マージする */
+  --actor-task-hub: var(--cyan);    /* task-hub のコード: 始める、worktree、PR、順番待ち */
+  --actor-agent: var(--violet);     /* エージェント(LLM): 実装、レビュー */
+  --verdict-pass: var(--ok);
+  --verdict-changes: var(--warn);
+
+  /* 字: OS に入っている字だけ。Web フォントは読み込まない */
+  --font-sans: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 0.8rem;
+  --text-sm: 0.9rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: clamp(1.5rem, 4vw, 2.5rem);
+  --leading: 1.6;
+
+  /* 角丸 */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+
+  /* 間 */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2.5rem;
+
+  /* 線と影。影は浮いた部品(開く一覧、ダイアログ)だけに使う */
+  --border: 1px solid var(--line);
+  --shadow: 0 4px 16px rgb(0 0 0 / 0.12);
+
+  /* 動き。prefers-reduced-motion のときは 0 にする(下) */
+  --motion-fast: 150ms;
+  --motion-slow: 400ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ダーク。下の 2 つのかたまりは同じ値にする(tests/test_brand.py が確かめる) */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121417;
+  --panel: #1b1e23;
+  --line: #343a42;
+  --text: #e8eaed;
+  --muted: #a0a8b2;
+  --accent: #7aa7ff;
+  --on-accent: #121417;
+  --cyan: #4cc4d4;
+  --violet: #b493f0;
+  --ok: #4cc27f;
+  --warn: #e6b04c;
+  --error: #f7786d;
+  --accent-bg: #18243a;
+  --cyan-bg: #132c31;
+  --violet-bg: #251e36;
+  --ok-bg: #152b1f;
+  --warn-bg: #2f2513;
+  --error-bg: #351a18;
+  --shadow: 0 4px 16px rgb(0 0 0 / 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121417;
+    --panel: #1b1e23;
+    --line: #343a42;
+    --text: #e8eaed;
+    --muted: #a0a8b2;
+    --accent: #7aa7ff;
+    --on-accent: #121417;
+    --cyan: #4cc4d4;
+    --violet: #b493f0;
+    --ok: #4cc27f;
+    --warn: #e6b04c;
+    --error: #f7786d;
+    --accent-bg: #18243a;
+    --cyan-bg: #132c31;
+    --violet-bg: #251e36;
+    --ok-bg: #152b1f;
+    --warn-bg: #2f2513;
+    --error-bg: #351a18;
+    --shadow: 0 4px 16px rgb(0 0 0 / 0.5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-slow: 0ms;
+  }
+}
