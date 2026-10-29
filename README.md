@@ -162,7 +162,7 @@ The docs are in Japanese.
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) Agents | [design.md](docs/design.md) Design decisions | [release.md](docs/release.md) Releases |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
 | [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | [brand.md](docs/brand.md) Messaging and look |
-| | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
+| | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | [media.md](docs/media.md) Taking the pictures again |
 | | [triggers.md](docs/triggers.md) Cards task-hub makes on its own | | |
 | | [autopilot.md](docs/autopilot.md) Autopilot: task-hub approves and merges for chosen repos | | |
 | | [sandbox.md](docs/sandbox.md) Sandboxed runs (Linux) | | |

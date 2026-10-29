@@ -267,12 +267,13 @@ LP はまだない。LP のカードで、同じ確かめを LP にも足す。
   リポジトリを出す。コマンドの出力なので、直すならテストと合わせて別のカードで直す
 - コードのコメント(`bin/task_hub.py`、`claude/task-board/hooks/panel.ts`)と、テスト(`tests/`、`claude/task-board/`、
   `kiro/board-extension/test/`)に、本物の Issue と仕事のリポジトリの名前が出る
-- テストの偽物の GitHub は、運営者のアカウント名を使う架空のリポジトリ(`tests/test_task.py`)。画像を撮るカードでは、写る名前を
-  `you/notes-app` のような一般の名前にする
+- テストの偽物の GitHub は、運営者のアカウント名を使う架空のリポジトリ(`tests/test_task.py`)。画像に写る名前は、
+  画像を撮るカードが `you/notes-app` のような一般の名前にした([media.md](media.md))
 
 ## 次のカードへの申し送り
 
-- 画像を撮るカード: 4 節の例のカードを、テストの偽物の GitHub で動かして撮る。偽物の名前(運営者のアカウント名を使う)が写らないようにする(7 節)
+- 画像を撮るカード: 済み(2026-10-29)。`python3 tests/media.py` が 4 節の例のカードを動かして撮り、`assets/media/` に置く。
+  何をどこに使うかと撮り直し方は [media.md](media.md)
 - README の絵のカード: バナーを README の一番上に置き(6 節の `<picture>`)、「しくみ」に分解の絵を置く。README の構成が変わるので、
   [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` も直す
 - LP のカード: 1 文を見出し、フッター、`llms.txt` で同じ文のまま使う。機能のカード 8 枚(3 節)、分解の絵(4 節)、`tokens.css` を使う。

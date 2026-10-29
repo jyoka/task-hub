@@ -56,11 +56,13 @@ slack-triage/          Slackトリアージ: スレッドをコピーして ⌃�
 durable/               実験: B の実行役(Pi Durable、Node)。[agents] durable で動くエージェントの 1 つ(durable/README.md)
 rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
 assets/brand/          伝え方の見た目: 色と字の CSS の変数(tokens.css)とバナー(docs/brand.md)
+assets/media/          README と LP の画像と動く画像。tests/media.py が撮る(docs/media.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
 tests/bench.py         弱い PC 向けの計測(テストではない。頼まれたときとリリースの前に動かす。docs/benchmark.md)
 tests/durable_bench.py 止まった実行の再開の A・B・C を本物のモデルで比べる実験(テストではない。頼まれたときだけ。docs/durable-runs-comparison.md)
+tests/media.py         README と LP の画像を、架空のカードを動かして撮る(テストではない。画面が変わったときに動かす。docs/media.md)
 .github/ISSUE_TEMPLATE/  Issue のフォーム(バグ報告、機能の要望)。task feedback が開く
 docs/                  セットアップ、エージェント、設計、形式、運用、リリース、教訓
 ```
@@ -119,6 +121,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック、出力の文字コードで書けない失敗の表示。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
 | `tests/test_brand.py` | 伝え方の土台([docs/brand.md](docs/brand.md)): 1 文が README の太字、brand.md、バナーで同じ。`tokens.css` の意味の色のコントラスト比が 4.5 以上(`python3 tests/test_brand.py --table` で表を出す)。README に運営者の私的な名前が出ない |
+| `tests/test_media.py` | `assets/media/` の画像([docs/media.md](docs/media.md)): 全部あり、大きさが上限の内で、写る文字とメタデータに運営者のボード、手元のパス、日付、メールアドレスがない。画像の元の架空のカードが、2 回動かして同じ文字になる |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `tests/test_durable_bench.py` | `tests/durable_bench.py` の 63 回の試行の組み合わせと、`--report` の表(モデルは呼ばない) |
 | `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
