@@ -379,6 +379,9 @@ def story(w):
     w.open_gate("review-2")
     w.until(lambda: w.status(CARD) == "In review", "card 12 to reach In review")
     w.until(lambda: "In review" in w.state("events.jsonl"), "the In review event")
+    # the run moves the card first and prints its last line ("is now In review") after: its log is whole, and `task
+    # merge` takes the card, only once the run has ended
+    w.until(lambda: w.run_ended(CARD), "card 12's run to end")
     where, header, log = w.task("log", CARD).split("\n", 2)  # the log's file, then its header: the date and time
     if not where.startswith("log: ") or not header.startswith(f"== task {CARD}: "):
         raise SystemExit(f"task log {CARD} no longer starts with the log's file and its header:\n{where}\n{header}")
