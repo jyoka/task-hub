@@ -5,6 +5,8 @@
   and dark (WCAG 2 relative luminance). `python3 tests/test_brand.py --table` prints the measured ratios.
 - tokens.css and the banners load nothing from outside; the READMEs and docs name none of the owner's private
   boards, repositories, or work.
+- The READMEs follow CONTRIBUTING.md's "README の構成": the headings in its order, the banner above the title, the
+  moving picture under the sentence, the Features table of 4 pictures that link to docs, alt texts, and the length.
 """
 import re
 import sys
@@ -16,6 +18,10 @@ BRAND = ROOT / "assets" / "brand"
 JA = "Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。"
 EN = "Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR."
 BANNERS = ("banner-dark.svg", "banner-light.svg")
+READMES = {"README.md": ("English | [日本語](README.ja.md)", "## Features"),
+           "README.ja.md": ("[English](README.md) | 日本語", "## 特長")}
+# CONTRIBUTING.md: the lines a README may have, not counting the pictures' HTML
+MOST_LINES = 200
 # the colors that carry meaning; each is read as text or a mark on the page and on a panel
 MEANING = ("text", "muted", "accent", "cyan", "violet", "ok", "warn", "error")
 GROUNDS = ("bg", "panel")
@@ -70,6 +76,23 @@ def table():
         rows.append(f"| `--{fg}` | `--{bg}` | "
                     + " | ".join(f"{contrast(t[k][fg], t[k][bg]):.2f}" for k in ("light", "dark")) + " |")
     return "\n".join(rows)
+
+
+def readme(name):
+    return (ROOT / name).read_text(encoding="utf-8")
+
+
+def section(text, heading):
+    return text.split(heading + "\n", 1)[1].split("\n## ", 1)[0]
+
+
+def pictures(text):
+    """Each <picture> as (its sources' srcset, the <img> alt, the <img> src)."""
+    out = []
+    for body in re.findall(r"(?s)<picture>(.*?)</picture>", text):
+        img = re.search(r'<img [^>]*alt="([^"]*)"[^>]*src="([^"]*)"', body)
+        out.append((re.findall(r'srcset="([^"]*)"', body), img[1], img[2]))
+    return out
 
 
 class BrandTest(unittest.TestCase):
@@ -149,6 +172,84 @@ class BrandTest(unittest.TestCase):
                 self.assertTrue(path.exists())
                 if anchor:
                     self.assertIn(anchor, [slug(h) for h in re.findall(r"(?m)^#+ (.*)$", path.read_text(encoding="utf-8"))])
+
+
+    def test_the_readmes_keep_the_headings_of_contributing_md(self):
+        rule = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split("### README の構成", 1)[1]
+        rows = re.findall(r"(?m)^\| \d+ \| `(#+ [^`]+)`(?: / `(#+ [^`]+)`)? \|", rule)
+        self.assertEqual(rows[0][0], "# task-hub")
+        for name, column in (("README.ja.md", 0), ("README.md", 1)):
+            with self.subTest(name):
+                want = [row[column] or row[0] for row in rows]
+                text = re.sub(r"(?ms)^```.*?^```", "", readme(name))  # a `# comment` in a code block is no heading
+                self.assertEqual(re.findall(r"(?m)^#{1,2} .*$", text), want)
+
+    def test_the_readmes_open_with_the_banner_the_sentence_and_the_moving_picture(self):
+        for name, sentence in (("README.md", EN), ("README.ja.md", JA)):
+            with self.subTest(name):
+                text = readme(name)
+                lines = [line for line in text.splitlines() if line.strip()]
+                self.assertEqual(lines[0], "<picture>")  # the banner comes first, above the title
+                banner, flow = pictures(text)[:2]
+                self.assertEqual(banner[0], ["assets/brand/banner-dark.svg"])
+                self.assertEqual(banner[2], "assets/brand/banner-light.svg")
+                self.assertIn('<source media="(prefers-color-scheme: dark)" srcset="assets/brand/banner-dark.svg">', text)
+                at = lines.index("# task-hub")
+                self.assertEqual(lines[at + 1:at + 4], [READMES[name][0], f"**{sentence}**", "<picture>"])
+                # the moving picture stops for prefers-reduced-motion, and AVIF falls back to GIF
+                self.assertEqual(flow[0], ["assets/media/list-dark.png", "assets/media/list-light.png",
+                                           "assets/media/flow.avif"])
+                self.assertEqual(flow[2], "assets/media/flow.gif")
+                self.assertIn('media="(prefers-reduced-motion: reduce)"', text)
+                # the rest of the top stays: the CI badge, the two decisions, and the way in for Kiro IDE
+                top = text.split("\n## ", 1)[0]
+                for kept in ("actions/workflows/windows.yml/badge.svg", "docs/kiro-quickstart.md",
+                             "docs/windows-quickstart.md"):
+                    self.assertIn(kept, top)
+                self.assertEqual(len(re.findall(r"(?m)^- \*\*", top)), 2)
+
+    def test_the_features_table_shows_4_pictures_that_link_to_docs(self):
+        tables = {}
+        for name, (_, heading) in READMES.items():
+            with self.subTest(name):
+                features = section(readme(name), heading)
+                table = re.search(r"(?s)<table>(.*?)</table>", features)[1]
+                cells = re.findall(r"(?s)<td [^>]*>(.*?)</td>", table)
+                self.assertEqual(len(cells), 4)
+                self.assertEqual(len(re.findall(r"<tr>", table)), 2)  # 2 columns
+                shown = []
+                for cell in cells:
+                    href = re.search(r'<a href="([^"#]+)#([^"]+)"><picture>', cell)
+                    self.assertIsNotNone(href, cell)
+                    path = ROOT / href[1]
+                    headings = re.findall(r"(?m)^#+ (.*)$", path.read_text(encoding="utf-8"))
+                    self.assertIn(href[2], [slug(h) for h in headings])
+                    (srcset,), _, src = pictures(cell)[0]
+                    self.assertEqual(srcset, src.replace("-light.png", "-dark.png"))
+                    self.assertRegex(cell, r"</a><br>\s*<b>[^<]+</b><br>\s*\S")  # a bold name, then one line
+                    shown.append(src)
+                tables[name] = shown
+                self.assertIn("(docs/media.md)", features.split("</table>", 1)[1].split("\n- ", 1)[0])
+                self.assertLessEqual(len(re.findall(r"(?m)^- ", features)), 7)
+        if len(tables) == 2:  # both READMEs show the same pictures in the same order
+            self.assertEqual(tables["README.md"], tables["README.ja.md"])
+
+    def test_every_picture_in_the_readmes_has_a_file_and_an_alt_that_says_what_it_shows(self):
+        for name in READMES:
+            with self.subTest(name):
+                found = pictures(readme(name))
+                self.assertGreaterEqual(len(found), 6)
+                for srcsets, alt, src in found:
+                    for path in (*srcsets, src):
+                        self.assertTrue((ROOT / path).is_file(), path)
+                    self.assertGreaterEqual(len(alt), 60, alt)  # a sentence, not a file name
+                    self.assertNotIn(Path(src).stem, alt)
+
+    def test_the_readmes_stay_short(self):
+        for name in READMES:
+            with self.subTest(name):
+                prose = re.sub(r"(?s)<(picture|table)>.*?</\1>", "", readme(name))
+                self.assertLessEqual(len(prose.splitlines()), MOST_LINES)
 
 
 if __name__ == "__main__":

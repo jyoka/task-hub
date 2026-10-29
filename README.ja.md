@@ -1,8 +1,20 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/banner-dark.svg">
+  <img alt="task-hub のバナー。左に 1 文「Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。」と英語の同じ文。右に 1 枚のカードの一生が 8 つの層で縦に並ぶ。Ready に移したカード、task-hub の runner、ブランチ task/12 の worktree、手元のエージェント、新しい文脈のレビュー(pass の印)、PR、マージの順番待ち、マージ。層の色は、あなた、task-hub のコード、エージェントのどれがするかを表す" src="assets/brand/banner-light.svg">
+</picture>
+
 # task-hub
 
 [English](README.md) | 日本語
 
 **Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。**
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="assets/media/list-dark.png">
+  <source media="(prefers-reduced-motion: reduce)" srcset="assets/media/list-light.png">
+  <source type="image/avif" srcset="assets/media/flow.avif">
+  <img alt="左にターミナル、右に task-hub のボードが並ぶ 15 秒の動く画像。あなたがカード #12「Add a search box to the notes list」を Ready に移す。task-hub がブランチ task/12 で始め、エージェントが変更とレポートを書く。別のエージェントが、大文字と小文字を区別していると差し戻す。直した変更が 2 回目のレビューで pass になり、task-hub が PR を開き、マージキューがマージする" src="assets/media/flow.gif">
+</picture>
 
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -39,14 +51,41 @@ flowchart LR
 
 ## 特長
 
-- **1 タスク = 1 ブランチ = 1 worktree = 1 PR**。最大 5 つを並行で動かします
-- **PR の前に自動レビュー**: 新しいコンテキストのエージェントが受け入れ条件を 1 つずつ確かめ、必要なら差し戻します(既定で 2 回まで)。`[runner] review_mode = goldfish` にすると、実装エージェントのレポートを読まない 2 つの視点が、Goal とほかのコードへの影響を別々に確かめます。判定は Project の Review 欄にも入ります([詳しく](docs/task-format.md#goldfish-のレビューrunner-review_mode))
-- **止まっても続きから**: 予期せず止まった実行(クラッシュ、再起動、ペインを閉じた)は、止まったところから 1 回だけ自動で再開します。前のエージェントが残したコマンド(長いテストなど)は、先に止めます(pi と claude)。止めるのは Ctrl-C です。エージェントが利用の上限(Claude Code の 5 時間の枠など)で止まったら、再開の時刻を書いて Blocked にし、上限が戻ったら止まったところから続けます。それまで、同じエージェントの Ready のカードは待ちます([詳しく](docs/operations.md#利用の上限で止まった))。Blocked の理由は仕分けて Issue にコメントします。Goal に答えを書くか、Issue や PR にコメントして Ready に戻すと、同じ PR で続きます(コメントもエージェントに渡ります)
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/usage.md#見え方と手元に残るもの"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/list-dark.png"><img width="400" alt="ターミナルの task list。#12 Add a search box to the notes list が In review で判定は pass、#13 が In progress でエージェントが実行中、#14 が Blocked、#15 が Backlog。4 枚とも you/notes-app のカード" src="assets/media/list-light.png"></picture></a><br>
+      <b>1 タスク 1 PR</b><br>
+      カードごとに、ブランチ、worktree、PR が 1 つずつ。最大 5 つを並べて動かす。
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/agents.md#自動レビュー"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/review-dark.png"><img width="400" alt="#12 の 1 回目のレビューは needs changes。milk で探すとメモ Buy Milk が見つからないので、両方を casefold() で比べ、テストを足すよう求めている。その下の task show 12 --digest では、最後の判定が pass で、PR へのリンクがある" src="assets/media/review-light.png"></picture></a><br>
+      <b>PR の前のレビュー</b><br>
+      新しい文脈のエージェントが、受け入れ条件を 1 つずつ確かめて差し戻す。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/agents.md#blocked-の仕分けreplanner"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/claude-board-dark.png"><img width="400" alt="Claude Code のペインのボード。ドット絵の船が #14 の SOS の旗を揚げている。要対応に、どのサービスで同期するかを聞いて Blocked の #14 と、pass で PR #1 のある In review の #12。実行中に、普段 9 分のところ 2 分たった #13" src="assets/media/claude-board-light.png"></picture></a><br>
+      <b>Blocked の仕分け</b><br>
+      止まった理由をボードに出す。エージェントが仕分けて、Issue にコメントする。
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/kiro-ide.md#10-ボードをサイドバーとステータスバーに出す拡張"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/kiro-board-dark.png"><img width="400" alt="Kiro のサイドバーのボード。理由の付いた Blocked の #14、判定 pass と押して開ける PR #1 のある In review の #12、実行中の #13。ステータスバーに「実行中1 レビュー待ち1 止まり1」" src="assets/media/kiro-board-light.png"></picture></a><br>
+      <b>ボードを横に</b><br>
+      Claude Code のペイン、Kiro のサイドバー、<code>task list --watch</code> で、いつでも見える。
+    </td>
+  </tr>
+</table>
+
+どの画像も、task-hub が架空のボードで自分で撮ったものです([docs/media.md](docs/media.md))。
+
+- **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Goldfish](https://egm.dev/))が GO / NO-GO を出します([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
+- **止まっても続きから**: クラッシュや再起動で止まった実行は 1 回だけ再開し、利用の上限で止まった実行は上限が戻るのを待ちます([詳しく](docs/operations.md#利用の上限で止まった))
+- **マージキュー**: `task merge` で承認した PR を、base に追いつかせ、チェックを待ってマージします。1 つのリポジトリで 1 度に 1 本です([詳しく](docs/operations.md#マージキュー))
 - **前後関係**: GitHub の「Blocked by」の待ち先が終わるまで、カードは始まりません
-- **Ready の前に Goal を確かめる**: `task check <番号>` で、Goal とコードしか知らないエージェント([Elephant-Goldfish Model](https://egm.dev/) の Goldfish)が GO / NO-GO を判定します。NO-GO なら Goal に足す文言案も付きます。そのうち Architect は、新しいプロダクトがアーキテクチャの 7 つの関門の決定を書く Architecture Brief と、カードを突き合わせます([詳しく](docs/architecture-brief.md))。`[runner] readiness = require` にすると、今の Goal への GO がない Ready のカードは始まりません([詳しく](docs/task-format.md#ready-の前の確かめtask-check))
-- **知らせてくれる**: In review、Blocked、長引いている実行、予算を超えた実行を、herdr か OS の通知で出します。設定すれば [ntfy](https://ntfy.sh) でスマートフォンにも届きます(LLM は使いません。[知らせ方の比較](docs/notifications.md))
-- **費用を測る**: エージェントの起動ごとのトークン、費用、クレジットを、CLI 自身の記録から読みます(Claude Code、pi、Kiro)。カードごとに予算を決められ、有料 API を使うカードはエージェントの起動前に残高を確かめます([Budget](docs/task-format.md#budget-予算と有料-api))
-- **ボードを横に**: Claude Code のペイン、Kiro のサイドバー、`task list --watch` で、いつでも見えます。Kiro と VS Code では、カードの Goal、変更、ログを読み取り専用のタブで開けます
+- **エージェントを選べる**: git、PR、Issue へのコメントは task-hub がコードで行うので、どのエージェントでも同じ形の PR になります([詳しく](docs/agents.md#エージェントの変更と追加))
+- **通知と費用**: In review、Blocked、予算超えを、LLM を使わずに OS かスマートフォンに知らせます。`task stats` がトークンと費用を集計します([詳しく](docs/notifications.md))
 - **軽い**: Python 標準ライブラリだけ。インストールするのは clone 1 つです
 
 ## はじめる
