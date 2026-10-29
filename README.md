@@ -16,6 +16,8 @@ English | [日本語](README.ja.md)
   <img alt="A terminal on the left and the task-hub board on the right, 15 seconds. You move card #12, Add a search box to the notes list, to Ready. task-hub starts it on branch task/12. The agent writes the change and a report. A second agent sends it back because the search minds upper and lower case. The fix passes the second review, task-hub opens the PR, and the merge queue merges it." src="assets/media/flow.gif">
 </picture>
 
+See one card's life, layer by layer, on the landing page: [jyoka.github.io/task-hub](https://jyoka.github.io/task-hub/)
+
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -179,7 +181,7 @@ archives the oldest Done cards.
 | `task watch` | Starts Ready cards automatically (every minute) |
 | `task intake` | Turns messages you send from your phone through [ntfy](https://ntfy.sh) into Backlog cards, and handles the Merge and Reject buttons of In review notifications ([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task check <id> [--no-write]` | Checks the Goal before Ready: GO or NO-GO on the Issue and in the Project's Readiness field (`[runner] readiness` can require a GO to start) |
-| `task review <id> --no-write --ref <commit>` | Tries the automated review on a card's code at a commit and prints the verdict, to compare `[runner] review_mode` on past cards. Writes nothing |
+| `task review <id> --no-write --ref <commit>` | Tries the automated review on a card's code at a commit and prints the verdict, to compare `[runner] review_mode` and cheaper reviews on past cards. Writes nothing |
 | `task show <id> [--full \| --digest]` | Shows the Issue and the latest report |
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |

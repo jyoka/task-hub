@@ -226,7 +226,7 @@ flowchart LR
 | `task watch` | `archive_overflow`、ループで `sync` と `check_triggers` | 同上 + 開始時のアーカイブの確認 + トリガー(4.7 節) | 同上 + triggers |
 | `task list [--max-age]` | `shared_items`、`tasks`、`listed`(`readiness_gate(read=False)`)、`list_lines` | キャッシュが古いときだけ読む | board-cache |
 | `task check <id> [--no-write] [--ref]` | `get`、`issue`、`ensure_clone`、`readiness_check`(`goldfish`、`at_once`)、`ReadinessResult`、`comment`、`set_readiness`、`note_readiness`(4.10) | 読む、Issue にコメント、Readiness 欄(なければ `project field-create`)。`--no-write` は読むだけ | worktrees(`<id>-check-<役>`。終われば消す)、logs(`<id>-check.log`)、checks、readiness、events |
-| `task review <id> --no-write --ref <commit> [--base] [--mode] [--report-file] [--goal-file]` | `get`、`issue`、`ensure_clone`、`review_by`(`build_review_prompt`、`review_result`、goldfish なら `combine_reviews`)、`snapshot`、`restore` | 読むだけ | worktrees(`<id>-review-trial`。終われば消す)、logs(`<id>-review-trial.log`)、review-trials |
+| `task review <id> --no-write --ref <commit> [--base] [--mode] [--report-file] [--goal-file] [--instructions-file] [--sent-file] [--setup]` | `get`、`issue`、`ensure_clone`、`trial_setup`(`--setup`。`copy_env_files`、`setup_command`)、`review_by`(`build_review_prompt`、`review_result`、goldfish なら `combine_reviews`)、`snapshot`、`restore` | 読むだけ | worktrees(`<id>-review-trial`。終われば消す)、logs(`<id>-review-trial.log`)、review-trials |
 | `task start <id>` | `get`、`set_status(Ready)`、`sync` | 読む、Status | runs、events |
 | `task new` | `cmd_new`、`create_task` | Issue、カード、欄、Blocked by | events、asked |
 | `task intake` | `intake_config`、`intake_stream`(ntfy の購読)、`parse_intake`、`intake_message`、`create_task`。ボタンの文(`task-hub ` で始まる)は `action_message`(`action_token` で確かめ、`pr_view`、`queue_entry`、`enqueue` か `gh pr close` と `set_status(Blocked)`) | 文ごとに Issue、カード、欄(Backlog)。ボタンごとにボードを読む、`gh pr view`、Merge は `cmd_merge` と同じ、Reject は PR を閉じる、Issue のコメント、Status | intake、intake-actions、merge-queue、events |
@@ -789,7 +789,8 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `Codebase Auditor`)の役で入ります。
 
 `task review --no-write` の結果は `review-trials.jsonl` に 1 行ずつ入ります(`id`、`title`、`repo`、`reviewer`、`mode`、
-`base`、`commit`、`finished`、`seconds`、`verdict`、`blocking`、`minor`、`usage`)。実行ではないので metrics には入れません。
+`base`、`commit`、`finished`、`seconds`、`verdict`、`blocking`、`minor`、`usage`、`instructions`(`--instructions-file` の
+パス。なければ空)、`sent`(`--sent-file` の指摘の数)、`setup`(`--setup` の有無))。実行ではないので metrics には入れません。
 
 ### Kiro の拡張がタスクの中身を読むところ
 
@@ -1062,5 +1063,6 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   Ready からマージまで動かし、mod の盤は `claude plugin test`、Kiro の盤は node で、それぞれのコードに描かせる。Chrome で撮り、
   ffmpeg で GIF、WebM、AVIF にして `assets/media/` に置く([media.md](../media.md))。テストではない。`tests/test_media.py` が、
   置いた画像の大きさと写してはいけないものを確かめ、カードを 2 回動かして同じ文字になることを確かめる
-- `tests/test_site.py`: LP(`site/`)の HTML、CSS、JS を、ブラウザを使わずに読んで確かめる。task-hub の動きには関わらない
+- `tests/test_site.py`: LP(`site/`)の HTML、CSS、JS を、ブラウザを使わずに読んで確かめる。task-hub の動きには関わらない。
+  GitHub Actions の `pages`(`.github/workflows/pages.yml`)は、これが通ってから LP を GitHub Pages に出す
   ([site/README.md](../../site/README.md))

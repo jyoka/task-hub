@@ -3796,12 +3796,14 @@ def shown_path(path, wt):
     return path
 
 
-def build_review_prompt(t, goal, report, diff, sent=(), comments="", auditor=None, readiness=""):
+def build_review_prompt(t, goal, report, diff, sent=(), comments="", auditor=None, readiness="", instructions=""):
     """sent: the findings earlier reviews of this run sent the agent back with. comments: what people wrote since the
     earlier run (comments_file). auditor: (name, what each auditor is told, its persona) for one Goldfish auditor
     ([runner] review_mode = goldfish), which gets readiness (`task check`'s comment on the Goal, if any) and never the
-    agent's report; None: the one reviewer, which gets the report."""
-    instructions, about_comments, about_sent, _ = instruction_parts(WORKER_REVIEW, 4)
+    agent's report; None: the one reviewer, which gets the report. instructions: in place of worker/REVIEW.md's
+    first part (`task review --instructions-file`, a trial only)."""
+    own, about_comments, about_sent, _ = instruction_parts(WORKER_REVIEW, 4)
+    instructions = instructions.strip() or own
     limit = 12000 if WINDOWS else 20000  # Windows: the whole prompt goes on a command line of 32,767 characters
     if len(diff) > limit:
         diff = diff[:limit] + "\n... (diff truncated)\n"
@@ -3863,18 +3865,19 @@ def run_review(t, report, say, usage=None, sent=()):
     return review_by(mode, launch, t, i["body"], report, diff, sent, comments, i.get("readiness_comment", ""), say)
 
 
-def review_by(mode, launch, t, goal, report, diff, sent=(), comments="", readiness="", say=print):
+def review_by(mode, launch, t, goal, report, diff, sent=(), comments="", readiness="", say=print, instructions=""):
     """The review in mode: one reviewer given the agent's report (agent), or each Goldfish auditor of worker/REVIEW.md
     in a fresh context of its own, one after another, never given the report, and their results combined (goldfish).
-    launch(prompt, label): one reviewer launch's ReviewResult (review_result)."""
+    launch(prompt, label): one reviewer launch's ReviewResult (review_result). instructions: build_review_prompt's."""
     if mode == "agent":
-        result = launch(build_review_prompt(t, goal, report, diff, sent, comments), "reviewer")
+        result = launch(build_review_prompt(t, goal, report, diff, sent, comments, instructions=instructions),
+                        "reviewer")
     else:
         about, auditors = review_auditors()
         found = {}
         for name, persona in auditors.items():  # in turn: the worktree, [setup] and the usage measured are the run's
             found[name] = launch(build_review_prompt(t, goal, "", diff, sent, comments, (name, about, persona),
-                                                     readiness), name)
+                                                     readiness, instructions), name)
             say(f"== {name}: {found[name].verdict or 'missing'}")
         result = combine_reviews(found)
     result.mode = mode
@@ -4565,7 +4568,9 @@ def cmd_check(a):
 def cmd_review(a):
     """`task review <id> --no-write --ref <commit>`: a trial of the automated review on a card's code at a commit (a
     past PR's), in [runner] review_mode or --mode, as a run would review it: prints the verdict and what it used, and
-    writes nothing to GitHub. For comparing the modes on past cards (docs/lessons.md)."""
+    writes nothing to GitHub. For comparing the modes on past cards (docs/lessons.md), and ways to review for less:
+    --instructions-file in place of worker/REVIEW.md's first part, --sent-file as the findings an earlier review sent
+    the work back with (with --base at the commit it saw: only the change since), --setup with [env] and [setup]."""
     usage_ = f"usage: {COMMANDS['review'][3].split('  #')[0]}"
     if not a["no_write"] or not a["ref"]:
         fail("`task review` is a trial only: give --no-write and --ref (a run reviews its own work)", usage_, 2)
@@ -4589,12 +4594,13 @@ def cmd_review(a):
     check_ready(reviewer)
     i = issue(t)
     texts = {}
-    for key in ("goal_file", "report_file"):
+    for key in ("goal_file", "report_file", "instructions_file", "sent_file"):
         try:
             texts[key] = read_agent_file(Path(a[key])) if a[key] else ""
         except OSError as e:
             fail(f"cannot read --{key.replace('_', '-')} {a[key]}: {e.strerror or e}", code=2)
     goal = texts["goal_file"] or i["body"]
+    sent = list_items(texts["sent_file"]) if texts["sent_file"].strip() else []
     repo_dir = ensure_clone(t["repo"])
     commit = git_shared(repo_dir, "rev-parse", "--verify", "-q", f"{a['ref']}^{{commit}}").stdout.strip()
     base = a["base"] or git_shared(repo_dir, "merge-base", base_ref(t, repo_dir), commit or "HEAD").stdout.strip()
@@ -4634,8 +4640,11 @@ def cmd_review(a):
             f"reviewer {reviewer} | {now()}")
         try:
             ensure_internal_excludes(wt)
-            result = review_by(mode, launch, t, goal, texts["report_file"], diff,
-                               readiness=i.get("readiness_comment", ""), say=say)
+            if a["setup"]:
+                trial_setup(t, wt, say)
+            result = review_by(mode, launch, t, goal, texts["report_file"], diff, sent,
+                               readiness=i.get("readiness_comment", ""), say=say,
+                               instructions=texts["instructions_file"])
         finally:
             git_shared(repo_dir, "worktree", "remove", "--force", wt)
     used = run_used(usage)
@@ -4645,11 +4654,32 @@ def cmd_review(a):
     append_jsonl(REVIEW_TRIALS, {"id": t["id"], "title": t["title"], "repo": t["repo"], "reviewer": reviewer,
                                  "mode": mode, "base": base, "commit": commit, "finished": now(),
                                  "seconds": round(time.time() - began), "verdict": result.field_verdict,
-                                 "blocking": blocking, "minor": minor, "usage": usage}, say)
+                                 "blocking": blocking, "minor": minor, "usage": usage,
+                                 "instructions": a["instructions_file"] or "", "sent": len(sent),
+                                 "setup": bool(a["setup"])}, say)
     say(f"== verdict: {result.verdict or 'missing'}")
     out("review:", f"  id: {t['id']}", f"  mode: {mode}", f"  verdict: {result.field_verdict}",
         f"  blocking: {blocking}", f"  minor: {minor}", f"  used: {q(spent)}", f"  log: {home(log)}",
         "  written: nothing (--no-write)", "comment:", result.issue_section())
+
+
+def trial_setup(t, wt, say):
+    """[env] and [setup] in a `task review --setup` worktree, as a run gets them before its agent: the reviewer can
+    run the repo's tests. Fails the trial when they cannot."""
+    try:
+        copy_env_files(t, wt)
+    except RuntimeError as e:
+        fail(str(e))
+    cmd = setup_command(t["repo"])
+    if not cmd:
+        return
+    say(f"== setup: {cmd}")
+    proc = subprocess.Popen(as_agent(shell_command(cmd), wt, pass_env()), cwd=wt, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    for line in proc.stdout:
+        say(line.rstrip("\n"))
+    if proc.wait() != 0:
+        fail(f"setup failed (exit {proc.returncode}), see {home(LOGS / (t['id'] + '-review-trial.log'))}")
 
 
 # ---------- one run (called in the herdr pane or background process) ----------
@@ -7704,11 +7734,14 @@ COMMANDS = {
               "--ref checks against that commit of the repo, --goal-file checks that text as the Goal (a past card's "
               "Goal before it was edited)"),
     "review": (cmd_review, ["id"], {"no-write": False, "ref": True, "base": True, "mode": True, "goal-file": True,
-                                    "report-file": True},
+                                    "report-file": True, "instructions-file": True, "sent-file": True,
+                                    "setup": False},
                "task review <id> --no-write --ref <commit> [--base <commit>] [--mode agent|goldfish] [--report-file path] "
-               "[--goal-file path]  # a trial of the automated review of a card's code at --ref (from --base, else "
-               "where it left the base branch), in [runner] review_mode or --mode: prints the verdict and writes "
-               "nothing; --mode agent needs the agent's report as --report-file"),
+               "[--goal-file path] [--instructions-file path] [--sent-file path] [--setup]  # a trial of the automated "
+               "review of a card's code at --ref (from --base, else where it left the base branch), in [runner] "
+               "review_mode or --mode: prints the verdict and writes nothing; --mode agent needs the agent's report as "
+               "--report-file; --instructions-file replaces worker/REVIEW.md's reviewer instructions, --sent-file gives "
+               "the findings an earlier review sent the work back with, --setup runs [env] and [setup] first"),
     "list": (cmd_list, [], {"watch": False, "max-age": True},
              "task list [--watch] [--max-age seconds]  # the open cards, read only: starts nothing (use `task` to start "
              f"Ready cards); --watch redraws them every {WATCH_SECONDS}s; the board read by any task-hub command in the "

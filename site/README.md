@@ -1,6 +1,7 @@
 # site: task-hub の LP
 
-task-hub の LP(1 ページ)です。**今は公開しません。** 手元で開いて見ます。GitHub Pages に出すかは運営者が決めます(下の「公開するとき」)。
+task-hub の LP(1 ページ)です。**https://jyoka.github.io/task-hub/ で公開しています**(GitHub Pages)。
+main に入ると、workflow が出し直します(下の「公開」)。直すときは、次のように手元で開いて見ます。
 
 ```sh
 python3 -m http.server --bind 127.0.0.1 --directory site 8000   # リポジトリの一番上で。止めるときは Ctrl+C
@@ -71,23 +72,55 @@ python3 -m http.server --bind 127.0.0.1 --directory site 8000   # リポジト�
 2026-10-29 に、Chrome 156(macOS)で上の全部を確かめました。スクロールの途中の形や番号を自動で確かめるときは、Chrome の DevTools Protocol を
 `--remote-debugging-pipe` で動かす使い捨てのスクリプトを手元で書いて使いました(リポジトリには入れていません)。Safari と Firefox では確かめていません。
 
-## 公開するとき(運営者が決めたとき)
+## 公開
 
-今はしません。公開を決めたら、次の順で行います。
+2026-10-30 に、運営者が公開を決めました。URL は https://jyoka.github.io/task-hub/ です。日本語は https://jyoka.github.io/task-hub/?lang=ja です。
 
-1. [docs/brand.md の 7 節](../docs/brand.md#7-公開の前に直すもの)の「公開の前に直すもの」を見る。docs の私的な名前は直した(2026-10-29)。残した所(「タスク 252」のような番号、docs の外のコードとテスト)を、公開の前に直すかを決める
-2. 出すフォルダーの作り方を決める。`-L` で `site/assets` のリンクの先(`assets/brand/` と `assets/media/`)を中に写し、1 つのフォルダーにする。
-   workflow の中で作る(手元では作らない。`_site/` は `.gitignore` に入っていないので、手元で作ったら消す)
+- `llms.txt` は https://jyoka.github.io/task-hub/llms.txt にあります。ドメインの一番上(`/llms.txt`)ではありません。独自のドメインを使うと一番上に来ます
+- 独自のドメインは使っていません。使うかは、運営者が決めます
+- 出す前に私的な名前を直した記録は、[docs/brand.md の 7 節](../docs/brand.md#7-公開の記録)にあります
+
+### 出し方
+
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) が出します。リポジトリの Settings → Pages の Source は「GitHub Actions」です。
+
+1. main への push で動きます。`site/`、`assets/`、`docs/brand.md`、この workflow のどれかが変わったときだけです。Actions のタブの
+   `pages` → Run workflow で、手で動かすこともできます
+2. `build` の job が、`python3 tests/test_site.py` で LP を確かめます。落ちたら出しません
+3. 出すフォルダー `_site` を作ります。`-L` で `site/assets` のリンクの先(`assets/brand/` と `assets/media/`)を中に写し、1 つのフォルダーにします
 
    ```sh
    rm -rf _site && cp -RL site _site && rm _site/README.md
    ```
 
-3. GitHub Pages に出す。リポジトリの Settings → Pages で、Source を「GitHub Actions」にし、`_site` を `actions/upload-pages-artifact` と
-   `actions/deploy-pages` で出す workflow を `.github/workflows/` に足す。workflow はそのときに作る(main への push で 2 の手順を動かし、出す)。
-   workflow には `permissions`(`pages: write`、`id-token: write`)と、`github-pages` の environment が要る
-4. 出したページ(`https://jyoka.github.io/task-hub/`)を、ダークとライト、英語と日本語、スマホの幅で開いて確かめる。上の「確かめる」と同じことを、出した URL でも見る
-5. 出した URL を GitHub の About の Website に書く(運営者)
+   `_site` は workflow の中で作ります。`.gitignore` に入っていないので、手元で作ったら消します
+4. `actions/upload-pages-artifact` が `_site` を上げ、`deploy` の job が `actions/deploy-pages` で出します
 
-- `llms.txt` は `https://jyoka.github.io/task-hub/llms.txt` に出る。ドメインの一番上(`/llms.txt`)ではない。独自のドメインを使うと一番上に来る
-- 独自のドメインを使うかは、そのときに決めます
+- `deploy` の job だけが `pages: write` と `id-token: write` を持ちます。ほかは `contents: read` です。秘密は使いません
+- `github-pages` の environment は main からしか出せません。ほかのブランチで手で動かすと、`build` だけが動きます
+- action は、コミットの SHA で版を固定しています。上げるときは、SHA と横の版の番号を一緒に直します
+
+### 出し直し方
+
+- 直したものを main に入れると、出し直します。1 回に 1 つずつ出し、動いている途中のものは止めません
+- 中身が同じまま出し直したいとき(Pages の不調など)は、Actions のタブの `pages` → Run workflow を main で動かします
+- 前の版に戻すときは、main で直す PR を出してマージします
+
+### 止め方
+
+- しばらく出し直さない: Actions のタブの `pages` → `...` → Disable workflow。今のページは残ります。戻すときは Enable workflow
+- Pages を外す(ページが消える): `gh api -X DELETE repos/jyoka/task-hub/pages`(Settings → Pages からも外せます)。
+  外したら、上のとおり workflow も止めます。外したままの `deploy` がどうなるかは確かめていません。
+  戻すときは、Source を「GitHub Actions」にし直し(`gh api -X POST repos/jyoka/task-hub/pages -f build_type=workflow`)、
+  workflow を Enable にして Run workflow で動かします
+- やめると決めたら、Pages を外してから `.github/workflows/pages.yml` を消す PR を出します
+
+### 出した後の確かめ
+
+出した URL で、上の「確かめる」の 2 と同じことを見ます。
+
+1. https://jyoka.github.io/task-hub/ を、ダークとライト(右上のボタン)、英語と日本語(右上のボタンと `?lang=ja`)で開く
+2. スマホの幅: DevTools のデバイスのツールバーで 390 と 320 にし、横にスクロールできないこと
+3. 外への通信: Network のタブで、`jyoka.github.io` 以外への要求がないこと(docs へのリンクは、押したときだけ `github.com` を開く)
+4. https://jyoka.github.io/task-hub/llms.txt が文で出ること
+5. 出した URL を GitHub の About の Website に書く(運営者)

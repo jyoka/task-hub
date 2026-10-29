@@ -57,7 +57,7 @@ durable/               実験: B の実行役(Pi Durable、Node)。[agents] dura
 rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
 assets/brand/          伝え方の見た目: 色と字の CSS の変数(tokens.css)とバナー(docs/brand.md)
 assets/media/          README と LP の画像と動く画像。tests/media.py が撮る(docs/media.md)
-site/                  LP(1 ページ。公開しない)。python3 -m http.server で手元で開く(site/README.md)
+site/                  LP(1 ページ)。https://jyoka.github.io/task-hub/ に .github/workflows/pages.yml が出す。手元では python3 -m http.server で開く(site/README.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
@@ -204,7 +204,7 @@ README は、初めて来た人が最初の画面で「何か」「なぜ使う�
 
 | 順 | 見出し(README.ja.md / README.md) | 中身 |
 |---|---|---|
-| 1 | `# task-hub` | 見出しの上にバナー(`assets/brand/`、ダークとライトを `<picture>` で出し分ける)。見出しの下に言語の切り替え、太字の一言の説明([docs/brand.md](docs/brand.md) の 1 文を同じ文のまま)、動く画像(`assets/media/`。`prefers-reduced-motion` なら止まった画像)、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
+| 1 | `# task-hub` | 見出しの上にバナー(`assets/brand/`、ダークとライトを `<picture>` で出し分ける)。見出しの下に言語の切り替え、太字の一言の説明([docs/brand.md](docs/brand.md) の 1 文を同じ文のまま)、動く画像(`assets/media/`。`prefers-reduced-motion` なら止まった画像)、LP(`https://jyoka.github.io/task-hub/`、[site/README.md](site/README.md))への 1 行のリンク、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
 | 2 | `## しくみ` / `## How it works` | 6 段階くらいの Mermaid の図 1 枚と、箇条書き 3 つ |
 | 3 | `## 特長` / `## Features` | 画面 4 枚の 2 列の表(各画像に太字の名前と 1 行の説明。画像は docs の該当の節へのリンク)、「どの画像も task-hub が自分で撮った」の 1 行、1 行ずつの箇条書き 7 つまで |
 | 4 | `## はじめる` / `## Get started` | 必要なもの、コマンド 3 つ前後、最小の設定。詳しくは setup.md へ |

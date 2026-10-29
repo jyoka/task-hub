@@ -16,6 +16,8 @@
   <img alt="左にターミナル、右に task-hub のボードが並ぶ 15 秒の動く画像。あなたがカード #12「Add a search box to the notes list」を Ready に移す。task-hub がブランチ task/12 で始め、エージェントが変更とレポートを書く。別のエージェントが、大文字と小文字を区別していると差し戻す。直した変更が 2 回目のレビューで pass になり、task-hub が PR を開き、マージキューがマージする" src="assets/media/flow.gif">
 </picture>
 
+1 枚のカードの一生を層に分けて見せる紹介ページ: [jyoka.github.io/task-hub](https://jyoka.github.io/task-hub/?lang=ja)
+
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -171,7 +173,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | `task watch` | Ready のカードを自動で始める(1 分ごと) |
 | `task intake` | スマートフォンから [ntfy](https://ntfy.sh) で送った文を Backlog のカードにする。In review の通知の Merge と Reject のボタンも受ける([operations.md](docs/operations.md#スマートフォンからカードを作るtask-intake)) |
 | `task check <番号> [--no-write]` | Ready の前に Goal を確かめる。GO / NO-GO を Issue と Project の Readiness 欄に書く(`[runner] readiness` で開始に GO を求められる) |
-| `task review <番号> --no-write --ref <コミット>` | カードのコードのあるコミットで自動レビューを試し、判定を表示する。過去のカードで `[runner] review_mode` を比べる用。何も書かない |
+| `task review <番号> --no-write --ref <コミット>` | カードのコードのあるコミットで自動レビューを試し、判定を表示する。過去のカードで `[runner] review_mode` や安いレビューを比べる用。何も書かない |
 | `task show <番号> [--full \| --digest]` | Issue と最新のレポート |
 | `task log <番号> [--full]` | このマシンでの実行の出力 |
 | `task open <番号>` | worktree を IDE で開く(`[ide] open`) |
