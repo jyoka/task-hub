@@ -121,7 +121,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_install.py` | Kiro 用のインストーラ(`kiro/install.sh` など) |
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック、出力の文字コードで書けない失敗の表示。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
-| `tests/test_brand.py` | 伝え方の土台([docs/brand.md](docs/brand.md)): 1 文が README の太字、brand.md、バナーで同じ。`tokens.css` の意味の色のコントラスト比が 4.5 以上(`python3 tests/test_brand.py --table` で表を出す)。README に運営者の私的な名前が出ない |
+| `tests/test_brand.py` | 伝え方の土台([docs/brand.md](docs/brand.md)): 1 文が README の太字、brand.md、バナーで同じ。`tokens.css` の意味の色のコントラスト比が 4.5 以上(`python3 tests/test_brand.py --table` で表を出す)。README に運営者の私的な名前が出ない。README の構成(見出しの順がこの文書の「README の構成」の表と同じ、バナーと動く画像の置き方、特長の表の 4 枚とリンク先、alt、長さ) |
 | `tests/test_site.py` | LP([site/README.md](site/README.md)): ブラウザを使わずに読む。リンクと画像の先があり、外から読み込まず、`prefers-reduced-motion` で動かない作り。1 文、機能のカード 8 枚、8 つの層が brand.md と同じ。運営者の私的な名前が出ない |
 | `tests/test_media.py` | `assets/media/` の画像([docs/media.md](docs/media.md)): 全部あり、大きさが上限の内で、写る文字とメタデータに運営者のボード、手元のパス、日付、メールアドレスがない。画像の元の架空のカードが、2 回動かして同じ文字になる |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
@@ -157,14 +157,18 @@ README は英語の `README.md`(GitHub が最初に出す)と日本語の `READM
 ### README の構成
 
 README は、初めて来た人が最初の画面で「何か」「なぜ使うか」「どう始めるか」をつかむためのページです。
-詳しいことは docs に置き、README からリンクします。150 行前後に収めます。2 つの README の 1 行目の下には、
+詳しいことは docs に置き、README からリンクします。2 つの README の `# task-hub` の下には、
 言語の切り替え(`English | [日本語](README.ja.md)`、`[English](README.md) | 日本語`)を置きます。
+
+長さは、絵の HTML(`<picture>` と `<table>` の中)を除いて 180 行前後、多くても 200 行です。絵は読む行ではないので数えません。
+コマンドの表(全部のコマンド)と docs の表が長いので、150 行前後には収まりません(2026-10-29 に決めた)。
+200 行を超えそうなら、まず docs に移せるものを探します。`tests/test_brand.py` が数えます。
 
 | 順 | 見出し(README.ja.md / README.md) | 中身 |
 |---|---|---|
-| 1 | `# task-hub` | 太字の一言の説明([docs/brand.md](docs/brand.md) の 1 文を同じ文のまま。`tests/test_brand.py` が確かめる)、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
+| 1 | `# task-hub` | 見出しの上にバナー(`assets/brand/`、ダークとライトを `<picture>` で出し分ける)。見出しの下に言語の切り替え、太字の一言の説明([docs/brand.md](docs/brand.md) の 1 文を同じ文のまま)、動く画像(`assets/media/`。`prefers-reduced-motion` なら止まった画像)、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
 | 2 | `## しくみ` / `## How it works` | 6 段階くらいの Mermaid の図 1 枚と、箇条書き 3 つ |
-| 3 | `## 特長` / `## Features` | 1 行ずつ、7 つまで |
+| 3 | `## 特長` / `## Features` | 画面 4 枚の 2 列の表(各画像に太字の名前と 1 行の説明。画像は docs の該当の節へのリンク)、「どの画像も task-hub が自分で撮った」の 1 行、1 行ずつの箇条書き 7 つまで |
 | 4 | `## はじめる` / `## Get started` | 必要なもの、コマンド 3 つ前後、最小の設定。詳しくは setup.md へ |
 | 5 | `## 使い方` / `## Usage` | 3 通りの使い方の表と、頼んでからマージまでの例 1 つ。詳しくは usage.md へ |
 | 6 | `## タスクの一生` / `## Task lifecycle` | 列ごとの表(何が起きているか、あなたの対応) |
@@ -176,6 +180,9 @@ README は、初めて来た人が最初の画面で「何か」「なぜ使う�
 - 版の番号や変更の履歴は README に書きません。リリースノートに書きます([docs/release.md](docs/release.md))
 - コマンドを足したら、2 つの README の「コマンド」の表に 1 行ずつ足します。表に全部のコマンドがあることはテストが確かめます
 - 新しい見出しを足したくなったら、まず docs のどこかに置けないかを考えます
+- 画像は `assets/media/` の、task-hub が自分で撮ったものだけを使います([docs/media.md](docs/media.md))。alt には、絵の中身が分かる文を
+  2 つの README のそれぞれの言葉で書きます。ファイル名や「スクリーンショット」だけにしません
+- 見出しの順、上の部分の並び、特長の表、長さは `tests/test_brand.py` が、この表と突き合わせて確かめます
 
 置き場所の目安です。
 

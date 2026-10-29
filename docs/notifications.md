@@ -10,7 +10,7 @@
 - このマシンの通知(macOS の通知)は、既定で出ています。ただし Mac の前にいないと見えません。
   10/26 の 23:11 と 23:35 の Blocked に翌日まで気づかなかったのは、このためと考えられます(推測)
 - GitHub の通知メールは、条件つきで使えます。task-hub は利用者自身の `gh` で書くので、普段は通知が来ません
-- GitHub の Project の Status の変化は、利用者のボード(`jyoka/2`)では、どの方法でも外へ出せません
+- GitHub の Project の Status の変化は、利用者のボード(`you/2` のような個人の Project)では、どの方法でも外へ出せません
 
 ## 方法ごとの結果
 
@@ -21,8 +21,8 @@
 | GitHub の通知メール(既定) | 使えない | task-hub のコメント、PR、カードの移動は、どれも利用者自身のアカウントの操作。GitHub は自分の操作を通知しない |
 | GitHub の通知メール(「Your own updates」を入れる) | 条件つき | 自分の操作もメールで来る。task-hub のレポートのコメント(Blocked も In review も)は届くはず。ただし手で書いたコメントもすべて来る。実際に届くかは未確認 |
 | GitHub の通知の受信箱、モバイルアプリ | 使えない | 自分の操作は入らない(メールの「Your own updates」にあたる設定が見当たらない) |
-| GitHub Actions(`projects_v2_item`) | 使えない | Project の webhook の出来事は、組織の Project にしかない。`jyoka/2` は利用者の Project。Actions のトリガーにもない |
-| GitHub Actions(`issue_comment`) | 使えるが勧めない | `jyoka/tasks` のレポートのコメントで動かせる。ただし送り先の鍵を Secrets に置く必要があり、結局 ntfy などに送るので二重になる |
+| GitHub Actions(`projects_v2_item`) | 使えない | Project の webhook の出来事は、組織の Project にしかない。利用者のボードは個人の Project。Actions のトリガーにもない |
+| GitHub Actions(`issue_comment`) | 使えるが勧めない | Issue リポジトリ(`you/tasks`)のレポートのコメントで動かせる。ただし送り先の鍵を Secrets に置く必要があり、結局 ntfy などに送るので二重になる |
 | `/chief`(`task events --next` を Monitor で待つ) | 条件つき | すぐ知れるが、Claude Code の会話を開いておく必要があり、出来事ごとにトークンを使う |
 | マネージャーの毎日 21:00 の確認(今のやり方) | 遅い | 最大で 1 日近く遅れる |
 
@@ -41,7 +41,7 @@ events = In review, Blocked, replan, slow, over budget
 - `events` はこのマシンの通知にも効きます。`Done`、`update`、`conflict`、`autopilot` を外すと、それらは Mac にも出なくなります
 - トピックの名前を知っている人は誰でも読めます。推測されにくい名前にするか、`ntfy_token` で守ります
   ([operations.md の「スマートフォンに届ける(ntfy)」](operations.md#スマートフォンに届けるntfy))
-- 送るのは見出し(`#251 Blocked: <タイトル>`)と要点です。Goal やコードは送りません。要点には Blocked の理由と
+- 送るのは見出し(`#12 Blocked: <タイトル>`)と要点です。Goal やコードは送りません。要点には Blocked の理由と
   レビューの指摘が入るので、外に出してよい内容かは人が決めます
 
 ## 確かめたこと

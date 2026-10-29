@@ -19,11 +19,11 @@
 
 ```ini
 [triggers]
-ci = jyoka/app, jyoka/web        ; 既定のブランチの CI が失敗したらカードを作る
-issues = jyoka/app               ; あなたに割り当てられた、開いている Issue のカードを作る
+ci = you/app, you/web            ; 既定のブランチの CI が失敗したらカードを作る
+issues = you/app                 ; あなたに割り当てられた、開いている Issue のカードを作る
 issue_label = agent              ; このラベルの付いた Issue も(書かなければ割り当てだけ)
-deps = weekly mon 09:00 jyoka/app Bump the dependencies and make the tests pass
-notes = monthly 1 jyoka/web Update the release notes from the merged PRs
+deps = weekly mon 09:00 you/app Bump the dependencies and make the tests pass
+notes = monthly 1 you/web Update the release notes from the merged PRs
 ready = deps                     ; この繰り返しの目標のカードは Ready に入れる
 ```
 
@@ -107,7 +107,7 @@ Ready のカードを始めたあとにトリガーを確かめるので、Ready
 
 ```
 triggered[2]{id,trigger,status,title}:
-  31,ci,Backlog,Fix failing CI on jyoka/app
+  31,ci,Backlog,Fix failing CI on you/app
   32,deps,Ready,"Bump the dependencies and make the tests pass (2026-W42)"
 ```
 

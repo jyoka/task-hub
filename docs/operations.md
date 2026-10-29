@@ -124,9 +124,9 @@ task-hub はカードの列を動かすたびに、`~/.local/state/task-hub/even
 Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを使い、`next:` の番号を Workflows のカーソルにします。
 
 ```json
-{"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "jyoka/aica_ra_a2a_poc", "event": "In review", "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/jyoka/aica_ra_a2a_poc/pull/36"}}
-{"time": "2026-09-26T14:20:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない", "digest": {"reason": "前提の PR #26 がまだマージされていない"}}
-{"time": "2026-09-26T14:21:00Z", "id": "32", "title": "求人検索と…", "repo": "jyoka/aica_ra_a2a_poc", "event": "replan", "decision": "human", "digest": {"decision": "human", "question": "PR #26 を先にマージしてよいですか?"}}
+{"time": "2026-09-26T14:05:00Z", "id": "41", "title": "保存できる項目に…", "repo": "you/app", "event": "In review", "pr": "https://github.com/you/app/pull/36", "digest": {"verdict": "pass", "review": ["api/save.py: 必須項目の判定", "マイグレーションの順番"], "pr": "https://github.com/you/app/pull/36"}}
+{"time": "2026-09-26T14:20:00Z", "id": "32", "title": "検索の絞り込みと…", "repo": "you/app", "event": "Blocked", "reason": "前提の PR #26 がまだマージされていない", "digest": {"reason": "前提の PR #26 がまだマージされていない"}}
+{"time": "2026-09-26T14:21:00Z", "id": "32", "title": "検索の絞り込みと…", "repo": "you/app", "event": "replan", "decision": "human", "digest": {"decision": "human", "question": "PR #26 を先にマージしてよいですか?"}}
 ```
 
 `event` は列の名前(`Backlog`、`Ready`、`In progress`、`In review`、`Blocked`、`Done`)か、replanner が仕分けたときの

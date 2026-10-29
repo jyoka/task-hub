@@ -73,7 +73,7 @@ PR の本文には Report、Please review、`Closes <issues repo>#<番号>` が�
 
 ```mermaid
 flowchart LR
-    task["個人のタスク<br/>jyoka/tasks の N(正本)"]
+    task["個人のタスク<br/>you/tasks の N(正本)"]
     team["チームの Issue<br/>org/repo の M"]
     tp["チームの Project のカード"]
     jira["Jira の課題<br/>ABC-123"]
@@ -82,7 +82,7 @@ flowchart LR
     team -- "カード" --> tp
     task -. "つなぎ先(link)" .-> jira
     task -- "実行" --> pr
-    pr -- "Closes jyoka/tasks の N" --> task
+    pr -- "Closes you/tasks の N" --> task
     pr -- "Closes org/repo の M(新規)" --> team
     pr -. "PR のタイトルに ABC-123" .-> jira
 ```

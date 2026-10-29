@@ -598,7 +598,7 @@ wait for merge、Blocked のカードだけ)です。
 (GitHub は変えられる人にしか見せない)、読めないときは何も言わず、次の日にまた読みます
 - `merge_ci` は `pr_view`(`mergeStateStatus`)を読んでから `pr_checks` を読みます。チェックが通った直後は、
   あとで読んだチェックは通っているのに、先に読んだ状態は `UNSTABLE` のままのことがあります(GitHub が数えるのが
-  数秒遅れる。jyoka/tasks#246)。そこで `checks = all` の `UNSTABLE` は、落ちたチェックがなければ(落ちていれば
+  数秒遅れる)。そこで `checks = all` の `UNSTABLE` は、落ちたチェックがなければ(落ちていれば
   その前に Blocked)、`ci_minutes` まではチェック待ちと同じに待ちます(`ci_wait` で `ci-wait` をコミットごとに 1 回)。
   過ぎたら、今までどおり `GitHub does not allow the merge (UNSTABLE: ...)` で Blocked にします
 - `ci_failed`(`merge_ci` でチェックが落ちたとき): キューの項目の `rerun.sha` が PR の先頭のコミット(`headRefOid`)と
@@ -757,7 +757,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ### 出来事(events.jsonl の 1 行)
 
 ```json
-{"time": "2026-10-10T02:33:41Z", "id": "156", "title": "...", "repo": "jyoka/x", "event": "In review",
+{"time": "2026-10-10T02:33:41Z", "id": "156", "title": "...", "repo": "you/app", "event": "In review",
  "pr": "https://github.com/...", "reason": "...", "digest": {"verdict": "pass", "review": "...", "pr": "..."}}
 ```
 

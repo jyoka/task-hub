@@ -15,7 +15,7 @@ task-hub を外に伝えるときの土台です。README の絵、画像、LP �
 - 機能は、名詞の見出しと 2 行の説明のカード 8 枚で伝える(3 節)。形容詞を使わず、コマンド、設定、数で書く
 - 分解の絵は、1 枚のカードの一生を 8 つの層に分ける。層の色は「誰がするか」(あなた、task-hub のコード、エージェント)を表す(4 節)
 - 見た目は [`assets/brand/tokens.css`](../assets/brand/tokens.css) の CSS の変数で決める。意味の色は、どれもコントラスト比 4.5 以上(5 節)
-- README の例の Issue `jyoka/tasks#12` は、このカードで `you/tasks#12` に直した。docs に残る私的な名前は 7 節の一覧にした
+- README と docs に残っていた運営者の私的な名前は、一般の言い方か架空の例に直した。`tests/test_brand.py` が、戻っていないかを確かめる(7 節)
 
 ## 1. 1 文
 
@@ -108,11 +108,13 @@ LP の見出し、フッター、`site/llms.txt` は [`tests/test_site.py`](../t
 | 7 | エージェントの選択 | 非対話モードを持つエージェント CLI なら、どれでも動かせる。<br>git、PR、Issue のコメントは task-hub がコードで行うので、どのエージェントでも同じ形の PR になる。 | Agent choice | Any agent CLI with a non-interactive mode works.<br>task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR. | [agents.md](agents.md#エージェントの変更と追加) |
 | 8 | 通知と費用 | In review、Blocked、長い実行、予算超えを、OS の通知と ntfy で知らせる。LLM は使わない。<br>起動ごとのトークンと費用を、エージェント CLI の記録から読む(`task stats`)。 | Alerts and cost | In review, Blocked, long runs, and runs over budget show as OS notifications and on ntfy. No LLM is used.<br>Tokens and cost per launch come from the agent CLI's own records (`task stats`). | [operations.md](operations.md#通知llm-なし) |
 
-README の「特長」の 1 行ずつの文は、上の 8 枚のもとになった。README の「特長」を直すのは、README の絵のカードで行う。
+README の「特長」の 1 行ずつの文は、上の 8 枚のもとになった。2026-10-29 に README の「特長」を直した。画面の 4 枚(1 タスク 1 PR、
+PR の前のレビュー、Blocked の仕分け、ボードを横に)は画像付きの 2 列の表にし、残りは 1 行ずつの箇条書きにした。
 
 ## 4. 分解の絵の台本
 
-1 枚のカードの一生を、層に分けて見せる絵。LP の真ん中と README の「しくみ」に置く(作るのは README の絵と LP のカード)。
+1 枚のカードの一生を、層に分けて見せる絵。LP の真ん中に置く(作るのは LP のカード)。README では、一番上のバナーの右の 8 層が、
+この絵の止まった短い形になる。README の「しくみ」は Mermaid の図のままにした。
 
 - 見出し: 「1 枚のカードを、層ごとに見る。」/「One card, layer by layer.」
 - 絵の中身は、task-hub が自分で撮った本物の画面にする(ボード、`task list`、Issue のレポート、PR)。
@@ -221,7 +223,7 @@ README の「特長」の 1 行ずつの文は、上の 8 枚のもとになっ�
 - 字は、見る人の OS の字で描かれる。字の形を固定したいとき(GitHub の共有の絵に上げるときなど)は、PNG に書き出す。書き出しはまだしていない
 - 2026-10-29 に macOS の Quick Look(`qlmanage -t`)で PNG にして、字がはみ出さないことを目で確かめた。ほかの OS の字では確かめていない
 
-README の一番上に置くときは、ダークとライトを `<picture>` で出し分ける(置くのは README の絵のカード)。
+README の一番上に、ダークとライトを `<picture>` で出し分けて置いた(2026-10-29)。README の alt は、絵の中身(1 文と 8 層)を書いた長い文にした。
 
 ```html
 <picture>
@@ -232,73 +234,52 @@ README の一番上に置くときは、ダークとライトを `<picture>` で
 
 ## 7. 公開の前に直すもの
 
-運営者の私的な名前が、外向けの文に出ている所の一覧。2026-10-29 に、次の検索で調べた。
+外向けの文に出ていた運営者の私的な名前を、一般の言い方か架空の例に直した(2026-10-29)。直したのは、README の 2 つ、
+CONTRIBUTING.md、SECURITY.md、AGENTS.md と、docs/ の全部。手順や決まりは変えず、名前だけを直した。
 
-```sh
-rg -n -i "aica|求人|AIprogramming|ai-CA_RA|voice-(agent|resume)|LINE のトーク|jyoka/(tasks|2\b|3\b|task-sandbox)" README.md README.ja.md CONTRIBUTING.md SECURITY.md AGENTS.md docs
-```
+| 種類 | 直し方 | 直したファイル |
+|---|---|---|
+| 運営者の本物のボード(Project の番号) | `you/2`、`you/3` か、「試験用の Project」「本番の Project」 | [notifications.md](notifications.md)、[release.md](release.md)、[review-2026-10-03.md](review-2026-10-03.md) |
+| private のリポジトリ(Issue のリポジトリ、試験用のリポジトリ、仕事のリポジトリ) | `you/tasks`、`you/app`、`you/task-sandbox` | README の 2 つ、[setup.md](setup.md)、[operations.md](operations.md)、[autopilot.md](autopilot.md)、[issue-tracker.md](issue-tracker.md)、[task-format.md](task-format.md)、[release.md](release.md)、[architecture/designs/team-sync.md](architecture/designs/team-sync.md) |
+| 本物の Issue と PR の番号、リンク | 根拠に引くだけの所は番号を外し、「あるカード」「運営者のボード」と書く。実験の記録で同じカードを何度も指す所は、ア、イ、ウ…と呼ぶ | [design.md](design.md)、[lessons.md](lessons.md)、[task-format.md](task-format.md)、[kiro-ide.md](kiro-ide.md)、[roadmap-statecharts.md](roadmap-statecharts.md)、[review-2026-10-03.md](review-2026-10-03.md)、[architecture/lld.md](architecture/lld.md)、[architecture/designs/autopilot-unblock.md](architecture/designs/autopilot-unblock.md) |
+| 仕事の名前、カードの題、手元のパス | 「運営者の別のプロダクト」「本物に近い例」。題は何が起きたかが分かる一般の言い方。パスは `~/code/app/` | [setup.md](setup.md)、[operations.md](operations.md)、[design.md](design.md)、[lessons.md](lessons.md)、[architecture/designs/autopilot.md](architecture/designs/autopilot.md)、[architecture/designs/autopilot-unblock.md](architecture/designs/autopilot-unblock.md) |
+| 運営者のアカウント名を使う架空の例 | `you/app`、`you/web` | [usage.md](usage.md)、[triggers.md](triggers.md)、[task-format.md](task-format.md)、[architecture/lld.md](architecture/lld.md) |
+
+何があったかは残した。たとえば [lessons.md](lessons.md) の実験の表は、カードの番号と仕事の題を外し、不合格の理由、判定、
+時間、トークンはそのままにした。
 
 数えないもの:
 
 - `jyoka/task-hub`: このリポジトリそのもの(public)。clone の URL、バッジ、Discussions
-- `jyoka/workenv_setting`([sandbox.md](sandbox.md) の 11 行): public のリポジトリ
-- `<you>/task-sandbox`、`you/tasks`、`<owner>`: 一般の言い方
+- `jyoka/workenv_setting`([sandbox.md](sandbox.md)): public のリポジトリ
+- `you/tasks#12`、`#12`、`<you>/task-sandbox`、`<owner>`: 一般の言い方と架空の例
+- 「タスク 252」のような、決定事項と教訓の出どころの番号: リポジトリの名前も題も持たないので残した。外すかは運営者が決める
 
-### このカードで直した所
+### 戻らないようにする確かめ
 
-| 場所 | 前 | 後 |
-|---|---|---|
-| `README.md` の「Usage」の例 | `Issue jyoka/tasks#12` | `Issue you/tasks#12` |
-| `README.ja.md` の「使い方」の例 | `Issue jyoka/tasks#12` | `Issue you/tasks#12` |
-
-`tests/test_brand.py` が、2 つの README に、運営者のボード、private のリポジトリ、仕事の名前が戻っていないかを確かめる。
+`tests/test_brand.py` の `test_the_public_docs_name_no_private_board_or_work` が、README の 2 つ、CONTRIBUTING.md、
+SECURITY.md、AGENTS.md、docs/ の全部の `.md` に、上の種類の名前が戻っていないかを確かめる。探す名前は、テストの
+`PRIVATE` にある。この文書には名前を書かない(書くと、この文書が名前を出すことになるため)。
 LP([`site/`](../site/))は、`tests/test_site.py` が同じ確かめをする。
 
-### 残した所: docs(公開の前に直すか、運営者が決める)
+### 残した所: docs の外
 
-| ファイル | 行 | 中身 | 種類 |
-|---|---|---|---|
-| [setup.md](setup.md) | 136、148、149 | `[env]` と `[setup]` の例に、仕事のリポジトリ `jyoka/aica_ra_a2a_poc`、手元のパス `~/AIprogramming PJ/ai-CA_RA-A2A-PoC/`、`voice-agent`、`voice-resume` | private のリポジトリ、仕事の名前、手元のパス |
-| [operations.md](operations.md) | 127〜129 | `events.jsonl` の例に、`jyoka/aica_ra_a2a_poc` と題「求人検索と…」 | private のリポジトリ、仕事の名前 |
-| [autopilot.md](autopilot.md) | 25 | 設定の例 `repos = jyoka/aica` | private のリポジトリ |
-| [notifications.md](notifications.md) | 13、24、25 | 運営者のボード `jyoka/2` と、Issue のリポジトリ `jyoka/tasks` | 本物のボードの番号 |
-| [task-format.md](task-format.md) | 5、531 | 例の `jyoka/tasks`、本物の Issue `jyoka/tasks#81` | private のリポジトリ、本物の Issue |
-| [issue-tracker.md](issue-tracker.md) | 5 | 例の `jyoka/tasks` | private のリポジトリ |
-| [design.md](design.md) | 110、127、394、444、457 | 本物の Issue(`jyoka/tasks#81`、`#281`、`#129〜#248`)、「aica の Render」 | 本物の Issue、仕事の名前 |
-| [lessons.md](lessons.md) | 40、120、131、185〜193、244〜247、254、297、301〜311、331、371、391 | 本物の Issue の番号と題(`#224 最初の求人は…` など)、aica、`jyoka/aica_ra_a2a_poc` | 本物の Issue、仕事の名前 |
-| [review-2026-10-03.md](review-2026-10-03.md) | 79、80、85、87、89 | 試験用の Project `jyoka/3`、運営者のボード `jyoka/2`、`jyoka/tasks` の Issue と `jyoka/task-sandbox` の PR へのリンク | 本物のボードの番号、private のリポジトリ |
-| [release.md](release.md) | 83〜85 | CI の変数の値 `jyoka/3`、`jyoka/task-sandbox` | 本物のボードの番号、private のリポジトリ(運営者向けの手順) |
-| [architecture/lld.md](architecture/lld.md) | 601 | 本物の Issue `jyoka/tasks#246` | 本物の Issue |
-| [architecture/designs/autopilot.md](architecture/designs/autopilot.md) | 7 | 「大きなプロジェクト(jyoka/aica)」 | private のリポジトリ |
-| [architecture/designs/team-sync.md](architecture/designs/team-sync.md) | 76、85 | 図の中の `jyoka/tasks` | private のリポジトリ |
-| [architecture/designs/autopilot-unblock.md](architecture/designs/autopilot-unblock.md) | 10、32、325、342、344、358、473〜481、490、556、589、637 | 本物の Issue の番号と題(`#255 LINE のトークで直せない` など)、`jyoka/aica#114`、`jyoka/tasks#253` | 本物の Issue、private のリポジトリ、仕事の名前 |
+画面と README には出ないので、このカードでは直していない。
 
-直し方の案:
-
-- 設定と出来事の例(setup.md、operations.md、autopilot.md、issue-tracker.md、task-format.md の 5 行): `you/app`、`~/code/app/` のような一般の言い方に直す。すぐ直せる
-- 本物の Issue の番号を根拠に引く所(design.md、lessons.md、lld.md、designs/): 外の人は開けない。番号を消すか、「運営者のボードの Issue(private)」と書く。決めるのは運営者
-- 運営者向けの手順(release.md、review-2026-10-03.md): 運営者の環境の話なので、残すか、`<owner>/<number>` に直すかを運営者が決める
-
-### 参考: 運営者のアカウント名を使う架空の例
-
-本物ではないが、運営者のアカウント名 `jyoka` を使う架空の例。外の人が見ると、運営者の本物のリポジトリと取り違えるかもしれない。
-
-| ファイル | 行 | 中身 |
-|---|---|---|
-| [usage.md](usage.md) | 77、81、95〜97、106 | `jyoka/app` |
-| [triggers.md](triggers.md) | 22〜26、110 | `jyoka/app`、`jyoka/web` |
-| [task-format.md](task-format.md) | 322 | `https://github.com/jyoka/app/pull/41` |
-| [architecture/lld.md](architecture/lld.md) | 760 | `jyoka/x` |
-
-テストの偽物の GitHub も `jyoka/app` を使う(`tests/test_task.py` に 234 か所)。画像を撮るカードでは、写る名前を `you/notes-app` のような一般の名前にする。
-ほかに、コードのコメントとテスト(`bin/task_hub.py`、`claude/task-board/`、`kiro/board-extension/test/`、`tests/`)にも `aica` や `jyoka/tasks` が出る。画面と README には出ない。
+- `task watch` の設定の誤りのメッセージ(`bin/task_hub.py` の `[triggers]` の例)が、運営者のアカウント名を使う架空の
+  リポジトリを出す。コマンドの出力なので、直すならテストと合わせて別のカードで直す
+- コードのコメント(`bin/task_hub.py`、`claude/task-board/hooks/panel.ts`)と、テスト(`tests/`、`claude/task-board/`、
+  `kiro/board-extension/test/`)に、本物の Issue と仕事のリポジトリの名前が出る
+- テストの偽物の GitHub は、運営者のアカウント名を使う架空のリポジトリ(`tests/test_task.py`)。画像に写る名前は、
+  画像を撮るカードが `you/notes-app` のような一般の名前にした([media.md](media.md))
 
 ## 次のカードへの申し送り
 
 - 画像を撮るカード: 済み(2026-10-29)。`python3 tests/media.py` が 4 節の例のカードを動かして撮り、`assets/media/` に置く。
   何をどこに使うかと撮り直し方は [media.md](media.md)
-- README の絵のカード: バナーを README の一番上に置き(6 節の `<picture>`)、「しくみ」に分解の絵を置く。README の構成が変わるので、
-  [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` も直す
+- README の絵のカード: 済み(2026-10-29)。バナー、1 文の下の動く画像、「特長」の画面 4 枚の表を置き、
+  [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` を直した。
+  分解の絵は README には置かず、LP に任せた(4 節)
 - LP のカード: 済み(2026-10-29)。[`site/`](../site/) に置いた。公開はしていない。開き方、確かめ方、GitHub Pages に出す手順は
   [site/README.md](../site/README.md)。`tests/test_site.py` が、1 文、機能のカード 8 枚と 8 つの層がこの文書と同じこと、外から読み込まないこと、
   `prefers-reduced-motion` で動かない作りを確かめる。スクロールの動きとスマホの幅は、手元の Chrome で確かめた

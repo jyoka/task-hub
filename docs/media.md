@@ -18,7 +18,7 @@ python3 tests/media.py
 
 | ファイル | 中身 | 合う機能のカード([brand.md](brand.md) の 3 節) |
 |---|---|---|
-| `flow.gif`、`flow.webm`、`flow.avif` | 動く画像(15 秒)。カード #12 を Ready に移してから、エージェントが作り、レビューで 1 回差し戻され、PR になり、マージキューでマージされるまで。左にターミナル、右に Claude Code の mod の盤。上の印は誰がしたか(You、task-hub、Agent) | 全体。README の一番上か「しくみ」 |
+| `flow.gif`、`flow.webm`、`flow.avif` | 動く画像(15 秒)。カード #12 を Ready に移してから、エージェントが作り、レビューで 1 回差し戻され、PR になり、マージキューでマージされるまで。左にターミナル、右に Claude Code の mod の盤。上の印は誰がしたか(You、task-hub、Agent) | 全体。README の一番上(太字の 1 文の下) |
 | `list-dark.png`、`list-light.png` | `task list`。#12 が In review(判定 `pass`)、#13 が実行中、#14 が Blocked、#15 が Backlog | 1 タスク 1 PR |
 | `review-dark.png`、`review-light.png` | 1 回目のレビュー(`.task-review.md` の `needs changes` と `Please fix`)と、最後の判定(`task show 12 --digest` の `pass` と PR) | PR の前のレビュー |
 | `claude-board-dark.png`、`claude-board-light.png` | Claude Code の mod の盤。船の絵、要対応(Blocked の理由、In review の判定と PR)、実行中(経過時間と普段の時間) | Blocked の仕分け、エージェントの選択 |
@@ -44,7 +44,8 @@ python3 tests/media.py
 ### README と LP での出し方
 
 ダークとライトは `<picture>` で出し分ける。動く画像は AVIF を出し、AVIF を出せないブラウザーには GIF を出す。
-WebM は LP の `<video>` 用。置くのは README の絵のカードと LP のカード。
+WebM は LP の `<video>` 用。README には 2026-10-29 に置いた(一番上の動く画像と、「特長」の画面 4 枚の表)。
+`prefers-reduced-motion` のときは、動く画像の代わりに `list-*.png` を出す。下は短い例。README の alt は、絵の中身を書いた長い文にしている。
 
 LP([`site/`](../site/))は、ここの画像をそのまま読む(`site/assets` は `assets/` へのリンク)。撮り直すと LP の絵も変わる。
 機能のカードの絵は、画面の一部を CSS で拡大して切り出している(`site/site.css` の `.crop-*`。画像の大きさを px で書いてある)。
@@ -52,6 +53,8 @@ LP([`site/`](../site/))は、ここの画像をそのまま読む(`site/assets` 
 
 ```html
 <picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="assets/media/list-dark.png">
+  <source media="(prefers-reduced-motion: reduce)" srcset="assets/media/list-light.png">
   <source type="image/avif" srcset="assets/media/flow.avif">
   <img alt="A card moves from Ready to a merged PR: the terminal on the left, the board on the right." src="assets/media/flow.gif">
 </picture>
@@ -131,7 +134,7 @@ python3 tests/run.py test_media  # 同じ確かめと、カードを 2 回動か
 
 | どこを | 何を |
 |---|---|
-| 各画像に写る文字(`text.json`) | 運営者の名前とボード(`jyoka`、`aica` など)、日付(`2026-10-29`、`2026/10/29`、`20261029`、`10月29日` など。時刻は数えない)、メールアドレス、手元のパス(`/Users/`、`/home/`、`/var/folders/`、`/tmp/` など)、このマシンのホーム、一時フォルダー、ログイン名、git のメールアドレス |
+| 各画像に写る文字(`text.json`) | 運営者の名前とボード(`tests/media.py` の `PRIVATE` にある名前)、日付(`2026-10-29`、`2026/10/29`、`20261029`、`10月29日` など。時刻は数えない)、メールアドレス、手元のパス(`/Users/`、`/home/`、`/var/folders/`、`/tmp/` など)、このマシンのホーム、一時フォルダー、ログイン名、git のメールアドレス |
 | 各ファイルのバイト(メタデータ) | 今日の日付、手元のパス、このマシンの名前、運営者の名前。PNG の文字のチャンク(`tEXt`、`iTXt`、`zTXt`、`tIME`、`eXIf`) |
 | ファイルの数と大きさ | `tests/media.py` が書くファイルが全部あり、それ以外がない。大きさの上限は下の表 |
 

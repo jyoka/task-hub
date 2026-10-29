@@ -74,7 +74,7 @@ python3 -m http.server --bind 127.0.0.1 --directory site 8000   # リポジト�
 
 今はしません。公開を決めたら、次の順で行います。
 
-1. [docs/brand.md の 7 節](../docs/brand.md#7-公開の前に直すもの)の「公開の前に直すもの」を見る。LP がリンクする docs(setup.md、usage.md、operations.md、agents.md、task-format.md、architecture/hld.md)に残る私的な名前を、直すかを決める
+1. [docs/brand.md の 7 節](../docs/brand.md#7-公開の前に直すもの)の「公開の前に直すもの」を見る。docs の私的な名前は直した(2026-10-29)。残した所(「タスク 252」のような番号、docs の外のコードとテスト)を、公開の前に直すかを決める
 2. 出すフォルダーの作り方を決める。`-L` で `site/assets` のリンクの先(`assets/brand/` と `assets/media/`)を中に写し、1 つのフォルダーにする。
    workflow の中で作る(手元では作らない。`_site/` は `.gitignore` に入っていないので、手元で作ったら消す)
 
