@@ -107,11 +107,13 @@ GitHub の About は運営者が変える。案は A の英語をそのまま使
 | 7 | エージェントの選択 | 非対話モードを持つエージェント CLI なら、どれでも動かせる。<br>git、PR、Issue のコメントは task-hub がコードで行うので、どのエージェントでも同じ形の PR になる。 | Agent choice | Any agent CLI with a non-interactive mode works.<br>task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR. | [agents.md](agents.md#エージェントの変更と追加) |
 | 8 | 通知と費用 | In review、Blocked、長い実行、予算超えを、OS の通知と ntfy で知らせる。LLM は使わない。<br>起動ごとのトークンと費用を、エージェント CLI の記録から読む(`task stats`)。 | Alerts and cost | In review, Blocked, long runs, and runs over budget show as OS notifications and on ntfy. No LLM is used.<br>Tokens and cost per launch come from the agent CLI's own records (`task stats`). | [operations.md](operations.md#通知llm-なし) |
 
-README の「特長」の 1 行ずつの文は、上の 8 枚のもとになった。README の「特長」を直すのは、README の絵のカードで行う。
+README の「特長」の 1 行ずつの文は、上の 8 枚のもとになった。2026-10-29 に README の「特長」を直した。画面の 4 枚(1 タスク 1 PR、
+PR の前のレビュー、Blocked の仕分け、ボードを横に)は画像付きの 2 列の表にし、残りは 1 行ずつの箇条書きにした。
 
 ## 4. 分解の絵の台本
 
-1 枚のカードの一生を、層に分けて見せる絵。LP の真ん中と README の「しくみ」に置く(作るのは README の絵と LP のカード)。
+1 枚のカードの一生を、層に分けて見せる絵。LP の真ん中に置く(作るのは LP のカード)。README では、一番上のバナーの右の 8 層が、
+この絵の止まった短い形になる。README の「しくみ」は Mermaid の図のままにした。
 
 - 見出し: 「1 枚のカードを、層ごとに見る。」/「One card, layer by layer.」
 - 絵の中身は、task-hub が自分で撮った本物の画面にする(ボード、`task list`、Issue のレポート、PR)。
@@ -220,7 +222,7 @@ README の「特長」の 1 行ずつの文は、上の 8 枚のもとになっ�
 - 字は、見る人の OS の字で描かれる。字の形を固定したいとき(GitHub の共有の絵に上げるときなど)は、PNG に書き出す。書き出しはまだしていない
 - 2026-10-29 に macOS の Quick Look(`qlmanage -t`)で PNG にして、字がはみ出さないことを目で確かめた。ほかの OS の字では確かめていない
 
-README の一番上に置くときは、ダークとライトを `<picture>` で出し分ける(置くのは README の絵のカード)。
+README の一番上に、ダークとライトを `<picture>` で出し分けて置いた(2026-10-29)。README の alt は、絵の中身(1 文と 8 層)を書いた長い文にした。
 
 ```html
 <picture>
@@ -296,7 +298,8 @@ LP はまだない。LP のカードで、同じ確かめを LP にも足す。
 
 - 画像を撮るカード: 済み(2026-10-29)。`python3 tests/media.py` が 4 節の例のカードを動かして撮り、`assets/media/` に置く。
   何をどこに使うかと撮り直し方は [media.md](media.md)
-- README の絵のカード: バナーを README の一番上に置き(6 節の `<picture>`)、「しくみ」に分解の絵を置く。README の構成が変わるので、
-  [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` も直す
+- README の絵のカード: 済み(2026-10-29)。バナー、1 文の下の動く画像、「特長」の画面 4 枚の表を置き、
+  [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` を直した。
+  分解の絵は README には置かず、LP に任せた(4 節)
 - LP のカード: 1 文を見出し、フッター、`llms.txt` で同じ文のまま使う。機能のカード 8 枚(3 節)、分解の絵(4 節)、`tokens.css` を使う。
   外から読み込まない、`prefers-reduced-motion` で止まる、スマホの幅で崩れないを、テストで確かめる
