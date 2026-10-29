@@ -80,9 +80,9 @@ Windows の PC を借りなくても、GitHub Actions の Windows で、本物�
    | 種類 | 名前 | 値の例 |
    |---|---|---|
    | Secret | `TASK_HUB_LIVE_TOKEN` | 2 のトークン |
-   | Variable | `TASK_HUB_LIVE_PROJECT` | `jyoka/3`(試験用の Project) |
-   | Variable | `TASK_HUB_LIVE_ISSUES` | `jyoka/task-sandbox` |
-   | Variable | `TASK_HUB_LIVE_REPO` | `jyoka/task-sandbox`(PR を出す先) |
+   | Variable | `TASK_HUB_LIVE_PROJECT` | `you/3`(試験用の Project) |
+   | Variable | `TASK_HUB_LIVE_ISSUES` | `you/task-sandbox` |
+   | Variable | `TASK_HUB_LIVE_REPO` | `you/task-sandbox`(PR を出す先) |
 
 **押すとき**: GitHub の Actions → windows → Run workflow で、「live」に印を付けて Run workflow を押します。
 `live` のジョブが緑なら成功です。カードを 1 枚作って PR まで進め、終わると PR を閉じてブランチを消し、カードを Done にします。
