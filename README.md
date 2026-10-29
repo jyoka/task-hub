@@ -123,7 +123,8 @@ agent = claude
 ```
 
 Each run is reviewed before its PR by the same agent in a fresh context. To turn that off, add `reviewer = off`
-under `[runner]`.
+under `[runner]`. After a send-back, the next review checks only the findings and what changed since; `re_review = full`
+reads the whole PR again ([how](docs/task-format.md#差し戻しの後のレビューrunner-re_review)).
 [docs/setup.md](docs/setup.md) tells you how to prepare the GitHub Project (columns and fields), install the
 skills, and keep `task watch` running.
 

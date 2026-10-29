@@ -119,6 +119,8 @@ agent = claude
 ```
 
 実行は PR の前に、同じエージェントが新しいコンテキストでレビューします。外すときは `[runner]` に `reviewer = off` を書きます。
+差し戻しの後のレビューは、前の指摘と、その後に変わった所だけを確かめます。`re_review = full` なら PR の全部を読み直します
+([詳しく](docs/task-format.md#差し戻しの後のレビューrunner-re_review))。
 GitHub Project の準備(列と欄)、スキルのインストール、常駐のさせ方は [docs/setup.md](docs/setup.md) にあります。
 
 ## 使い方

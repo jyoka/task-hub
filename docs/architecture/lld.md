@@ -32,7 +32,7 @@ flowchart TB
     sharing["sharing<br/>share_config、share_body、share_column、TeamGitHub(つなぎ手)、to_team、add_closes、share_pr"]
     sync["sync<br/>sync: 片付け、止まった実行、マージ、開始、アーカイブ<br/>delete_merged_branch、repo_setting_lines"]
     readiness["readiness<br/>cmd_check、readiness_check、goldfish、at_once、ReadinessResult、readiness_gate、<br/>set_readiness、latest_readiness、goal_hash"]
-    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
+    runone["one run<br/>cmd_run、run_task、run_worker、review_loop、run_review、review_scope、review_by、combine_reviews、<br/>run_replan、finish、set_review、upsert_pr"]
     start["starting a run<br/>launch、start_run、ensure_worktree、copy_env_files、write_rules、goal_budget、run_setup、check_balance、human_comments、build_prompt、<br/>run_agent_process、Watchdog、as_agent、git_shared、shared_read、shared_write、Steps、agent_usage、over_budget"]
     herdr["herdr<br/>task_workspace、close_herdr、herdr_json"]
     runstate["run state<br/>load_run、save_run、write_atomic、alive、check_slow、record_run、<br/>resumable、relaunch、stop_left_agent、<br/>usage_limit、limit_stop、limit_resumed、limit_relaunch、agent_limits"]
@@ -104,6 +104,8 @@ classDiagram
         minor: Known issues
         mode: agent / goldfish
         attempt: その実行の何回目のレビューか
+        scope: full / delta(review_scope)
+        scope_note: Scope の行
         field_verdict: Review 欄の値
         review_line(): 機械が読む 1 行
         passed
@@ -345,7 +347,7 @@ flowchart TB
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
-    review -- "あり" --> rv["run_review → review_by<br/>snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews"]
+    review -- "あり" --> rv["run_review → review_scope<br/>full: review_by。snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews<br/>delta(差し戻しの後、変更が線の内): build_re_review_prompt で 1 体"]
     rv -- "pass、minor(Known issues)だけ" --> finish
     rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
@@ -741,9 +743,9 @@ sequenceDiagram
 | `share/worktrees/<id>/.task-durable/` | B の実行役(`durable/`、`[agents] durable` のときだけ) | B の実行役、比べる実験(`*.usage.json`) | `<session>.sqlite`(と `-wal`、`-shm`。Pi Durable の会話とタスク)、`<session>.lock`(持ち主の pid。O_EXCL で作り、死んだ持ち主のものは取り直す)、`<session>.groups/<番号>`(動いている bash のコマンドのプロセスグループ。`group-shell` がコマンドの間だけ置き、中身はグループの先頭の開始時刻(`ps` の `lstart`)。次の起動は、先頭がまだその `group-shell`(pid、pgid、開始時刻が同じ)のグループだけを止め、ファイルは全部消す。Pi Durable が SIGKILL で止めたコマンド(timeout、SIGTERM での close)のファイルは残るため)、`<session>.usage.json`(`harness.usage()`)、`.gitignore`(`*`。task-hub はコミットしない)。`cleanup` が worktree と一緒に消す |
 | `share/sandbox-used` | `check_sandbox`(`[sandbox] mode = user` のときと、`off` で専用ユーザーの ACL を見つけたとき) | `refuse_after_user`(読むだけ)、`check_sandbox`(`off` で ACL がなく `repos` と `worktrees` が無くなったら消す) | 空のファイル |
 | `share/prompts/<id>.md` | `build_prompt` | `task _run` | Markdown |
-| `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt` | Markdown(`comments_text`) |
+| `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt`、`build_re_review_prompt` | Markdown(`comments_text`) |
 | `share/prompts/<id>-retry.md` | `review_loop`(差し戻しの前)。`launch` が消す | 再開した `task _run`(`retry` から) | Markdown(差し戻しのプロンプト) |
-| `share/prompts/<id>-review.json` | `review_loop`(差し戻しの前)、`review_retry`(差し戻しのあと)。`launch` が消す | 再開した `task _run`(`review`、`retry` から)の `review_stop` | JSON。`sent`(差し戻した指摘の列)、`sizes`(差し戻しごとに変えた行数)、`tree`(今の差し戻しの前の worktree の tree) |
+| `share/prompts/<id>-review.json` | `review_loop`(差し戻しの前)、`review_retry`(差し戻しのあと)。`launch` が消す | 再開した `task _run`(`review`、`retry` から)の `review_stop` | JSON。`sent`(差し戻した指摘の列)、`sizes`(差し戻しごとに変えた行数)、`tree`(今の差し戻しの前の worktree の tree。`[runner] re_review = delta` のレビューの差分の起点)、`fixes` と `minor`(差し戻した前のレビューの blocking と Known issues。delta のレビューに渡す。古いファイルにない欄は空で、`fixes` が空なら `sent` を渡す) |
 | `share/prompts/<id>-report.md` | `hide_report`(goldfish の視点を起動する前に、worktree の `.task-report.md` を移す)。`unhide_report`(視点が終われば、`review`、`finishing` から再開した `task _run`)が worktree に戻して消す。`launch` と、ほかの段から始まる `task _run` も消す | `unhide_report`、`sync`(死んだ実行のレポートを Issue に書くとき) | Markdown(実装エージェントのレポート) |
 | `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked, verdict}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由、Review 欄に入れる最後の判定(レビューがなければ空。古い記録にはない) |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
@@ -779,6 +781,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 ### 実行の集計(metrics.jsonl の 1 行)
 
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
+`review_scopes`(`reviews` と同じ順に、各レビューが読んだもの。`full` は PR の全部、`delta` は前の指摘とその後の変更だけ)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
 `repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
 `goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行、`limit` は利用の上限で止まった実行)、
@@ -786,7 +789,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
 `started`、`seconds`、`reviews`、`usage` は、再開のあとの分だけです(前の `task _run` のメモリにあったため)。その場の再開の
 起動は、`usage` に `agent, resumed` のような役で入ります。`goldfish` のレビューの起動は、視点の名前(`Goal Auditor`、
-`Codebase Auditor`)の役で入ります。
+`Codebase Auditor`)の役で入ります。`delta` のレビューの起動は `re-reviewer` の役で入ります。
 
 `task review --no-write` の結果は `review-trials.jsonl` に 1 行ずつ入ります(`id`、`title`、`repo`、`reviewer`、`mode`、
 `base`、`commit`、`finished`、`seconds`、`verdict`、`blocking`、`minor`、`usage`、`instructions`(`--instructions-file` の
@@ -859,7 +862,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
 | `git merge-base`、`diff`、`ls-files`、`cat-file` など(読むだけ) | git(Kiro の拡張。`src/inspect.ts` の `READ_ONLY` だけ、index の写しで) | - | 人が変更のタブを開いたとき |
-| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
+| エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。差し戻しの後の `re_review = delta` のレビューは、どちらでも 1 体。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
 | `task check` の書き込み: `gh issue comment`、`gh project item-edit`(Readiness 欄。blocked は `--clear`)、欄がなければ `gh project field-create` を 1 回 | gh(GraphQL) | 判定ごとに 2〜3 | `task check` だけ(`--no-write` は 0) |
 | Review 欄(`set_review`): `gh project item-edit`(判定、レビューがなければ `--clear`)、欄がなければ `gh project field-create` を 1 回。`ITEMS_QUERY` は欄があるときだけ `review` も読む(同じ呼び出し) | gh(GraphQL) | 実行の終わりに 1〜2。欄がなくレビューもない実行は 0 | `finish` ごと |
 | `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn` か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
@@ -1012,7 +1015,12 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     task-hub は判定でカードを動かさない
 20. `[runner] review_mode = goldfish` の視点は、実装エージェントのレポートをプロンプトでも worktree のファイル(`.task-report.md`)
     でも受け取らない。視点が動く間に実行が止まっても、レポートは失われず、再開した実行か `sync` が Issue に書く
-21. エージェントが読める形で利用の上限を言って失敗で終わったら、カードは Blocked で、理由に再開の時刻が入る。時刻を過ぎた最初の
+21. 差し戻しの後のレビューは、`[runner] re_review = delta`(既定)なら、前のレビューが見た tree(`prompts/<id>-review.json` の
+    `tree`)からの差分、前のレビューが差し戻した指摘と Known issues だけを 1 体で読む。その差分が `RE_REVIEW_LINES`(300 行)か
+    `RE_REVIEW_FILES`(10 ファイル)を超えるとき、`research` のタスク、`tree` がないか git で読めないとき、`full` では PR の全部を読む。どちらで
+    読んだかは、レビューの節の `Scope:` の行(delta と、線を超えて全部を読んだとき)、機械が読む 1 行の `scope`、
+    `metrics.jsonl` の `review_scopes` に必ず残る。`(again)` で差し戻しが止まるのは full と同じ
+22. エージェントが読める形で利用の上限を言って失敗で終わったら、カードは Blocked で、理由に再開の時刻が入る。時刻を過ぎた最初の
     同期が止まった段階から再開する。上限の間は同じエージェントの Ready のカードを始めず、時刻を過ぎたら始める。読めない形と
     `[runner] limit_resume = off` は足す前と同じ Blocked
 

@@ -203,6 +203,10 @@ Blocked にし、次の実行への修正指示の下書きを Issue に書き�
 `[runner] review_mode = goldfish` では、実装エージェントのレポートを渡さない視点(Goal Auditor、Codebase Auditor)を
 1 体ずつ新しいコンテキストで動かし、結果を 1 つの判定にまとめてから、同じ差し戻しの流れに渡します。最後の判定は
 Project の Review 欄と、レポートのコメントの機械が読む 1 行に残ります([task-format.md](../task-format.md#goldfish-のレビューrunner-review_mode))。
+差し戻しの後のレビューは、既定(`[runner] re_review = delta`)では前の指摘と、前のレビューが見た作業の木からの差分だけを
+1 体で読みます。差分が大きいとき(300 行か 10 ファイルを超える)と `re_review = full` では、PR の全部を読み直します。
+どちらで読んだかは、レビューの節の `Scope:` の行、機械が読む 1 行の `scope`、`metrics.jsonl` の `review_scopes` に残ります
+([task-format.md](../task-format.md#差し戻しの後のレビューrunner-re_review))。
 
 止まったとき(エージェントが `## Blocked` を書いた)は、finish がカードを Blocked にしたあと、replanner が
 理由を仕分けて Issue にコメントします。人が Goal に答えを書き足すか、Issue や PR にコメントして Ready に戻すと、同じブランチと
