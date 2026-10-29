@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">task-hub</title>
+  <desc id="desc">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。 Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</desc>
+  <rect width="1280" height="640" fill="#f6f7f8"/>
+  <g font-family="system-ui, -apple-system, &quot;Hiragino Sans&quot;, &quot;Yu Gothic UI&quot;, &quot;Noto Sans JP&quot;, sans-serif">
+    <g transform="translate(80 80)">
+      <rect x="0" y="0" width="9" height="32" rx="2" fill="#1f5fbf"/>
+      <rect x="12" y="0" width="9" height="22" rx="2" fill="#0b6e7d"/>
+      <rect x="24" y="0" width="9" height="13" rx="2" fill="#1a7a3e"/>
+      <text x="50" y="26" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="30" fill="#1b1f24">task-hub</text>
+    </g>
+    <text x="80" y="236" font-size="38" font-weight="700" fill="#1b1f24">Ready に移した GitHub Project の</text>
+    <text x="80" y="290" font-size="38" font-weight="700" fill="#1b1f24">カードを、手元のエージェントが</text>
+    <text x="80" y="344" font-size="38" font-weight="700" fill="#1b1f24">レビュー済みの PR にする。</text>
+    <text x="80" y="414" font-size="22" fill="#5c6570">Your local coding agents turn each GitHub Project card</text>
+    <text x="80" y="446" font-size="22" fill="#5c6570">you move to Ready into a reviewed PR.</text>
+    <g font-size="16">
+      <rect x="80" y="536" width="14" height="14" rx="4" fill="#1f5fbf"/>
+      <text x="102" y="548" fill="#5c6570">You</text>
+      <rect x="152" y="536" width="14" height="14" rx="4" fill="#0b6e7d"/>
+      <text x="174" y="548" fill="#5c6570">task-hub (code)</text>
+      <rect x="312" y="536" width="14" height="14" rx="4" fill="#6b3fb0"/>
+      <text x="334" y="548" fill="#5c6570">Agent (LLM)</text>
+    </g>
+    <path d="M 846 122 V 518" stroke="#d5d9de" stroke-width="2" stroke-dasharray="4 6"/>
+    <g transform="translate(860 100)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#1f5fbf"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">1</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Card moved to Ready</text>
+    </g>
+    <g transform="translate(860 156)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#0b6e7d"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">2</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">task-hub runner</text>
+    </g>
+    <g transform="translate(860 212)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#0b6e7d"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">3</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">worktree · task/12</text>
+    </g>
+    <g transform="translate(860 268)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#6b3fb0"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">4</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Local agent</text>
+    </g>
+    <g transform="translate(860 324)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#6b3fb0"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">5</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Fresh-context review</text>
+      <rect x="262" y="10" width="62" height="24" rx="12" fill="#e7f4ec" stroke="#1a7a3e" stroke-width="1"/>
+      <text x="293" y="27" font-size="14" font-weight="700" text-anchor="middle" fill="#1a7a3e">pass</text>
+    </g>
+    <g transform="translate(860 380)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#0b6e7d"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">6</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Pull request</text>
+    </g>
+    <g transform="translate(860 436)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#0b6e7d"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">7</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Merge queue</text>
+    </g>
+    <g transform="translate(860 492)">
+      <rect width="340" height="44" rx="8" fill="#ffffff" stroke="#d5d9de" stroke-width="1"/>
+      <rect x="0" y="0" width="8" height="44" rx="4" fill="#1f5fbf"/>
+      <text x="24" y="28" font-size="14" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#5c6570">8</text>
+      <text x="48" y="28" font-size="18" fill="#1b1f24">Merged</text>
+    </g>
+  </g>
+</svg>

@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md)
 
-**Move a GitHub Project card to Ready. Your local coding agent implements it and opens a PR.**
+**Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.**
 
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -101,7 +101,7 @@ A recurring goal can be a drift report: an agent with no other context lists whe
 Example: you ask to fix the login, then merge.
 
 ```
-You         /task (or tell /chief)                    → Issue jyoka/tasks#12, Backlog
+You         /task (or tell /chief)                    → Issue you/tasks#12, Backlog
 You         Move the card to Ready                    → task-hub starts it           In progress
 worker      Edits, tests, writes the report
 reviewer    Checks each acceptance criterion          → pass (needs changes: sent back, 2 times at most)
@@ -161,7 +161,7 @@ The docs are in Japanese.
 | [windows.md](docs/windows.md) Windows | [operations.md](docs/operations.md) Operations and troubleshooting | [architecture/lld.md](docs/architecture/lld.md) Low-level design | [architecture/feature-design.md](docs/architecture/feature-design.md) Designing a feature |
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) Agents | [design.md](docs/design.md) Design decisions | [release.md](docs/release.md) Releases |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro internals | [task-format.md](docs/task-format.md) Issue and PR formats | [lessons.md](docs/lessons.md) Lessons learned | [SECURITY.md](SECURITY.md) Reporting vulnerabilities |
-| [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | |
+| [windows-quickstart.md](docs/windows-quickstart.md) Kiro IDE on Windows | [issue-tracker.md](docs/issue-tracker.md) Registering from other skills | | [brand.md](docs/brand.md) Messaging and look |
 | | [slack-triage.md](docs/slack-triage.md) Registering from Slack | | |
 | | [triggers.md](docs/triggers.md) Cards task-hub makes on its own | | |
 | | [autopilot.md](docs/autopilot.md) Autopilot: task-hub approves and merges for chosen repos | | |

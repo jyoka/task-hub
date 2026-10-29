@@ -55,6 +55,7 @@ slack-triage/          Slackトリアージ: スレッドをコピーして ⌃�
 .kiro/steering/        このリポジトリを Kiro で開いたときの約束(「セットアップして」でインストーラを動かす)
 durable/               実験: B の実行役(Pi Durable、Node)。[agents] durable で動くエージェントの 1 つ(durable/README.md)
 rust/                  実験: task-rs(Rust の読むだけの一覧と TUI)。task には組み込まない。配布は task-rs-v* の pre-release(rust/README.md)
+assets/brand/          伝え方の見た目: 色と字の CSS の変数(tokens.css)とバナー(docs/brand.md)
 windows/               Windows 用のインストーラ(install.ps1)と、task watch を常駐させるスクリプト(task-watch.ps1)
 tests/test_task.py     テスト: 全部は GitHub Actions。手元では python3 tests/run.py <名前の一部>
 tests/test_windows.py  Windows だけで動くテスト(GitHub Actions の windows-latest で実行)
@@ -117,6 +118,7 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
 | `tests/test_install.py` | Kiro 用のインストーラ(`kiro/install.sh` など) |
 | `tests/test_run.py` | `tests/run.py` の既定の並べる数、低い優先度、全部のテストのロック、出力の文字コードで書けない失敗の表示。Windows の GitHub Actions でも動く |
 | `tests/test_windows.py` | Windows だけで動く(ほかでは skip)。GitHub Actions の `windows-latest` で、push のたびに動く |
+| `tests/test_brand.py` | 伝え方の土台([docs/brand.md](docs/brand.md)): 1 文が README の太字、brand.md、バナーで同じ。`tokens.css` の意味の色のコントラスト比が 4.5 以上(`python3 tests/test_brand.py --table` で表を出す)。README に運営者の私的な名前が出ない |
 | `tests/test_bench.py` | `tests/bench.py` が本物の HOME に触れず、`gh` を呼ばずに表と合否を出すこと |
 | `tests/test_durable_bench.py` | `tests/durable_bench.py` の 63 回の試行の組み合わせと、`--report` の表(モデルは呼ばない) |
 | `tests/test_task_rs.py` | `task-rs tui` の `g` キーと読む画面(Enter、`d`、`l`、スクロール、ログの追従、Issue のコメントと Markdown、コメントの開閉と `n` `p`)。task-rs を cargo でビルドし、PTY の中で偽物の Lazygit、偽物の gh と一時的な HOME で動かす。cargo がない、または Windows では skip |
@@ -155,7 +157,7 @@ README は、初めて来た人が最初の画面で「何か」「なぜ使う�
 
 | 順 | 見出し(README.ja.md / README.md) | 中身 |
 |---|---|---|
-| 1 | `# task-hub` | 太字の一言の説明、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
+| 1 | `# task-hub` | 太字の一言の説明([docs/brand.md](docs/brand.md) の 1 文を同じ文のまま。`tests/test_brand.py` が確かめる)、CI のバッジ、人が決める 2 つのこと、Kiro IDE の人への案内 |
 | 2 | `## しくみ` / `## How it works` | 6 段階くらいの Mermaid の図 1 枚と、箇条書き 3 つ |
 | 3 | `## 特長` / `## Features` | 1 行ずつ、7 つまで |
 | 4 | `## はじめる` / `## Get started` | 必要なもの、コマンド 3 つ前後、最小の設定。詳しくは setup.md へ |
