@@ -15,8 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BRAND = ROOT / "assets" / "brand"
-JA = "Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。"
-EN = "Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR."
+JA = "AI に任せて、離れていい。確かめてから届くから。"
+EN = "Hand work to AI agents and walk away. Nothing reaches you unchecked."
 BANNERS = ("banner-dark.svg", "banner-light.svg")
 READMES = {"README.md": ("English | [日本語](README.ja.md)", "## Features"),
            "README.ja.md": ("[English](README.md) | 日本語", "## 特長")}

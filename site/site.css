@@ -370,7 +370,9 @@ main > section { padding-top: 5rem; }
 /* 3. Features */
 .cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: var(--space-3); }
 .card { background: var(--panel); border: var(--border); border-radius: var(--radius-xl); padding: var(--space-3); }
-.card h3 { font-size: var(--text-md); margin: var(--space-3) 0 var(--space-1); }
+.card h3 { font-size: var(--text-md); margin: 0 0 var(--space-1); }
+/* The pillar of docs/brand.md section 2 the card belongs to */
+.card .card-pillar { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-xs); font-weight: 700; color: var(--accent); }
 .card p { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--muted); }
 .card-shot { position: relative; aspect-ratio: 16 / 10; display: grid; place-items: center; }
 /* Show a part of a screen, larger. In picture pixels: --iw and --ih are its size, --cw the width to show, and --cx
@@ -388,7 +390,6 @@ main > section { padding-top: 5rem; }
 .crop-review { --iw: 1800; --ih: 1406; --cw: 1000; --cx: 50; --cy: 130; }
 .crop-claude { --iw: 1020; --ih: 1156; --cw: 900; --cx: 60; --cy: 560; }
 .crop-queue { --iw: 1800; --ih: 944; --cw: 1000; --cx: 50; --cy: 50; }
-.crop-kiro { --iw: 1040; --ih: 826; --cw: 960; --cx: 50; --cy: 180; }
 .card-shot:hover { border-color: var(--accent); }
 .card-type {
   align-content: center;
