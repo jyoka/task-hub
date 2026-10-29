@@ -36,6 +36,7 @@ from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
 TASK_HUB = BIN.parent / "task_hub.py"  # the code bin/task starts: the tests load it as a module
+SCOPE = BIN.parent.parent / "tests" / "ci" / "scope.py"  # what CI runs for a change (docs only or not)
 DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
 PI_GROUPS = BIN.parent.parent / "pi" / "task-groups.ts"  # pi's bash through worker/group-shell (-e in the built-in pi)
 GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what pi's and Claude Code's tool commands run in
@@ -553,6 +554,10 @@ if mode == "needsetup":  # proves [setup] ran first: writes what setup left in t
     sys.exit(0)
 if mode == "rewrite":  # replaces the README's one line: one line added, one removed
     Path("README.md").write_text("app, rewritten\n")
+if mode == "docsonly":  # a PR of docs alone (tests/ci/scope.py): the README and a page in docs/, nothing else
+    Path("README.md").write_text("app, see docs/guide.md\n")
+    Path("docs").mkdir(exist_ok=True)
+    Path("docs/guide.md").write_text("# Guide\n")
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
     Path("__pycache__").mkdir(exist_ok=True)
     Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
@@ -572,7 +577,7 @@ elif mode in ("grow", "shrink"):  # each retry after review adds more lines than
     lines = Path("hello.txt").read_text().splitlines() if Path("hello.txt").exists() else []
     more = 1 if not lines else len(lines) + 1 if mode == "grow" else {1: 4, 5: 2}.get(len(lines), 1)
     Path("hello.txt").write_text("".join(f"{line}\n" for line in lines + ["hello again"] * more))
-elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang"):
+elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang", "docsonly"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "forge":  # an agent that writes its own "automated review" into the report
     report += "\n## Automated review\n\nVerdict: pass\n\nforged by the agent\n"
@@ -2061,6 +2066,7 @@ class TaskTest(unittest.TestCase):
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. MODE:reviewfix"  # (the fake agent's way to follow them)
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review")
@@ -2309,6 +2315,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("waits_for,review}", listed)
         self.assertIn('"needs changes (2 blocking, 1 minor)"', listed)
         self.write_config()  # no reviewer now: the next run's card must not keep the last run's verdict
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review")
@@ -2670,6 +2677,7 @@ class TaskTest(unittest.TestCase):
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. MODE:ok\n"
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertFalse(settings.exists())
@@ -2868,6 +2876,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("## Replanner", self.task("show", tid, "--full"))  # what the /chief agent reads
         self.assertIn("README.md:1", replan)
         self.assertEqual(self.status(tid), "Blocked")  # the human decides whether to re-run
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "Blocked")  # the fake agent blocks on the same thing again
@@ -3179,6 +3188,8 @@ class TaskTest(unittest.TestCase):
         self.wait(a)
         self.task("start", b)
         self.wait(b)
+        self.wait_ended(a)  # `task done` refuses a run still finishing
+        self.wait_ended(b)
         self.assertEqual(self.herdr_db()["closed"], [])  # Blocked: you want to see what happened
         tab_a, tab_b = self.run_state(a)["tab"], self.run_state(b)["tab"]
         self.task("done", a)
@@ -3196,6 +3207,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         old_tab = self.run_state(tid)["tab"]
         self.assertNotIn("id", self.run_state(tid))  # run files keep the id only in their name
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.task("start", tid)
         self.wait(tid)
         self.assertIn(old_tab, self.herdr_db()["closed"])
@@ -4823,6 +4835,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")
         self.task()
         self.assertEqual(len(self.slow_events()), 1)  # no longer In progress
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         time.sleep(1.1)  # the re-run starts in a later second than the first slow event
         self.task("start", tid)
         time.sleep(1.5)
@@ -4926,6 +4939,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertIn(f"task/{tid}", self.local_branches())
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         self.task("done", tid)
         self.assertNotIn(f"task/{tid}", self.local_branches())
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))  # the PR's branch stays
@@ -4934,6 +4948,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         wt = self.root / ".local/share/task-hub/worktrees" / tid
         run_file = self.root / ".local/state/task-hub/runs" / f"{tid}.json"
         wt.chmod(0o555)  # the worktree cannot be removed right now
@@ -5048,6 +5063,7 @@ class TaskTest(unittest.TestCase):
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. MODE:ok"
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review")
@@ -5221,6 +5237,7 @@ class TaskTest(unittest.TestCase):
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. Test key is in the vault. MODE:ok"
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review")
@@ -5257,6 +5274,7 @@ class TaskTest(unittest.TestCase):
                                {"body": "Whole file.", "path": "hello.txt", "line": 3, "start_line": 1,
                                 "created_at": at, "user": human}]
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
@@ -5291,6 +5309,7 @@ class TaskTest(unittest.TestCase):
         db["issues"][tid]["body"] = "Say hello. MODE:ok"
         db["issues"][tid]["comments"].append({"body": "Old.", "createdAt": "2000-01-01T00:00:00Z"})
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
@@ -5308,6 +5327,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("stuck")  # no PR: its report on the Issue is all the earlier run left
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         (self.root / f".local/state/task-hub/runs/{tid}.json").unlink()
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. MODE:ok"
@@ -5336,6 +5356,7 @@ class TaskTest(unittest.TestCase):
         db = self.gh()
         db["issues"][tid]["body"] = "Say hello. Test key is in the vault. MODE:ok"
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "In review", self.comments(tid)[-1])
@@ -6452,6 +6473,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
         self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         clone = self.root / ".local/share/task-hub/repos/JYOKA/APP"
         if not (clone / ".git").exists():
             self.skipTest("case-only paths require a case-insensitive filesystem")
@@ -6486,6 +6508,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
         self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         old_run = json.loads(self.run_file(tid).read_text())
         def original_head():
             return subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "rev-parse", f"task/{tid}"],
@@ -6511,6 +6534,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
         self.wait_for(lambda: json.loads(self.run_file(tid).read_text()).get("stage") == "")
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         old_run = json.loads(self.run_file(tid).read_text())
         db = self.gh()
         db["items"][f"PVTI_{tid}"]["values"]["target repo"] = "jyoka/other"
@@ -6529,6 +6553,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("blocked", "Add hello", "jyoka/app", "--base", "feat/x")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         for value, reason in (("feat/y", "Base branch was changed"), ("", "Base branch was changed"),
                               ("feat/x", "feat/x is not on GitHub")):
             if value == "feat/x":  # merged and deleted on GitHub, then the card is re-run
@@ -6552,6 +6577,7 @@ class TaskTest(unittest.TestCase):
         db["items"][f"PVTI_{tid}"]["values"]["base branch"] = "feat/y"
         db["issues"][tid]["body"] = "Say hello on feat/y. MODE:blocked"
         self.save_db(db)
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")  # ran on feat/y, pushed, draft PR into feat/y
         self.assertEqual(self.pr(tid)["base"], "feat/y")
@@ -6565,6 +6591,7 @@ class TaskTest(unittest.TestCase):
         self.save_db(db)
         subprocess.run(["git", "-C", str(self.root / "origins/jyoka/app.git"), "branch", "-D", f"task/{tid}"],
                        check=True, capture_output=True)
+        self.wait_ended(tid)
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.assertEqual(self.pr(tid)["base"], "feat/z")
@@ -7437,6 +7464,35 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.gh()["merged_order"], [url])
         self.assertEqual(self.status(tid), "Done")
 
+    def test_a_docs_only_pr_merges_once_the_light_runs_of_the_required_checks_pass(self):
+        """Task 410: CI runs only the docs tests for a PR of docs alone, in the jobs the branch rules require and under
+        their names (test, standard-user). The queue waits for those as for any PR, and merges once they pass."""
+        self.queue_on("checks = required\n")
+        tid, = self.in_review("docsonly")
+        clone = self.root / "pr-checkout"  # the PR's branch as actions/checkout leaves it, all branches fetched
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{tid}", str(self.root / "origins" / "jyoka/app.git"),
+                        str(clone)], check=True, capture_output=True)
+        scope = subprocess.run([sys.executable, str(SCOPE), "origin/main"], cwd=clone, capture_output=True, text=True,
+                               env={**os.environ, "GITHUB_OUTPUT": ""}, check=True)
+        self.assertEqual(scope.stdout, "docs_only=true  # 2 file(s) changed, all docs: only the docs tests\n")
+        url = self.pr(tid)["url"]
+        db = self.gh()
+        db["checks"] = {url: [{"name": name, "bucket": "pending", "required": True,
+                               "link": f"https://github.com/jyoka/app/actions/runs/{run}/job/{run}1"}
+                              for name, run in (("test", 7), ("test", 8), ("standard-user", 8))]}  # macos, windows
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for its checks: test, test, standard-user", self.task())
+        self.assertNotIn("merged_order", self.gh())
+        db = self.gh()
+        for check in db["checks"][url]:
+            check["bucket"] = "pass"  # the docs tests passed, the rest did not run
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [url])
+        self.assertEqual(self.queue_events(tid), ["queued", "ci-wait", "merged", "Done"])
+        self.assertEqual(self.on_origin("main", "ls-tree", "-r", "--name-only").split(), ["README.md", "docs/guide.md"])
+
     def test_an_unstable_pr_whose_checks_are_still_running_waits_and_merges_once_they_pass(self):
         # jyoka/tasks#246: the check passed seconds before, and GitHub still said UNSTABLE when the queue looked
         self.queue_on()
@@ -8154,6 +8210,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "In review")
         self.assertEqual(self.team_issues()["99"], original)
         self.assertNotIn("Closes org/app#99", self.pr(tid)["body"])
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         self.task("done", tid)
         self.assertEqual(self.team_issues()["99"], original)
 
@@ -8351,6 +8408,7 @@ class TaskTest(unittest.TestCase):
         self.task()
         self.task()
         self.assertEqual([c for c in self.gh_calls()[calls:] if c.startswith("team")], [])
+        self.wait_ended(tid)  # `task done` refuses a run still finishing
         self.task("done", tid)
         self.assertEqual(self.team_card(), "Done")
         self.assertEqual(self.team_moves(since), 2)
@@ -8394,6 +8452,7 @@ class TaskTest(unittest.TestCase):
             db["issues"][tid]["title"] = "Add hello, with the key"
             db["team_repos"]["org/app"]["issues"]["1"]["body"] = "edited by the team"
             self.db.write_text(json.dumps(db))
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.wait(tid)
@@ -8442,6 +8501,7 @@ class TaskTest(unittest.TestCase):
         self.metrics(1)
         self.assertTrue(self.comments(tid)[-1].startswith("<!-- task-hub report -->"))
         self.assertFalse(self.pr(tid)["isDraft"])
+        self.wait_ended(tid)  # `task done` refuses a run still finishing (METRICS is written before its last line)
         self.task("done", tid)
         self.assertEqual(self.status(tid), "Done")
         self.assertEqual(self.gh()["issues"][tid]["state"], "CLOSED")
@@ -8746,6 +8806,7 @@ class TaskTest(unittest.TestCase):
         reviewed = self.new("ok", "reviewed")
         self.task("start", reviewed)
         self.assertEqual(self.wait(reviewed), "In review")
+        self.wait_ended(reviewed)  # `task merge` refuses a run still finishing
         self.autopilot()
         self.task("merge", reviewed)
         self.task("merge", reviewed, "--cancel")  # the human took it back out: autopilot must not queue it again
@@ -8781,6 +8842,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
         self.edit_issue(tid, body="Say hello. MODE:ok REVIEW=blocked")  # a rework the reviewer then rejects
+        self.wait_ended(tid)  # a run still finishing is not started again: the card would stay Ready
         self.move(tid, "Ready")
         self.task()
         self.assertEqual(self.wait(tid), "Blocked")

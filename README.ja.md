@@ -16,6 +16,8 @@
   <img alt="左にターミナル、右に task-hub のボードが並ぶ 15 秒の動く画像。あなたがカード #12「Add a search box to the notes list」を Ready に移す。task-hub がブランチ task/12 で始め、エージェントが変更とレポートを書く。別のエージェントが、大文字と小文字を区別していると差し戻す。直した変更が 2 回目のレビューで pass になり、task-hub が PR を開き、マージキューがマージする" src="assets/media/flow.gif">
 </picture>
 
+1 枚のカードの一生を層に分けて見せる紹介ページ: [jyoka.github.io/task-hub](https://jyoka.github.io/task-hub/?lang=ja)
+
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 

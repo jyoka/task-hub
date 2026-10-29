@@ -19,6 +19,7 @@ task-hub を外に伝えるときの土台です。README の絵、画像、LP �
 - 分解の絵は、1 枚のカードの一生を 8 つの層に分ける。層の色は「誰がするか」(あなた、task-hub のコード、エージェント)を表す(4 節)
 - 見た目は [`assets/brand/tokens.css`](../assets/brand/tokens.css) の CSS の変数で決める。意味の色は、どれもコントラスト比 4.5 以上(5 節)
 - README と docs に残っていた運営者の私的な名前は、一般の言い方か架空の例に直した。`tests/test_brand.py` が、戻っていないかを確かめる(7 節)
+- LP は https://jyoka.github.io/task-hub/ で公開した(2026-10-30 に決めた。7 節)
 
 ## 1. 1 文
 
@@ -325,9 +326,13 @@ README の一番上に、ダークとライトを `<picture>` で出し分けて
 </picture>
 ```
 
-## 7. 公開の前に直すもの
+## 7. 公開の記録
 
-外向けの文に出ていた運営者の私的な名前を、一般の言い方か架空の例に直した(2026-10-29)。直したのは、README の 2 つ、
+LP([`site/`](../site/))を https://jyoka.github.io/task-hub/ で公開した(運営者が 2026-10-30 に決めた)。
+GitHub Pages に、[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) が main への push で出す。
+出し方、出し直し方、止め方は [site/README.md の「公開」](../site/README.md#公開)。
+
+公開の前に、外向けの文に出ていた運営者の私的な名前を、一般の言い方か架空の例に直した(2026-10-29)。直したのは、README の 2 つ、
 CONTRIBUTING.md、SECURITY.md、AGENTS.md と、docs/ の全部。手順や決まりは変えず、名前だけを直した。
 
 | 種類 | 直し方 | 直したファイル |
@@ -346,7 +351,7 @@ CONTRIBUTING.md、SECURITY.md、AGENTS.md と、docs/ の全部。手順や決�
 - `jyoka/task-hub`: このリポジトリそのもの(public)。clone の URL、バッジ、Discussions
 - `jyoka/workenv_setting`([sandbox.md](sandbox.md)): public のリポジトリ
 - `you/tasks#12`、`#12`、`<you>/task-sandbox`、`<owner>`: 一般の言い方と架空の例
-- 「タスク 252」のような、決定事項と教訓の出どころの番号: リポジトリの名前も題も持たないので残した。外すかは運営者が決める
+- 「タスク 252」のような、決定事項と教訓の出どころの番号: リポジトリの名前も題も持たないので残した。公開でも残すと、運営者が決めた
 
 ### 戻らないようにする確かめ
 
@@ -357,7 +362,7 @@ LP([`site/`](../site/))は、`tests/test_site.py` が同じ確かめをする。
 
 ### 残した所: docs の外
 
-画面と README には出ないので、このカードでは直していない。
+画面と README には出ないので、直していない。LP にも出ない(`tests/test_site.py` が確かめる)。公開のときも直していない。
 
 - `task watch` の設定の誤りのメッセージ(`bin/task_hub.py` の `[triggers]` の例)が、運営者のアカウント名を使う架空の
   リポジトリを出す。コマンドの出力なので、直すならテストと合わせて別のカードで直す
@@ -373,8 +378,10 @@ LP([`site/`](../site/))は、`tests/test_site.py` が同じ確かめをする。
 - README の絵のカード: 済み(2026-10-29)。バナー、1 文の下の動く画像、「特長」の画面 4 枚の表を置き、
   [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` を直した。
   分解の絵は README には置かず、LP に任せた(4 節)
-- LP のカード: 済み(2026-10-29)。[`site/`](../site/) に置いた。公開はしていない。開き方、確かめ方、GitHub Pages に出す手順は
+- LP のカード: 済み(2026-10-29)。[`site/`](../site/) に置いた。開き方、確かめ方、GitHub Pages に出す手順は
   [site/README.md](../site/README.md)。`tests/test_site.py` が、1 文、機能のカード 8 枚と 8 つの層がこの文書と同じこと、外から読み込まないこと、
   `prefers-reduced-motion` で動かない作りを確かめる。スクロールの動きとスマホの幅は、手元の Chrome で確かめた
 - 1 文の言い直しのカード: 済み(2026-10-29)。1 節の 1 文、2 節の 3 本の柱と人ごとの 1 行、3 節のカードの並びを決め、
   README、LP、`site/llms.txt`、バナーを合わせた
+- LP の公開のカード: 済み(2026-10-30)。`.github/workflows/pages.yml` を足し、https://jyoka.github.io/task-hub/ に出すようにした。
+  README の 2 つの上の部分に LP へのリンクを置いた。出し方と止め方は [site/README.md の「公開」](../site/README.md#公開)
