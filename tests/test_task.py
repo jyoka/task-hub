@@ -2242,6 +2242,39 @@ class TaskTest(unittest.TestCase):
             with self.subTest(args):
                 self.assertIn(said, self.task("review", tid, *args, code=2))
 
+    def test_review_trial_takes_other_instructions_earlier_findings_and_setup(self):
+        """What docs/lessons.md tries cheaper reviews with: a short review, and a second one of only the change."""
+        self.write_config()
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        self.write_config("\n[setup]\njyoka/app = echo trial-setup-ran\n", reviewer=True)
+        files = {name: self.root / f"{name}.md" for name in ("report", "light", "sent")}
+        files["report"].write_text("")
+        files["light"].write_text("LIGHT-INSTRUCTIONS: read the Goal and the diff only.\n")
+        files["sent"].write_text("- FINDING-ONE: hello.txt is wrong\n  - its detail\n- FINDING-TWO: no test\n")
+        out = self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "agent",
+                        "--report-file", str(files["report"]), "--instructions-file", str(files["light"]),
+                        "--sent-file", str(files["sent"]), "--setup")
+        self.assertIn("verdict: pass", out)
+        prompt = self.reviewer_calls()[-1]["prompt"]
+        self.assertIn("LIGHT-INSTRUCTIONS", prompt)
+        self.assertNotIn("You are the adversarial reviewer", prompt)  # worker/REVIEW.md's first part
+        self.assertIn("Findings the work was sent back with", prompt)
+        self.assertIn("- FINDING-ONE: hello.txt is wrong\n  - its detail\n- FINDING-TWO: no test", prompt)
+        log = (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log").read_text()
+        self.assertIn("trial-setup-ran", log)
+        trial = json.loads((self.root / ".local/state/task-hub/review-trials.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((trial["instructions"], trial["sent"], trial["setup"]), (str(files["light"]), 2, True))
+        self.task("review", tid, "--no-write", "--ref", f"task/{tid}", "--mode", "agent",
+                  "--report-file", str(files["report"]))  # without them: the run's own review
+        self.assertIn("You are the adversarial reviewer", self.reviewer_calls()[-1]["prompt"])
+        self.assertNotIn("Findings the work was sent back with", self.reviewer_calls()[-1]["prompt"])
+        self.assertEqual(log, (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log").read_text()
+                         [:len(log)])
+        self.assertNotIn("trial-setup-ran", (self.root / f".local/state/task-hub/logs/{tid}-review-trial.log")
+                         .read_text()[len(log):])
+
     def test_unknown_reviewer_stops_the_start_before_the_agent_runs(self):
         self.write_config(reviewer="nosuch")
         tid = self.new("ok")

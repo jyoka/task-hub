@@ -505,8 +505,9 @@ Verdict: needs changes
 
 ### レビューを試す(task review --no-write)
 
-`[runner] review_mode` の 2 つを過去のカードで比べるためのコマンドです。カードのリポジトリのあるコミットのコードを、
-実行と同じ指示でレビューし、判定と使った量を表示します。GitHub には何も書きません。
+`[runner] review_mode` の 2 つや、レビューを安くする方法([lessons.md](lessons.md#レビューの-token-を減らす-3-つの方法を過去のカードで試す-2026-10-29タスク-404))を
+過去のカードで比べるためのコマンドです。カードのリポジトリのあるコミットのコードを、実行と同じ指示でレビューし、
+判定と使った量を表示します。GitHub には何も書きません。
 
 ```sh
 task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode goldfish
@@ -518,6 +519,13 @@ task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode agent --report-fil
 - 差分は `--base` から `--ref` までです。`--base` を省くと、カードの Base branch(空ならデフォルトブランチ)から分かれた所です。
 - `--mode` を省くと `[runner] review_mode` です。`agent` には、そのときの実装エージェントのレポートを `--report-file` で渡します。
   `--goal-file` を渡すと、Issue の本文の代わりにその文を Goal にします(実行のあとに Goal を編集したカード用)。
+- 試すための口が 3 つあります。どれも既定の動きは変えません。
+  - `--instructions-file`: `worker/REVIEW.md` の最初の部分(レビューの指示)の代わりに、そのファイルの文を渡します。
+    返し方の形(`.task-review.md` の見出し)は、渡す文に書いておきます
+  - `--sent-file`: 前のレビューが差し戻した指摘(1 行目が `- ` の項目を 1 件と数える)を、実行の 2 回目のレビューと同じく渡します。
+    `--base` を前のレビューが見たコミットにすると、その後の変更だけの差分になります
+  - `--setup`: 実行と同じく、`[env]` のファイルを置き、`[setup]` を動かしてからレビューします。テストに準備が要るリポジトリ用です
+- モデルは `[agents]` のコマンドのままです。claude なら、環境変数 `ANTHROPIC_MODEL=claude-sonnet-5-5` を付けて動かすと替わります。
 - 結果は `~/.local/state/task-hub/review-trials.jsonl` に 1 行ずつ残ります。`metrics.jsonl` には入れません。
   ログは `logs/<番号>-review-trial.log` です。
 
