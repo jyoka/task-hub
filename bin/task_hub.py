@@ -102,6 +102,13 @@ RE_REVIEWS = ("delta", "full")  # [runner] re_review: what a review after a retr
 # a change since the review that sent the work back past either: the review after the retry reads the whole PR again.
 # The re-reviews jyoka/tasks#404 measured changed 6 to 176 lines in 3 to 5 files (docs/lessons.md)
 RE_REVIEW_LINES, RE_REVIEW_FILES = 300, 10
+LIGHT_REVIEWS = ("docs", "off")  # [runner] light_review: whether a change of documents alone gets the light review
+# a document (is_doc): a file of these kinds, unless agents or programs read it as their instructions: by its name, or
+# in a folder of those (any dot folder, such as .claude/, .github/ and .kiro/, too). jyoka/tasks#404 measured the
+# light review on Markdown docs alone (docs/lessons.md)
+DOC_SUFFIXES = (".md", ".markdown", ".rst", ".adoc")
+NOT_DOC_NAMES = ("agents.md", "claude.md", "gemini.md", "skill.md")
+NOT_DOC_DIRS = ("worker", "skills", "prompts", "agents", "commands", "steering")
 REVIEW_LINE = "<!-- task-hub review: "  # the machine-readable line of the report's Automated review (review_line)
 RESEARCH_LABEL = "research"  # on the Issue: the deliverable is the agent's report, so no file change is fine
 MAX_REPLAN_ANSWERS = 2  # per task; after that a Blocked task always waits for the human
@@ -379,8 +386,9 @@ class ReviewResult:
     """Automated review verdict and feedback. Please fix holds the blocking findings, Known issues the minor ones: a
     review with only minor ones passes, and they go into the PR as known issues.
     mode: [runner] review_mode it was made in; attempt: which review of the run it is (1: the first), for review_line.
-    scope: what it read (review_scope): full, the whole pull request, or delta, the findings sent back and the change
-    since; scope_note: the Scope line its section says that with ("" for none)."""
+    scope: what it read (review_scope, light_scope): full, the whole pull request, delta, the findings sent back and
+    the change since, or light, the Goal and the diff of a PR of documents; scope_note: the Scope line its section says
+    that with ("" for none)."""
     def __init__(self, markdown="", mode="agent", attempt=1):
         self.markdown = markdown or ""
         self.mode, self.attempt = mode, attempt
@@ -645,7 +653,7 @@ def config():
     c.read_dict({"runner": {"agent": "claude", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
                             "readiness": "off", "checker": "", "review_mode": "agent", "re_review": "delta",
-                            "limit_resume": "on"},
+                            "light_review": "docs", "limit_resume": "on"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES),
                            "rerun": str(MERGE_RERUNS)},
@@ -788,6 +796,15 @@ def re_review():
     value = config()["runner"].get("re_review", "").strip().lower() or "delta"
     if value not in RE_REVIEWS:
         raise RuntimeError(f"[runner] re_review in {home(CONFIG)} must be delta or full; got {value!r}")
+    return value
+
+
+def light_review():
+    """[runner] light_review: docs (the default: a pull request that changes documents alone, is_doc, gets one
+    reviewer that reads the Goal and the diff: light_scope) or off (it is reviewed in full, as any other)."""
+    value = config()["runner"].get("light_review", "").strip().lower() or "docs"
+    if value not in LIGHT_REVIEWS:
+        raise RuntimeError(f"[runner] light_review in {home(CONFIG)} must be docs or off; got {value!r}")
     return value
 
 
@@ -2249,6 +2266,7 @@ def launch(t):
         review_retries()
         review_mode()
         re_review()
+        light_review()
     check_sandbox()
     for name in dict.fromkeys([t["agent"], helper_agent(t, "reviewer"), helper_agent(t, "replanner")]):
         if name:  # before the worktree and before any credit is spent
@@ -2714,7 +2732,8 @@ def held_report_file(t):
 
 def hide_report(t):
     """Move the agent's report out of the worktree until unhide_report: a Goldfish auditor judges the Goal and the
-    code, never the report, and would find the report there with one `ls -a`."""
+    code, and a light reviewer the Goal and the diff, never the report, and would find the report there with one
+    `ls -a`."""
     wt = Path(t["worktree"])
     text = agent_file(wt / REPORT_FILE)
     if text is not None:
@@ -2774,6 +2793,22 @@ def staged_diff(t):
     git_shared(wt, "add", "-A", check=True)
     fork = git_shared(wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
     return git_shared(wt, "diff", "--cached", fork, "--").stdout
+
+
+def pr_files(t):
+    """The paths the whole PR changes (staged_diff): added, changed, deleted, and both sides of a rename."""
+    wt = t["worktree"]
+    git_shared(wt, "add", "-A", check=True)
+    fork = git_shared(wt, "merge-base", base_ref(t, wt), "HEAD").stdout.strip() or "HEAD"
+    return [p for p in git_shared(wt, "diff", "--cached", "--name-only", "--no-renames", "-z", fork, "--")
+            .stdout.split("\0") if p]
+
+
+def is_doc(path):
+    """Whether path is a document people read (DOC_SUFFIXES), not instructions an agent or a program reads."""
+    *dirs, name = path.lower().split("/")
+    return name.endswith(DOC_SUFFIXES) and name not in NOT_DOC_NAMES and \
+        not any(d.startswith(".") or d in NOT_DOC_DIRS for d in dirs)
 
 
 def pr_size(t, wt):
@@ -3863,6 +3898,30 @@ def build_re_review_prompt(t, goal, report, diff, tree, sent, minor=(), comments
                       diff if diff.strip() else "(no change since the earlier review)", "```", ""])
 
 
+def build_light_review_prompt(t, goal, diff, sent=(), comments=""):
+    """The prompt of a light review (light_scope): worker/REVIEW.md's seventh part in place of its first, then the
+    task, the comments and the findings sent back as build_review_prompt has them, and the diff. No report: the
+    review jyoka/tasks#404 measured read the Goal and the diff only."""
+    _, about_comments, about_sent, _, _, _, instructions = instruction_parts(WORKER_REVIEW, 7)
+    _, diff = clip_diff(diff)  # cut: the light reviewer may read the changed files for the rest
+    return "\n".join([instructions, "", "# Task", "", f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}",
+                      f"Branch: {t['branch']}", "", "## Goal", "", goal.strip(),
+                      *(["", about_comments, "", comments] if comments else []),
+                      *(["", about_sent, "", *sent] if sent else []), "", "# Diff", "", "```diff", diff, "```", ""])
+
+
+def light_scope(t):
+    """The Scope line of a light review when the next review reading the whole PR is one ([runner] light_review =
+    docs, not a research task, and every file the PR changes is a document: is_doc), else ""."""
+    if t.get("research") or light_review() == "off":
+        return ""
+    files = pr_files(t)
+    if not files or not all(map(is_doc, files)):
+        return ""
+    return f"Scope: a light review of the Goal and the diff: every changed file is a document " \
+           f"({plural(len(files), 'file', 'files')})"
+
+
 def review_scope(t, state):
     """What the next review reads ([runner] re_review): ("delta", note, diff) only the findings sent back and diff, the
     change since the review that sent them (state["tree"], the worktree it saw), when the work was sent back, it is
@@ -3899,7 +3958,8 @@ def review_auditors():
 def run_review(t, report, say, usage=None, state=None):
     """The reviewer's verdict on the PR, or None when no reviewer is set or there is nothing to review.
     state: review_loop's (state["sent"]: the findings earlier reviews of this run sent the agent back with); after a
-    retry, the review reads only those and the change since, or the whole PR again (review_scope)."""
+    retry, the review reads only those and the change since, or the whole PR again (review_scope). A review of the
+    whole PR when it changes documents alone is a light one, of the Goal and the diff (light_scope)."""
     state = state or {}
     reviewer = helper_agent(t, "reviewer")  # "agent": the task's own agent, in a fresh context
     if not reviewer:
@@ -3918,9 +3978,9 @@ def run_review(t, report, say, usage=None, state=None):
     # a research task's report is its deliverable: a review without it would have nothing to judge
     mode = "agent" if t.get("research") else review_mode()
 
-    def launch(prompt, label):
+    def launch(prompt, label, hide=mode == "goldfish"):
         shared_unlink(wt / REVIEW_FILE)
-        if mode == "goldfish":  # out of the prompt, and out of the worktree the auditor inspects
+        if hide:  # out of the prompt, and out of the worktree the auditor (or the light reviewer) inspects
             hide_report(t)
         try:
             snap = hold_snapshot(t)
@@ -3930,9 +3990,15 @@ def run_review(t, report, say, usage=None, state=None):
             unhide_report(t)
     sent = state.get("sent", [])
     scope, note, since = review_scope(t, state)
+    light = light_scope(t) if scope == "full" else ""
+    if light:
+        scope, note = "light", light
     if note:
         say(f"== {note}")
-    if scope == "delta":  # one reviewer, in either mode: the re-review jyoka/tasks#404 measured. It checks the last
+    if scope == "light":  # one reviewer, in either mode, of the Goal and the diff: the review jyoka/tasks#404 measured
+        result = launch(build_light_review_prompt(t, i["body"], diff, sent, comments), "light reviewer", hide=True)
+        result.mode = mode
+    elif scope == "delta":  # one reviewer, in either mode: the re-review jyoka/tasks#404 measured. It checks the last
         # review's findings (state["fixes"]): the earlier ones that review found fixed are not in its change since
         result = launch(build_re_review_prompt(t, i["body"], report, since, state["tree"], state.get("fixes") or sent,
                                                state.get("minor", []), comments, mode == "goldfish"), "re-reviewer")
@@ -4836,7 +4902,7 @@ def run_task(t, say):
         if not (name == REPORT_FILE and stage in ("review", "finishing")):  # there, the report is the agent's
             shared_unlink(wt / name)
     if stage in ("review", "finishing"):
-        unhide_report(t)  # a run cut short while a Goldfish auditor ran had moved it out
+        unhide_report(t)  # a run cut short while a Goldfish auditor or a light reviewer ran had moved it out
     else:
         held_report_file(t).unlink(missing_ok=True)
     say(f"== task {t['id']}: {t['title']} | agent {t['agent']} | {now()}")
