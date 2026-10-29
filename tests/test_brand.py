@@ -3,7 +3,8 @@
 - The one sentence is the same, word for word, in the README's bold line, docs/brand.md, and both banners.
 - Every meaning color in tokens.css has a contrast ratio of 4.5 or more against the page and the panel, in light
   and dark (WCAG 2 relative luminance). `python3 tests/test_brand.py --table` prints the measured ratios.
-- tokens.css and the banners load nothing from outside; the READMEs name none of the owner's private boards.
+- tokens.css and the banners load nothing from outside; the READMEs and docs name none of the owner's private
+  boards, repositories, or work.
 - The READMEs follow CONTRIBUTING.md's "README の構成": the headings in its order, the banner above the title, the
   moving picture under the sentence, the Features table of 4 pictures that link to docs, alt texts, and the length.
 """
@@ -25,6 +26,10 @@ MOST_LINES = 200
 MEANING = ("text", "muted", "accent", "cyan", "violet", "ok", "warn", "error")
 GROUNDS = ("bg", "panel")
 DARK = (':root[data-theme="dark"]', ':root:not([data-theme="light"])')
+# the owner's private names (docs/brand.md section 7): real boards (jyoka/2, jyoka/3), private repositories, links to
+# their Issues (tasks#81), examples under the owner's account (jyoka/app), and the names of the owner's work
+PRIVATE = re.compile(r"jyoka/(?!task-hub\b|workenv_setting\b)[\w.-]+|(?<![\w/])tasks#\d"
+                     r"|(?<![a-z])aica|AIprogramming|ai-CA_RA|求人|LINE のトーク", re.I)
 
 
 def block(css, selector):
@@ -134,13 +139,27 @@ class BrandTest(unittest.TestCase):
                 text = (BRAND / name).read_text(encoding="utf-8").replace('xmlns="http://www.w3.org/2000/svg"', "")
                 self.assertIsNone(re.search(r"https?:|@import|url\(|<script|<image|<foreignObject", text, re.I))
 
-    def test_the_readmes_name_no_private_board_or_work(self):
-        """docs/brand.md section 7: the owner's real board, private repositories, and work names stay out."""
-        private = re.compile(r"jyoka/(tasks|aica|2\b|3\b|task-sandbox)|aica|AIprogramming|ai-CA_RA", re.I)
-        for name in ("README.md", "README.ja.md"):
-            with self.subTest(name):
-                lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
-                self.assertEqual([f"{i}: {line}" for i, line in enumerate(lines, 1) if private.search(line)], [])
+    def test_the_public_docs_name_no_private_board_or_work(self):
+        """docs/brand.md section 7: the owner's real boards, private repositories, real Issues, and work names stay out
+        of the READMEs and docs. Examples use `you/app`, `you/tasks#12`, and the like."""
+        docs = sorted((ROOT / "docs").rglob("*.md"))
+        self.assertGreater(len(docs), 20)
+        top = ("README.md", "README.ja.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")
+        for path in [ROOT / name for name in top] + docs:
+            with self.subTest(str(path.relative_to(ROOT))):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                self.assertEqual([f"{i}: {line}" for i, line in enumerate(lines, 1) if PRIVATE.search(line)], [])
+
+    def test_the_private_names_check_finds_them(self):
+        for line in ("repos = jyoka/aica", "(jyoka/tasks#81)", "tasks#47 で", "Project `jyoka/2` と", "`jyoka/3`",
+                     "jyoka/task-sandbox", "ci = jyoka/app, jyoka/web", "~/AIprogramming PJ/", "求人検索と…",
+                     "https://github.com/jyoka/tasks/issues/117", "LINE のトークで"):
+            with self.subTest(line):
+                self.assertIsNotNone(PRIVATE.search(line))
+        for line in ("Issue you/tasks#12", "jyoka/task-hub", "github.com/jyoka/workenv_setting", "`#12`",
+                     "owner/name#n", "you/app#114", "Jamaica"):
+            with self.subTest(line):
+                self.assertIsNone(PRIVATE.search(line))
 
     def test_the_links_in_brand_md_lead_somewhere(self):
         """Each feature card links to its docs: the file exists, and so does the heading the link names."""

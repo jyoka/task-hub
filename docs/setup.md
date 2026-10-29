@@ -133,7 +133,7 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
    [env]
    ; 作業先リポジトリ = コピーするファイル(複数ならカンマ区切り)
    ; そのまま書くと worktree のルートに同じ名前で、「-> 場所」を付けるとその場所に置きます
-   jyoka/aica_ra_a2a_poc = ~/AIprogramming PJ/ai-CA_RA-A2A-PoC/.env, ~/AIprogramming PJ/ai-CA_RA-A2A-PoC/voice-agent/.env -> voice-agent/.env
+   you/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
    ```
 
    置き場所は worktree の中の相対パスで、外を指すもの(`../`、絶対パス)や、同じ場所を 2 回書いたものは止めます。
@@ -145,8 +145,8 @@ task-hub 自体を開発するときは、別の場所に clone します。手�
    ```ini
    [setup]
    ; uv は 2 回目から、仮想環境 1 つを 1 秒未満で作り、ディスクもほとんど使いません(brew install uv)
-   jyoka/aica_ra_a2a_poc = uv venv -q voice-resume/.venv
-     uv pip install -q -r voice-resume/requirements.txt --python voice-resume/.venv/bin/python
+   you/app = uv venv -q api/.venv
+     uv pip install -q -r api/requirements.txt --python api/.venv/bin/python
    ```
 
    準備で作ったファイルは、git が無視するものでなければなりません。リポジトリのファイルを書き換えてもいけません

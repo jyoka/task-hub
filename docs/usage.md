@@ -74,11 +74,11 @@ limit_resume = on       ; エージェントが利用の上限で止まったら
 
 [env]
 ; テストに要る .env などを、実行のたびに worktree にコピーする(コミットはしない)
-jyoka/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
+you/app = ~/code/app/.env, ~/code/app/voice/.env -> voice/.env
 
 [setup]
 ; worker の前に worktree で実行する準備(仮想環境など)。失敗したら Blocked
-jyoka/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
+you/app = uv venv -q .venv && uv pip install -q -r requirements.txt --python .venv/bin/python
 
 [notify]
 events = In review, Blocked, replan, Done, slow, update, conflict, autopilot, over budget   ; 通知を出す出来事(これが既定)。空にすると出さない
@@ -92,9 +92,9 @@ repo =                    ; 文に owner/name: がないときの作業先
 
 [triggers]
 ; task watch が自分でカードを作る(Backlog に入る)。詳しくは docs/triggers.md
-ci = jyoka/app                  ; 既定のブランチの CI が失敗した
-issues = jyoka/app              ; あなたに割り当てられた Issue
-deps = weekly mon jyoka/app Bump the dependencies   ; 毎週の目標
+ci = you/app                    ; 既定のブランチの CI が失敗した
+issues = you/app                ; あなたに割り当てられた Issue
+deps = weekly mon you/app Bump the dependencies   ; 毎週の目標
 drift_report =                  ; 文書とコードの食い違いを調べる research カードにする繰り返しの目標の名前
 
 [merge]
@@ -103,7 +103,7 @@ prefix = off              ; on: キューにない In review の PR も、競合
 rerun = 1                 ; キューで落ちたチェックを同じコミットで 1 回だけ走らせ直す(既定)。0: すぐ Blocked
 
 [autopilot]
-repos = jyoka/app         ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
+repos = you/app           ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
 
 [resume]
 ; 止まった実行を、エージェント自身の会話の続きから再開するコマンド。組み込みの claude と pi は書かなくてよい(docs/agents.md の「止まった実行の再開」)
