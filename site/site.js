@@ -9,8 +9,8 @@
   const LANG_KEY = 'task-hub-site-lang';
   const THEME_KEY = 'task-hub-site-theme';
   const TITLES = {
-    en: 'task-hub: Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.',
-    ja: 'task-hub: Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。',
+    en: 'task-hub: Hand work to AI agents and walk away. Nothing reaches you unchecked.',
+    ja: 'task-hub: AI に任せて、離れていい。確かめてから届くから。',
   };
   // The attributes that change with the language. The HTML holds English; Japanese is in data-ja-<attribute>
   const ATTRS = ['alt', 'aria-label', 'title', 'href'];

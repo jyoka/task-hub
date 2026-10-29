@@ -1,12 +1,13 @@
 # task-hub
 
-> Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.
-> Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。
+> Hand work to AI agents and walk away. Nothing reaches you unchecked.
+> AI に任せて、離れていい。確かめてから届くから。
 
 task-hub is a command-line tool (`task`) for macOS, with Windows support. It is written in Python with the standard library only, under the MIT license.
-It is for people who build with GitHub Issues and PRs and run an agent CLI (Claude Code, Codex, Pi, Kiro, and others) on their own Mac.
-You move a card to Ready and merge the PR. task-hub and your agents do the rest: implement, test, review in a fresh context, open the PR, and sort out why a task stopped.
-Each card leaves its report and review verdict on the Issue, and its column shows where it is.
+Write what you want as a Goal and hand it over. An AI agent on your machine builds it. A fresh pair of eyes that did not build it checks the work against the Goal, and it is fixed before it reaches you.
+You decide only two things: what to do (move the card to Ready) and whether it may ship (merge the PR). Everything, from what you asked to what you decided, can be traced later on the Issue and the PR.
+It is for developers who run many agents alone, team leads, and people who are not engineers. The work lives on a GitHub Project board; the agents are CLIs on your own machine (Claude Code, Codex, Pi, Kiro, and others).
+The check before delivery (a fresh-context review) is on by default. If you turn it off with `[runner] reviewer = off`, work reaches you unchecked.
 This file is the landing page (site/index.html) as text. The docs are in Japanese. The example data is made up.
 
 ## One card, layer by layer
@@ -30,14 +31,16 @@ An LLM does only three jobs: implement, review, and sort out why a task stopped.
 
 ## What it does
 
-- One PR per task: each card gets one branch, one worktree, and one PR. Up to 5 run at the same time, on branches named `task/<id>`.
-- Pre-PR review: an agent in a fresh context checks each acceptance criterion. It sends the work back 2 times at most by default. With `review_mode = goldfish`, two viewpoints that skip the report check it.
-- Goal check: `task check <id>` has agents that know only the Goal and the code say GO or NO-GO. A NO-GO comes with wording to add. With `readiness = require`, a card without a GO does not start.
-- Stop recovery: a run that stops on a crash or a restart resumes once, from where it stopped. A run that hits the usage limit waits for the reset time, then goes on from the same place.
-- Blocked triage: an agent sorts out why a task stopped and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
-- Merge queue: `task merge` approves a PR; the queue brings it up to date with its base, waits for its checks, and merges it. An agent fixes conflicts. One PR per repository at a time.
-- Agent choice: any agent CLI with a non-interactive mode works. task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR.
-- Alerts and cost: In review, Blocked, long runs, and runs over budget show as OS notifications and on ntfy. No LLM is used. Tokens and cost per launch come from the agent CLI's own records (`task stats`).
+The features come in the order of three pillars: peace of mind (it is checked before it reaches you), focus (you need not watch), and trust (you can trace everything).
+
+- Check before delivery (peace of mind): an agent in a fresh context, one that did not build the work, checks each acceptance criterion and sends the work back if one fails. On by default, before the PR opens. 2 send-backs at most by default. With `review_mode = goldfish`, two viewpoints that skip the report check it.
+- Goal check (peace of mind): `task check <id>` has agents that know only the Goal and the code say GO or NO-GO. A NO-GO comes with wording to add. With `readiness = require`, a card without a GO does not start.
+- Blocked triage (peace of mind): a run that fails the check stops with its reason instead of reaching you. The reason shows on the board and the Issue. With `replanner`, an agent sorts out why and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.
+- Stop recovery (focus): a run that stops on a crash or a restart resumes once, from where it stopped. A run that hits the usage limit waits for the reset time, then goes on from the same place.
+- Alerts (focus): you need not watch: In review, Blocked, long runs, and runs over budget come to you. They show as OS notifications and on ntfy (your phone). Code decides when to notify; no LLM is used.
+- Merge queue (focus): `task merge` approves a PR; the queue brings it up to date with its base, waits for its checks, and merges it. An agent fixes conflicts. One PR per repository at a time.
+- A workspace per card (trust): each card gets one branch, one worktree, and one PR, so what you asked for and what came back line up one to one. Up to 5 run at the same time, on branches named `task/<id>`.
+- Records kept by code (trust): task-hub, not the agent, does git, the PR, and the Issue comments in code, so every agent CLI leaves the same kind of record. Tokens and cost per launch come from the agent CLI's own records (`task stats`).
 
 ## Start in three steps
 
@@ -47,7 +50,7 @@ You need macOS (Windows: docs/windows.md), Python 3.10 or later, git, `gh` logge
    `git clone https://github.com/jyoka/task-hub.git ~/.local/lib/task-hub` and
    `ln -sfn ~/.local/lib/task-hub/bin/task ~/.local/bin/task`
 2. Let `gh` use Projects: `gh auth refresh -s project`
-3. Write `~/.config/task-hub/config.ini` (`[board] project = <owner>/<project number>`, `issues = <owner>/<repository that holds the Issues>`; `[runner] agent = claude`, `reviewer = agent`), check it with `task list`, then run `task`.
+3. Write `~/.config/task-hub/config.ini` (`[board] project = <owner>/<project number>`, `issues = <owner>/<repository that holds the Issues>`; `[runner] agent = claude`), check it with `task list`, then run `task`.
 
 Commands for the first day:
 
@@ -64,7 +67,7 @@ Commands for the first day:
 
 Two kinds of tools are close to task-hub: cloud agents you assign a GitHub Issue to, and board apps that run agents on your machine.
 task-hub keeps the board on GitHub (a GitHub Project) and runs the agents on your Mac, with the agent CLIs you already log in to.
-What task-hub adds before the merge: a fresh-context review of each acceptance criterion (with `[runner] reviewer = agent`; 2 send-backs at most by default), a resume after a crash, an agent that sorts out why a task is Blocked, and a merge queue (with `[merge] queue = on`, off by default; one PR per repository at a time).
+What task-hub adds before the merge: a fresh-context review of each acceptance criterion (on by default, off with `[runner] reviewer = off`; 2 send-backs at most by default), a resume after a crash, an agent that sorts out why a task is Blocked, and a merge queue (with `[merge] queue = on`, off by default; one PR per repository at a time).
 The other tools' review, recovery, and merge features were not checked, so this page says nothing about them.
 
 ## Docs

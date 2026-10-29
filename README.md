@@ -1,13 +1,13 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/banner-dark.svg">
-  <img alt="The task-hub banner. On the left, the one sentence in Japanese and English: Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR. On the right, one card's life in 8 stacked layers: card moved to Ready, task-hub runner, worktree on branch task/12, local agent, fresh-context review marked pass, pull request, merge queue, merged. Each layer's color says who does it: you, task-hub's code, or an agent." src="assets/brand/banner-light.svg">
+  <img alt="The task-hub banner. On the left, the one sentence in Japanese and English: Hand work to AI agents and walk away. Nothing reaches you unchecked. On the right, one card's life in 8 stacked layers: card moved to Ready, task-hub runner, worktree on branch task/12, local agent, fresh-context review marked pass, pull request, merge queue, merged. Each layer's color says who does it: you, task-hub's code, or an agent." src="assets/brand/banner-light.svg">
 </picture>
 
 # task-hub
 
 English | [日本語](README.ja.md)
 
-**Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.**
+**Hand work to AI agents and walk away. Nothing reaches you unchecked.**
 
 <picture>
   <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="assets/media/list-dark.png">
@@ -19,13 +19,15 @@ English | [日本語](README.ja.md)
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-You make two decisions:
+Write what you want as a Goal and hand it over. An AI agent on your machine builds it. A fresh pair of eyes that
+did not build it checks the work against the Goal, and it is fixed before it reaches you. You decide only two things:
 
-- **May it start?** Move the card to Ready.
-- **May it go in?** Merge the PR.
+- **What to do.** Write the Goal on a GitHub Project card and move it to Ready.
+- **Whether it may ship.** Merge the PR.
 
-task-hub and your agents do the rest: implement, test, review, open the PR, sort out why a task stopped, wait in
-line, and clean up. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.
+Everything, from what you asked to what you decided, can be traced later on the Issue and the PR. Any agent CLI
+with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others. The check before delivery is on by
+default; if you turn it off with `reviewer = off`, work reaches you unchecked.
 
 > **Kiro IDE users: see [docs/kiro-quickstart.md](docs/kiro-quickstart.md) (Mac) or
 > [docs/windows-quickstart.md](docs/windows-quickstart.md) (Windows).** Open this repository in Kiro IDE and
@@ -57,26 +59,26 @@ flowchart LR
 <table>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/usage.md#見え方と手元に残るもの"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/list-dark.png"><img width="400" alt="task list in a terminal: #12 Add a search box to the notes list is In review with the verdict pass, #13 is In progress with its agent, #14 is Blocked, and #15 waits in Backlog. All four are for you/notes-app." src="assets/media/list-light.png"></picture></a><br>
-      <b>One PR per task</b><br>
-      Each card gets its own branch, worktree, and PR. Up to 5 run at the same time.
+      <a href="docs/agents.md#自動レビュー"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/review-dark.png"><img width="400" alt="The first review of #12 says needs changes: searching for milk misses the note Buy Milk, so compare both sides with casefold() and add a test. Below it, task show 12 --digest gives the final verdict pass and the PR link." src="assets/media/review-light.png"></picture></a><br>
+      <b>Check before delivery</b><br>
+      On by default: before the PR, an agent in a fresh context checks each acceptance criterion and sends the work back.
     </td>
     <td width="50%" valign="top">
-      <a href="docs/agents.md#自動レビュー"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/review-dark.png"><img width="400" alt="The first review of #12 says needs changes: searching for milk misses the note Buy Milk, so compare both sides with casefold() and add a test. Below it, task show 12 --digest gives the final verdict pass and the PR link." src="assets/media/review-light.png"></picture></a><br>
-      <b>Pre-PR review</b><br>
-      An agent in a fresh context checks each acceptance criterion and sends the work back.
+      <a href="docs/agents.md#blocked-の仕分けreplanner"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/claude-board-dark.png"><img width="400" alt="The board in a Claude Code pane, in Japanese. A pixel-art boat flies SOS for #14. Under Needs you, #14 is Blocked with its question, which service should keep the notes in sync, and #12 is In review with pass and PR #1. Under Running, #13 has run 2 minutes against a usual 9." src="assets/media/claude-board-light.png"></picture></a><br>
+      <b>Blocked triage</b><br>
+      Work that fails the check stops instead of reaching you, and the board shows why.
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/agents.md#blocked-の仕分けreplanner"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/claude-board-dark.png"><img width="400" alt="The board in a Claude Code pane, in Japanese. A pixel-art boat flies SOS for #14. Under Needs you, #14 is Blocked with its question, which service should keep the notes in sync, and #12 is In review with pass and PR #1. Under Running, #13 has run 2 minutes against a usual 9." src="assets/media/claude-board-light.png"></picture></a><br>
-      <b>Blocked triage</b><br>
-      The board shows why a task stopped. An agent sorts it out and comments on the Issue.
-    </td>
-    <td width="50%" valign="top">
       <a href="docs/kiro-ide.md#10-ボードをサイドバーとステータスバーに出す拡張"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/kiro-board-dark.png"><img width="400" alt="The board in the Kiro sidebar, in Japanese: #14 Blocked with its reason, #12 In review with the verdict pass and PR #1 to click, and #13 running. The status bar reads 1 running, 1 waiting for review, 1 stopped." src="assets/media/kiro-board-light.png"></picture></a><br>
       <b>Board at your side</b><br>
       See the board in a Claude Code pane, the Kiro sidebar, or <code>task list --watch</code>.
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/usage.md#見え方と手元に残るもの"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/media/list-dark.png"><img width="400" alt="task list in a terminal: #12 Add a search box to the notes list is In review with the verdict pass, #13 is In progress with its agent, #14 is Blocked, and #15 waits in Backlog. All four are for you/notes-app." src="assets/media/list-light.png"></picture></a><br>
+      <b>A workspace per card</b><br>
+      Each card gets its own branch, worktree, and PR, so what you asked for and what came back line up.
     </td>
   </tr>
 </table>
@@ -85,10 +87,10 @@ task-hub took every picture here itself, on a made-up board ([docs/media.md](doc
 
 - **Goal check before Ready.** `task check <id>` has agents that know only the Goal and the code ([Goldfish](https://egm.dev/)) say GO or NO-GO ([how](docs/task-format.md#ready-の前の確かめtask-check)).
 - **Continue after a stop.** A run stopped by a crash or a restart resumes once; one stopped by the usage limit waits for the reset ([how](docs/operations.md#利用の上限で止まった)).
+- **Alerts.** You need not watch: In review, Blocked, and runs over budget reach the OS or your phone without an LLM ([how](docs/notifications.md)).
 - **Merge queue.** `task merge` approves a PR. task-hub brings it up to date, waits for its checks, and merges it, one per repository at a time ([how](docs/operations.md#マージキュー)).
 - **Dependencies.** A card does not start until the tasks in its GitHub "Blocked by" list are done.
-- **Any agent CLI.** task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR ([how](docs/agents.md#エージェントの変更と追加)).
-- **Alerts and cost.** In review, Blocked, and runs over budget reach the OS or your phone without an LLM; `task stats` sums tokens and cost ([how](docs/notifications.md)).
+- **Records kept by code.** task-hub, not the agent, does git, the PR, and the Issue comments, so every agent CLI leaves the same kind of record; `task stats` sums tokens and cost ([how](docs/task-format.md#task-hub-のレポートコメント)).
 - **Light.** Python standard library only. You install one clone.
 
 ## Get started

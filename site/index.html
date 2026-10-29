@@ -6,8 +6,8 @@
 <!-- Nothing loads from outside. The policy is a meta tag so that it holds on GitHub Pages too -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
-<title>task-hub: Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</title>
-<meta name="description" content="Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.">
+<title>task-hub: Hand work to AI agents and walk away. Nothing reaches you unchecked.</title>
+<meta name="description" content="Hand work to AI agents and walk away. Nothing reaches you unchecked.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/brand/tokens.css">
 <link rel="stylesheet" href="site.css">
@@ -32,14 +32,14 @@
 
 <main id="main">
 
-<!-- 1. The headline: the name, the one sentence (docs/brand.md section 1), and who it is for (section 2) -->
+<!-- 1. The headline: the name, the one sentence and the lines under it (docs/brand.md section 1) -->
 <section class="hero" id="top">
   <h1 class="hero-name">task-hub</h1>
-  <p class="hero-line" id="sentence"><span data-lang="en">Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</span><span data-lang="ja">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。</span></p>
+  <p class="hero-line" id="sentence"><span data-lang="en">Hand work to AI agents and walk away. Nothing reaches you unchecked.</span><span data-lang="ja">AI に任せて、離れていい。確かめてから届くから。</span></p>
   <div class="hero-text">
-    <p><span data-lang="en">You move a card to Ready and merge the PR.</span><span data-lang="ja">人がするのは、カードを Ready に移すことと、PR をマージすることだけ。</span></p>
-    <p><span data-lang="en">task-hub and your agents do the rest: implement, test, review in a fresh context, open the PR, and sort out why a task stopped.</span><span data-lang="ja">その間の実装、テスト、新しい文脈のレビュー、PR、止まった理由の仕分けは、task-hub とエージェントが進める。</span></p>
-    <p><span data-lang="en">Each card leaves its report and review verdict on the Issue. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.</span><span data-lang="ja">どのカードも、Issue にレポートとレビューの判定が残る。非対話モードを持つエージェント CLI なら、どれでも動かせる(Claude Code、Codex、Pi、Kiro など)。</span></p>
+    <p><span data-lang="en">Write what you want as a Goal and hand it over. An AI agent on your machine builds it. A fresh pair of eyes that did not build it checks the work against the Goal, and it is fixed before it reaches you.</span><span data-lang="ja">頼みたいことを Goal に書いて渡すだけ。手元の AI エージェントが作る。作っていない新しい目が Goal と突き合わせて確かめ、直してから届ける。</span></p>
+    <p><span data-lang="en">You decide only two things: what to do, and whether it may ship. Everything, from what you asked to what you decided, can be traced later.</span><span data-lang="ja">あなたが決めるのは「何をやるか」と「出してよいか」の 2 つだけ。頼んだことから決めたことまで、全部があとからたどれる。</span></p>
+    <p><span data-lang="en">The work lives on a GitHub Project board, as cards, Issues, and PRs. Any agent CLI with a non-interactive mode works: Claude Code, Codex, Pi, Kiro, and others.</span><span data-lang="ja">仕事は GitHub Project のボードに、カード、Issue、PR として残る。非対話モードを持つエージェント CLI なら、どれでも動かせる(Claude Code、Codex、Pi、Kiro など)。</span></p>
   </div>
   <div class="hero-actions">
     <a class="button primary" data-cta="start" href="https://github.com/jyoka/task-hub#get-started" data-ja-href="https://github.com/jyoka/task-hub/blob/main/README.ja.md#はじめる"><span data-lang="en">Get started</span><span data-lang="ja">はじめる</span></a>
@@ -203,84 +203,93 @@
   <p class="section-foot"><span data-lang="en">An LLM does only three jobs: implement, review, and sort out why a task stopped. Code decides when to start, when to notify, and when to clean up.</span><span data-lang="ja">LLM を使うのは、実装、レビュー、止まった理由の仕分けの 3 か所だけ。いつ始めるか、いつ知らせるか、いつ片付けるかは、コードが決める。</span></p>
 </section>
 
-<!-- 3. Features: the eight cards of docs/brand.md section 3. Each picture opens the docs for its feature -->
+<!-- 3. Features: the eight cards of docs/brand.md section 3, in the order of the three pillars (section 2). Each picture opens the docs for its feature -->
 <section class="features" id="features" aria-labelledby="features-title">
   <div class="section-head">
     <h2 id="features-title"><span data-lang="en">What it does</span><span data-lang="ja">できること</span></h2>
-    <p><span data-lang="en">The pictures are screens task-hub took of itself. Click one to open the docs for that feature (in Japanese).</span><span data-lang="ja">絵は task-hub が自分で撮った画面です。押すと、その機能の docs が開きます。</span></p>
+    <p><span data-lang="en">In the order of three promises: peace of mind (it is checked before it reaches you), focus (you need not watch), and trust (you can trace everything). The pictures are screens task-hub took of itself. Click one to open the docs for that feature (in Japanese).</span><span data-lang="ja">3 つの約束の順に並べました。安心(確かめてから届く)、軽さ(見張らなくてよい)、信頼(全部たどれる)。絵は task-hub が自分で撮った画面です。押すと、その機能の docs が開きます。</span></p>
   </div>
   <ul class="cards">
     <li class="card">
-      <a class="card-shot shot crop crop-list" href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md#見え方と手元に残るもの">
-        <img class="on-light" src="assets/media/list-light.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
-        <img class="on-dark" src="assets/media/list-dark.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
-      </a>
-      <h3><span data-lang="en">One PR per task</span><span data-lang="ja">1 タスク 1 PR</span></h3>
-      <p><span data-lang="en">Each card gets one branch, one worktree, and one PR.</span><span data-lang="ja">1 枚のカードに、1 つのブランチ、1 つの worktree、1 つの PR。</span></p>
-      <p><span data-lang="en">Up to 5 run at the same time, on branches named <code>task/&lt;id&gt;</code>.</span><span data-lang="ja">最大 5 つを並べて動かし、ブランチは <code>task/&lt;番号&gt;</code>。</span></p>
-    </li>
-    <li class="card">
-      <a class="card-shot shot crop crop-review" href="https://github.com/jyoka/task-hub/blob/main/docs/task-format.md#goldfish-のレビューrunner-review_mode">
+      <a class="card-shot shot crop crop-review" href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md#自動レビュー">
         <img class="on-light" src="assets/media/review-light.png" width="1800" height="1406" loading="lazy" alt="The first review says needs changes; the final verdict is pass." data-ja-alt="1 回目のレビューは needs changes、最後の判定は pass">
         <img class="on-dark" src="assets/media/review-dark.png" width="1800" height="1406" loading="lazy" alt="The first review says needs changes; the final verdict is pass." data-ja-alt="1 回目のレビューは needs changes、最後の判定は pass">
       </a>
-      <h3><span data-lang="en">Pre-PR review</span><span data-lang="ja">PR の前のレビュー</span></h3>
-      <p><span data-lang="en">An agent in a fresh context checks each acceptance criterion.</span><span data-lang="ja">新しい文脈のエージェントが、受け入れ条件を 1 つずつ確かめる。</span></p>
-      <p><span data-lang="en">It sends the work back 2 times at most by default. With <code>review_mode = goldfish</code>, two viewpoints that skip the report check it.</span><span data-lang="ja">差し戻しは既定で 2 回まで。<code>review_mode = goldfish</code> では、レポートを読まない 2 つの視点が見る。</span></p>
+      <p class="card-pillar"><span data-lang="en">Peace of mind</span><span data-lang="ja">安心</span></p>
+      <h3><span data-lang="en">Check before delivery</span><span data-lang="ja">届ける前の確かめ</span></h3>
+      <p><span data-lang="en">An agent in a fresh context, one that did not build the work, checks each acceptance criterion and sends the work back if one fails.</span><span data-lang="ja">実装を見ていない新しい文脈のエージェントが、受け入れ条件を 1 つずつ確かめ、足りなければ差し戻す。</span></p>
+      <p><span data-lang="en">On by default, before the PR opens. 2 send-backs at most by default. With <code>review_mode = goldfish</code>, two viewpoints that skip the report check it.</span><span data-lang="ja">既定で入り、PR を開く前に動く。差し戻しは既定で 2 回まで。<code>review_mode = goldfish</code> では、レポートを読まない 2 つの視点が見る。</span></p>
     </li>
     <li class="card">
       <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/task-format.md#ready-の前の確かめtask-check" aria-label="Docs: Goal check" data-ja-aria-label="docs: Goal の確認">
         <code>task check 12</code>
         <span class="type-row"><span class="tag tag-ok">GO</span><span class="tag tag-warn">NO-GO</span></span>
       </a>
+      <p class="card-pillar"><span data-lang="en">Peace of mind</span><span data-lang="ja">安心</span></p>
       <h3><span data-lang="en">Goal check</span><span data-lang="ja">Goal の確認</span></h3>
       <p><span data-lang="en"><code>task check &lt;id&gt;</code> has agents that know only the Goal and the code say GO or NO-GO.</span><span data-lang="ja"><code>task check &lt;番号&gt;</code> で、Goal とコードだけを知るエージェントが GO / NO-GO を出す。</span></p>
       <p><span data-lang="en">A NO-GO comes with wording to add. With <code>readiness = require</code>, a card without a GO does not start.</span><span data-lang="ja">NO-GO には Goal に足す文言が付く。<code>readiness = require</code> なら、GO のないカードは始まらない。</span></p>
-    </li>
-    <li class="card">
-      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#利用の上限で止まった" aria-label="Docs: Stop recovery" data-ja-aria-label="docs: 止まった後の再開">
-        <span class="type-row"><span class="tag tag-error">crash</span><span aria-hidden="true">→</span><span class="tag tag-cyan">resume ×1</span></span>
-        <span class="type-row"><span class="tag tag-warn">usage limit</span><span aria-hidden="true">→</span><span class="tag tag-cyan">wait, resume</span></span>
-      </a>
-      <h3><span data-lang="en">Stop recovery</span><span data-lang="ja">止まった後の再開</span></h3>
-      <p><span data-lang="en">A run that stops on a crash or a restart resumes once, from where it stopped.</span><span data-lang="ja">クラッシュや再起動で止まった実行を、止まった所から 1 回だけ再開する。</span></p>
-      <p><span data-lang="en">A run that hits the usage limit waits for the reset time, then goes on from the same place.</span><span data-lang="ja">利用の上限で止まったら、戻る時刻を書いて待ち、戻ったら同じ所から続ける。</span></p>
     </li>
     <li class="card">
       <a class="card-shot shot crop crop-claude" href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md#blocked-の仕分けreplanner">
         <img class="on-light" src="assets/media/claude-board-light.png" width="1020" height="1156" loading="lazy" alt="The board in Claude Code: the reason #14 is Blocked, and #12 in review with its verdict and PR." data-ja-alt="Claude Code の盤。#14 が Blocked の理由と、In review の #12 の判定と PR">
         <img class="on-dark" src="assets/media/claude-board-dark.png" width="1020" height="1156" loading="lazy" alt="The board in Claude Code: the reason #14 is Blocked, and #12 in review with its verdict and PR." data-ja-alt="Claude Code の盤。#14 が Blocked の理由と、In review の #12 の判定と PR">
       </a>
+      <p class="card-pillar"><span data-lang="en">Peace of mind</span><span data-lang="ja">安心</span></p>
       <h3><span data-lang="en">Blocked triage</span><span data-lang="ja">Blocked の仕分け</span></h3>
-      <p><span data-lang="en">An agent sorts out why a task stopped and comments on the Issue.</span><span data-lang="ja">止まった理由をエージェントが仕分けて、Issue にコメントする。</span></p>
-      <p><span data-lang="en">Add the answer to the Goal, move the card to Ready, and the same PR continues.</span><span data-lang="ja">Goal に答えを足して Ready に戻すと、同じ PR で続く。</span></p>
+      <p><span data-lang="en">A run that fails the check stops with its reason instead of reaching you. The reason shows on the board and the Issue.</span><span data-lang="ja">確かめに通らない実行は、出来上がりとして届けず、理由を付けて止める。理由はボードと Issue に出る。</span></p>
+      <p><span data-lang="en">With <code>replanner</code>, an agent sorts out why and comments on the Issue. Add the answer to the Goal, move the card to Ready, and the same PR continues.</span><span data-lang="ja"><code>replanner</code> を入れると、エージェントが理由を仕分けて Issue にコメントする。Goal に答えを足して Ready に戻すと、同じ PR で続く。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#利用の上限で止まった" aria-label="Docs: Stop recovery" data-ja-aria-label="docs: 止まった後の再開">
+        <span class="type-row"><span class="tag tag-error">crash</span><span aria-hidden="true">→</span><span class="tag tag-cyan">resume ×1</span></span>
+        <span class="type-row"><span class="tag tag-warn">usage limit</span><span aria-hidden="true">→</span><span class="tag tag-cyan">wait, resume</span></span>
+      </a>
+      <p class="card-pillar"><span data-lang="en">Focus</span><span data-lang="ja">軽さ</span></p>
+      <h3><span data-lang="en">Stop recovery</span><span data-lang="ja">止まった後の再開</span></h3>
+      <p><span data-lang="en">A run that stops on a crash or a restart resumes once, from where it stopped.</span><span data-lang="ja">クラッシュや再起動で止まった実行を、止まった所から 1 回だけ再開する。</span></p>
+      <p><span data-lang="en">A run that hits the usage limit waits for the reset time, then goes on from the same place.</span><span data-lang="ja">利用の上限で止まったら、戻る時刻を書いて待ち、戻ったら同じ所から続ける。</span></p>
+    </li>
+    <li class="card">
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#通知llm-なし" aria-label="Docs: Alerts" data-ja-aria-label="docs: 通知">
+        <span class="type-row"><span class="tag tag-warn">In review</span><span class="tag tag-error">Blocked</span></span>
+        <code>ntfy</code>
+      </a>
+      <p class="card-pillar"><span data-lang="en">Focus</span><span data-lang="ja">軽さ</span></p>
+      <h3><span data-lang="en">Alerts</span><span data-lang="ja">通知</span></h3>
+      <p><span data-lang="en">You need not watch: In review, Blocked, long runs, and runs over budget come to you.</span><span data-lang="ja">見張らなくても、In review、Blocked、長い実行、予算超えを知らせる。</span></p>
+      <p><span data-lang="en">They show as OS notifications and on ntfy (your phone). Code decides when to notify; no LLM is used.</span><span data-lang="ja">OS の通知と ntfy(スマートフォン)に届く。知らせるかどうかはコードが決め、LLM は使わない。</span></p>
     </li>
     <li class="card">
       <a class="card-shot shot crop crop-queue" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#マージキュー">
         <img class="on-light" src="assets/media/layers/7-merge-queue-light.png" width="1800" height="944" loading="lazy" alt="task merge 12, then #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列の #12">
         <img class="on-dark" src="assets/media/layers/7-merge-queue-dark.png" width="1800" height="944" loading="lazy" alt="task merge 12, then #12 in the wait for merge column." data-ja-alt="task merge 12 と、wait for merge の列の #12">
       </a>
+      <p class="card-pillar"><span data-lang="en">Focus</span><span data-lang="ja">軽さ</span></p>
       <h3><span data-lang="en">Merge queue</span><span data-lang="ja">マージキュー</span></h3>
       <p><span data-lang="en"><code>task merge</code> approves a PR; the queue brings it up to date with its base, waits for its checks, and merges it.</span><span data-lang="ja"><code>task merge</code> で承認した PR を、base に追いつかせ、チェックを待ってマージする。</span></p>
       <p><span data-lang="en">An agent fixes conflicts. One PR per repository at a time.</span><span data-lang="ja">衝突はエージェントが直す。1 つのリポジトリで 1 度に 1 本。</span></p>
     </li>
     <li class="card">
-      <a class="card-shot shot crop crop-kiro" href="https://github.com/jyoka/task-hub/blob/main/docs/agents.md#エージェントの変更と追加">
-        <img class="on-light" src="assets/media/kiro-board-light.png" width="1040" height="826" loading="lazy" alt="The board in the Kiro sidebar and status bar." data-ja-alt="Kiro のサイドバーの盤とステータスバー">
-        <img class="on-dark" src="assets/media/kiro-board-dark.png" width="1040" height="826" loading="lazy" alt="The board in the Kiro sidebar and status bar." data-ja-alt="Kiro のサイドバーの盤とステータスバー">
+      <a class="card-shot shot crop crop-list" href="https://github.com/jyoka/task-hub/blob/main/docs/usage.md#見え方と手元に残るもの">
+        <img class="on-light" src="assets/media/list-light.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
+        <img class="on-dark" src="assets/media/list-dark.png" width="1800" height="566" loading="lazy" alt="task list: one card in review, one running, one blocked, one in the backlog." data-ja-alt="task list。In review、実行中、Blocked、Backlog が 1 枚ずつ">
       </a>
-      <h3><span data-lang="en">Agent choice</span><span data-lang="ja">エージェントの選択</span></h3>
-      <p><span data-lang="en">Any agent CLI with a non-interactive mode works.</span><span data-lang="ja">非対話モードを持つエージェント CLI なら、どれでも動かせる。</span></p>
-      <p><span data-lang="en">task-hub does git, the PR, and the Issue comments in code, so every agent makes the same kind of PR.</span><span data-lang="ja">git、PR、Issue のコメントは task-hub がコードで行うので、どのエージェントでも同じ形の PR になる。</span></p>
+      <p class="card-pillar"><span data-lang="en">Trust</span><span data-lang="ja">信頼</span></p>
+      <h3><span data-lang="en">A workspace per card</span><span data-lang="ja">カードごとの作業場所</span></h3>
+      <p><span data-lang="en">Each card gets one branch, one worktree, and one PR, so what you asked for and what came back line up one to one.</span><span data-lang="ja">1 枚のカードに、1 つのブランチ、1 つの worktree、1 つの PR。頼んだことと届いたものが 1 対 1 で並ぶ。</span></p>
+      <p><span data-lang="en">Up to 5 run at the same time, on branches named <code>task/&lt;id&gt;</code>.</span><span data-lang="ja">最大 5 つを並べて動かし、ブランチは <code>task/&lt;番号&gt;</code>。</span></p>
     </li>
     <li class="card">
-      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/operations.md#通知llm-なし" aria-label="Docs: Alerts and cost" data-ja-aria-label="docs: 通知と費用">
-        <span class="type-row"><span class="tag tag-warn">In review</span><span class="tag tag-error">Blocked</span></span>
+      <a class="card-shot card-type shot" href="https://github.com/jyoka/task-hub/blob/main/docs/task-format.md#task-hub-のレポートコメント" aria-label="Docs: Records kept by code" data-ja-aria-label="docs: コードが残す記録">
+        <code>task show 12</code>
+        <span class="type-row"><span class="tag tag-cyan">report</span><span class="tag tag-ok">pass</span><span class="tag tag-cyan">PR</span></span>
         <code>task stats</code>
       </a>
-      <h3><span data-lang="en">Alerts and cost</span><span data-lang="ja">通知と費用</span></h3>
-      <p><span data-lang="en">In review, Blocked, long runs, and runs over budget show as OS notifications and on ntfy. No LLM is used.</span><span data-lang="ja">In review、Blocked、長い実行、予算超えを、OS の通知と ntfy で知らせる。LLM は使わない。</span></p>
-      <p><span data-lang="en">Tokens and cost per launch come from the agent CLI's own records (<code>task stats</code>).</span><span data-lang="ja">起動ごとのトークンと費用を、エージェント CLI の記録から読む(<code>task stats</code>)。</span></p>
+      <p class="card-pillar"><span data-lang="en">Trust</span><span data-lang="ja">信頼</span></p>
+      <h3><span data-lang="en">Records kept by code</span><span data-lang="ja">コードが残す記録</span></h3>
+      <p><span data-lang="en">task-hub, not the agent, does git, the PR, and the Issue comments in code, so every agent CLI leaves the same kind of record.</span><span data-lang="ja">git、PR、Issue のコメントは、エージェントではなく task-hub のコードが行う。どのエージェント CLI でも同じ形で残る。</span></p>
+      <p><span data-lang="en">Tokens and cost per launch come from the agent CLI's own records (<code>task stats</code>).</span><span data-lang="ja">起動ごとのトークンと費用も、エージェント CLI の記録から読む(<code>task stats</code>)。</span></p>
     </li>
   </ul>
 </section>
@@ -314,11 +323,10 @@ project = &lt;owner&gt;/&lt;project number&gt;
 issues = &lt;owner&gt;/&lt;repository that holds the Issues&gt;
 
 [runner]
-agent = claude
-reviewer = agent</code></pre>
+agent = claude</code></pre>
       <pre><code>task list   # <span data-lang="en">check the config</span><span data-lang="ja">設定を確かめる</span>
 task        # <span data-lang="en">start Ready cards</span><span data-lang="ja">Ready のカードを始める</span></code></pre>
-      <p><span data-lang="en"><code>reviewer = agent</code> turns on the review before the PR. Prepare the Project's columns and fields with <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>.</span><span data-lang="ja"><code>reviewer = agent</code> で PR の前のレビューが動く。Project の列と欄の用意は <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>。</span></p>
+      <p><span data-lang="en">The check before the PR is on by default; <code>reviewer = off</code> turns it off, and then work reaches you unchecked. Prepare the Project's columns and fields with <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>.</span><span data-lang="ja">PR の前の確かめは既定で入る。<code>reviewer = off</code> で外すと、確かめずに届く。Project の列と欄の用意は <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md">docs/setup.md</a>。</span></p>
     </li>
   </ol>
   <h3 class="table-title"><span data-lang="en">Commands for the first day</span><span data-lang="ja">最初の日に要るコマンド</span></h3>
@@ -375,7 +383,7 @@ task        # <span data-lang="en">start Ready cards</span><span data-lang="ja">
           <th scope="row"><span data-lang="en">Review before the PR</span><span data-lang="ja">PR の前のレビュー</span></th>
           <td class="unknown" data-label="Cloud agents" data-label-ja="クラウドのエージェント">-</td>
           <td class="unknown" data-label="Board apps" data-label-ja="ボードのアプリ">-</td>
-          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">With <code>reviewer = agent</code>, an agent in a fresh context checks each acceptance criterion and sends the work back, 2 times at most by default</span><span data-lang="ja"><code>reviewer = agent</code> なら、新しい文脈のエージェントが受け入れ条件を 1 つずつ確かめ、差し戻す(既定で 2 回まで)</span></td>
+          <td data-label="task-hub" data-label-ja="task-hub"><span data-lang="en">On by default (<code>reviewer = off</code> turns it off): an agent in a fresh context checks each acceptance criterion and sends the work back, 2 times at most by default</span><span data-lang="ja">既定で入る(<code>reviewer = off</code> で外す)。新しい文脈のエージェントが受け入れ条件を 1 つずつ確かめ、差し戻す(既定で 2 回まで)</span></td>
         </tr>
         <tr>
           <th scope="row"><span data-lang="en">A task that stopped</span><span data-lang="ja">止まったタスク</span></th>
@@ -399,7 +407,7 @@ task        # <span data-lang="en">start Ready cards</span><span data-lang="ja">
 
 <!-- 6. Footer -->
 <footer class="foot">
-  <p class="foot-line"><span data-lang="en">Your local coding agents turn each GitHub Project card you move to Ready into a reviewed PR.</span><span data-lang="ja">Ready に移した GitHub Project のカードを、手元のエージェントがレビュー済みの PR にする。</span></p>
+  <p class="foot-line"><span data-lang="en">Hand work to AI agents and walk away. Nothing reaches you unchecked.</span><span data-lang="ja">AI に任せて、離れていい。確かめてから届くから。</span></p>
   <nav class="foot-links" aria-label="Docs" data-ja-aria-label="docs">
     <a href="https://github.com/jyoka/task-hub#readme" data-ja-href="https://github.com/jyoka/task-hub/blob/main/README.ja.md">README</a>
     <a href="https://github.com/jyoka/task-hub/blob/main/docs/setup.md"><span data-lang="en">Setup</span><span data-lang="ja">セットアップ</span></a>
