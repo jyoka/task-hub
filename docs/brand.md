@@ -294,7 +294,8 @@ LP はまだない。LP のカードで、同じ確かめを LP にも足す。
 
 ## 次のカードへの申し送り
 
-- 画像を撮るカード: 4 節の例のカードを、テストの偽物の GitHub で動かして撮る。偽物の名前(`jyoka/app`)が写らないようにする(7 節)
+- 画像を撮るカード: 済み(2026-10-29)。`python3 tests/media.py` が 4 節の例のカードを動かして撮り、`assets/media/` に置く。
+  何をどこに使うかと撮り直し方は [media.md](media.md)
 - README の絵のカード: バナーを README の一番上に置き(6 節の `<picture>`)、「しくみ」に分解の絵を置く。README の構成が変わるので、
   [CONTRIBUTING.md の「README の構成」](../CONTRIBUTING.md#readme-の構成)と `tests/test_brand.py` も直す
 - LP のカード: 1 文を見出し、フッター、`llms.txt` で同じ文のまま使う。機能のカード 8 枚(3 節)、分解の絵(4 節)、`tokens.css` を使う。

@@ -154,7 +154,7 @@ Goal の書き方、タスクの分け方、前後関係、調べもののタス
 | [kiro-quickstart.md](docs/kiro-quickstart.md) Kiro IDE | [agents.md](docs/agents.md) エージェント | [design.md](docs/design.md) なぜこの作りか | [release.md](docs/release.md) リリース |
 | [kiro-ide.md](docs/kiro-ide.md) Kiro の中身 | [task-format.md](docs/task-format.md) Issue と PR の形式 | [lessons.md](docs/lessons.md) わかったこと | [SECURITY.md](SECURITY.md) 脆弱性の報告 |
 | [windows-quickstart.md](docs/windows-quickstart.md) Windows の Kiro IDE | [issue-tracker.md](docs/issue-tracker.md) ほかのスキルから登録 | | [brand.md](docs/brand.md) 伝え方と見た目 |
-| | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | |
+| | [slack-triage.md](docs/slack-triage.md) Slack から登録 | | [media.md](docs/media.md) 画像の撮り直し |
 | | [triggers.md](docs/triggers.md) task-hub が自分で作るカード | | |
 | | [autopilot.md](docs/autopilot.md) オートパイロット(選んだリポジトリの承認とマージを task-hub がする) | | |
 | | [sandbox.md](docs/sandbox.md) サンドボックス(Linux) | | |
