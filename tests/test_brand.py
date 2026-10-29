@@ -201,10 +201,11 @@ class BrandTest(unittest.TestCase):
                                            "assets/media/flow.avif"])
                 self.assertEqual(flow[2], "assets/media/flow.gif")
                 self.assertIn('media="(prefers-reduced-motion: reduce)"', text)
-                # the rest of the top stays: the CI badge, the two decisions, and the way in for Kiro IDE
+                # the rest of the top stays: the landing page (site/README.md), the CI badge, the two decisions,
+                # and the way in for Kiro IDE
                 top = text.split("\n## ", 1)[0]
-                for kept in ("actions/workflows/windows.yml/badge.svg", "docs/kiro-quickstart.md",
-                             "docs/windows-quickstart.md"):
+                for kept in ("](https://jyoka.github.io/task-hub/", "actions/workflows/windows.yml/badge.svg",
+                             "docs/kiro-quickstart.md", "docs/windows-quickstart.md"):
                     self.assertIn(kept, top)
                 self.assertEqual(len(re.findall(r"(?m)^- \*\*", top)), 2)
 

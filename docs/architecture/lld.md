@@ -1057,5 +1057,6 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
   Ready からマージまで動かし、mod の盤は `claude plugin test`、Kiro の盤は node で、それぞれのコードに描かせる。Chrome で撮り、
   ffmpeg で GIF、WebM、AVIF にして `assets/media/` に置く([media.md](../media.md))。テストではない。`tests/test_media.py` が、
   置いた画像の大きさと写してはいけないものを確かめ、カードを 2 回動かして同じ文字になることを確かめる
-- `tests/test_site.py`: LP(`site/`)の HTML、CSS、JS を、ブラウザを使わずに読んで確かめる。task-hub の動きには関わらない
+- `tests/test_site.py`: LP(`site/`)の HTML、CSS、JS を、ブラウザを使わずに読んで確かめる。task-hub の動きには関わらない。
+  GitHub Actions の `pages`(`.github/workflows/pages.yml`)は、これが通ってから LP を GitHub Pages に出す
   ([site/README.md](../../site/README.md))
