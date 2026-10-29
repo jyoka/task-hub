@@ -16,6 +16,8 @@ English | [日本語](README.ja.md)
   <img alt="A terminal on the left and the task-hub board on the right, 15 seconds. You move card #12, Add a search box to the notes list, to Ready. task-hub starts it on branch task/12. The agent writes the change and a report. A second agent sends it back because the search minds upper and lower case. The fix passes the second review, task-hub opens the PR, and the merge queue merges it." src="assets/media/flow.gif">
 </picture>
 
+See one card's life, layer by layer, on the landing page: [jyoka.github.io/task-hub](https://jyoka.github.io/task-hub/)
+
 [![windows](https://github.com/jyoka/task-hub/actions/workflows/windows.yml/badge.svg)](https://github.com/jyoka/task-hub/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 

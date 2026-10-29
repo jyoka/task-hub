@@ -25,14 +25,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # docs only (tests/ci/scope.py): the docs tests instead of the rest, in this same job, so that the check `test`
+      # the merge queue waits for reports either way. Not a job of its own that this one needs: a job skipped because
+      # the one it needs failed counts as passed. A push to main always runs everything
+      - name: What the change touches
+        id: scope
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p evidence
+          python3 tests/ci/scope.py "$CI_DIFF_BASE" | tee evidence/scope.log
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           node-version: "24"
       - name: Rust toolchain
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
       - uses: actions/cache@v4
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -45,30 +58,41 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.com
       - name: Rust tests and TUI binary
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
-          mkdir -p evidence
           cargo test --manifest-path rust/Cargo.toml --locked 2>&1 | tee evidence/rust.log
           cargo build --manifest-path rust/Cargo.toml --locked
       # before the Python suite, whose test_durable_runner_* run it under task-hub once it is installed and built
       - name: Durable runner (experiment)
+        if: steps.scope.outputs.docs_only != 'true'
         working-directory: durable
         run: |
           npm ci --ignore-scripts
           npm test 2>&1 | tee ../evidence/durable.log
       # 4 at a time, not run.py's 2 (kept for a person's Mac): the tests mostly wait on subprocesses (CONTRIBUTING.md)
       - name: Full Python suite, including CLI and PTY integration tests
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           echo "CPUs: $(sysctl -n hw.ncpu)" | tee evidence/python.log
           python3 tests/run.py -j 4 2>&1 | tee -a evidence/python.log
+      - name: Docs tests only (the READMEs' command tables, brand, site, media, the docs read by the tests)
+        if: steps.scope.outputs.docs_only == 'true'
+        run: |
+          names=$(python3 tests/ci/scope.py --tests)
+          python3 tests/run.py -j 4 $names 2>&1 | tee evidence/python.log
       - name: Kiro board extension
+        if: steps.scope.outputs.docs_only != 'true'
         working-directory: kiro/board-extension
         run: npm test 2>&1 | tee ../../evidence/extension.log
-      - name: Python lint and whitespace
-        env:
-          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - name: Python lint
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           python3 -m pip install ruff
           ruff check --select E9,F63,F7,F82 bin/task bin/task_hub.py tests
+      - name: Whitespace in the diff
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
           base="$CI_DIFF_BASE"
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
             base=$(git rev-parse HEAD^)

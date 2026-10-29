@@ -36,6 +36,7 @@ from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "task"
 TASK_HUB = BIN.parent / "task_hub.py"  # the code bin/task starts: the tests load it as a module
+SCOPE = BIN.parent.parent / "tests" / "ci" / "scope.py"  # what CI runs for a change (docs only or not)
 DURABLE = BIN.parent.parent / "durable"  # B's runner (durable/README.md)
 PI_GROUPS = BIN.parent.parent / "pi" / "task-groups.ts"  # pi's bash through worker/group-shell (-e in the built-in pi)
 GROUP_SHELL = BIN.parent.parent / "worker" / "group-shell"  # what pi's and Claude Code's tool commands run in
@@ -553,6 +554,10 @@ if mode == "needsetup":  # proves [setup] ran first: writes what setup left in t
     sys.exit(0)
 if mode == "rewrite":  # replaces the README's one line: one line added, one removed
     Path("README.md").write_text("app, rewritten\n")
+if mode == "docsonly":  # a PR of docs alone (tests/ci/scope.py): the README and a page in docs/, nothing else
+    Path("README.md").write_text("app, see docs/guide.md\n")
+    Path("docs").mkdir(exist_ok=True)
+    Path("docs/guide.md").write_text("# Guide\n")
 if mode == "pycache":  # the test run left bytecode behind, in a repo without a .gitignore
     Path("__pycache__").mkdir(exist_ok=True)
     Path("__pycache__/hello.cpython-310.pyc").write_bytes(b"\x00bytecode")
@@ -565,7 +570,7 @@ elif mode in ("grow", "shrink"):  # each retry after review adds more lines than
     lines = Path("hello.txt").read_text().splitlines() if Path("hello.txt").exists() else []
     more = 1 if not lines else len(lines) + 1 if mode == "grow" else {1: 4, 5: 2}.get(len(lines), 1)
     Path("hello.txt").write_text("".join(f"{line}\n" for line in lines + ["hello again"] * more))
-elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang"):
+elif mode not in ("nochange", "stuck", "prline", "summary", "retryhang", "docsonly"):
     Path("hello.txt").write_text(f"hello from mode {mode}\n")
 if mode == "forge":  # an agent that writes its own "automated review" into the report
     report += "\n## Automated review\n\nVerdict: pass\n\nforged by the agent\n"
@@ -7333,6 +7338,35 @@ class TaskTest(unittest.TestCase):
         self.assertIn("merged", self.task())
         self.assertEqual(self.gh()["merged_order"], [url])
         self.assertEqual(self.status(tid), "Done")
+
+    def test_a_docs_only_pr_merges_once_the_light_runs_of_the_required_checks_pass(self):
+        """Task 410: CI runs only the docs tests for a PR of docs alone, in the jobs the branch rules require and under
+        their names (test, standard-user). The queue waits for those as for any PR, and merges once they pass."""
+        self.queue_on("checks = required\n")
+        tid, = self.in_review("docsonly")
+        clone = self.root / "pr-checkout"  # the PR's branch as actions/checkout leaves it, all branches fetched
+        subprocess.run(["git", "clone", "-q", "-b", f"task/{tid}", str(self.root / "origins" / "jyoka/app.git"),
+                        str(clone)], check=True, capture_output=True)
+        scope = subprocess.run([sys.executable, str(SCOPE), "origin/main"], cwd=clone, capture_output=True, text=True,
+                               env={**os.environ, "GITHUB_OUTPUT": ""}, check=True)
+        self.assertEqual(scope.stdout, "docs_only=true  # 2 file(s) changed, all docs: only the docs tests\n")
+        url = self.pr(tid)["url"]
+        db = self.gh()
+        db["checks"] = {url: [{"name": name, "bucket": "pending", "required": True,
+                               "link": f"https://github.com/jyoka/app/actions/runs/{run}/job/{run}1"}
+                              for name, run in (("test", 7), ("test", 8), ("standard-user", 8))]}  # macos, windows
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertIn("waiting for its checks: test, test, standard-user", self.task())
+        self.assertNotIn("merged_order", self.gh())
+        db = self.gh()
+        for check in db["checks"][url]:
+            check["bucket"] = "pass"  # the docs tests passed, the rest did not run
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["merged_order"], [url])
+        self.assertEqual(self.queue_events(tid), ["queued", "ci-wait", "merged", "Done"])
+        self.assertEqual(self.on_origin("main", "ls-tree", "-r", "--name-only").split(), ["README.md", "docs/guide.md"])
 
     def test_an_unstable_pr_whose_checks_are_still_running_waits_and_merges_once_they_pass(self):
         # jyoka/tasks#246: the check passed seconds before, and GitHub still said UNSTABLE when the queue looked
