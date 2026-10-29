@@ -22,7 +22,7 @@ Backlog から出たカードは、今までどおりあなたを待ちます。
 
 ```ini
 [autopilot]
-repos = jyoka/aica            ; カンマ区切り。owner/name。大文字と小文字は区別しない
+repos = you/app               ; カンマ区切り。owner/name。大文字と小文字は区別しない
 
 [merge]
 queue = on                    ; 必須。マージはマージキューを通す

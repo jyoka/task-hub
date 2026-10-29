@@ -2,7 +2,7 @@
 
 Instructions for agents and skills that create issues for work the user wants done on their task-hub board
 (for example `to-prd` and `to-issues` from the Matt Pocock skills). The board's issues repository is
-`[board] issues` in `~/.config/task-hub/config.ini` (for example `jyoka/tasks`); the code lives in other
+`[board] issues` in `~/.config/task-hub/config.ini` (for example `you/tasks`); the code lives in other
 repositories. If `task` is not on PATH, use `~/.local/lib/task-hub/bin/task`.
 
 Every task goes through `task new`, never `gh issue create` plus `gh project item-add`: `task new` puts the card

@@ -2,7 +2,7 @@
 
 ## タスク = Issue + Project のカード
 
-各タスクは、非公開の Issue リポジトリ(設定の `[board] issues`、例: `jyoka/tasks`)の Issue 1 件です。
+各タスクは、非公開の Issue リポジトリ(設定の `[board] issues`、例: `you/tasks`)の Issue 1 件です。
 タスクの番号は Issue の番号です。Issue は GitHub Project にカードとして載っています。
 
 | どこに | 何を | 書くのは |
@@ -319,7 +319,7 @@ Need the Stripe test key.
 
 ...
 
-PR: https://github.com/jyoka/app/pull/41
+PR: https://github.com/you/app/pull/41
 ```
 
 task-hub 自身が止めたとき(実行が止まった、開始できなかった)も、
@@ -528,7 +528,7 @@ task review 12 --no-write --ref 1a2b3c4 --base 9f8e7d6 --mode agent --report-fil
 - マージされると `Closes` によって Issue が閉じ、Project のワークフロー(Item closed)でカードが Done に移ります。
   次の確認で task-hub はカードが開いた列から消えたことに気づき、worktree と herdr のワークスペースを削除します
 - GitHub のドキュメントは「`Closes` はデフォルトブランチへのマージのときだけ効く」としています。デフォルトブランチへの
-  マージでも閉じなかったことがあります(jyoka/tasks#81)。そのため task-hub が In review と wait for merge のカードすべての
+  マージでも閉じなかったことがあります。そのため task-hub が In review と wait for merge のカードすべての
   PR を確認し、マージされていれば Issue を閉じてカードを Done にし、
   worktree と herdr のワークスペースを削除します。この確認は GraphQL とは別枠の REST API で行います。
   そのタスクを別のマシンで実行した場合や、変更なしで終わった実行のあとに人が PR を作った場合も、ブランチ `task/<番号>`

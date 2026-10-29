@@ -130,13 +130,13 @@ stateDiagram-v2
 
 ## 5. ロードマップ
 
-### Phase 0: 遷移表と図 (tasks#39)
+### Phase 0: 遷移表と図
 
 - `StatusLifecycle` に task-hub 自身の遷移の表を持たせ、`set_status` で照らし合わせる。表にない遷移は警告するが止めない
 - 全遷移を確かめるテストを足す
 - 上の図を `docs/design.md` に載せる
 
-### Phase 1: 実行中の段階を見せ、生きているプロセスをガードにする (tasks#40、#39 のあと)
+### Phase 1: 実行中の段階を見せ、生きているプロセスをガードにする (Phase 0 のあと)
 
 - 実行の段階 (preparing / setup / agent / review / retry / finishing / replanning) を手元の run の記録に残し、`task list` と `task show` に出す
 - イベント (`events.jsonl`) には足さない。`/chief` を起こす回数が増えて費用が上がるため
