@@ -59,7 +59,8 @@ PR のファイルを書き換えた場合は元に戻して Blocked にしま�
 [lessons.md](lessons.md#自動レビューの-agent-と-goldfish-を比べる-2026-10-27タスク-253) にあります。
 
 `needs changes` の場合、task-hub は `[runner] review_retries` の回数(既定 2 回)まで実装エージェントに自動で差し戻します。
-同じ指摘がまた出たり、差し戻しの変更が小さくならなかったりすると、回数が残っていても止めます。止まったら
+同じ指摘がまた出たり、差し戻しの変更が小さくならなかったり、差し戻しのあとの blocking の指摘が
+`[runner] review_stop_blocking` 件(既定 3)以下になったりすると、回数が残っていても止めます。止まったら
 ドラフト PR を作り、修正指示の下書きを Issue に書いて、カードを Blocked にします。詳しくは
 [task-format.md の「自動レビューの差し戻し」](task-format.md#自動レビューの差し戻し)。最後のレビューの判定は Project の
 Review 欄とレポートのコメントの 1 行にも残ります([判定の残し方](task-format.md#判定の残し方review-欄と機械が読む-1-行))。マージの判断は、[オートパイロット](autopilot.md)を使わない限り人が行います。

@@ -352,7 +352,7 @@ flowchart TB
     rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
     retry --> rv
-    rv -- "review_stop(回数、また出た指摘、変更なし、収束しない)<br/>Suggested instructions を足す、blocked" --> finish
+    rv -- "review_stop(また出た指摘、変更なし、収束しない、差し戻しのあとの blocking が少ない、回数)<br/>Suggested instructions を足す、blocked" --> finish
     finish["finish<br/>add -A、commit、push、upsert_pr、comment、set_review、set_status"]
     finish -- "In review" --> close["タブを閉じる"]
     finish -- "エージェント自身の Blocked" --> replan["run_replan<br/>仕分けてコメント、replan の出来事"]
@@ -783,7 +783,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 `id`、`title`、`repo`、`agent`、`reviewer`、`started`、`finished`、`seconds`、`status`、`reviews`(判定の列)、
 `review_scopes`(`reviews` と同じ順に、各レビューが読んだもの。`full` は PR の全部、`delta` は前の指摘とその後の変更だけ、`light` は文書だけの PR の Goal と差分)、
 `retried`、`retries`(差し戻した回数)、`review_stop`(最後の `needs changes` を差し戻さなかった理由。`limit`、
-`repeated`、`no change`、`not converging`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
+`repeated`、`no change`、`not converging`、`few blocking`。差し戻さずに終われば空)、`review_mode`(最後のレビューの `agent` か
 `goldfish`。レビューがなければ空)、`review_verdict`(Review 欄に入れた最後の判定。なければ空)、`blocked_by`(`balance` は残高の確認で止めた実行、`limit` は利用の上限で止まった実行)、
 `replan`(replanner が上限に当たったら `limit`)、`usage`(起動ごとのトークン、呼び出し、費用(pi の `cost`)、クレジット、モデル)、`files`、`added`、`removed`、
 `resumed`(再開した段階の列。再開しなければ空)、`interrupted`(最後に止まった理由)。`relaunch` で再開した実行の
@@ -865,7 +865,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | エージェントの CLI(`[agents]` のコマンド) | 子プロセス(自分のプロセスグループ。stdout と stderr を 1 行ずつ読む) | エージェント側の課金 | 実行ごと(agent、retry、reviewer、replanner)。`[runner] review_mode = goldfish` ではレビューごとに視点の数(既定 2 体、順に)。差し戻しの後の `re_review = delta` のレビューは、どちらでも 1 体。文書だけの PR の `light_review = docs` のレビューも、どちらでも 1 体。`task check` ごとに Goldfish 5 体(批評の 3 体は同時に) |
 | `task check` の書き込み: `gh issue comment`、`gh project item-edit`(Readiness 欄。blocked は `--clear`)、欄がなければ `gh project field-create` を 1 回 | gh(GraphQL) | 判定ごとに 2〜3 | `task check` だけ(`--no-write` は 0) |
 | Review 欄(`set_review`): `gh project item-edit`(判定、レビューがなければ `--clear`)、欄がなければ `gh project field-create` を 1 回。`ITEMS_QUERY` は欄があるときだけ `review` も読む(同じ呼び出し) | gh(GraphQL) | 実行の終わりに 1〜2。欄がなくレビューもない実行は 0 | `finish` ごと |
-| `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn` か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
+| `readiness_gate` の `gh issue view`(本文、ラベル、コメント) | gh(GraphQL) | 1 回 | `[runner] readiness` が `warn`(既定)か `require` で、Ready のカード(と `[autopilot]` の Backlog のカード)の Goal かカードが前に読んだときから変わったときだけ。`off` では 0 |
 | 再開のエージェント(`[resume]` のコマンド、組み込みの `pi` と `claude` は `DEFAULT_RESUME`、なければ `[agents]`) | 同上。`{session}` で前の会話を続ける(pi は `--session-id`、claude は `--resume`) | 元のプロンプト(数 KB)を 1 回送り直す。会話を続けると、前の会話もモデルに送る(pi 1.4.0 では cache の読み込みになった) | 再開ごと(1 実行に 1 回まで) |
 | B の実行役のモデル(`durable/`、既定は `openai-codex/gpt-6-luna`、thinking `medium`) | pi-ai の `openai-codex` provider。pi の `auth.json` を読むだけ(`CredentialStore` の `modify` を断るので、切れかけたトークンは更新せず理由つきで 1 で終わる) | ChatGPT のサブスクリプション。再開では元のプロンプトを送り直さず、SQLite の会話から続ける | エージェントのターンごと |
 | `ps -p <pid> -o etime=`、`ps -A -o pgid=,stat=`(`stop_left_agent`) | 子プロセス。GitHub は 0 | - | `relaunch` のとき、`agent_pid` が残っていれば |
