@@ -5777,6 +5777,8 @@ def merge_ci(t, e, pr, settings):
             return merge_block(t, e, f"its checks did not finish in {limit // 60} min: {', '.join(pending)}")
         ci_wait(t, e, pr, f"waiting for {', '.join(pending)}")
         return f"waiting for its checks: {', '.join(pending)}"
+    if checks and rerun_of(e).get("sha") == pr["headRefOid"]:  # none failed or runs: the ones run again passed
+        rerun_result(t, e, "passed")
     state = pr.get("mergeStateStatus") or ""
     if pr.get("mergeable") == "CONFLICTING" or state in ("DIRTY", "BEHIND"):  # the base moved on meanwhile
         queue_set(e, step="update")
@@ -5807,6 +5809,14 @@ def rerun_of(e):
 
 
 ACTIONS_RUN = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/actions/runs/(\d+)")
+ACTIONS_JOB = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/actions/runs/\d+/jobs?/(\d+)")
+# a failed test's line in a job's log: tests/run.py's `failed: <id>`, unittest's `FAIL: name (id)` (ERROR too),
+# pytest's `FAILED <id> - ...` (not unittest's closing `FAILED (failures=1)`), cargo test's `test <name> ... FAILED`,
+# go test's `--- FAIL: <name>`
+FAILED_TEST = re.compile(r"failed: (\S*[A-Za-z_]\S*)$|(?:FAIL|ERROR): (\w+) \(([\w.]+)\)|FAILED ([^\s(]\S*)"
+                         r"|test (\S+) \.\.\. FAILED$|--- FAIL: (\S+)")
+LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")  # GitHub's time at the start of each line of a job's log
+FAILED_TESTS_KEPT = 20  # per rerun: more failed at once is a broken change, not a flaky test
 
 
 def ci_failed(t, e, pr, settings, failed, checks, in_time):
@@ -5825,6 +5835,11 @@ def ci_failed(t, e, pr, settings, failed, checks, in_time):
             return merge_block(t, e, f"its failed checks did not run again in {settings['ci_seconds'] // 60} min: "
                                      + said())
         twice = {c.get("name") for c in before} & {c.get("name") for c in failed}
+        # the result of the rerun only when one run again failed: same name in the same run (an attempt keeps the
+        # run's id); a check of the same name in another run (another OS) failing for the first time says nothing
+        run_of = lambda c: (c.get("name"), (ACTIONS_RUN.match(c.get("link") or "") or [None, None])[1])
+        if {run_of(c) for c in before} & {run_of(c) for c in failed}:
+            rerun_result(t, e, "failed again")
         return merge_block(t, e, said(twice) + (" (ran again once on the same commit)" if twice else ""))
     if not settings["rerun"]:
         return merge_block(t, e, said())
@@ -5853,8 +5868,54 @@ def ci_failed(t, e, pr, settings, failed, checks, in_time):
     queue_set(e, rerun={"sha": sha, "checks": [{"name": c.get("name"), "link": c.get("link")} for c in failed]},
               since=now())  # the new attempt gets its own ci_minutes
     names = ", ".join(c.get("name") or "?" for c in failed)
-    emit(t, "ci-rerun", pr=e["pr"], sha=sha, reason=f"{names} failed on {sha[:7]}; running the failed jobs again once")
+    tests = failed_tests(e["repo"], failed)
+    which = f" ({', '.join(tests[:3])}{f' and {len(tests) - 3} more' if len(tests) > 3 else ''})" if tests else ""
+    emit(t, "ci-rerun", pr=e["pr"], sha=sha, tests=tests,
+         reason=f"{names} failed on {sha[:7]}{which}; running the failed jobs again once")
     return f"{names} failed; running the failed jobs again once (`gh run rerun --failed`)"
+
+
+def failed_tests(repo, failed):
+    """The tests that failed in the failed checks' GitHub Actions jobs, by name, read from each job's log: one REST
+    call per failed job, made only when a check failed. [] when no log names one or none could be read (the logs
+    expired, a check from outside Actions): the rerun goes on all the same."""
+    names = []
+    for c in failed:
+        if not (m := ACTIONS_JOB.match(c.get("link") or "")):
+            continue
+        try:
+            r = run(GH, "api", f"repos/{repo}/actions/jobs/{m[1]}/logs")
+        except FileNotFoundError:
+            break
+        if r.returncode == 0:
+            names += test_names(r.stdout)
+    return list(dict.fromkeys(names))[:FAILED_TESTS_KEPT]
+
+
+def test_names(log):
+    """The failed tests a job's log names (FAILED_TEST), in the order it names them, each once."""
+    names = []
+    for line in log.split("\n"):
+        line = LOG_STAMP.sub("", re.sub(TERMINAL_ESCAPE, "", line), 1).strip()
+        if not (m := FAILED_TEST.match(line.removeprefix("##[error]"))):  # an annotation's prefix
+            continue
+        if m[2]:  # unittest: `test_x (module.Class.test_x)` from Python 3.11 on, `test_x (module.Class)` before
+            names.append(m[3] if m[3].endswith(f".{m[2]}") else f"{m[3]}.{m[2]}")
+        else:
+            names.append(next(g for g in m.groups() if g))
+    return list(dict.fromkeys(names))
+
+
+def rerun_result(t, e, result):
+    """Note once how the failed checks run again on the PR's commit came out: "passed" or "failed again", for the
+    flaky tests of `task stats` (which joins it to the commit's `ci-rerun` and the tests named there)."""
+    rerun = rerun_of(e)
+    if not rerun.get("sha") or rerun.get("result"):
+        return
+    queue_set(e, rerun={**rerun, "result": result})
+    emit(t, "ci-rerun-result", pr=e["pr"], sha=rerun["sha"], result=result,
+         reason=f"the failed checks {'passed' if result == 'passed' else 'failed again'} when run again on "
+                f"{rerun['sha'][:7]}")
 
 
 def ci_wait(t, e, pr, reason):
@@ -7518,9 +7579,13 @@ def cmd_feedback(a):
         *([] if opened else ["help: open the url in your browser to write the report"]))
 
 
-def cmd_stats(_):
+def cmd_stats(a):
     """What the runs on this machine came to: outcomes, reviews, retries, why cards blocked, replanner decisions,
-    and what each agent launch used."""
+    and what each agent launch used; and the merge queue's CI reruns, with the tests that failed in them."""
+    days = a["flaky_days"] or str(FLAKY_DAYS)
+    if not days.isdigit():
+        fail(f"--flaky-days takes a whole number of days, got {days!r}", f"usage: {COMMANDS['stats'][3]}", 2)
+    flaky = flaky_lines(int(days))
     runs = []
     for line in (METRICS.read_text().splitlines() if METRICS.exists() else []):
         try:
@@ -7533,7 +7598,7 @@ def cmd_stats(_):
     checks = checks_line()
     if not runs:  # the first run can be slow before any run has finished
         out(f"stats: 0 runs recorded yet in {home(METRICS)} (task-hub records each run from 0.6 on)", slow, budget,
-            *checks)
+            *checks, *flaky)
         return
 
     def counts(name, key, values):
@@ -7587,6 +7652,7 @@ def cmd_stats(_):
         slow,
         budget,
         *checks,
+        *flaky,
         *([f"size: median {sizes[len(sizes) // 2]} changed lines per PR over {len(sizes)} runs "
            f"(a PR you can review in 10 to 15 minutes is a few hundred lines)",
            *table("largest", largest, ["id", "title", "lines", "files"])] if sized else []),
@@ -7599,6 +7665,47 @@ def cmd_stats(_):
            "works it out from the model's prices)"] if costed else []),
         *(table("roles", roles, ["role", "launches", "measured", "median_seconds", "median_tokens"]) if roles else []),
         *(table("heaviest", heaviest, ["id", "title", "tokens", "calls", "subagent_calls"]) if heaviest else []))
+
+
+FLAKY_DAYS = 30  # how far back `task stats` looks for flaky tests by default; docs/usage.md says why
+FLAKY_SHOWN = 10
+
+
+def flaky_lines(days):
+    """`task stats`' lines of the merge queue's CI reruns in the last `days` days (`ci-rerun` events), and the tests
+    their failed jobs named, the most failed first; none before the first rerun. A rerun passed when the next
+    `ci-rerun-result` of its card and commit says so (a card queued again after it blocked can run the same commit's
+    checks again: each result goes to the rerun just before it)."""
+    reruns, latest = [], {}
+    for line in (event_lines_of(EVENTS.read_text(errors="replace")) if EVENTS.exists() else []):
+        with contextlib.suppress(ValueError):
+            e = json.loads(line)
+            if not isinstance(e, dict) or not isinstance(e.get("time"), str):
+                continue
+            key = (e.get("id"), e.get("sha"))
+            if e.get("event") == "ci-rerun" and isinstance(key[1], str):
+                reruns.append({**e, "passed": False})
+                latest[key] = reruns[-1]
+            elif e.get("event") == "ci-rerun-result" and isinstance(key[1], str) and key in latest:
+                latest.pop(key)["passed"] = e.get("result") == "passed"
+    if not reruns:
+        return []
+    since = "" if days > 36500 else (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)) \
+        .strftime("%Y-%m-%dT%H:%M:%SZ")  # past a century: all of them (timedelta's own limit is near)
+    reruns = [e for e in reruns if e["time"] > since]
+    tests = {}
+    for e in reruns:
+        repo = e["repo"] if isinstance(e.get("repo"), str) and e["repo"] else "?"
+        for name in {n for n in e["tests"] if isinstance(n, str)} if isinstance(e.get("tests"), list) else ():
+            x = tests.setdefault((name, repo), {"test": name, "repo": repo, "failed": 0, "passed_again": 0, "last": ""})
+            x["failed"] += 1
+            x["passed_again"] += e["passed"]
+            x["last"] = max(x["last"], e["time"][:10])
+    rows = sorted(sorted(tests.values(), key=lambda x: x["last"], reverse=True), key=lambda x: -x["failed"])
+    return [f"ci_reruns: {len(reruns)} in the last {plural(days, 'day', 'days')} (`--flaky-days`), "
+            f"{sum(e['passed'] for e in reruns)} passed when run again, "
+            f"{sum(not e.get('tests') for e in reruns)} named no failed test",
+            *table("flaky_tests", rows[:FLAKY_SHOWN], ["test", "repo", "failed", "passed_again", "last"])]
 
 
 def checks_line():
@@ -7928,8 +8035,10 @@ COMMANDS = {
                "task-hub did lately; --follow prints each new event as it happens, --next waits for the next ones and "
                "exits, --after N alone prints those after line N without waiting, "
                "--digest adds each event's digest below it"),
-    "stats": (cmd_stats, [], {}, "task stats  # outcomes of the runs on this machine: reviews, retries, blocks, replanner, "
-              "tokens"),
+    "stats": (cmd_stats, [], {"flaky-days": True},
+              "task stats [--flaky-days N]  # outcomes of the runs on this machine: reviews, retries, blocks, "
+              "replanner, tokens; and the tests that failed when the merge queue ran CI again, the most failed "
+              f"first, over the last N days (default {FLAKY_DAYS})"),
     "update": (cmd_update, [], {}, "task update  # update task-hub to its newest release (an installer's clone: by "
                "that release's installer), restart the launchd "
                "`task watch`, copy Kiro's hook and workflow again"),

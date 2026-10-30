@@ -103,7 +103,7 @@ drift_report =                  ; 文書とコードの食い違いを調べる 
 [merge]
 queue = off               ; on: 承認した PR(task merge、wait for merge の列)を base に追いつかせ、競合を解き、チェックが通ったらマージする
 prefix = off              ; on: キューにない In review の PR も、競合したら承認の前に解いておく(マージはしない)
-rerun = 1                 ; キューで落ちたチェックを同じコミットで 1 回だけ走らせ直す(既定)。0: すぐ Blocked
+rerun = 1                 ; キューで落ちたチェックを同じコミットで 1 回だけ走らせ直す(既定)。0: すぐ Blocked。落ちたテストは task stats に出る
 
 [autopilot]
 repos = you/app           ; このリポジトリのカードは、承認(Ready)とマージを task-hub がする。[merge] queue = on と reviewer が要る
@@ -231,7 +231,7 @@ In review で終わったタブは自動で閉じ、Blocked のタブは中身�
 | 内容 | 場所 |
 |---|---|
 | 実行のログ | `~/.local/state/task-hub/logs/<番号>.log`(`task log`) |
-| 起きたこと(列の移動、replanner の判定) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す) |
+| 起きたこと(列の移動、replanner の判定、マージキューが走らせ直したときに落ちたテスト) | `~/.local/state/task-hub/events.jsonl`(`task events`、`/chief` が見張る。書くときに通知も出す。落ちたテストは `task stats` の `flaky_tests`) |
 | 実行ごとの結果(レビューの判定、差し戻し、Blocked の理由、起動ごとの秒数とトークン数) | `~/.local/state/task-hub/metrics.jsonl`(`task stats`) |
 | `task check` ごとの判定と、起動ごとの秒数とトークン数 | `~/.local/state/task-hub/checks.jsonl`(`task stats` の `checks:` 行)。ログは `logs/<番号>-check.log` |
 | `task review --no-write` ごとの判定と、起動ごとの秒数とトークン数 | `~/.local/state/task-hub/review-trials.jsonl`。ログは `logs/<番号>-review-trial.log` |
@@ -287,6 +287,50 @@ In review と Done の間に `wait for merge` の列を足せます。レビュ�
 `[merge] queue = on` にすると、この列はマージキューの入口になります。カードをここに動かす(または `task merge <番号>`)と
 承認したことになり、`task watch` が base に追いつかせて、チェックが通ったらマージします
 ([operations.md](operations.md#マージキュー))。
+
+### ときどき落ちるテスト(task stats の flaky_tests)
+
+マージキューは、落ちたチェックを同じコミットで 1 回だけ走らせ直します
+([operations.md](operations.md#落ちたチェックを走らせ直す))。2 回目で通るとそのまま進むので、何もしなければ
+ときどき落ちるテストは見えません。1 回落ちるたびに、CI 1 回分だけマージが遅れます。
+
+そこで走らせ直すときに、落ちたジョブのログから落ちたテストの名前を読み、`ci-rerun` の出来事に残します。
+`task stats` は、それを多い順に出します。
+
+```
+ci_reruns: 3 in the last 30 days (`--flaky-days`), 2 passed when run again, 1 named no failed test
+flaky_tests[2]{test,repo,failed,passed_again,last}:
+  test_task.TaskTest.test_watch_survives_a_crash,you/app,2,2,2026-10-29
+  tests/test_web.py::test_login,you/web,1,0,2026-10-21
+```
+
+| 欄 | 意味 |
+|---|---|
+| `failed` | 走らせ直したときに、そのテストが落ちていた回数 |
+| `passed_again` | そのうち、走らせ直して通った回数。`failed` と同じなら、ときどき落ちるテストの見込みが高い |
+| `last` | 最後に落ちた日(UTC) |
+| `named no failed test` | ログから名前を読めなかった走らせ直しの数 |
+
+- 見る期間の既定は **30 日** です。`task stats --flaky-days 7` のように変えられます。30 日にした理由は 2 つです
+  - 走らせ直しは少ない。2026-10-30 に調べた task-hub では、直近 200 回の CI で落ちたジョブは 20 本だった。
+    1 週間では 1 つのテストが 1、2 回しか出ず、どれが繰り返し落ちるのか比べられない
+  - 直したテストは、いずれ表から消えてほしい。期間を区切らないと、直す前の回数がいつまでも上に残る。
+    30 日なら、直してから 1 か月で消える
+- 表は上位 10 件です。並びは `failed` の多い順、同じなら新しい順です
+- 名前を読めるテストの出力は、`tests/run.py` の `failed: <id>`、unittest の `FAIL: name (id)` と `ERROR: ...`、
+  pytest の `FAILED <id>`、cargo test の `test <name> ... FAILED`、go test の `--- FAIL: <name>` です。
+  1 回の走らせ直しで残すのは 20 件までです。それより多く落ちたなら、ときどき落ちるテストではなく、変更が壊れています
+- 名前を読めなくても(ログが消えた、知らない形の出力、GitHub Actions でないチェック)、走らせ直しはいつもどおり動きます。
+  `named no failed test` に数えるだけです
+- `passed_again` は、走らせ直したチェックの結果です。結果が出なかった走らせ直しは `failed` にだけ数えます。
+  たとえば結果が出る前にブランチに新しいコミットが入ったときや、走らせ直したチェックは通ったが、別のチェックが
+  はじめて落ちて Blocked になったときです(同じ名前でも別の run のチェック、たとえば別の OS のジョブを含む)。
+  2 回目に落ちたテストが 1 回目と違っても、残す名前は 1 回目のものです
+- Blocked のカードを `task merge` でもう一度キューに入れると、同じコミットでもう 1 回走らせ直します。結果は、そのすぐ前の
+  走らせ直しの分として数えます
+- GitHub の呼び出しが増えるのは、チェックが落ちて走らせ直すときだけです。落ちたジョブ 1 本につき REST 1 回です
+  (どう読むかは [LLD の外部の呼び出し](architecture/lld.md#7-外部の呼び出し))
+- 数えるのは、このマシンの `events.jsonl` にある出来事だけです。ほかのマシンの task-hub が走らせ直した分は入りません
 
 ### 更新
 

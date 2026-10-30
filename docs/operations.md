@@ -133,7 +133,7 @@ Kiro Workflows の `watch` が呼ぶ `kiro/task-events-watch` も同じものを
 `replan`、実行がいつもより長引いているときの `slow`、実行が予算を超えたときの `over budget`([予算と残高](#予算と残高))、
 エージェントが利用の上限に当たったときの `limit`(`agent`、`stage`、`until`。[利用の上限で止まった](#利用の上限で止まった))、
 止まった実行を続けたときの `resumed`、マージキューの出来事(`queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、
-`merged`、`conflict`。[マージキュー](#マージキュー))、マージしたあとの GitHub のブランチの `branch`([マージしたあとのブランチ](#マージしたあとのブランチ))です。`reason`(Blocked の 1 行、`slow` では
+`ci-rerun-result`、`merged`、`conflict`。[マージキュー](#マージキュー))、マージしたあとの GitHub のブランチの `branch`([マージしたあとのブランチ](#マージしたあとのブランチ))です。`reason`(Blocked の 1 行、`slow` では
 `running 40 min, usually 8 min for kiro` のような経過時間といつもの時間)、`pr`、`decision`、`digest` は、あるときだけ
 入ります。マシンごとのファイルで、そのマシンの task-hub が動かしたものだけが書かれます。
 GitHub が Done にしたカード(PR のマージで Issue が閉じたときの「Item closed」や、GitHub 上で手で閉じたとき)も、
@@ -457,6 +457,10 @@ rerun = 1           ; 既定は 1: 落ちたチェックを同じコミットで
 `task merge` のキューの表示の `rerun` の欄に、走らせ直したコミットの先頭 7 文字が出ます(まだなら空)。
 `ci-rerun` は `[notify] events` の既定には入れていません。通知がほしいときは足してください。
 
+走らせ直すときは、落ちたジョブのログから落ちたテストの名前を読み、`ci-rerun` の `tests` に残します。走らせ直した結果
+(通った、また落ちた)は `ci-rerun-result` に残します。`task stats` の `flaky_tests` が、ときどき落ちるテストを多い順に
+出します([usage.md](usage.md#ときどき落ちるテストtask-stats-の-flaky_tests))。名前を読めなくても、走らせ直しは変わりません。
+
 ### 承認していない PR の競合
 
 キューに入れていない In review の PR が base と競合したら、`conflict` の出来事を 1 回書いて通知します(PR のコミットごとに
@@ -531,7 +535,8 @@ settings: <repo> keeps merged branches (GitHub's "Automatically delete head bran
 件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、差し戻しをやめた理由(`review_stops`。
 `limit`、`repeated`、`no change`、`not converging`、`few blocking`。[task-format.md](task-format.md#自動レビューの差し戻し))、
 Blocked の理由、replanner の判定、
-`slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
+`slow` の出来事が出た実行の数(自動で止めるかを決める材料)、マージキューが走らせ直したときに落ちたテスト(`ci_reruns`、
+`flaky_tests`。[usage.md](usage.md#ときどき落ちるテストtask-stats-の-flaky_tests))、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
 Blocked の理由は次のどれかです。
 

@@ -57,6 +57,7 @@ def opt(name):
 def fail(msg):
     print(msg, file=sys.stderr); sys.exit(1)
 out = None
+raw = None  # plain text, not JSON: a job's log
 code = 0
 cmd = a[:2]
 def git(*args):
@@ -381,6 +382,16 @@ elif cmd == ["run", "rerun"]:  # db["reruns"]: what was run again; db["rerun_fai
     if db.get("rerun_fails"):
         fail(db["rerun_fails"])
     db.setdefault("reruns", []).append({"run": a[2], "failed": "--failed" in a, "repo": opt("--repo")})
+elif a[0] == "api" and re.fullmatch(r"repos/[\w.-]+/[\w.-]+/actions/jobs/\d+/logs", a[1]):
+    # REST: a job's log as plain text (db["job_logs"][job id]); db["job_log_reads"]: the jobs read. Without a log,
+    # GitHub's 404 (its logs expired, or were deleted)
+    job = a[1].split("/")[-2]
+    db.setdefault("job_log_reads", []).append(job)
+    if job in db.get("job_logs", {}):
+        raw = db["job_logs"][job]
+    else:  # not fail(): the read is recorded all the same
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        code = 1
 else:
     fail(f"fake gh: unsupported {a}")
 tmp = f"{path}.{os.getpid()}.tmp"  # write, then rename: a reader never sees a half-written file
@@ -389,6 +400,8 @@ with open(tmp, "w") as f:
 os.replace(tmp, path)
 if out is not None:
     print(json.dumps(out))
+if raw is not None:
+    sys.stdout.write(raw)
 sys.exit(code)
 '''
 
@@ -7417,6 +7430,122 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.queue_events(tid), ["queued", "ci-wait", "merged", "Done"])  # ci-rerun is its own
         self.wait_for(lambda: self.notifications_of(tid, "Done"))
         self.assertEqual(self.notifications_of(tid, "ci-rerun"), [])  # not in the default [notify] events
+
+    def test_stats_lists_a_test_that_failed_and_passed_when_its_check_ran_again(self):
+        """The flaky test is named: the failed job's log says which test failed, and `task stats` counts it."""
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)  # job 1 of run 101
+        db = self.gh()
+        db["job_logs"] = {"1": "2026-10-30T01:00:00.1234567Z \x1b[36;1mpython3 tests/run.py -j 4\x1b[0m\n"
+                               "2026-10-30T01:20:00.1234567Z FAIL test_app.AppTest.test_flaky\n"
+                               "2026-10-30T01:20:00.1234567Z FAIL: test_flaky (test_app.AppTest.test_flaky)\n"
+                               "2026-10-30T01:20:00.1234567Z AssertionError: 'merged' not found in 'waiting'\n"
+                               "2026-10-30T01:30:00.1234567Z 900 tests, 1 failed, 2 skipped, 1800s with 4 jobs\n"
+                               "2026-10-30T01:30:00.1234567Z failed: test_app.AppTest.test_flaky\n"
+                               "2026-10-30T01:30:00.1234567Z FAILED (failures=1)\n"
+                               "2026-10-30T01:30:01.1234567Z ##[error]Process completed with exit code 1.\n"}
+        self.save_db(db)
+        self.task("merge", tid)
+        self.assertNotIn("job_log_reads", self.gh())  # nothing failed yet: no log is read
+        self.assertIn("test failed; running the failed jobs again once", self.task())
+        self.assertEqual(self.gh()["job_log_reads"], ["1"])  # one REST call per failed job, only when it failed
+        sha = self.on_origin(f"task/{tid}", "rev-parse").strip()
+        rerun, = [e for e in self.events_of(tid) if e["event"] == "ci-rerun"]
+        self.assertEqual(rerun["tests"], ["test_app.AppTest.test_flaky"])
+        self.assertEqual(rerun["reason"], f"test failed on {sha[:7]} (test_app.AppTest.test_flaky); running the "
+                                          "failed jobs again once")
+        db = self.gh()
+        db["checks"][self.pr(tid)["url"]] = [{"name": "test", "bucket": "pass",  # the second attempt passed
+                                              "link": "https://github.com/jyoka/app/actions/runs/101/job/2"}]
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual(self.gh()["job_log_reads"], ["1"])  # a check that passed reads no log
+        result, = [e for e in self.events_of(tid) if e["event"] == "ci-rerun-result"]
+        self.assertEqual((result["sha"], result["result"]), (sha, "passed"))
+        self.assertEqual(self.queue_events(tid), ["queued", "merged", "Done"])  # ci-rerun and its result are their own
+        out = self.task("stats")
+        self.assertIn("ci_reruns: 1 in the last 30 days (`--flaky-days`), 1 passed when run again, "
+                      "0 named no failed test", out)
+        self.assertIn("flaky_tests[1]{test,repo,failed,passed_again,last}:\n"
+                      f"  test_app.AppTest.test_flaky,jyoka/app,1,1,{result['time'][:10]}", out)
+        self.assertIn("flaky_tests[0]", self.task("stats", "--flaky-days", "0"))  # 0 days: none
+        self.assertIn("--flaky-days takes a whole number of days", self.task("stats", "--flaky-days", "x", code=2))
+
+    def test_a_rerun_goes_on_when_the_log_names_no_test_and_failing_again_counts_as_not_passed(self):
+        self.queue_on()
+        first, second = self.in_review("first", "second")
+        self.failing_check(first)  # its job's log is gone: GitHub answers 404
+        self.task("merge", first)
+        self.assertIn("running the failed jobs again once", self.task())
+        rerun, = [e for e in self.events_of(first) if e["event"] == "ci-rerun"]
+        self.assertNotIn("tests", rerun)  # the rerun is as before
+        self.assertEqual(self.gh()["reruns"], [{"run": "101", "failed": True, "repo": "jyoka/app"}])
+        self.failing_check(first, job=2)  # failed again on the same commit
+        self.task()
+        self.assertEqual(self.status(first), "Blocked")  # as before: twice on one commit blocks
+        self.assertEqual(self.gh()["job_log_reads"], ["1"])  # the second failure is not read: it blocks
+        db = self.gh()
+        db["job_logs"] = {"3": "--- FAIL: TestFlaky (0.01s)\n"}  # go test's line, without GitHub's time stamps
+        self.save_db(db)
+        self.failing_check(second, job=3, run=102)
+        self.task("merge", second)
+        self.task()
+        self.failing_check(second, job=4, run=102)
+        self.task()
+        result, = [e for e in self.events_of(second) if e["event"] == "ci-rerun-result"]
+        self.assertEqual(result["result"], "failed again")
+        out = self.task("stats")
+        self.assertIn("ci_reruns: 2 in the last 30 days (`--flaky-days`), 0 passed when run again, "
+                      "1 named no failed test", out)
+        self.assertIn(f"flaky_tests[1]{{test,repo,failed,passed_again,last}}:\n  TestFlaky,jyoka/app,1,0,", out)
+        self.task("merge", first)  # queued again by hand on the same commit: its checks run again once more
+        self.assertIn("running the failed jobs again once", self.task())
+        db = self.gh()
+        db["checks"][self.pr(first)["url"]][0]["bucket"] = "pass"
+        self.save_db(db)
+        self.assertIn("merged", self.task())
+        self.assertEqual([e["result"] for e in self.events_of(first) if e["event"] == "ci-rerun-result"],
+                         ["failed again", "passed"])
+        self.assertIn("ci_reruns: 3 in the last 30 days (`--flaky-days`), 1 passed when run again, "  # not 2: each
+                      "2 named no failed test", self.task("stats"))  # result counts for the rerun just before it
+
+    def test_a_check_of_the_same_name_failing_in_another_run_is_no_result_of_the_rerun(self):
+        self.queue_on()
+        tid, = self.in_review("first")
+        self.failing_check(tid)  # `test` of run 101 (macOS, say)
+        self.task("merge", tid)
+        self.task()
+        db = self.gh()  # run again, it passed; then `test` of another workflow's run (Windows) failed
+        db["checks"][self.pr(tid)["url"]] = [
+            {"name": "test", "bucket": "pass", "link": "https://github.com/jyoka/app/actions/runs/101/job/2"},
+            {"name": "test", "bucket": "fail", "link": "https://github.com/jyoka/app/actions/runs/300/job/1"}]
+        self.save_db(db)
+        self.task()
+        self.assertEqual(self.status(tid), "Blocked")  # as before
+        self.assertEqual([e for e in self.events_of(tid) if e["event"] == "ci-rerun-result"], [])
+        self.assertIn("--flaky-days takes a whole number", self.task("stats", "--flaky-days", "-1", code=2))
+        self.assertIn("ci_reruns: 1 in the last 1000000 days", self.task("stats", "--flaky-days", "1000000"))
+
+    def test_the_failed_tests_are_read_from_the_logs_of_the_test_runners_people_use(self):
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.root)}):
+            loader = importlib.machinery.SourceFileLoader("task_bin", str(TASK_HUB))
+            task = importlib.util.module_from_spec(importlib.util.spec_from_loader("task_bin", loader))
+            loader.exec_module(task)
+        log = "\n".join(["2026-10-30T01:00:00.1234567Z FAIL: test_old (test_app.AppTest)",  # unittest before 3.11
+                         "ERROR: test_new (test_app.AppTest.test_new)",  # from 3.11 on
+                         "FAILED tests/test_web.py::test_login - AssertionError: 401",  # pytest
+                         "FAILED (failures=1, errors=1)",  # unittest's closing line: no test
+                         "\x1b[31mtest parser::tests::reads_events ... FAILED\x1b[0m",  # cargo test, in colour
+                         "test result: FAILED. 41 passed; 1 failed",
+                         "    --- FAIL: TestQueue/second (0.02s)",  # go test, a subtest
+                         "failed: test_app.AppTest.test_new",  # tests/run.py names it again: kept once
+                         "2026-10-30T01:00:00.1234567Z ##[error]FAIL: test_noted (test_app.AppTest.test_noted)",
+                         "failed: 3",  # a count, not a test
+                         "ERROR could not reach the cache"])  # a message, not a test
+        self.assertEqual(task.test_names(log), ["test_app.AppTest.test_old", "test_app.AppTest.test_new",
+                                                "tests/test_web.py::test_login", "parser::tests::reads_events",
+                                                "TestQueue/second", "test_app.AppTest.test_noted"])
 
     def test_a_check_that_fails_again_on_the_same_commit_blocks_with_the_second_run(self):
         self.queue_on()
