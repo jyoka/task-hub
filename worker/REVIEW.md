@@ -22,9 +22,9 @@ https://github.com/google/elephant-goldfish-model (Apache License 2.0). The word
 
 After a retry, with `[runner] re_review = delta` (the default), one re-reviewer reads only the findings the work
 was sent back with and the change since the review that sent them, unless that change is big (task-hub's
-`review_scope` draws the line): it gets the part between the fifth and the sixth line in place of the first part,
-then the task, the comments and the findings as above, the Known issues of that review, the agent's report, and the
-diff of the change since. With `review_mode = goldfish` it gets the part below the sixth line too, and no report.
+`review_scope` draws the line): it gets the part between the fifth and the seventh line in place of the first part,
+then the task, the comments and the findings as above, the Known issues of that review, and the diff of the change
+since. In either `review_mode`, it gets no report, and the report is out of the worktree while it runs.
 With `re_review = full`, or past the line, the review after a retry reads the whole pull request again, as above.
 
 With `[runner] light_review = docs` (the default), a review of the whole pull request when every file it changes is
@@ -328,11 +328,10 @@ One line: exactly what the human must provide.
 
 ---
 
-The reviews of this run are made by Goldfish auditors, who know only the Goal and the code.
-You get no report from the agent that did the work, and no word of how it went: where the instructions above
-mention the report, there is none. Treat every
-claim you would have read there ("the tests pass", "this case is handled") as unchecked: check it yourself, by
-reading the code and running the tests of the code the change touches.
+You get no report from the agent that did the work, and no word of how it went: you know only the Goal, the
+findings and the code. Treat every claim you would have read in a report ("the tests pass", "this case is
+handled") as unchecked: check it yourself, by reading the code and running the tests of the code the change
+touches.
 
 ---
 

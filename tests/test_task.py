@@ -1945,12 +1945,11 @@ class TaskTest(unittest.TestCase):
         self.assertIn("+from the first run only", first)
         self.assertIn("You are the re-reviewer", second)
         self.assertNotIn("You are the adversarial reviewer", second)
-        self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Agent report")[0])
+        self.assertIn("Change hello.txt so it says fixed after review.", second.split("# Diff since")[0])
         diff = second.split("# Diff since the earlier review", 1)[1]
         self.assertIn("-hello from mode reviewfix\n+fixed after review", diff)  # the retry's change, from the tree
         self.assertRegex(diff, r"The earlier review saw the git tree [0-9a-f]{40}: `git diff [0-9a-f]{40}`")
         self.assertNotIn("from the first run only", second)  # the first run's work the first review passed
-        self.assertIn("# Agent report\n\n## Report", second)  # agent mode: the retry's report and its test results
         comment = self.comments(tid)[-1]
         self.assertEqual(self.review_line(comment), {"verdict": "pass", "blocking": 0, "minor": 0, "mode": "agent",
                                                      "attempt": 2, "scope": "delta"})
@@ -1959,6 +1958,26 @@ class TaskTest(unittest.TestCase):
         self.assertIn("Scope: the findings sent back", self.pr(tid)["body"])
         record = self.metrics(1)[-1]
         self.assertEqual((record["reviews"], record["review_scopes"]), (["needs changes", "pass"], ["full", "delta"]))
+
+    def test_the_review_after_a_retry_never_gets_the_agents_report_as_the_trial_had_it(self):
+        """agent mode, as goldfish: the re-reviewer checks the tests itself, in a worktree without the report
+        (jyoka/tasks#404 measured it with an empty report; the agent skipped checks it took from the report)."""
+        self.write_config(reviewer=True)
+        tid = self.new("reviewfix FIRSTFILE")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "In review")
+        first, second = self.reviewer_calls()
+        self.assertIn("# Agent report\n\n## Report\n\nAdded hello.txt. Ran the tests: 3 passed.", first["prompt"])
+        self.assertTrue(first["report"])  # the first review as before: the report, in the prompt and the worktree
+        self.assertIn("You are the re-reviewer", second["prompt"])
+        self.assertNotIn("# Agent report", second["prompt"])
+        self.assertNotIn("Ran the tests: 3 passed", second["prompt"])  # the report's claim: its own to check
+        self.assertNotIn("hello.txt: wording", second["prompt"])  # its Please review
+        self.assertIn("You get no report from the agent", second["prompt"])
+        self.assertFalse(second["report"])  # nor in the worktree it inspects
+        comment = self.comments(tid)[-1]
+        self.assertIn("Added hello.txt. Ran the tests: 3 passed.", comment)  # the report, put back
+        self.assertEqual(self.review_line(comment)["scope"], "delta")
 
     def test_the_review_after_a_retry_gets_the_earlier_minor_findings_and_stops_on_again(self):
         self.write_config(reviewer=True)
