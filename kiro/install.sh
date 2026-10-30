@@ -943,11 +943,17 @@ EOF
       "時間をおいて、もう一度実行してください"
     sleep 1  # bootout ends the old one in the background
   done
+  # A slow Mac can take a while to start it: wait up to 30 seconds, saying so after 2, and go on as soon as it answers
   i=0
-  while [ "$i" -lt 20 ] && [ ! -s "$ST_STATUS" ]; do sleep 0.25; i=$((i + 1)); done
+  while [ "$i" -lt 120 ] && [ ! -s "$ST_STATUS" ]; do
+    [ "$i" = 8 ] && say "$label: 起動キー ${keyname} の登録を待っています(30 秒まで)…"
+    sleep 0.25; i=$((i + 1))
+  done
+  [ -s "$ST_STATUS" ] || die "Slackトリアージの起動キー ${keyname} を登録できませんでした(起動キーを待つ常駐が、30 秒待っても登録の結果を書きませんでした)" \
+    "もう一度実行してください。続くときは task-hub の担当者に知らせてください"
   case $(cat "$ST_STATUS" 2>/dev/null) in
     ok*) ;;
-    *) die "Slackトリアージの起動キー ${keyname} を登録できませんでした($(cat "$ST_STATUS" 2>/dev/null || echo 応答なし))" \
+    *) die "Slackトリアージの起動キー ${keyname} を登録できませんでした($(cat "$ST_STATUS"))" \
          "slack-triage key t のように別のキーにしてから、もう一度実行してください" ;;
   esac
   printf '%s\n' "$sum" > "$sumfile"

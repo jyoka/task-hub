@@ -25,6 +25,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -349,13 +350,20 @@ class InstallTest(unittest.TestCase):
         self.script("lipo", '#!/bin/sh\n[ "$1" = -create ] || exit 0\ncp "$4" "$3"\n')
         self.launchctl_calls, self.launchd_loaded = root / "launchctl-calls.txt", root / "launchd-loaded"
         # Slack triage's agent (com.task-hub.slack-triage) has its own log and state; when it is bootstrapped, the
-        # fake writes the status the real program writes once it holds the key
+        # fake writes the status the real program writes once it holds the key: that many seconds later when
+        # slack-triage-slow has a number (a slow Mac), never when slack-triage-silent is there
         self.st_calls, self.st_loaded = root / "slack-triage-launchctl-calls.txt", root / "slack-triage-loaded"
         self.st_status = self.home / ".local/state/task-hub/slack-triage-hotkey.status"
+        self.st_slow, self.st_silent = root / "slack-triage-slow", root / "slack-triage-silent"
         self.script("launchctl", '#!/bin/sh\ncase "$*" in\n  *slack-triage*)\n'
                                  f'    echo "$*" >> "{self.st_calls}"\n    case $1 in\n'
                                  f'      print) [ -e "{self.st_loaded}" ] ;;\n'
-                                 f'      bootstrap) touch "{self.st_loaded}"; echo "ok ctrl,opt+s" > "{self.st_status}" ;;\n'
+                                 f'      bootstrap) touch "{self.st_loaded}"\n'
+                                 f'        if [ -e "{self.st_silent}" ]; then :\n'
+                                 f'        elif [ -e "{self.st_slow}" ]; then\n'
+                                 f'          (sleep "$(cat "{self.st_slow}")"; echo "ok ctrl,opt+s" > "{self.st_status}") '
+                                 '>/dev/null 2>&1 &\n'
+                                 f'        else echo "ok ctrl,opt+s" > "{self.st_status}"; fi ;;\n'
                                  f'      bootout) rm -f "{self.st_loaded}" ;;\n'
                                  f'      kickstart) echo "ok ctrl,opt+s" > "{self.st_status}" ;;\n'
                                  '      *) exit 2 ;;\n    esac\n    exit ;;\nesac\n'
@@ -1691,6 +1699,32 @@ class InstallTest(unittest.TestCase):
         lines = self.doctor(1)
         i = lines.index("× 11. Slackトリアージ: 起動キー ⌃⌥T を登録できていません")
         self.assertEqual(lines[i + 1], "    → slack-triage key t のように別のキーにしてください")
+
+    def test_slack_triage_key_on_a_slow_mac_is_waited_for_up_to_30_seconds(self):
+        # the agent's program writes its status 11 seconds after launchd starts it (a busy Mac): more than the
+        # installer waited before (5 seconds), and more than Windows' 10
+        self.st_slow.write_text("11\n")
+        started = time.monotonic()
+        lines = self.install()
+        self.assertGreater(time.monotonic() - started, 11)
+        i = lines.index("11. Slackトリアージ: 起動キー ⌃⌥S の登録を待っています(30 秒まで)…")
+        self.assertTrue(lines[i + 1].startswith("11. Slackトリアージ: 入れました("), lines)
+        self.assertIn("Slack のスレッドをコピーして ⌃⌥S で使えます", lines[i + 1])
+        self.assertEqual(self.st_status.read_text(), "ok ctrl,opt+s\n")
+        self.assertIn("○ 11. Slackトリアージ: Slack のスレッドをコピーして ⌃⌥S で使えます", self.doctor(0))
+
+        # it never answers: after 30 seconds, the stop says what it waited for and how long
+        self.st_slow.unlink()
+        self.st_silent.touch()
+        self.change_origin("slack-triage/hotkey/main.swift",
+                           (REPO / "slack-triage/hotkey/main.swift").read_text() + "// changed\n")  # started again
+        started = time.monotonic()
+        lines = self.install(1)
+        self.assertGreater(time.monotonic() - started, 30)
+        self.assertEqual(lines[-2:], [
+            "11. Slackトリアージ: 止まりました。Slackトリアージの起動キー ⌃⌥S を登録できませんでした"
+            "(起動キーを待つ常駐が、30 秒待っても登録の結果を書きませんでした)",
+            "次にすること: もう一度実行してください。続くときは task-hub の担当者に知らせてください"])
 
     def test_slack_triage_program_is_built_again_only_when_its_source_changed(self):
         self.install()

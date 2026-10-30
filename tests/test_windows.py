@@ -1126,6 +1126,30 @@ class SetupTest(unittest.TestCase):
         self.assertIn("× 11. Slackトリアージ: task-hub 本体がないので確かめていません", self.doctor(code=1))
 
     @unittest.skipIf(os.environ.get("TASK_TEST_NO_DESKTOP"), "a hotkey needs a desktop (tests/ci/as-standard-user.ps1)")
+    def test_slack_triage_key_that_is_slow_to_start_is_waited_for(self):
+        # the program waiting for the key holds it 12 seconds after it starts, as PowerShell's start and Add-Type can
+        # on a busy PC: more than the installer waited before (10 seconds). The installer clones the program from
+        # origin, so the slow one is a commit there: the real program, with a sleep before it registers the key
+        self.ready()
+        seed = self.root / "seed"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(seed)], check=True, capture_output=True)
+        hotkey = seed / "windows/slack-triage-hotkey.ps1"
+        mark = b"$ErrorActionPreference = 'Stop'"
+        self.assertIn(mark, hotkey.read_bytes())
+        hotkey.write_bytes(hotkey.read_bytes().replace(mark, mark + b"; Start-Sleep -Seconds 12", 1))
+        git_id = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
+                  "GIT_COMMITTER_EMAIL": "t@e"}
+        for args in (["commit", "-qam", "a slow start"], ["push", "-q", "origin", "HEAD"]):
+            subprocess.run(["git", "-C", str(seed), *args], check=True, capture_output=True, env={**os.environ, **git_id})
+        self.slack_config(owner_name="佐藤 花子", hotkey_key="n", hotkey_mods="ctrl,alt,shift")  # a key of this test's
+        started = time.monotonic()
+        out = self.install()
+        self.assertGreater(time.monotonic() - started, 12)
+        self.assertIn("11. Slackトリアージ: 起動キーの登録を待っています(30 秒まで)…\n11. Slackトリアージ: 入れました(", out)
+        self.assertIn("Slack のスレッドをコピーして Ctrl+Alt+Shift+N で使えます。止めるときは slack-triage off", out)
+        self.assertEqual(self.hotkey_status(), "ok Ctrl+Alt+Shift+N")
+
+    @unittest.skipIf(os.environ.get("TASK_TEST_NO_DESKTOP"), "a hotkey needs a desktop (tests/ci/as-standard-user.ps1)")
     def test_starting_at_logon_with_a_user_folder_name_no_code_page_has(self):
         # on an English Windows a Japanese name is such a name: the shortcut must not lose it
         self.ready()

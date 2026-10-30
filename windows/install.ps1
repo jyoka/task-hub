@@ -990,8 +990,17 @@ function Stage-SlackTriage {
   $loops | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $statusFile -ErrorAction SilentlyContinue
   Start-Process powershell.exe -ArgumentList $arguments -WindowStyle Hidden
-  for ($i = 0; $i -lt 40 -and -not [IO.File]::Exists($statusFile); $i++) { Start-Sleep -Milliseconds 250 }
-  $status = if ([IO.File]::Exists($statusFile)) { [IO.File]::ReadAllText($statusFile).Trim() } else { '応答なし' }
+  # PowerShell's start and Add-Type can take a while on a slow or busy PC: wait up to 30 seconds, saying so after 2, and
+  # go on as soon as it answers
+  for ($i = 0; $i -lt 120 -and -not [IO.File]::Exists($statusFile); $i++) {
+    if ($i -eq 8) { Write-Host "$($script:label): 起動キーの登録を待っています(30 秒まで)…" }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not [IO.File]::Exists($statusFile)) {
+    Die 'Slackトリアージの起動キーを登録できませんでした(起動キーを待つ常駐が、30 秒待っても登録の結果を書きませんでした)' `
+      'もう一度実行してください。続くときは task-hub の担当者に知らせてください'
+  }
+  $status = [IO.File]::ReadAllText($statusFile).Trim()
   if ($status -like 'conflict *') {
     Die "起動キー $($status.Substring(9)) は、ほかのアプリが使っています" `
       'slack-triage key t のように別のキーにしてから、もう一度実行してください'
