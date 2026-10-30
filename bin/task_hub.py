@@ -2732,8 +2732,8 @@ def held_report_file(t):
 
 def hide_report(t):
     """Move the agent's report out of the worktree until unhide_report: a Goldfish auditor judges the Goal and the
-    code, and a light reviewer the Goal and the diff, never the report, and would find the report there with one
-    `ls -a`."""
+    code, a light reviewer the Goal and the diff, and a re-reviewer the findings and the code, never the report, and
+    would find the report there with one `ls -a`."""
     wt = Path(t["worktree"])
     text = agent_file(wt / REPORT_FILE)
     if text is not None:
@@ -3879,20 +3879,20 @@ def clip_diff(diff):
     return limit, diff[:limit] + "\n... (diff truncated)\n" if len(diff) > limit else diff
 
 
-def build_re_review_prompt(t, goal, report, diff, tree, sent, minor=(), comments="", goldfish=False):
+def build_re_review_prompt(t, goal, diff, tree, sent, minor=(), comments=""):
     """The prompt of a review after a retry that reads only the findings the last review sent the work back with
     (sent; minor: its Known issues) and diff, the change since the worktree it saw (tree, review_scope):
-    worker/REVIEW.md's fifth part in place of its first. goldfish ([runner] review_mode = goldfish): its sixth part
-    too, and no report, as an auditor gets none; else the agent's report, with the tests it ran."""
-    _, about_comments, about_sent, _, instructions, about_goldfish = instruction_parts(WORKER_REVIEW, 6)
+    worker/REVIEW.md's fifth and sixth parts in place of its first. No report, in either [runner] review_mode: the
+    re-review jyoka/tasks#404 measured had none, and it runs the tests itself (task-hub has no result of its own to
+    give: the log keeps the steps, not their output, and the CI runs once the PR is open)."""
+    _, about_comments, about_sent, _, instructions, about_no_report = instruction_parts(WORKER_REVIEW, 6)
     _, diff = clip_diff(diff)  # cut: the re-reviewer can run the git diff itself
-    given = [] if goldfish else ["", "# Agent report", "", report.strip() or "(no report)"]
-    return "\n".join([instructions, *(["", about_goldfish] if goldfish else []), "", "# Task", "",
+    return "\n".join([instructions, "", about_no_report, "", "# Task", "",
                       f"Task {t['id']}: {t['title']}", f"Repository: {t['repo']}", f"Branch: {t['branch']}", "",
                       "## Goal", "", goal.strip(), *(["", about_comments, "", comments] if comments else []),
                       "", about_sent, "", *sent,
                       *(["", "## Known issues of the earlier review", "", *minor] if minor else []),
-                      *given, "", "# Diff since the earlier review", "",
+                      "", "# Diff since the earlier review", "",
                       f"The earlier review saw the git tree {tree}: `git diff {tree}` shows this change in full.", "",
                       "```diff",
                       diff if diff.strip() else "(no change since the earlier review)", "```", ""])
@@ -3980,7 +3980,7 @@ def run_review(t, report, say, usage=None, state=None):
 
     def launch(prompt, label, hide=mode == "goldfish"):
         shared_unlink(wt / REVIEW_FILE)
-        if hide:  # out of the prompt, and out of the worktree the auditor (or the light reviewer) inspects
+        if hide:  # out of the prompt, and out of the worktree the auditor (light reviewer, re-reviewer) inspects
             hide_report(t)
         try:
             snap = hold_snapshot(t)
@@ -3998,10 +3998,11 @@ def run_review(t, report, say, usage=None, state=None):
     if scope == "light":  # one reviewer, in either mode, of the Goal and the diff: the review jyoka/tasks#404 measured
         result = launch(build_light_review_prompt(t, i["body"], diff, sent, comments), "light reviewer", hide=True)
         result.mode = mode
-    elif scope == "delta":  # one reviewer, in either mode: the re-review jyoka/tasks#404 measured. It checks the last
-        # review's findings (state["fixes"]): the earlier ones that review found fixed are not in its change since
-        result = launch(build_re_review_prompt(t, i["body"], report, since, state["tree"], state.get("fixes") or sent,
-                                               state.get("minor", []), comments, mode == "goldfish"), "re-reviewer")
+    elif scope == "delta":  # one reviewer, in either mode, without the report: the re-review jyoka/tasks#404
+        # measured. It checks the last review's findings (state["fixes"]): the earlier ones that review found fixed
+        # are not in its change since
+        result = launch(build_re_review_prompt(t, i["body"], since, state["tree"], state.get("fixes") or sent,
+                                               state.get("minor", []), comments), "re-reviewer", hide=True)
         result.mode = mode
     else:
         result = review_by(mode, launch, t, i["body"], report, diff, sent, comments, i.get("readiness_comment", ""),

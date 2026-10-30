@@ -347,7 +347,7 @@ flowchart TB
     report -- "いいえ" --> finish
     report -- "はい" --> review{"reviewer あり?"}
     review -- "なし" --> finish
-    review -- "あり" --> rv["run_review → review_scope<br/>full: review_by。snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews<br/>delta(差し戻しの後、変更が線の内): build_re_review_prompt で 1 体<br/>light(full のうち PR が文書だけ。light_scope、is_doc): build_light_review_prompt で 1 体(レポートを外す)"]
+    review -- "あり" --> rv["run_review → review_scope<br/>full: review_by。snapshot(snap に記録)→ reviewer → restore<br/>goldfish: 視点ごとに順にこれを繰り返し(その間レポートを外す)、combine_reviews<br/>delta(差し戻しの後、変更が線の内): build_re_review_prompt で 1 体(レポートを外す)<br/>light(full のうち PR が文書だけ。light_scope、is_doc): build_light_review_prompt で 1 体(レポートを外す)"]
     rv -- "pass、minor(Known issues)だけ" --> finish
     rv -- "needs changes で review_stop が空" --> retry["retry<br/>差し戻しつきで run_worker<br/>変えた行数を数える"]
     retry -- "外から kill された、watchdog が止めた(1 回だけ)" --> retry
@@ -746,7 +746,7 @@ sequenceDiagram
 | `share/prompts/<id>-comments.md` | `launch`(渡す人のコメントがあるときだけ。ないときは消す) | `build_review_prompt`、`build_re_review_prompt` | Markdown(`comments_text`) |
 | `share/prompts/<id>-retry.md` | `review_loop`(差し戻しの前)。`launch` が消す | 再開した `task _run`(`retry` から) | Markdown(差し戻しのプロンプト) |
 | `share/prompts/<id>-review.json` | `review_loop`(差し戻しの前)、`review_retry`(差し戻しのあと)。`launch` が消す | 再開した `task _run`(`review`、`retry` から)の `review_stop` | JSON。`sent`(差し戻した指摘の列)、`sizes`(差し戻しごとに変えた行数)、`tree`(今の差し戻しの前の worktree の tree。`[runner] re_review = delta` のレビューの差分の起点)、`fixes` と `minor`(差し戻した前のレビューの blocking と Known issues。delta のレビューに渡す。古いファイルにない欄は空で、`fixes` が空なら `sent` を渡す) |
-| `share/prompts/<id>-report.md` | `hide_report`(goldfish の視点を起動する前に、worktree の `.task-report.md` を移す)。`unhide_report`(視点が終われば、`review`、`finishing` から再開した `task _run`)が worktree に戻して消す。`launch` と、ほかの段から始まる `task _run` も消す | `unhide_report`、`sync`(死んだ実行のレポートを Issue に書くとき) | Markdown(実装エージェントのレポート) |
+| `share/prompts/<id>-report.md` | `hide_report`(goldfish の視点、light と delta のレビュアーを起動する前に、worktree の `.task-report.md` を移す)。`unhide_report`(視点が終われば、`review`、`finishing` から再開した `task _run`)が worktree に戻して消す。`launch` と、ほかの段から始まる `task _run` も消す | `unhide_report`、`sync`(死んだ実行のレポートを Issue に書くとき) | Markdown(実装エージェントのレポート) |
 | `share/prompts/<id>-finish.json` | `task _run`(`finishing` の前)。`launch` が消す | 再開した `task _run`(`finishing` から) | `{code, review, blocked, verdict}`: エージェントの終了コード、自動レビューの節、レビューの Blocked の理由、Review 欄に入れる最後の判定(レビューがなければ空。古い記録にはない) |
 | `state/install-manifest.json` | Mac: `kiro/install.sh`、`note_install_copy`(フックとワークフローの SHA-256 だけ)。Windows: `windows/install.ps1`、`note_install_copy` | アンインストール、診断、インストーラ自身 | JSON。`python`(`task` が使う Python)、`installed`(インストーラが置いたものだけ。すでにあった git、Python、gh は書かない。`uv-python` は uv にその版がなかったときだけ。`git-credential` はインストーラの gh を git のログインに使う設定をしたときの gh。アンインストールはその gh を指す `credential.<URL>.helper` だけを外す。Mac も同じ)、`sha256`。Windows の `installed` は `git`、`git-path`、`uv`、`uv-python`、`gh`、`git-credential`、`kiro-cli`、`kiro-cli-path`、`task-hub`、`task`(`task.cmd`)、`task-sh`(Git Bash 用)、`user-path`(`*-path` はユーザーの PATH に足した項目)、`config`(作ったときだけ)、`kiro-skill-task`、`kiro-skill-chief`(ジャンクション)、`kiro-steering`、`kiro-hook`、`kiro-workflow`(コピー。`sha256` に中身。フックとワークフローは `task _kiro-copy` が書く Windows の形)、`kiro-settings`(Workflows を有効にした settings.json。消さない)、`watch`(`scheduled-task:task-hub watch` か、スタートアップの `.lnk`)、`slack-triage`(`slack-triage.cmd`)、`slack-triage-autostart`(`scheduled-task:task-hub slack-triage` か `.lnk`) |
 | `state/gh-login.ps1`、`state/kiro-login.ps1` | `windows/install.ps1`(ログインが要るとき) | 別の PowerShell の窓(動き出すと自分を消す)。ログインが済むとインストーラが消す | PowerShell(BOM 付き UTF-8) |
@@ -1016,7 +1016,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
 20. `[runner] review_mode = goldfish` の視点は、実装エージェントのレポートをプロンプトでも worktree のファイル(`.task-report.md`)
     でも受け取らない。視点が動く間に実行が止まっても、レポートは失われず、再開した実行か `sync` が Issue に書く
 21. 差し戻しの後のレビューは、`[runner] re_review = delta`(既定)なら、前のレビューが見た tree(`prompts/<id>-review.json` の
-    `tree`)からの差分、前のレビューが差し戻した指摘と Known issues だけを 1 体で読む。その差分が `RE_REVIEW_LINES`(300 行)か
+    `tree`)からの差分、前のレビューが差し戻した指摘と Known issues だけを 1 体で読む(`build_re_review_prompt`。
+    worker/REVIEW.md の 5 つ目と 6 つ目の部分)。`review_mode` によらず、実装エージェントのレポートはプロンプトでも worktree
+    からも渡さない。テストの結果も渡さず、レビュアーが自分でテストを動かす。その差分が `RE_REVIEW_LINES`(300 行)か
     `RE_REVIEW_FILES`(10 ファイル)を超えるとき、`research` のタスク、`tree` がないか git で読めないとき、`full` では PR の全部を読む。どちらで
     読んだかは、レビューの節の `Scope:` の行(delta と、線を超えて全部を読んだとき)、機械が読む 1 行の `scope`、
     `metrics.jsonl` の `review_scopes` に必ず残る。`(again)` で差し戻しが止まるのは full と同じ
