@@ -1517,17 +1517,21 @@ class TaskTest(unittest.TestCase):
 
     def wait_ended(self, tid):
         """Wait for the run's process to end: wait returns once the card moved, and the run still writes its record,
-        its stage and METRICS after that. Before a check reads them, or before the next step needs the run gone."""
-        self.wait_for(lambda: (pid := self.run_state(tid).get("pid")) and process_gone(int(pid)))
+        its stage and METRICS after that, runs the replanner of a Blocked card, and moves the team's card. Before a
+        check reads them, before a check that nothing more came, or before the next step needs the run gone (`task
+        done`, a start, a Done card's cleanup). Never a sleep: on a busy machine (CI) the run takes longer."""
+        self.wait_for(lambda: (pid := self.run_state(tid).get("pid")) and process_gone(int(pid)),
+                      what=lambda: f"the run of task {tid} to end; run record: {self.run_state(tid)}")
 
-    def wait_for(self, check, timeout=20):
-        """The replanner runs after the card is already Blocked."""
+    def wait_for(self, check, timeout=20, what=None):
+        """Wait until check() is true: the way to wait for something a background process does (the replanner runs
+        after the card is already Blocked). what: a function saying what it waited for, for the failure."""
         end = time.time() + timeout
         while time.time() < end:
             if check():
                 return
             time.sleep(0.2)
-        self.fail("timed out")
+        self.fail(f"timed out after {timeout}s" + (f" waiting for {what()}" if what else ""))
 
     def pr(self, tid):
         return self.gh()["prs"].get(f"jyoka/app task/{tid}")
@@ -1631,6 +1635,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn(pr["url"], report)
         self.assertIn("hello.txt", self.origin_files(f"task/{tid}"))
         self.assertNotIn(".task-report.md", self.origin_files(f"task/{tid}"))
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         # merged: GitHub closes the Issue and its "Item closed" workflow moves the card to Done;
         # the next sync notices the card left the open columns and cleans up locally
         db = self.gh()
@@ -3029,7 +3034,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.wait(tid), "Blocked")  # the fake agent blocks on the same thing again
         self.assertIn("# Replanner notes", self.work_prompts()[1])
         self.assertIn("The app is called app", self.work_prompts()[1])
-        time.sleep(1)
+        self.wait_ended(tid)  # the replanner runs after the card moved: a second replan would be there by then
         self.assertEqual(len(self.replans(tid)), 1)  # same reason again: no second replan
 
     def test_replanner_answer_that_cannot_be_verified_goes_to_the_human(self):
@@ -3134,7 +3139,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("noreport REPLAN=answered")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
-        time.sleep(1)
+        self.wait_ended(tid)  # the replanner runs after the card moved: its comment would be there by then
         self.assertEqual(self.replans(tid), [])
 
     def use_herdr(self, workspaces=(), panes=()):
@@ -3548,7 +3553,8 @@ class TaskTest(unittest.TestCase):
             self.wait(ok)
             self.task("start", stuck)
             self.wait_for(lambda: len(lines) >= 2)
-            time.sleep(1.5)  # anything else would have arrived by now
+            self.wait_ended(ok), self.wait_ended(stuck)  # a run still finishing could write one more event
+            time.sleep(1.5)  # anything else would have arrived by now: --follow reads the events about once a second
         finally:
             follow.terminate()
             follow.wait()
@@ -3868,6 +3874,7 @@ class TaskTest(unittest.TestCase):
         self.task("start", stuck)
         self.wait(ok), self.wait(stuck)
         self.wait_for(lambda: self.notifications())
+        self.wait_ended(ok), self.wait_ended(stuck)  # every notification is sent by now; the notifier is not waited for
         time.sleep(0.5)  # a late In review notification would show up here
         self.assertEqual([n[-2] for n in self.notifications()], [f"#{stuck} Blocked: Add hello"])
 
@@ -4194,6 +4201,7 @@ class TaskTest(unittest.TestCase):
             self.wait_for(lambda: "This pane stays open" in self.task("log", tid))
             self.assertLess(time.time() - began, 8)  # the ntfy request alone may take 10 seconds
             self.wait_for(lambda: self.notifications_of(tid, "Blocked"))  # this machine's still shows
+            self.wait_ended(tid)  # the sync cleans up, and writes Done, only once the run has ended
             began = time.time()
             self.move(tid, "Done")
             self.task()  # the sync writes Done, and notifies
@@ -5116,6 +5124,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         wt = self.root / ".local/share/task-hub/worktrees" / tid
         db = self.gh()
         db["issues"][tid]["state"] = "CLOSED"  # merged or closed by hand on GitHub; "Item closed" moves the card
@@ -5138,6 +5147,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         db = self.gh()
         del db["items"][f"PVTI_{tid}"]
         self.save_db(db)
@@ -5149,6 +5159,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "In review")
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         wt = self.root / ".local/share/task-hub/worktrees" / tid
         ready = self.new("ok", "Another")
         self.move(ready, "Ready")
@@ -5521,9 +5532,7 @@ class TaskTest(unittest.TestCase):
     def test_ctrl_c_stops_the_agent_but_keeps_its_work(self):
         tid = self.new("slow")
         self.task("start", tid)
-        end = time.time() + 15
-        while time.time() < end and "waiting" not in self.task("log", tid):
-            time.sleep(0.2)
+        self.wait_for(lambda: "waiting" in self.task("log", tid), timeout=15)
         os.kill(int(json.loads(self.run_file(tid).read_text())["pid"]), signal.SIGINT)
         self.assertEqual(self.wait(tid), "Blocked")
         self.assertTrue(self.pr(tid)["isDraft"])
@@ -6343,12 +6352,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("outage")
         self.task("start", tid)
         run = json.loads(self.run_file(tid).read_text())
-        end = time.time() + 20
-        while time.time() < end:  # until the run process has ended
-            pid = json.loads(self.run_file(tid).read_text()).get("pid")
-            if pid and subprocess.run(["ps", "-p", pid], capture_output=True).returncode != 0:
-                break
-            time.sleep(0.2)
+        self.wait_ended(tid)
         log = self.task("log", tid)
         self.assertIn("could not finish", log)
         report = Path(run["worktree"]) / ".task-report.md"
@@ -6421,6 +6425,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
         self.task("start", tid)
         self.wait(tid)
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         self.task()
         self.assertEqual(self.status(tid), "In review")  # not merged yet
         db = self.gh()
@@ -6453,6 +6458,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok")
         self.task("start", tid)
         self.wait(tid)
+        self.wait_ended(tid)  # a run still finishing is not cleaned up: its last record would bring the run file back
         self.task()
         self.assertEqual(self.status(tid), "In review")  # not merged yet
         worktree = Path(self.run_state(tid)["worktree"])
@@ -6763,6 +6769,7 @@ class TaskTest(unittest.TestCase):
         tid = self.new("ok", "Add hello", "jyoka/app", "--base", "feat/x")
         self.task("start", tid)
         self.wait(tid)
+        self.wait_ended(tid)  # a run still finishing would write its run file again
         self.run_file(tid).unlink()  # the task ran on another machine
         db = self.gh()
         db["prs"][f"jyoka/app task/{tid}"].update(state="MERGED", merged=True)
@@ -7824,6 +7831,7 @@ class TaskTest(unittest.TestCase):
         for tid in (by_github, by_hand):
             self.task("start", tid)
             self.assertEqual(self.wait(tid), "In review")
+            self.wait_ended(tid)  # `task done` and the cleanup of a Done card refuse a run still finishing
         for tid in (by_github, by_hand):  # no sync between them and the checks below: the merge watch never saw them
             self.merge_on_github(tid)
         # its "Closes ..." closed the Issue, and GitHub's "Item closed" moved the card to Done
@@ -7983,9 +7991,7 @@ class TaskTest(unittest.TestCase):
         self.write_config(extra=f"\n[ide]\nopen = {self.root}/fakebin/fake-ide --flag {{path}}\n")
         out = self.task("open", "7")
         self.assertIn("opening", out)
-        end = time.time() + 5
-        while time.time() < end and not self.ide_calls():
-            time.sleep(0.05)
+        self.wait_for(self.ide_calls, timeout=5)
         self.assertEqual(self.ide_calls(), [["--flag", str(wt)]])
 
     def test_open_without_ide_config_prints_the_path_and_launches_nothing(self):
@@ -8278,9 +8284,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(fields["template"], "bug_report.yml")
         self.assertEqual(fields["version"], self.task("--version").strip())
         self.assertRegex(fields["os"], r"^(macOS|Linux|Windows) .*, Python 3\.")
-        end = time.time() + 5
-        while time.time() < end and not self.ide_calls():
-            time.sleep(0.05)
+        self.wait_for(self.ide_calls, timeout=5)
         self.assertEqual(self.ide_calls(), [[url]])  # the whole URL as one argument, & and all
 
     def test_feedback_prints_the_url_when_no_browser_can_open(self):
@@ -9386,7 +9390,10 @@ class TaskTest(unittest.TestCase):
         (self.root / "goldfish-calls.txt.mode").write_text("nogo")  # the same Goal gets a NO-GO this time
         out = self.task("check", tid, code=1)
         self.assertIn('"Readiness" field is TEXT', out + self.stderr[-1])
-        self.assertEqual(self.readiness_comments(tid)[-1].split("\n")[1], "Verdict: NO-GO")
+        # the whole comment when it fails, with a blocked check's why. Once in CI (#413), before GOLDFISH_WORKTREES:
+        # the critics' `git worktree add` at once failed on each other's .git/worktrees/<id>-check-<role>/commondir
+        self.assertEqual(self.readiness_comments(tid)[-1].split("\n")[1], "Verdict: NO-GO",
+                         self.readiness_comments(tid)[-1])
         self.close(first)
         out = self.task()
         self.assertIn(f"readiness: its Goal got NO-GO (`task check {tid}`)", out)

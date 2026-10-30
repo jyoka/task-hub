@@ -140,6 +140,10 @@ python3 -m unittest tests.test_task.TaskTest.test_version -v
   そう書きます([docs/lessons.md](docs/lessons.md))
 - Windows で動きが変わる部分(プロセス、パス、シェル)は、`bin/task_hub.py` の `WINDOWS` で分けます
   ([docs/windows.md](docs/windows.md))
+- 後ろで動く実行は、`time.sleep` で待たずに、出来事を待ちます。CI は手元より遅く、決まった時間では間に合わないためです。
+  `tests/test_task.py` の `wait`(カードが動いた)、`wait_ended`(実行のプロセスが終わった)、`wait_for`(ほかの出来事)を
+  使います。`task done`、次の開始、Done のカードの片付け、「もう何も来ない」の確認の前は、`wait_ended` です
+  ([docs/lessons.md](docs/lessons.md))
 
 ### docs だけの PR
 
