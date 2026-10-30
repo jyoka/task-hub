@@ -207,16 +207,20 @@ task-hub は、どの判定でもカードを動かしません。NO-GO のカ�
 
 ### 開始の門: [runner] readiness
 
+この節が、開始の門の既定値と振る舞いの正式な定義です。ほかの文書はここを指し、コード(`READINESS_DEFAULT`、
+`readiness_mode`)はここに合わせます([決定事項 39](design.md#決定事項))。既定は `warn` です。`[runner] readiness` を書かなければ
+`warn` で動きます。今までどおり Issue を読み足したくないときは `readiness = off` と書きます。
+
 ```ini
 [runner]
-readiness = off     ; off(既定)/ warn / require
+readiness = warn    ; off / warn(既定)/ require
 checker =           ; task check のエージェント。空か agent = カードの Agent 欄
 ```
 
 | 値 | Ready のカード | オートパイロット |
 |---|---|---|
-| `off`(既定) | 今までどおり。Issue を読みに行くこともない | 今までどおり |
-| `warn` | 今の Goal への GO がなくても始める。そのとき `readiness` イベントを書き、`task` の出力に `readiness:` の行を出す。`task list` に `readiness` の列が付く | 今までどおり |
+| `off` | 門を使わない。Issue を読みに行くこともない | 今までどおり |
+| `warn`(既定) | 今の Goal への GO がなくても始める。そのとき `readiness` イベントを書き、`task` の出力に `readiness:` の行を出す。`task list` に `readiness` の列が付く | 今までどおり |
 | `require` | 今の Goal への GO がなければ始めない。`waits_for` に理由(`readiness: its Goal changed since its last check (`task check 12`)` など)を出し、`task check` で GO になれば次の確認で始まる | GO のない Backlog のカードを Ready に移さない |
 
 - 「今の Goal への GO」は、最新の判定コメントが GO で、そのハッシュが今の Goal のハッシュと同じことです。
@@ -415,15 +419,27 @@ blocking がなく minor だけなら、レビューは通過です。判定が 
 だけなら通過として扱います。カードは In review に進み、minor の指摘は PR の本文と Issue のコメントの
 「Known issues」に残ります。[オートパイロット](autopilot.md)の対象なら、この PR もマージキューに入ります。
 
-`needs changes` で差し戻す回数は `[runner] review_retries` で決めます。既定は 2 回、0 にすると差し戻しません。
-次のどれかに当たると、回数が残っていても差し戻しをやめて Blocked にします。
+この節が、自動レビューの差し戻しを止める条件の正式な定義です。ほかの文書はここを指し、コード(`review_stop`)は
+ここに合わせます([決定事項 39](design.md#決定事項))。
 
-| 止まる条件 | 理由の行(Blocked の 1 行目) |
-|---|---|
-| 差し戻した指摘がまた出た(reviewer が `(again)` を付けたか、同じ文の指摘) | `automated review stopped after ...: a finding came back after the retry it was sent back with` |
-| 最後の差し戻しで、ファイルが何も変わらなかった | `automated review stopped after ...: the last retry changed no files` |
-| 差し戻しの変更が、前の差し戻しより小さくならない(変えた行数。足した行と消した行の和) | `automated review stopped after ...: the retries' changes are not getting smaller (<前> then <今> changed lines)` |
-| 差し戻しの回数を使い切った | `automated review did not pass after <回数> retries` |
+`needs changes` で差し戻す回数は `[runner] review_retries` で決めます。既定は 2 回、0 にすると差し戻しません。
+1 回のレビューを 1 ラウンドと数えると、既定では最初のレビューと差し戻しのあとの 2 回で、最大 3 ラウンドです。
+次のどれかに当たると、回数が残っていても差し戻しをやめて Blocked にし、人の判断に回します。上から順に確かめます。
+
+| 止まる条件 | 理由の行(Blocked の 1 行目) | `review_stop` |
+|---|---|---|
+| 差し戻した指摘がまた出た(reviewer が `(again)` を付けたか、同じ文の指摘) | `automated review stopped after ...: a finding came back after the retry it was sent back with` | `repeated` |
+| 最後の差し戻しで、ファイルが何も変わらなかった | `automated review stopped after ...: the last retry changed no files` | `no change` |
+| 差し戻しの変更が、前の差し戻しより小さくならない(変えた行数。足した行と消した行の和) | `automated review stopped after ...: the retries' changes are not getting smaller (<前> then <今> changed lines)` | `not converging` |
+| 差し戻しのあとのレビューで、blocking の指摘が `[runner] review_stop_blocking` 件(既定 3)以下に減った | `automated review stopped after ...: <件数> blocking findings left, [runner] review_stop_blocking = <件数> or fewer go to a person` | `few blocking` |
+| 差し戻しの回数を使い切った(最大のラウンドに達した) | `automated review did not pass after <回数> retries` | `limit` |
+
+- `review_stop_blocking` は、差し戻しのあとのレビュー(2 ラウンド目から)だけに効きます。最初のレビューは、
+  指摘が 1 件でも差し戻します。「減ったところで止める」の決定で、最初のレビューはまだ減っていないためです。
+- `review_stop_blocking = 0` にすると、件数では止めません。blocking が 0 件ならレビューは通過なので、0 件で止まることはありません。
+- 既定では、2 ラウンド目に blocking が 4 件以上残ったときだけ、3 ラウンド目のレビューまで進みます。
+- 止まった理由は、Blocked の出来事(`events.jsonl` の `reason`)、Issue のレポートのコメントの `## Blocked`、`metrics.jsonl` の
+  `review_stop` に残ります。
 
 2 回目からのレビューには、それまでに差し戻した指摘を渡します。reviewer は直っていないものを同じ文で `(again)`
 を付けて書き直します。task-hub は、印のある指摘と、空白や大文字小文字、Markdown の飾りを除いて同じ文の指摘を、

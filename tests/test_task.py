@@ -712,6 +712,12 @@ if forced == ["moving"]:  # a new finding each round: one more than the findings
     Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
                                        f"## Please fix\n\n- round {n + 1}: hello.txt is not done\n")
     sys.exit(0)
+if forced == ["many"]:  # FINDINGS=<n> new findings each round, numbered after the ones it was sent back with
+    n = max(map(int, re.findall(r"\n- round (\d+)", prompt)), default=0)
+    count = int((re.findall(r"FINDINGS=(\d+)", prompt) or ["1"])[0])
+    fix = "".join(f"- round {n + 1}, finding {k}: hello.txt is not done\n" for k in range(1, count + 1))
+    Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n## Please fix\n\n{fix}")
+    sys.exit(0)
 if forced == ["again"]:  # the same finding, in other words, marked (again) as worker/REVIEW.md asks
     fix = "- (again) The greeting is still too short" if "# Findings" in prompt else "- the greeting is too short"
     Path(".task-review.md").write_text(f"## Verdict\n\nneeds changes\n\n## Review\n\nnot yet\n\n"
@@ -1411,7 +1417,9 @@ class TaskTest(unittest.TestCase):
     # --- helpers ---
 
     def write_config(self, extra="", reviewer=False, replanner="", pass_env="", parallel="", review_retries="",
-                     readiness="", review_mode="", re_review="", light_review=""):
+                     readiness="off", review_mode="", re_review="", light_review="", review_stop_blocking=""):
+        """readiness: off unless a test is about it (the default, warn, reads each Ready card's Issue once more);
+        "" leaves it out, to the default."""
         cfg = self.root / ".config" / "task-hub" / "config.ini"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(f"[board]\nproject = jyoka/2\nissues = jyoka/tasks\n\n[runner]\nagent = fake\n"
@@ -1422,6 +1430,7 @@ class TaskTest(unittest.TestCase):
                        + (f"pass_env = {pass_env}\n" if pass_env else "")
                        + (f"parallel = {parallel}\n" if parallel else "")
                        + (f"review_retries = {review_retries}\n" if review_retries else "")
+                       + (f"review_stop_blocking = {review_stop_blocking}\n" if review_stop_blocking else "")
                        + (f"review_mode = {review_mode}\n" if review_mode else "")
                        + (f"re_review = {re_review}\n" if re_review else "")
                        + (f"light_review = {light_review}\n" if light_review else "")
@@ -1975,7 +1984,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.metrics(1)[-1]["review_scopes"], ["full", "delta"])
 
     def test_a_third_review_checks_the_findings_of_the_review_before_it_only(self):
-        self.write_config(reviewer=True)
+        self.write_config(reviewer=True, review_stop_blocking="0")  # one finding a round would stop after a retry
         tid = self.new("shrink REVIEW=moving")  # a new finding each round, and each retry changes less
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
@@ -2165,7 +2174,8 @@ class TaskTest(unittest.TestCase):
         self.assertIn("### Known issues", last)
 
     def test_automated_review_sends_back_up_to_review_retries_times(self):
-        self.write_config(reviewer=True)  # review_retries: 2 by default
+        # review_retries: 2 by default; one finding a round would stop after a retry (review_stop_blocking)
+        self.write_config(reviewer=True, review_stop_blocking="0")
         tid = self.new("shrink REVIEW=moving")  # a new finding each round, and each retry changes less
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
@@ -2195,7 +2205,7 @@ class TaskTest(unittest.TestCase):
         self.assertIn("review_retries", self.comments(tid)[-1])
 
     def test_automated_review_stops_when_the_retries_do_not_converge(self):
-        self.write_config(reviewer=True, review_retries="3")
+        self.write_config(reviewer=True, review_retries="3", review_stop_blocking="0")
         tid = self.new("grow REVIEW=moving")  # each retry changes more than the one before
         self.task("start", tid)
         self.assertEqual(self.wait(tid), "Blocked")
@@ -2203,6 +2213,45 @@ class TaskTest(unittest.TestCase):
         self.assertIn("automated review stopped after 2 retries: the retries' changes are not getting smaller "
                       "(2 then 4 changed lines)", self.comments(tid)[-1])
         self.assertEqual(self.metrics(1)[-1]["review_stop"], "not converging")
+
+    def test_by_default_three_reviews_at_most_and_few_blocking_findings_go_to_a_person(self):
+        """The stop conditions of docs/task-format.md as they are by default: 3 reviews at most (review_retries = 2),
+        and after a retry, 3 blocking findings or fewer go to a person instead of back to the agent."""
+        self.write_config(reviewer=True)
+        cases = [("1 finding", 1, (2, 2), "few blocking", "one blocking finding left"),
+                 ("3 findings", 3, (2, 2), "few blocking", "3 blocking findings left"),
+                 ("4 findings", 4, (3, 3), "limit", "automated review did not pass after 2 retries")]
+        for done, (title, n, calls, stop, said) in enumerate(cases, 1):
+            with self.subTest(title):
+                before = (len(self.agent_calls()), len(self.reviewer_calls()))
+                tid = self.new(f"shrink REVIEW=many FINDINGS={n}", title)  # n new findings each round
+                self.task("start", tid)
+                self.assertEqual(self.wait(tid), "Blocked")
+                self.assertEqual((len(self.agent_calls()) - before[0], len(self.reviewer_calls()) - before[1]), calls)
+                last = self.comments(tid)[-1]
+                blocked = last.split("## Blocked\n\n", 1)[1].splitlines()[0]
+                self.assertIn(said, blocked)
+                if stop == "few blocking":
+                    self.assertIn("automated review stopped after one retry", blocked)
+                    self.assertIn("[runner] review_stop_blocking = 3 or fewer go to a person", blocked)
+                self.assertIn("## Suggested instructions", last)
+                self.assertEqual(self.metrics(done)[-1]["review_stop"], stop)
+                blocked_event = [e for e in self.events_of(tid) if e["event"] == "Blocked"][-1]
+                self.assertIn(said, blocked_event.get("reason", ""))  # why it stopped: in the event too
+
+    def test_review_stop_blocking_is_set_in_the_config(self):
+        self.write_config(reviewer=True, review_stop_blocking="0")  # 0: never on the count alone
+        tid = self.new("shrink REVIEW=many FINDINGS=1")
+        self.task("start", tid)
+        self.assertEqual(self.wait(tid), "Blocked")
+        self.assertEqual((len(self.agent_calls()), len(self.reviewer_calls())), (3, 3))
+        self.assertEqual(self.metrics(1)[-1]["review_stop"], "limit")
+        self.write_config(reviewer=True, review_stop_blocking="few")
+        tid = self.new("ok")
+        self.task("start", tid)
+        self.assertEqual(self.status(tid), "Blocked")
+        self.assertEqual(len(self.agent_calls()), 3)  # stopped before the agent ran
+        self.assertIn("[runner] review_stop_blocking", self.comments(tid)[-1])
 
     def test_automated_review_stops_when_a_retry_changes_nothing(self):
         self.write_config(reviewer=True)
@@ -9324,7 +9373,21 @@ class TaskTest(unittest.TestCase):
         self.assertIn(f"readiness: its Goal got NO-GO (`task check {tid}`)", out)
         self.assertEqual(self.status(tid), "Ready", "the GO the comment replaced does not start it")
 
+    def test_readiness_is_warn_when_the_config_leaves_it_out(self):
+        """docs/task-format.md: [runner] readiness is warn by default. A card without a GO starts, and is said."""
+        self.write_config(readiness="")
+        self.assertNotIn("readiness", (self.root / ".config/task-hub/config.ini").read_text())
+        tid = self.new("ok")
+        self.move(tid, "Ready")
+        self.assertIn("waits_for,readiness}", self.task("list"))
+        out = self.task()
+        self.assertEqual(self.wait(tid), "In review")
+        self.assertIn(f"readiness: task {tid} started without a GO for its current Goal", out)
+        self.assertEqual([e.get("reason") for e in self.events_of(tid) if e["event"] == "readiness"],
+                         ["started without a GO for its current Goal: its Goal was never checked"])
+
     def test_readiness_off_changes_nothing(self):
+        self.write_config(readiness="off")
         tid = self.new("ok")
         self.move(tid, "Ready")
         before = self.gh().get("issue_view_calls", 0)

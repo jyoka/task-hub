@@ -529,7 +529,7 @@ settings: <repo> keeps merged branches (GitHub's "Automatically delete head bran
 
 `task stats` は、このマシンで終わった実行を集計します(0.6 から記録しています)。列ごとの件数、エージェントごとの
 件数と所要時間の中央値、自動レビューの最初の判定と差し戻しで直った数、差し戻しをやめた理由(`review_stops`。
-`limit`、`repeated`、`no change`、`not converging`。[task-format.md](task-format.md#自動レビューの差し戻し))、
+`limit`、`repeated`、`no change`、`not converging`、`few blocking`。[task-format.md](task-format.md#自動レビューの差し戻し))、
 Blocked の理由、replanner の判定、
 `slow` の出来事が出た実行の数(自動で止めるかを決める材料)、PR の大きさ(ベースから分かれた時点からの変更行数の中央値と、大きい順の 3 件)、エージェントの使用量(下記)です。10〜15 分でレビューできる
 数百行を大きく超えるタスクが続くなら、分け方を見直す合図です(基準は `/task` と `/chief` のスキルにあります)。
