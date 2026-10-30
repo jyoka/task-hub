@@ -69,6 +69,9 @@ def launcher_version(launcher):
 VERSION = launcher_version(BIN)
 PARALLEL = 5  # [runner] parallel by default: tasks In progress at once
 REVIEW_RETRIES = 2  # [runner] review_retries by default: how many times the reviewer may send the work back
+#                    (3 reviews in all: the stop conditions are docs/task-format.md's, the one place they are defined)
+REVIEW_STOP_BLOCKING = 3  # [runner] review_stop_blocking by default: after a retry, this many blocking findings or
+#                           fewer go to a person instead of back to the agent (review_stop; 0: never)
 MAX_CARDS = 100  # over this many cards on the Project, the Done ones moved longest ago are archived (their Issues stay)
 # the column names of GitHub's Kanban template, plus Blocked and wait for merge; matched without regard to case
 BACKLOG, READY, IN_PROGRESS, IN_REVIEW, WAIT_FOR_MERGE, BLOCKED, DONE = \
@@ -94,6 +97,7 @@ SHARE_STATUS = {BACKLOG: "Todo", READY: IN_PROGRESS, IN_PROGRESS: IN_PROGRESS, I
 READINESS_FIELD = "Readiness"  # the Project's single-select field `task check` fills (made when missing)
 READINESS_VERDICTS = ["GO", "NO-GO"]  # its options; a blocked check clears it
 READINESS_MODES = ("off", "warn", "require")  # [runner] readiness: what starting a Ready card asks of its Goal
+READINESS_DEFAULT = "warn"  # [runner] readiness left out (docs/task-format.md, the one place it is defined)
 REVIEW_FIELD = "Review"  # the Project's single-select field a run's last automated review fills (made when missing)
 REVIEW_VERDICTS = ["pass", "needs changes", "blocked"]  # its options; a run without a review clears it
 DEFAULT_REVIEWER = "agent"  # [runner] reviewer left out: the task's own agent, in a fresh context (off: none)
@@ -652,7 +656,8 @@ def config():
     # no reviewer here: left out, it is DEFAULT_REVIEWER (helper_agent), and review_default_notice tells it apart
     c.read_dict({"runner": {"agent": "claude", "replanner": "", "pass_env": "",
                             "parallel": str(PARALLEL), "review_retries": str(REVIEW_RETRIES),
-                            "readiness": "off", "checker": "", "review_mode": "agent", "re_review": "delta",
+                            "review_stop_blocking": str(REVIEW_STOP_BLOCKING), "readiness": READINESS_DEFAULT,
+                            "checker": "", "review_mode": "agent", "re_review": "delta",
                             "light_review": "docs", "limit_resume": "on"},
                  "agents": DEFAULT_AGENTS, "check": {}, "board": {}, "share": {},
                  "merge": {"queue": "off", "prefix": "off", "checks": "all", "ci_minutes": str(CI_MINUTES),
@@ -777,6 +782,16 @@ def review_retries():
     value = config()["runner"].get("review_retries", "").strip() or str(REVIEW_RETRIES)
     if not re.fullmatch(r"\d+", value):
         raise RuntimeError(f"[runner] review_retries in {home(CONFIG)} must be a whole number, 0 or more; "
+                           f"got {value!r}")
+    return int(value)
+
+
+def review_stop_blocking():
+    """[runner] review_stop_blocking: after a retry, a "needs changes" review with this many blocking findings or fewer
+    goes to a person instead of back to the agent (review_stop; 0: never)."""
+    value = config()["runner"].get("review_stop_blocking", "").strip() or str(REVIEW_STOP_BLOCKING)
+    if not re.fullmatch(r"\d+", value):
+        raise RuntimeError(f"[runner] review_stop_blocking in {home(CONFIG)} must be a whole number, 0 or more; "
                            f"got {value!r}")
     return int(value)
 
@@ -2264,6 +2279,7 @@ def launch(t):
             raise RuntimeError(f'unknown {key} "{name}" in the config')
     if helper_agent(t, "reviewer"):
         review_retries()
+        review_stop_blocking()
         review_mode()
         re_review()
         light_review()
@@ -4049,8 +4065,9 @@ def review_loop(t, report, code, say, record, resume_at="", why=""):
     Returns (report, code, review section, blocked).
 
     Sending back stops early when it is not getting anywhere (review_stop): a finding comes back after the retry it
-    was sent back with, or the retries' changes are not getting smaller. A review that stops it blocks the card, and
-    its section ends with Suggested instructions for the next run.
+    was sent back with, or the retries' changes are not getting smaller; and after a retry, a review with few blocking
+    findings left goes to a person ([runner] review_stop_blocking). A review that stops it blocks the card, and its
+    section ends with Suggested instructions for the next run.
     Each verdict goes into record["reviews"] (what it read into record["review_scopes"]), record["retries"] counts
     the retries (record["retried"]: any), and record["review_stop"] says why the last "needs changes" was not sent
     back. Each launch is measured into record["usage"].
@@ -4120,10 +4137,12 @@ def review_retry(t, feedback, state, say, record, why=""):
 
 def review_stop(review, state, retries):
     """Why a "needs changes" review is not sent back again ("" to send it back), and the word for record["review_stop"]:
-    the limit ([runner] review_retries) is reached, or the retries are not getting anywhere: a finding came back after
+    the limit ([runner] review_retries) is reached, the retries are not getting anywhere (a finding came back after
     the retry it was sent back with, the last retry changed nothing, or it changed as much as the one before it or
-    more (the change is not converging)."""
+    more: the change is not converging), or a retry brought the blocking findings down to [runner]
+    review_stop_blocking or fewer, which a person decides. docs/task-format.md defines these, in this order."""
     limit, sizes, done = review_retries(), state["sizes"], f"after {plural(retries, 'retry', 'retries')}"
+    few, blocking = review_stop_blocking(), len(review.findings)
     if retries and review.repeated(state["sent"]):
         return f"automated review stopped {done}: a finding came back after the retry it was sent back with", "repeated"
     if retries and sizes and sizes[-1] == 0:
@@ -4131,6 +4150,9 @@ def review_stop(review, state, retries):
     if len(sizes) > 1 and sizes[-1] >= sizes[-2]:
         return (f"automated review stopped {done}: the retries' changes are not getting smaller "
                 f"({' then '.join(map(str, sizes[-2:]))} changed lines)", "not converging")
+    if retries and blocking <= few:
+        return (f"automated review stopped {done}: {plural(blocking, 'blocking finding', 'blocking findings')} left, "
+                f"[runner] review_stop_blocking = {few} or fewer go to a person"), "few blocking"
     if retries >= limit:
         return (f"automated review did not pass {done}" if limit else
                 "automated review: needs changes ([runner] review_retries = 0: it is never sent back)"), "limit"
@@ -4404,8 +4426,8 @@ def latest_readiness_comment(comments):
 
 
 def readiness_mode():
-    """[runner] readiness: off (the default), warn, or require."""
-    mode = config()["runner"].get("readiness", "").strip().lower() or "off"
+    """[runner] readiness: off, warn (READINESS_DEFAULT), or require."""
+    mode = config()["runner"].get("readiness", "").strip().lower() or READINESS_DEFAULT
     if mode not in READINESS_MODES:
         fail(f"[runner] readiness must be off, warn or require; got {mode!r}",
              f"fix it in {home(CONFIG)} (see docs/task-format.md)")
