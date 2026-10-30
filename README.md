@@ -189,7 +189,7 @@ archives the oldest Done cards.
 | `task log <id> [--full]` | Shows the output of the run on this machine |
 | `task open <id>` | Opens the worktree in your IDE (`[ide] open`) |
 | `task events [--follow \| --next]` | Shows recent events (column moves, triage, long runs) |
-| `task stats` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens, cost) |
+| `task stats [--flaky-days N]` | Sums up the runs (reviews, send-backs, Blocked reasons, tokens, cost), and the tests that failed when the merge queue ran CI again ([flaky tests](docs/usage.md#ときどき落ちるテストtask-stats-の-flaky_tests)) |
 | `task merge [<id>] [--cancel]` | Approves the PR for the merge queue (`[merge] queue = on`, off by default): `task watch` brings it up to date with its base, has an agent fix conflicts, waits for its checks, and merges it, one PR per repo at a time ([operations.md](docs/operations.md#マージキュー)) |
 | `task done <id>` | Closes or cancels a task by hand |
 | `task share <id> --to owner/name [--project owner/number]` | Copies a task you choose to a team's Issue and Project, then keeps its Status and reports in step |

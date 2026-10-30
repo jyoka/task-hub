@@ -243,6 +243,7 @@ flowchart LR
     events --> pi["Pi の拡張"]
     events --> mod["mod と Kiro の拡張<br/>経過、判定、PR"]
     metrics[("metrics.jsonl")] --> stats["task stats"]
+    events -- "ci-rerun の落ちたテスト" --> stats
     metrics --> mod
     metrics --> budget["over_budget<br/>(起動が終わるたび)"]
     records[("エージェントの CLI の記録<br/>~/.claude、~/.pi、kiro-cli")] --> budget
@@ -308,6 +309,7 @@ sequenceDiagram
         else チェックの段
             Task->>GH: gh pr checks(ci-wait)
             Task->>GH: 落ちたら gh run rerun --failed(コミットごとに 1 回、ci-rerun)。また落ちたら Blocked
+            Task->>GH: 走らせ直すときだけ、落ちたジョブのログを読む(落ちたテストの名前を ci-rerun に。task stats が数える)
             Task->>GH: CLEAN なら gh pr merge --merge(merged、Done)、task/<id> のブランチを消す
         end
     end

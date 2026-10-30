@@ -237,7 +237,7 @@ flowchart LR
 | `task share <id> --to` | `get`、`issue`、`share_config`、`TeamGitHub`、`share_pr` | 読む、チームの Project を読む、チームの Issue とコメントとカード、個人の Issue につなぎ先のコメント、開いている PR の本文 | なし(つなぎ先は GitHub のコメント) |
 | `task show` | `get`、`issue` | 読むだけ | なし |
 | `task log`、`task open` | `load_run`(手元の記録だけ) | なし | なし |
-| `task events`、`task stats` | `events_named`、`cmd_stats` | なし | なし |
+| `task events`、`task stats` | `events_named`、`cmd_stats`、`flaky_lines` | なし | なし |
 | `task update` | `cmd_update`、`restart_watch`、`copy_kiro`。かんたんセットアップで入れた clone は `update_by_installer`(新しい版のインストーラを動かす) | なし(origin のタグを読む) | LIB を新しい版に、Kiro のフックとワークフローのコピー |
 | `task feedback` | `cmd_feedback`、`open_in_browser` | なし(ブラウザで Issue の画面を開くだけ) | なし |
 | `task _run <id>` | `cmd_run` | 3.3 の図 | runs、logs、metrics、events |
@@ -607,8 +607,15 @@ wait for merge、Blocked のカードだけ)です。
 - `ci_failed`(`merge_ci` でチェックが落ちたとき): キューの項目の `rerun.sha` が PR の先頭のコミット(`headRefOid`)と
   違えば、落ちたチェックの `link` から GitHub Actions の run id(`/actions/runs/<id>`)を取り、run ごとに
   `gh run rerun <id> --failed --repo <repo>` を呼びます。そのあと `rerun`(`sha` と落ちたチェックの `name`、`link`)と
-  `since`(`ci_minutes` を数え直す)を書き、`ci-rerun`(`sha` つき)を出して `ci` の段のまま待ちます。`rerun.sha` が
-  同じなら `merge_block` します(`failed twice`)。ただし落ちたチェックの `link` がどれも `rerun.checks` にあるなら、GitHub が
+  `since`(`ci_minutes` を数え直す)を書き、`ci-rerun`(`sha` つき)を出して `ci` の段のまま待ちます。`ci-rerun` を出す前に
+  `failed_tests` が、落ちたチェックの `link` の job id(`/job/<id>`)ごとにジョブのログを読み、`test_names` が落ちたテストの
+  名前を取り出して `tests` に入れます(20 件まで)。ログを読めない、名前がない、Actions のジョブでないときは `tests` なしで、
+  走らせ直しはそのままです。`rerun.sha` が
+  同じなら `merge_block` します(`failed twice`)。そのとき走らせ直したチェック(名前と run id が同じ。走らせ直しは同じ
+  run id の新しい attempt)がまた落ちていれば、先に `rerun_result` が `ci-rerun-result`(`result: failed again`)を出します。
+  同じ名前で別の run のチェックだけが落ちたときは、`failed twice` の Blocked は今までどおりで、結果は出しません。走らせ直したコミットのチェックが落ちずにすべて終わったら、
+  `merge_ci` が `rerun_result` で `ci-rerun-result`(`result: passed`)を出します。どちらもキューの `rerun.result` に書いて
+  1 回だけにします。ただし落ちたチェックの `link` がどれも `rerun.checks` にあるなら、GitHub が
   まだ前の結果を返しているだけなので、`ci_minutes` までは待ちます。`[merge] rerun = 0`、Actions でない `link` がある、
   `gh run rerun` が失敗した(`; rerun failed: ...`)ときは、すぐ `merge_block` します。落ちたチェックと同じ run に
   `pending` のチェックがあれば、走らせ直す前にそれを待ちます(動いている run は走らせ直せない。`ci_minutes` を過ぎたら
@@ -717,12 +724,12 @@ sequenceDiagram
 | `state/runs/<id>.lock` | `launch_lock`(中身は空。ロックだけに使う)、`cleanup` が消す | `launch_lock` | 空のファイル |
 | `state/limits/<エージェント>.json` | `note_limit`(`limit_stop`、replanner の上限。もっと遅い時刻がすでにあれば書かない) | `agent_limits`(`tasks()`、`task list`、`task`) | JSON `{"until": "2026-10-28T07:42:00+09:00", "said": "<エージェントの言った 1 行>"}`。時刻を過ぎたものは読まないだけで、消さない。task-rs は読まない |
 | `state/runs/<id>.groups/<番号>` | `worker/group-shell`(エージェントのツールのコマンドを始めるとき。コマンドが終わっても残る)。`stop_left_commands` と `cleanup` がフォルダごと消す | `stop_left_commands`(エージェントを起動する前) | テキスト 1 行。ファイルの名前はコマンドのプロセスグループの番号、中身はグループの先頭の開始時刻(`LC_ALL=C ps -o lstart`)。task-rs は読まない(`runs/` の更新時刻を見るだけ) |
-| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait, rerun}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット、`rerun` は落ちたチェックを走らせ直したコミットとそのチェック(`{sha, checks: [{name, link}]}`) |
+| `state/merge-queue.json` | `cmd_merge`、`merge_queue`(どちらも `change_queue` で `merge-queue.lock` を持って読み、変えて書く) | `cmd_merge`、`sync` | `{queue: [{id, repo, pr, queued, step, since, fixed, ci_wait, rerun}]}`。`step` は `update` か `ci`、`fixed` は競合を解かせたときの base の sha、`ci_wait` は `ci-wait` を出したコミット、`rerun` は落ちたチェックを走らせ直したコミットとそのチェック、その結果(`{sha, checks: [{name, link}], result}`。`result` は `ci-rerun-result` を出したあとの `passed` か `failed again`) |
 | `state/repo-settings.json` | `repo_setting_lines`(読んだときだけ書く) | `repo_setting_lines` | `{repo: [delete_branch_on_merge, UNIX 時刻]}`。値は `true`、`false`、`null`(見えない、読めない)。1 日たったら読み直す |
 | `state/merge-queue.lock`、`state/merge-queue.work.lock` | `file_lock`(中身は空) | 同じ | `.lock` は 1 回の読み書きのあいだ、`.work.lock` はキューを進める 1 つの task-hub(`task watch` と `task`)が持つ |
 | `share/run/<id>.sh` | `launch`(herdr のときだけ。0600) | ペインの `sh`(読んだら自分を消す) | シェルスクリプト |
 | `state/logs/<id>.log` | `task _run` | `task log`、task-rs の `log_tail`、Kiro の拡張(ログのタブ) | テキスト。エージェントの出力は 1 行ずつ。コマンドに JSON の出力のフラグがあるエージェント(組み込みの 4 つ。`step_format`)は、`Steps` が手順ごとの 1 行(`LOG_LINE_MAX` 字まで)と最後の結果の全文に直したもの |
-| `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events` | JSON Lines |
+| `state/events.jsonl` | `emit`(追記) | /chief、Kiro、Pi、mod、`task events`、`task stats`(`flaky_lines` が `ci-rerun` と `ci-rerun-result` を読む) | JSON Lines |
 | `state/metrics.jsonl` | `record_run`(追記) | `task stats`、mod の実績、`slow_threshold`、`budget_limits` | JSON Lines |
 | `state/checks.jsonl` | `cmd_check`(追記) | `task stats`(`checks_line`) | JSON Lines。`{id, title, repo, agent, ref, commit, goal, started, finished, seconds, verdict, blocking, minor, written, usage}`。`usage` は metrics と同じ起動ごとの形。metrics に入れないのは、そこを読むものが実行を数えるため |
 | `state/readiness.json`、`state/readiness.lock` | `note_readiness`(`readiness_gate`、`cmd_check`。lock を持って読み、変えて書く) | `readiness_gate` | `{key, cards: {id: {read, research, verdict, hash}}}`。`key` は `board_config()` |
@@ -770,12 +777,16 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 再開の `resumed`(`stage` と `reason`。既定の `[notify] events` には入れない)、
 利用の上限で止まった `limit`(`agent`、`stage`、`until`、`reason` にエージェントの言った 1 行。カードの Blocked が通知されるので、
 既定の `[notify] events` には入れない)、
-マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`(既定の `[notify] events` には入れない)、
+マージキューの `queued`、`updated`、`conflict-fix`、`ci-wait`、`ci-rerun`、`ci-rerun-result`(この 2 つは既定の `[notify] events` には入れない)、
 `merged`、`conflict`、オートパイロットの `autopilot`
 (`action` は `ready` か `merge`)、マージしたあとの GitHub のブランチの `branch`(`action` は `deleted`、`kept`、`failed`。
 既定の `[notify] events` には入れない)のどれかです。`conflict` と
 `[merge] prefix` の `conflict-fix` には、1 回だけにする判定に使う `sha`(PR の先頭のコミット)が入ります。
-`ci-rerun` の `sha` は走らせ直したコミットです。
+`ci-rerun` の `sha` は走らせ直したコミット、`tests` は落ちたジョブのログが名指しした落ちたテストの名前の列です(読めなければ書かない)。
+`ci-rerun-result` は同じ `sha` と、`result`(`passed` か `failed again`)を持ちます。`task stats` の `flaky_tests` は、
+`[--flaky-days]` 日(既定 30、`FLAKY_DAYS`)のうちの `ci-rerun` の `tests` を数えます。`id` と `sha` が同じ次の
+`ci-rerun-result`(ファイルの順で、その `ci-rerun` のあと)が `passed` なら `passed_again` にも数えます(Blocked のあと
+`task merge` でまた入れると、同じコミットで 2 回走らせ直すことがあるため)。`metrics.jsonl` に入れないのは、そこを読むものが実行を数えるためです。
 空の欄は書きません。
 
 ### 実行の集計(metrics.jsonl の 1 行)
@@ -857,7 +868,7 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | 人のコメント(`human_comments`): Issue のコメント、PR の会話のコメント、レビュー、行へのコメント | REST | Issue に 1 回、手元の記録に PR があれば 3 回 | 再実行の開始ごと(初めての実行と毎分の同期では呼ばない) |
 | Issue の作成、コメント、閉じる、PR の作成と更新 | `gh issue`、`gh pr`(gh の中で GraphQL) | gh 任せ(測っていない) | 登録、実行の終わり。research のカード(`task new --research`、`[triggers] drift_report`)は作る前に `gh label create --force` も |
 | `git fetch`、`push` | git | - | 開始、終わり |
-| マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`gh run rerun <run id> --failed --repo <repo>`(落ちたチェックの run。コミットごとに 1 回)、`git fetch`、`merge`、`push` | gh(GraphQL、`run rerun` は REST)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1。走らせ直しは落ちた run ごとに REST 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
+| マージキュー: `gh pr view --json ...mergeable,mergeStateStatus`、`gh pr checks --json name,bucket,link`(`[merge] checks = required` なら `--required`)、`gh pr merge --merge --match-head-commit`、`gh run rerun <run id> --failed --repo <repo>`(落ちたチェックの run。コミットごとに 1 回)、`gh api repos/<repo>/actions/jobs/<job id>/logs`(落ちたジョブのログ。走らせ直すときだけ)、`git fetch`、`merge`、`push` | gh(GraphQL、`run rerun` とジョブのログは REST)、git | キューのあるリポジトリごとに 1 分に GraphQL 2 前後(キューが空なら 0)。マージ 1 回につき 1。走らせ直しは落ちた run ごとに REST 1、落ちたジョブごとに REST 1 | `[merge] queue = on` の同期ごと。`conflict` の判定はマージの確認の REST の結果を使うので増えない |
 | チームの `PROJECT_QUERY`、`gh issue create`、`gh issue comment`(task-hub のコメントの数)、`gh project item-add`、`item-edit`(Status と既定の欄の数)、個人の Issue へのコメント、開いている PR があれば `gh pr view` と `gh pr edit` | GraphQL、gh | 1 回あたり GraphQL 1 + 内容を作る要求が数回 | `task share` だけ。watch と実行の呼び出しは増えない |
 | つないだタスクの写し(4.6): `TEAM_CARD_QUERY`、列が変わるときだけ `item-edit`、`gh issue edit`、`gh issue comment`、`gh issue close` | GraphQL、gh | Status の変化 1 回につき GraphQL 1 + mutation 0〜1。開始ごとに `issue edit` 1、task-hub のコメントごとに 1、閉じるとき 1 | つないだタスクの Status が変わるとき、開始、コメント、閉じるときだけ。つなぎ先は読み直さない。つないでいないタスクと、動かないタスクの毎分の同期では呼ばない |
 | `task list`(Kiro の拡張) | 子プロセス。Mac は `~/.local/bin/task`、Windows は `~\.local\bin\task.cmd` を `cmd.exe` で(Node は .cmd をシェルなしで動かせない。引数は `list` と `--max-age 0` だけ) | `task list` と同じ | 1 分ごと、更新ボタン |
@@ -879,6 +890,18 @@ GitHub に置く task-hub の印: Issue のコメントの先頭の `<!-- task-h
 | `gh api repos/<repo>/compare/<base>...<branch>`(`[sandbox] mode = user` のときだけ) | `branch_compare`: 専用ユーザーが push したあと、先に進んでいるか(`ahead_by`)と PR の大きさ(`files`)を GitHub から読む | REST 1 回 | 実行の終わりに 2 回 |
 
 GraphQL は 1 時間 5000 ポイント、REST は 1 時間 5000 回です(アカウント全体で共有)。
+
+落ちたテストの名前(`failed_tests`)は、`macos-test-evidence` の成果物ではなく、ジョブのログから読みます。理由は次のとおりです。
+
+- どのリポジトリでも使える。マージキューは task-hub 以外のリポジトリの PR もマージする。成果物の名前と中身は task-hub の
+  CI だけの決まりで、ほかのリポジトリにはない。ジョブのログは GitHub Actions のジョブならどれにもある
+- 呼び出しが少ない。ログは、落ちたチェックの `link` にある job id から REST 1 回で読める。成果物は、run の成果物の一覧を
+  読み、zip を取ってきて展開する(2 回とファイル)
+- 落ちたときだけ呼ぶ。チェックが通った PR では読まない。走らせ直すときに、落ちたジョブごとに 1 回だけ読む
+  (走らせ直しが断られて Blocked にするとき、2 回目に落ちたときは読まない)
+
+ログはテストの出力の形に頼ります(`FAILED_TEST`。形は [usage.md](../usage.md#ときどき落ちるテストtask-stats-の-flaky_tests))。
+読めないときも、走らせ直しは変えません。
 
 組み込みのエージェントは、手順ごとに JSON の 1 行を出すフラグ付きで動きます。`agent_process` は、コマンド(プロンプトは
 見ない)からどの CLI の JSON かを `step_format` で決め、`STEPS` のクラス(`Steps` の子)で 1 行ずつ直します。
@@ -1030,6 +1053,9 @@ v2 のセッションのファイルに残ることを 2.28.0 で確かめた)�
     (`build_light_review_prompt`。worker/REVIEW.md の 7 つ目の部分。レポートは渡さず worktree からも外す)。
     文書でないファイルが 1 つでもあるとき、`research` のタスク、`off` では今までどおり。軽くしたことは、レビューの節の
     `Scope:` の行、機械が読む 1 行の `scope`(`light`)、`metrics.jsonl` の `review_scopes` に必ず残る
+24. マージキューは、落ちたチェックを走らせ直すときだけ、落ちたジョブごとに 1 回ログを読み、落ちたテストの名前を `ci-rerun` に
+    残す。チェックが通った PR ではログを読まない。名前を読めなくても、走らせ直しの回数(コミットごとに 1 回)と Blocked に
+    する条件は変わらない。`task stats` は、その名前を回数の多い順に出す
 
 ## 10. テストの仕組み
 
